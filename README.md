@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-**Don't Pester Your Client** — Bitcoin Lightning micropayments for MCP servers.
+**Don't Pester Your Customer** — Bitcoin Lightning micropayments for MCP servers.
 
 > Under Construction
 
