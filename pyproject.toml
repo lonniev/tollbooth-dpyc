@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tollbooth-dpyc"
 version = "0.1.0"
-description = "Don't Pester Your Client — Bitcoin Lightning micropayments for MCP servers"
+description = "Don't Pester Your Customer — Bitcoin Lightning micropayments for MCP servers"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
@@ -23,6 +23,15 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
 ]
+dependencies = [
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/lonniev/tollbooth-dpyc"
@@ -31,3 +40,6 @@ Issues = "https://github.com/lonniev/tollbooth-dpyc/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tollbooth"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
