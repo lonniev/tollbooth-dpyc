@@ -109,78 +109,19 @@ def _get_multiplier(
     return multiplier
 
 
-async def purchase_credits_tool(
+async def _create_purchase_invoice(
     btcpay: BTCPayClient,
     cache: LedgerCache,
     user_id: str,
     amount_sats: int,
-    certificate: str,
-    authority_public_key: str,
-    tier_config_json: str | None = None,
-    user_tiers_json: str | None = None,
+    tier_config_json: str | None,
+    user_tiers_json: str | None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Create a BTCPay Lightning invoice after verifying an Authority certificate.
+    """Shared logic: validate amount, create BTCPay invoice, record in ledger.
 
-    A Tollbooth Operator cannot operate without a trusted Authority. Every
-    credit purchase requires a valid Authority-signed Ed25519 JWT certificate.
-    The certificate's net_sats (amount after tax) determines the invoice amount.
-
-    Call flow: user requests credits → operator calls Authority's
-    certify_purchase → Authority returns signed JWT → operator passes JWT
-    here → this function verifies it and creates the BTCPay invoice.
-
-    After the user pays, call check_payment_tool with the returned invoice_id
-    to credit their balance.
-
-    Args:
-        btcpay: BTCPay client for the operator's store.
-        cache: Ledger cache for the user.
-        user_id: The user's identity string.
-        amount_sats: Requested satoshis (used for validation; the certificate's
-            net_sats determines the actual invoice amount).
-        certificate: Authority-signed JWT from certify_purchase. Required.
-        authority_public_key: Authority's Ed25519 PEM public key. Required.
-            Operators must configure this — the network does not allow
-            untrusted operation.
-        tier_config_json: Optional JSON string of tier definitions.
-        user_tiers_json: Optional JSON string mapping user IDs to tier names.
-
-    Returns dict with:
-        success: True if invoice was created.
-        invoice_id: BTCPay invoice ID (pass to check_payment_tool).
-        checkout_link: URL for the user to pay the Lightning invoice.
-        expiration: When the invoice expires.
-        tier/multiplier/expected_credits: Tier info and projected credit amount.
-        certificate_jti: JTI from the verified certificate.
-        message: Human-readable summary with payment instructions.
-
-    Errors: Returns success=False if authority_public_key or certificate is
-    missing, certificate validation fails, amount_sats <= 0, exceeds
-    MAX_INVOICE_SATS (1,000,000), or BTCPay is unreachable.
+    Both certified (operator) and direct (Authority) purchases funnel here.
     """
-    # Trust gate — no Authority key means the operator is misconfigured
-    if not authority_public_key:
-        return {
-            "success": False,
-            "error": "Operator misconfigured: authority_public_key is required. "
-            "A Tollbooth Operator cannot operate without a trusted Authority.",
-        }
-
-    if not certificate:
-        return {
-            "success": False,
-            "error": "A valid Authority certificate is required for every credit purchase. "
-            "Call the Authority's certify_purchase tool first.",
-        }
-
-    try:
-        cert_claims = verify_certificate(certificate, authority_public_key)
-    except CertificateError as e:
-        return {"success": False, "error": f"Certificate rejected: {e}"}
-
-    # Use net_sats from the certificate as the invoice amount
-    amount_sats = cert_claims["net_sats"]
-
     if amount_sats <= 0:
         return {"success": False, "error": "amount_sats must be positive."}
 
@@ -193,8 +134,9 @@ async def purchase_credits_tool(
     invoice_metadata: dict[str, Any] = {
         "user_id": user_id,
         "purpose": "credit_purchase",
-        "certificate_jti": cert_claims["jti"],
     }
+    if extra_metadata:
+        invoice_metadata.update(extra_metadata)
 
     try:
         invoice = await btcpay.create_invoice(
@@ -224,7 +166,7 @@ async def purchase_credits_tool(
     if not await cache.flush_user(user_id):
         logger.warning("Failed to flush pending invoice %s for %s.", invoice_id, user_id)
 
-    result: dict[str, Any] = {
+    return {
         "success": True,
         "invoice_id": invoice_id,
         "amount_sats": amount_sats,
@@ -242,8 +184,86 @@ async def purchase_credits_tool(
             f'After paying, call check_payment with invoice_id: "{invoice_id}"'
         ),
     }
-    result["certificate_jti"] = cert_claims["jti"]
+
+
+async def purchase_credits_tool(
+    btcpay: BTCPayClient,
+    cache: LedgerCache,
+    user_id: str,
+    amount_sats: int,
+    certificate: str,
+    authority_public_key: str,
+    tier_config_json: str | None = None,
+    user_tiers_json: str | None = None,
+) -> dict[str, Any]:
+    """Create a BTCPay invoice after verifying an Authority certificate.
+
+    For OPERATOR use: the certified purchase flow. Every credit purchase
+    requires a valid Authority-signed Ed25519 JWT certificate. The
+    certificate's net_sats (amount after tax) determines the invoice amount.
+
+    Call flow: user requests credits → operator calls Authority's
+    certify_purchase → Authority returns signed JWT → operator passes JWT
+    here → this function verifies it and creates the BTCPay invoice.
+
+    For Authority-side tax credit purchases (no certificate needed), use
+    purchase_tax_credits_tool instead.
+    """
+    # Trust gate — no Authority key means the operator is misconfigured
+    if not authority_public_key:
+        return {
+            "success": False,
+            "error": "Operator misconfigured: authority_public_key is required. "
+            "A Tollbooth Operator cannot operate without a trusted Authority.",
+        }
+
+    if not certificate:
+        return {
+            "success": False,
+            "error": "A valid Authority certificate is required for every credit purchase. "
+            "Call the Authority's certify_purchase tool first.",
+        }
+
+    try:
+        cert_claims = verify_certificate(certificate, authority_public_key)
+    except CertificateError as e:
+        return {"success": False, "error": f"Certificate rejected: {e}"}
+
+    # Use net_sats from the certificate as the invoice amount
+    net_sats = cert_claims["net_sats"]
+
+    result = await _create_purchase_invoice(
+        btcpay, cache, user_id, net_sats,
+        tier_config_json, user_tiers_json,
+        extra_metadata={"certificate_jti": cert_claims["jti"]},
+    )
+    if result.get("success"):
+        result["certificate_jti"] = cert_claims["jti"]
     return result
+
+
+async def purchase_tax_credits_tool(
+    btcpay: BTCPayClient,
+    cache: LedgerCache,
+    user_id: str,
+    amount_sats: int,
+    tier_config_json: str | None = None,
+    user_tiers_json: str | None = None,
+) -> dict[str, Any]:
+    """Create a BTCPay invoice for a direct tax credit purchase.
+
+    For AUTHORITY use: operators buy tax credits directly from the Authority.
+    No certificate needed — the Authority IS the trust anchor.
+
+    The amount_sats is used directly as the invoice amount (no certificate
+    verification or tax deduction — the Authority handles tax via
+    certify_purchase separately).
+    """
+    return await _create_purchase_invoice(
+        btcpay, cache, user_id, amount_sats,
+        tier_config_json, user_tiers_json,
+        extra_metadata={"purpose": "tax_credit_purchase"},
+    )
 
 
 async def check_payment_tool(
