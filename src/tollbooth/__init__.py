@@ -3,7 +3,7 @@
 Bitcoin Lightning micropayments for MCP servers.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger, ToolUsage, InvoiceRecord
