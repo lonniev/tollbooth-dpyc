@@ -994,3 +994,68 @@ class TestBTCPayStatus:
 
         assert result["server_reachable"] is True
         assert result["store_name"] == "unauthorized"
+
+
+# ---------------------------------------------------------------------------
+# btcpay_status — authority_config diagnostic
+# ---------------------------------------------------------------------------
+
+
+class TestBTCPayStatusAuthorityConfig:
+    @pytest.mark.asyncio
+    async def test_authority_key_configured_and_valid(self) -> None:
+        """Valid Ed25519 PEM key shows configured, valid, fingerprint, verification enabled."""
+        config = _make_config(authority_public_key=_TEST_PUBLIC_PEM)
+        result = await btcpay_status_tool(config, None)
+
+        auth = result["authority_config"]
+        assert auth["public_key_configured"] is True
+        assert auth["public_key_valid"] is True
+        assert auth["certificate_verification_enabled"] is True
+        assert len(auth["public_key_fingerprint"]) == 8
+        assert "public_key_error" not in auth
+
+    @pytest.mark.asyncio
+    async def test_authority_key_not_configured(self) -> None:
+        """No key set — configured false, verification disabled."""
+        config = _make_config(authority_public_key=None)
+        result = await btcpay_status_tool(config, None)
+
+        auth = result["authority_config"]
+        assert auth["public_key_configured"] is False
+        assert auth["certificate_verification_enabled"] is False
+        assert "public_key_fingerprint" not in auth
+        assert "public_key_valid" not in auth
+
+    @pytest.mark.asyncio
+    async def test_authority_key_invalid_pem(self) -> None:
+        """Malformed PEM key — configured true, valid false, error reported."""
+        config = _make_config(authority_public_key="not a valid PEM key")
+        result = await btcpay_status_tool(config, None)
+
+        auth = result["authority_config"]
+        assert auth["public_key_configured"] is True
+        assert auth["public_key_valid"] is False
+        assert auth["certificate_verification_enabled"] is False
+        assert "public_key_error" in auth
+
+    @pytest.mark.asyncio
+    async def test_authority_url_shown(self) -> None:
+        """Authority URL surfaced when configured."""
+        config = _make_config(
+            authority_public_key=_TEST_PUBLIC_PEM,
+            authority_url="https://tollbooth-authority.fastmcp.app/mcp",
+        )
+        result = await btcpay_status_tool(config, None)
+
+        auth = result["authority_config"]
+        assert auth["authority_url"] == "https://tollbooth-authority.fastmcp.app/mcp"
+
+    @pytest.mark.asyncio
+    async def test_authority_url_none_when_missing(self) -> None:
+        """Authority URL is None when not configured."""
+        config = _make_config()
+        result = await btcpay_status_tool(config, None)
+
+        auth = result["authority_config"]
+        assert auth["authority_url"] is None
