@@ -45,7 +45,7 @@ pip install tollbooth-dpyc
 | `BTCPayClient` | Async HTTP client for BTCPay Server's Greenfield API — invoices, payouts, health checks. |
 | `VaultBackend` | Protocol for pluggable persistence — implement `store_ledger`, `fetch_ledger`, `snapshot_ledger`. |
 | `LedgerCache` | In-memory LRU cache with write-behind flush. The hot path for all credit operations. |
-| `ToolTier` | Cost tiers for tool-call metering (FREE, READ, WRITE, HEAVY). |
+| `ToolTier` | Cost tiers for tool-call metering (FREE=0, READ=1, WRITE=5, HEAVY=10 sats per call). |
 | `tools.credits` | Ready-made tool implementations: `purchase_credits`, `check_payment`, `check_balance`, and more. |
 
 ## Quick Start
@@ -67,6 +67,35 @@ async with BTCPayClient(config.btcpay_host, config.btcpay_api_key, config.btcpay
     invoice = await client.create_invoice(1000, metadata={"user": "milo"})
     print(f"Pay here: {invoice['checkoutLink']}")
 ```
+
+## Configuration
+
+`TollboothConfig` is a plain frozen dataclass. Your host application constructs it from its own settings (env vars, pydantic-settings, YAML — whatever you prefer). Tollbooth never reads environment variables directly.
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `btcpay_host` | `str \| None` | `None` | BTCPay Server URL for creating invoices and checking payments |
+| `btcpay_store_id` | `str \| None` | `None` | BTCPay store ID — each operator runs their own store |
+| `btcpay_api_key` | `str \| None` | `None` | BTCPay API key — must have invoice + payout permissions |
+| `btcpay_tier_config` | `str \| None` | `None` | JSON string mapping tier names to credit multipliers |
+| `btcpay_user_tiers` | `str \| None` | `None` | JSON string mapping user IDs to tier names |
+| `seed_balance_sats` | `int` | `0` | Free starter balance granted to new users (0 to disable) |
+| `tollbooth_royalty_address` | `str \| None` | `None` | Lightning Address for the 2% royalty payout to the Tollbooth originator |
+| `tollbooth_royalty_percent` | `float` | `0.02` | Royalty percentage (0.02 = 2%) |
+| `tollbooth_royalty_min_sats` | `int` | `10` | Minimum royalty payout in sats (below this, no payout fires) |
+
+## Tool Functions
+
+The `tollbooth.tools.credits` module provides ready-made implementations that your MCP server wraps as tools. Each function takes infrastructure objects (BTCPayClient, LedgerCache) as parameters — you wire them up, Tollbooth handles the logic.
+
+| Function | Purpose |
+|----------|---------|
+| `purchase_credits_tool` | Creates a BTCPay invoice, records it as pending, returns a checkout link for the user. |
+| `check_payment_tool` | Polls an invoice, credits the balance on settlement, fires the royalty payout. Idempotent. |
+| `check_balance_tool` | Returns current balance, usage summary, tier info, and invoice history. Read-only. |
+| `restore_credits_tool` | Recovers credits from a paid invoice lost to cache/vault issues. Checks vault first, falls back to BTCPay. |
+| `btcpay_status_tool` | Diagnostics: BTCPay connectivity, store name, API key permissions, royalty config. |
+| `compute_low_balance_warning` | Pure function — returns a warning dict if balance is below threshold, `None` if healthy. |
 
 ## The Three-Party Settlement
 
@@ -104,9 +133,9 @@ Tollbooth is a three-party ecosystem:
 
 | Repo | Role |
 |------|------|
-| [tollbooth-authority](https://github.com/lonniev/tollbooth-authority) | Tax certification service — EdDSA-signed JWTs, Authority BTCPay |
-| **tollbooth-dpyc** (this package) | Operator-side library — credit ledger, BTCPay client, tool gating |
-| [thebrain-mcp](https://github.com/lonniev/thebrain-mcp) | Reference integration — first MCP server powered by Tollbooth |
+| [tollbooth-authority](https://github.com/lonniev/tollbooth-authority) | The institution — tax collection, EdDSA signing, purchase order certification |
+| **tollbooth-dpyc** (this package) | The booth — operator-side credit ledger, BTCPay client, tool gating |
+| [thebrain-mcp](https://github.com/lonniev/thebrain-mcp) | The first city — reference MCP server powered by Tollbooth |
 
 See the [Three-Party Protocol diagram](https://github.com/lonniev/tollbooth-authority/blob/main/docs/diagrams/tollbooth-three-party-protocol.svg) for the full architecture.
 
@@ -121,6 +150,17 @@ Authority BTCPay                  BTCPayClient                      TOOL_COSTS m
 ```
 
 Dependency flows one way: `your-mcp-server --> tollbooth-dpyc`. Authority is a network peer, not a code dependency. Only runtime dependency: `httpx`.
+
+## Development
+
+```bash
+git clone https://github.com/lonniev/tollbooth-dpyc.git
+cd tollbooth-dpyc
+python -m venv venv
+source venv/bin/activate
+pip install -e ".[dev]"
+pytest tests/ -q
+```
 
 ## Further Reading
 
