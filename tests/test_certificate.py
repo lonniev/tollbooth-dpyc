@@ -95,6 +95,17 @@ class TestVerifyCertificateValid:
         assert result["net_sats"] == 980
         assert result["jti"] == "jti-unique-1"
 
+    def test_bare_base64_key_accepted(self, keypair):
+        """Bare base64 key (no PEM headers) works for verification."""
+        private_key, public_pem = keypair
+        # Strip PEM headers to get bare base64
+        lines = [ln for ln in public_pem.strip().splitlines() if not ln.startswith("-----")]
+        bare_b64 = "".join(lines).strip()
+        token = _sign_certificate(private_key, jti="jti-bare-b64")
+        result = verify_certificate(token, bare_b64)
+        assert result["operator_id"] == "op-1"
+        assert result["jti"] == "jti-bare-b64"
+
     def test_extracts_all_claims(self, keypair):
         private_key, public_pem = keypair
         token = _sign_certificate(

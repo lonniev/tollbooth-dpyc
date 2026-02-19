@@ -83,8 +83,7 @@ async with BTCPayClient(config.btcpay_host, config.btcpay_api_key, config.btcpay
 | `tollbooth_royalty_address` | `str \| None` | `None` | Lightning Address for the 2% royalty payout to the Tollbooth originator |
 | `tollbooth_royalty_percent` | `float` | `0.02` | Royalty percentage (0.02 = 2%) |
 | `tollbooth_royalty_min_sats` | `int` | `10` | Minimum royalty payout in sats (below this, no payout fires) |
-| `authority_public_key` | `str \| None` | `None` | Authority's Ed25519 PEM public key for certificate verification. When set, `purchase_credits` requires a valid Authority JWT. |
-| `authority_url` | `str \| None` | `None` | Authority MCP endpoint URL (scaffolding for future use) |
+| `authority_public_key` | `str \| None` | `None` | Authority's Ed25519 public key — bare base64 or full PEM. Required for `purchase_credits` (every purchase needs a valid Authority JWT). |
 
 ## Tool Functions
 

@@ -1040,22 +1040,34 @@ class TestBTCPayStatusAuthorityConfig:
         assert "public_key_error" in auth
 
     @pytest.mark.asyncio
-    async def test_authority_url_shown(self) -> None:
-        """Authority URL surfaced when configured."""
-        config = _make_config(
-            authority_public_key=_TEST_PUBLIC_PEM,
-            authority_url="https://tollbooth-authority.fastmcp.app/mcp",
-        )
+    async def test_bare_base64_key_accepted(self) -> None:
+        """Bare base64 key (no PEM headers) works for diagnostics."""
+        # Extract just the base64 body from the PEM
+        lines = [ln for ln in _TEST_PUBLIC_PEM.strip().splitlines() if not ln.startswith("-----")]
+        bare_b64 = "".join(lines).strip()
+        config = _make_config(authority_public_key=bare_b64)
         result = await btcpay_status_tool(config, None)
 
         auth = result["authority_config"]
-        assert auth["authority_url"] == "https://tollbooth-authority.fastmcp.app/mcp"
+        assert auth["public_key_configured"] is True
+        assert auth["public_key_valid"] is True
+        assert auth["certificate_verification_enabled"] is True
+        assert len(auth["public_key_fingerprint"]) == 8
+        assert "authority_url" not in auth
 
     @pytest.mark.asyncio
-    async def test_authority_url_none_when_missing(self) -> None:
-        """Authority URL is None when not configured."""
-        config = _make_config()
-        result = await btcpay_status_tool(config, None)
+    async def test_fingerprint_matches_key_tail(self) -> None:
+        """Fingerprint is last 8 chars of the base64 key body."""
+        lines = [ln for ln in _TEST_PUBLIC_PEM.strip().splitlines() if not ln.startswith("-----")]
+        bare_b64 = "".join(lines).strip()
+        expected = bare_b64[-8:]
 
-        auth = result["authority_config"]
-        assert auth["authority_url"] is None
+        # Test with full PEM
+        config_pem = _make_config(authority_public_key=_TEST_PUBLIC_PEM)
+        result_pem = await btcpay_status_tool(config_pem, None)
+        assert result_pem["authority_config"]["public_key_fingerprint"] == expected
+
+        # Test with bare base64
+        config_bare = _make_config(authority_public_key=bare_b64)
+        result_bare = await btcpay_status_tool(config_bare, None)
+        assert result_bare["authority_config"]["public_key_fingerprint"] == expected

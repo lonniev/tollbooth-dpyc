@@ -10,6 +10,30 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def normalize_public_key(raw: str) -> str:
+    """Accept a bare base64 key string or full PEM and return valid PEM.
+
+    Operators can set AUTHORITY_PUBLIC_KEY to just the base64 body
+    (e.g. ``MCowBQYDK2VwAyEA...``) — no PEM headers needed. The
+    variable name tells you it's a public key.
+    """
+    stripped = raw.strip()
+    if stripped.startswith("-----"):
+        return stripped
+    return f"-----BEGIN PUBLIC KEY-----\n{stripped}\n-----END PUBLIC KEY-----"
+
+
+def key_fingerprint(raw: str) -> str:
+    """Return last 8 chars of the base64 key body for display."""
+    stripped = raw.strip()
+    if stripped.startswith("-----"):
+        lines = [ln for ln in stripped.splitlines() if not ln.startswith("-----")]
+        b64 = "".join(lines).strip()
+    else:
+        b64 = stripped
+    return b64[-8:] if len(b64) >= 8 else b64
+
+
 class CertificateError(Exception):
     """Raised when a certificate fails validation."""
 
@@ -46,7 +70,8 @@ def verify_certificate(token: str, public_key_pem: str) -> dict[str, Any]:
 
     Args:
         token: The JWT string from certify_purchase.
-        public_key_pem: The Authority's Ed25519 public key in PEM format.
+        public_key_pem: The Authority's Ed25519 public key — either bare base64
+            or full PEM format. The variable name indicates it's a public key.
 
     Returns:
         Dict with extracted claims: operator_id, amount_sats, tax_paid_sats,
@@ -64,9 +89,12 @@ def verify_certificate(token: str, public_key_pem: str) -> dict[str, Any]:
             "Install with: pip install 'PyJWT[crypto]'"
         ) from e
 
+    # Normalize bare base64 to PEM
+    pem = normalize_public_key(public_key_pem)
+
     # Load the public key
     try:
-        public_key = load_pem_public_key(public_key_pem.encode())
+        public_key = load_pem_public_key(pem.encode())
     except (ValueError, TypeError) as e:
         raise CertificateError(f"Invalid authority public key: {e}") from e
 
