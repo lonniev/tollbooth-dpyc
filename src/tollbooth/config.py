@@ -19,4 +19,3 @@ class TollboothConfig:
     tollbooth_royalty_percent: float = 0.02
     tollbooth_royalty_min_sats: int = 10
     authority_public_key: str | None = None
-    authority_url: str | None = None
