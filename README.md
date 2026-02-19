@@ -100,18 +100,27 @@ The enforcement is both technical and social. At startup, Tollbooth inspects the
 
 ## Architecture
 
+Tollbooth is a three-party ecosystem:
+
+| Repo | Role |
+|------|------|
+| [tollbooth-authority](https://github.com/lonniev/tollbooth-authority) | Tax certification service — EdDSA-signed JWTs, Authority BTCPay |
+| **tollbooth-dpyc** (this package) | Operator-side library — credit ledger, BTCPay client, tool gating |
+| [thebrain-mcp](https://github.com/lonniev/thebrain-mcp) | Reference integration — first MCP server powered by Tollbooth |
+
+See the [Three-Party Protocol diagram](https://github.com/lonniev/tollbooth-authority/blob/main/docs/diagrams/tollbooth-three-party-protocol.svg) for the full architecture.
+
 ```
-tollbooth-dpyc (this package)     thebrain-mcp (consumer)
-================================  ================================
-TollboothConfig                   Settings (pydantic) ──constructs──> TollboothConfig
-UserLedger                        server.py imports via re-export shims
-BTCPayClient                      PersonalBrainVault implements VaultBackend
-VaultBackend (Protocol)           TOOL_COSTS dict maps tools to ToolTier
-LedgerCache
-credit tools
+tollbooth-authority               tollbooth-dpyc (this package)     your-mcp-server (consumer)
+================================  ================================  ================================
+EdDSA signing + tax ledger        TollboothConfig                   Settings ──constructs──> TollboothConfig
+certify_purchase → JWT            UserLedger                        implements VaultBackend
+Authority BTCPay                  BTCPayClient                      TOOL_COSTS maps tools to ToolTier
+                                  VaultBackend (Protocol)
+                                  LedgerCache + credit tools
 ```
 
-Dependency flows one way: `your-mcp-server --> tollbooth-dpyc`. Zero circular dependencies. Only runtime dependency: `httpx`.
+Dependency flows one way: `your-mcp-server --> tollbooth-dpyc`. Authority is a network peer, not a code dependency. Only runtime dependency: `httpx`.
 
 ## Further Reading
 
