@@ -342,6 +342,73 @@ class TestLedgerCacheConcurrency:
 
 
 # ---------------------------------------------------------------------------
+# Flush retry
+# ---------------------------------------------------------------------------
+
+
+class TestLedgerCacheFlushRetry:
+    @pytest.mark.asyncio
+    async def test_retry_succeeds_on_transient_failure(self) -> None:
+        """Flush succeeds on second attempt after transient vault error."""
+        vault = _mock_vault()
+        call_count = 0
+
+        async def store_side_effect(user_id, ledger_json):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("transient error")
+            return "ok"
+
+        vault.store_ledger = AsyncMock(side_effect=store_side_effect)
+        cache = LedgerCache(vault, maxsize=5, flush_retries=1, flush_retry_delay=0.01)
+        await cache.get("user1")
+        cache.mark_dirty("user1")
+
+        result = await cache.flush_user("user1")
+
+        assert result is True
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausted_returns_false(self) -> None:
+        """All retry attempts fail -> returns False, entry stays dirty."""
+        vault = _mock_vault(fail_store=True)
+        cache = LedgerCache(vault, maxsize=5, flush_retries=2, flush_retry_delay=0.01)
+        await cache.get("user1")
+        cache.mark_dirty("user1")
+
+        result = await cache.flush_user("user1")
+
+        assert result is False
+        assert cache._entries["user1"].dirty is True
+        # 1 initial + 2 retries = 3 total attempts
+        assert vault.store_ledger.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_zero_retries_single_attempt(self) -> None:
+        """flush_retries=0 means exactly one attempt, no retries."""
+        vault = _mock_vault(fail_store=True)
+        cache = LedgerCache(vault, maxsize=5, flush_retries=0, flush_retry_delay=0.01)
+        await cache.get("user1")
+        cache.mark_dirty("user1")
+
+        result = await cache.flush_user("user1")
+
+        assert result is False
+        assert vault.store_ledger.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_default_config_has_retry(self) -> None:
+        """Default LedgerCache has flush_retries=1 visible in health()."""
+        vault = _mock_vault()
+        cache = LedgerCache(vault)
+        health = cache.health()
+        assert health["flush_retries"] == 1
+        assert health["flush_retry_delay"] == 2.0
+
+
+# ---------------------------------------------------------------------------
 # Size property
 # ---------------------------------------------------------------------------
 

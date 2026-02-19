@@ -30,6 +30,7 @@ from tollbooth.tools.credits import (
     check_payment_tool,
     compute_low_balance_warning,
     purchase_credits_tool,
+    reconcile_pending_invoices,
 )
 from tollbooth.constants import MAX_INVOICE_SATS
 
@@ -1071,3 +1072,88 @@ class TestBTCPayStatusAuthorityConfig:
         config_bare = _make_config(authority_public_key=bare_b64)
         result_bare = await btcpay_status_tool(config_bare, None)
         assert result_bare["authority_config"]["public_key_fingerprint"] == expected
+
+
+# ---------------------------------------------------------------------------
+# reconcile_pending_invoices
+# ---------------------------------------------------------------------------
+
+
+class TestReconcilePendingInvoices:
+    @pytest.mark.asyncio
+    async def test_credits_settled_invoice(self) -> None:
+        """Settled pending invoice gets credited and flushed."""
+        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "500"})
+        ledger = UserLedger(pending_invoices=["inv-1"])
+        cache = _mock_cache(ledger)
+
+        result = await reconcile_pending_invoices(btcpay, cache, "user1")
+
+        assert result["reconciled"] == 1
+        assert result["actions"][0]["action"] == "credited"
+        assert result["actions"][0]["api_sats"] == 500
+        assert ledger.balance_api_sats == 500
+        assert "inv-1" in ledger.credited_invoices
+        cache.flush_user.assert_called_once_with("user1")
+
+    @pytest.mark.asyncio
+    async def test_removes_expired_invoice(self) -> None:
+        """Expired pending invoice is removed from pending list."""
+        btcpay = _mock_btcpay({"id": "inv-1", "status": "Expired"})
+        ledger = UserLedger(pending_invoices=["inv-1"])
+        cache = _mock_cache(ledger)
+
+        result = await reconcile_pending_invoices(btcpay, cache, "user1")
+
+        assert result["reconciled"] == 1
+        assert result["actions"][0]["action"] == "removed"
+        assert result["actions"][0]["reason"] == "Expired"
+        assert "inv-1" not in ledger.pending_invoices
+        cache.flush_user.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_noop_on_empty_pending(self) -> None:
+        """No pending invoices → no actions, no flush."""
+        btcpay = _mock_btcpay()
+        ledger = UserLedger()
+        cache = _mock_cache(ledger)
+
+        result = await reconcile_pending_invoices(btcpay, cache, "user1")
+
+        assert result["reconciled"] == 0
+        assert result["actions"] == []
+        cache.flush_user.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_btcpay_errors(self) -> None:
+        """BTCPay errors for individual invoices are skipped, not fatal."""
+        from tollbooth.btcpay_client import BTCPayConnectionError
+
+        btcpay = _mock_btcpay(error=BTCPayConnectionError("timeout"))
+        ledger = UserLedger(pending_invoices=["inv-1"])
+        cache = _mock_cache(ledger)
+
+        result = await reconcile_pending_invoices(btcpay, cache, "user1")
+
+        assert result["reconciled"] == 0
+        # Invoice stays pending since we couldn't check it
+        assert "inv-1" in ledger.pending_invoices
+        cache.flush_user.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_idempotent_already_credited(self) -> None:
+        """Already-credited settled invoice is not double-credited."""
+        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "500"})
+        ledger = UserLedger(
+            balance_api_sats=500,
+            pending_invoices=["inv-1"],
+            credited_invoices=["inv-1"],
+        )
+        cache = _mock_cache(ledger)
+
+        result = await reconcile_pending_invoices(btcpay, cache, "user1")
+
+        assert result["reconciled"] == 0
+        # Balance should not increase
+        assert ledger.balance_api_sats == 500
+        cache.flush_user.assert_not_called()
