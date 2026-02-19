@@ -5,6 +5,7 @@ Bitcoin Lightning micropayments for MCP servers.
 
 __version__ = "0.1.1"
 
+from tollbooth.certificate import CertificateError, verify_certificate
 from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger, ToolUsage, InvoiceRecord
 from tollbooth.btcpay_client import BTCPayClient, BTCPayError, BTCPayAuthError
@@ -13,6 +14,7 @@ from tollbooth.ledger_cache import LedgerCache
 from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_API_SATS
 
 __all__ = [
+    "CertificateError",
     "TollboothConfig",
     "UserLedger",
     "ToolUsage",
@@ -25,4 +27,5 @@ __all__ = [
     "ToolTier",
     "MAX_INVOICE_SATS",
     "LOW_BALANCE_FLOOR_API_SATS",
+    "verify_certificate",
 ]

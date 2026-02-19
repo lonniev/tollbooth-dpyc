@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from tollbooth.btcpay_client import BTCPayClient, BTCPayAuthError, BTCPayError
+from tollbooth.certificate import CertificateError, verify_certificate
 from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
@@ -113,6 +114,8 @@ async def purchase_credits_tool(
     amount_sats: int,
     tier_config_json: str | None = None,
     user_tiers_json: str | None = None,
+    certificate: str | None = None,
+    authority_public_key: str | None = None,
 ) -> dict[str, Any]:
     """Create a BTCPay Lightning invoice and record it as pending in the user's ledger.
 
@@ -124,6 +127,11 @@ async def purchase_credits_tool(
     to credit their balance. Do not create a new invoice if one is already
     pending — let it expire or settle first.
 
+    If authority_public_key is configured, a valid Authority certificate (JWT)
+    is required. The certificate's net_sats determines the invoice amount,
+    overriding amount_sats. Without the key, the old direct-purchase flow
+    continues (backward compatible).
+
     Args:
         btcpay: BTCPay client for the operator's store.
         cache: Ledger cache for the user.
@@ -132,6 +140,10 @@ async def purchase_credits_tool(
             multiplier is applied at settlement, not at invoice time.
         tier_config_json: Optional JSON string of tier definitions.
         user_tiers_json: Optional JSON string mapping user IDs to tier names.
+        certificate: Optional Authority-signed JWT from certify_purchase.
+            Required when authority_public_key is set.
+        authority_public_key: Ed25519 PEM public key for certificate verification.
+            When set, certificate is required and its net_sats overrides amount_sats.
 
     Returns dict with:
         success: True if invoice was created.
@@ -139,11 +151,29 @@ async def purchase_credits_tool(
         checkout_link: URL for the user to pay the Lightning invoice.
         expiration: When the invoice expires.
         tier/multiplier/expected_credits: Tier info and projected credit amount.
+        certificate_jti: JTI from the verified certificate (if used).
         message: Human-readable summary with payment instructions.
 
     Errors: Returns success=False if amount_sats <= 0, exceeds MAX_INVOICE_SATS
-    (1,000,000), or BTCPay is unreachable.
+    (1,000,000), BTCPay is unreachable, or certificate validation fails.
     """
+    # Certificate verification gate
+    cert_claims: dict[str, Any] | None = None
+    if authority_public_key:
+        if not certificate:
+            return {
+                "success": False,
+                "error": "Authority public key is configured — a valid certificate is required. "
+                "Call the Authority's certify_purchase tool first.",
+            }
+        try:
+            cert_claims = verify_certificate(certificate, authority_public_key)
+        except CertificateError as e:
+            return {"success": False, "error": f"Certificate rejected: {e}"}
+
+        # Use net_sats from the certificate as the invoice amount
+        amount_sats = cert_claims["net_sats"]
+
     if amount_sats <= 0:
         return {"success": False, "error": "amount_sats must be positive."}
 
@@ -153,10 +183,14 @@ async def purchase_credits_tool(
             "error": f"amount_sats exceeds maximum of {MAX_INVOICE_SATS:,} sats (0.01 BTC) per invoice.",
         }
 
+    invoice_metadata: dict[str, Any] = {"user_id": user_id, "purpose": "credit_purchase"}
+    if cert_claims:
+        invoice_metadata["certificate_jti"] = cert_claims["jti"]
+
     try:
         invoice = await btcpay.create_invoice(
             amount_sats,
-            metadata={"user_id": user_id, "purpose": "credit_purchase"},
+            metadata=invoice_metadata,
         )
     except BTCPayError as e:
         return {"success": False, "error": f"BTCPay error: {e}"}
@@ -199,6 +233,8 @@ async def purchase_credits_tool(
             f'After paying, call check_payment with invoice_id: "{invoice_id}"'
         ),
     }
+    if cert_claims:
+        result["certificate_jti"] = cert_claims["jti"]
     return result
 
 
