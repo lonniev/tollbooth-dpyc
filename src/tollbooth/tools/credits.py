@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import logging
+import platform
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -637,6 +639,15 @@ async def btcpay_status_tool(
         "btcpay_store_id": config.btcpay_store_id or None,
         "btcpay_api_key_status": "present" if config.btcpay_api_key else "missing",
     }
+
+    # Runtime version provenance — what's actually imported in this process
+    versions: dict[str, str] = {"python": platform.python_version()}
+    for pkg in ("tollbooth-dpyc", "fastmcp"):
+        try:
+            versions[pkg.replace("-", "_")] = importlib.metadata.version(pkg)
+        except importlib.metadata.PackageNotFoundError:
+            versions[pkg.replace("-", "_")] = "unknown"
+    result["versions"] = versions
 
     # Tier config
     if config.btcpay_tier_config:
