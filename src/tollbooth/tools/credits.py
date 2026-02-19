@@ -625,6 +625,7 @@ async def btcpay_status_tool(
     Returns dict with:
         btcpay_host/btcpay_store_id: Configured endpoints.
         btcpay_api_key_status: 'present' or 'missing'.
+        authority_config: Trust chain status — key configured/valid, fingerprint, URL.
         server_reachable: True/False/None (None if not configured).
         store_name: Store name or error status.
         api_key_permissions: Required vs present permissions, with missing list.
@@ -656,6 +657,30 @@ async def btcpay_status_tool(
             result["user_tiers"] = "invalid JSON"
     else:
         result["user_tiers"] = "missing"
+
+    # Authority trust chain config
+    authority_config: dict[str, Any] = {
+        "public_key_configured": bool(config.authority_public_key),
+        "authority_url": config.authority_url or None,
+        "certificate_verification_enabled": False,
+    }
+    if config.authority_public_key:
+        try:
+            from cryptography.hazmat.primitives.serialization import load_pem_public_key
+            load_pem_public_key(config.authority_public_key.encode())
+            # Extract fingerprint: last 8 chars of the base64 key body
+            key_lines = [
+                ln for ln in config.authority_public_key.strip().splitlines()
+                if not ln.startswith("-----")
+            ]
+            key_b64 = "".join(key_lines).strip()
+            authority_config["public_key_fingerprint"] = key_b64[-8:] if len(key_b64) >= 8 else key_b64
+            authority_config["public_key_valid"] = True
+            authority_config["certificate_verification_enabled"] = True
+        except Exception as e:
+            authority_config["public_key_valid"] = False
+            authority_config["public_key_error"] = str(e)
+    result["authority_config"] = authority_config
 
     # Connectivity checks — only if all 3 connection vars present and client available
     connection_vars_present = bool(
