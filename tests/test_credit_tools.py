@@ -1,10 +1,14 @@
 """Tests for credit management tools: purchase_credits, check_payment, check_balance, btcpay_status."""
 
 import json
+import time
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock
 
+import jwt as pyjwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
 
 from tollbooth.btcpay_client import (
     BTCPayAuthError,
@@ -12,6 +16,7 @@ from tollbooth.btcpay_client import (
     BTCPayConnectionError,
     BTCPayServerError,
 )
+from tollbooth.certificate import reset_jti_store
 from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
@@ -27,6 +32,43 @@ from tollbooth.tools.credits import (
     purchase_credits_tool,
 )
 from tollbooth.constants import MAX_INVOICE_SATS
+
+
+# ---------------------------------------------------------------------------
+# Module-level test keypair for certificate signing
+# ---------------------------------------------------------------------------
+
+_TEST_PRIVATE_KEY = Ed25519PrivateKey.generate()
+_TEST_PUBLIC_PEM = _TEST_PRIVATE_KEY.public_key().public_bytes(
+    serialization.Encoding.PEM,
+    serialization.PublicFormat.SubjectPublicKeyInfo,
+).decode()
+
+_jti_counter = 0
+
+
+def _test_certificate(net_sats: int = 980, amount_sats: int = 1000) -> str:
+    """Sign a test certificate with a unique JTI for each call."""
+    global _jti_counter
+    _jti_counter += 1
+    claims = {
+        "operator_id": "test-op",
+        "amount_sats": amount_sats,
+        "tax_paid_sats": amount_sats - net_sats,
+        "net_sats": net_sats,
+        "jti": f"test-jti-{_jti_counter}-{time.time_ns()}",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 600,
+    }
+    return pyjwt.encode(claims, _TEST_PRIVATE_KEY, algorithm="EdDSA")
+
+
+@pytest.fixture(autouse=True)
+def _clean_jti_store():
+    """Reset the JTI store before each test to prevent cross-test replay."""
+    reset_jti_store()
+    yield
+    reset_jti_store()
 
 
 # ---------------------------------------------------------------------------
@@ -145,11 +187,16 @@ class TestPurchaseCredits:
             "expirationTime": "2026-02-16T01:00:00Z",
         })
         cache = _mock_cache()
-        result = await purchase_credits_tool(btcpay, cache, "user1", 1000)
+        result = await purchase_credits_tool(
+            btcpay, cache, "user1", 1000,
+            certificate=_test_certificate(net_sats=1000),
+            authority_public_key=_TEST_PUBLIC_PEM,
+        )
         assert result["success"] is True
         assert result["invoice_id"] == "inv-42"
         assert result["amount_sats"] == 1000
         assert "checkout_link" in result
+        assert "certificate_jti" in result
         btcpay.create_invoice.assert_called_once()
         cache.mark_dirty.assert_called_once_with("user1")
 
@@ -157,7 +204,11 @@ class TestPurchaseCredits:
     async def test_zero_amount_rejected(self) -> None:
         btcpay = _mock_btcpay()
         cache = _mock_cache()
-        result = await purchase_credits_tool(btcpay, cache, "user1", 0)
+        result = await purchase_credits_tool(
+            btcpay, cache, "user1", 0,
+            certificate=_test_certificate(net_sats=0),
+            authority_public_key=_TEST_PUBLIC_PEM,
+        )
         assert result["success"] is False
         assert "positive" in result["error"]
 
@@ -165,14 +216,22 @@ class TestPurchaseCredits:
     async def test_negative_amount_rejected(self) -> None:
         btcpay = _mock_btcpay()
         cache = _mock_cache()
-        result = await purchase_credits_tool(btcpay, cache, "user1", -100)
+        result = await purchase_credits_tool(
+            btcpay, cache, "user1", -100,
+            certificate=_test_certificate(net_sats=-100),
+            authority_public_key=_TEST_PUBLIC_PEM,
+        )
         assert result["success"] is False
 
     @pytest.mark.asyncio
     async def test_btcpay_error(self) -> None:
         btcpay = _mock_btcpay(error=BTCPayConnectionError("DNS failed"))
         cache = _mock_cache()
-        result = await purchase_credits_tool(btcpay, cache, "user1", 1000)
+        result = await purchase_credits_tool(
+            btcpay, cache, "user1", 1000,
+            certificate=_test_certificate(net_sats=1000),
+            authority_public_key=_TEST_PUBLIC_PEM,
+        )
         assert result["success"] is False
         assert "BTCPay error" in result["error"]
 
@@ -181,7 +240,11 @@ class TestPurchaseCredits:
         btcpay = _mock_btcpay({"id": "inv-99", "checkoutLink": "https://x.com"})
         ledger = UserLedger()
         cache = _mock_cache(ledger)
-        await purchase_credits_tool(btcpay, cache, "user1", 500)
+        await purchase_credits_tool(
+            btcpay, cache, "user1", 500,
+            certificate=_test_certificate(net_sats=500),
+            authority_public_key=_TEST_PUBLIC_PEM,
+        )
         assert "inv-99" in ledger.pending_invoices
 
     @pytest.mark.asyncio
@@ -190,6 +253,8 @@ class TestPurchaseCredits:
         cache = _mock_cache()
         result = await purchase_credits_tool(
             btcpay, cache, "user1", 1000,
+            certificate=_test_certificate(net_sats=1000),
+            authority_public_key=_TEST_PUBLIC_PEM,
             tier_config_json=TIER_CONFIG, user_tiers_json=USER_TIERS,
         )
         assert result["tier"] == "default"
@@ -202,6 +267,8 @@ class TestPurchaseCredits:
         cache = _mock_cache()
         result = await purchase_credits_tool(
             btcpay, cache, "user-vip", 500,
+            certificate=_test_certificate(net_sats=500),
+            authority_public_key=_TEST_PUBLIC_PEM,
             tier_config_json=TIER_CONFIG, user_tiers_json=USER_TIERS,
         )
         assert result["tier"] == "vip"
@@ -517,6 +584,8 @@ class TestPurchaseCap:
         cache = _mock_cache()
         result = await purchase_credits_tool(
             btcpay, cache, "user1", MAX_INVOICE_SATS,
+            certificate=_test_certificate(net_sats=MAX_INVOICE_SATS),
+            authority_public_key=_TEST_PUBLIC_PEM,
         )
         assert result["success"] is True
 
@@ -527,6 +596,8 @@ class TestPurchaseCap:
         cache = _mock_cache()
         result = await purchase_credits_tool(
             btcpay, cache, "user1", MAX_INVOICE_SATS + 1,
+            certificate=_test_certificate(net_sats=MAX_INVOICE_SATS + 1),
+            authority_public_key=_TEST_PUBLIC_PEM,
         )
         assert result["success"] is False
         assert "maximum" in result["error"]

@@ -197,13 +197,15 @@ class TestAntiReplay:
 
 class TestPurchaseWithCertificate:
     @pytest.mark.asyncio
-    async def test_certificate_required_when_key_set(self):
+    async def test_missing_certificate_rejected(self, keypair):
+        _, public_pem = keypair
         result = await purchase_credits_tool(
             btcpay=_mock_btcpay(),
             cache=_mock_cache(),
             user_id="user-1",
             amount_sats=1000,
-            authority_public_key="-----BEGIN PUBLIC KEY-----\nfake\n-----END PUBLIC KEY-----",
+            certificate="",
+            authority_public_key=public_pem,
         )
         assert result["success"] is False
         assert "certificate is required" in result["error"]
@@ -230,7 +232,7 @@ class TestPurchaseWithCertificate:
             btcpay=_mock_btcpay(),
             cache=_mock_cache(),
             user_id="user-1",
-            amount_sats=1000,  # ignored — cert's net_sats used
+            amount_sats=1000,
             certificate=token,
             authority_public_key=public_pem,
         )
@@ -247,13 +249,12 @@ class TestPurchaseWithCertificate:
             btcpay=btcpay,
             cache=_mock_cache(),
             user_id="user-1",
-            amount_sats=9999,  # should be overridden
+            amount_sats=9999,  # should be overridden by cert's net_sats
             certificate=token,
             authority_public_key=public_pem,
         )
         assert result["success"] is True
         assert result["amount_sats"] == 500
-        # Verify BTCPay was called with net_sats, not original amount
         btcpay.create_invoice.assert_called_once()
         call_args = btcpay.create_invoice.call_args
         assert call_args[0][0] == 500
@@ -278,7 +279,6 @@ class TestPurchaseWithCertificate:
     async def test_replay_rejected_in_purchase(self, keypair):
         private_key, public_pem = keypair
         token = _sign_certificate(private_key, jti="jti-replay-purchase")
-        # First purchase succeeds
         result1 = await purchase_credits_tool(
             btcpay=_mock_btcpay(),
             cache=_mock_cache(),
@@ -303,35 +303,35 @@ class TestPurchaseWithCertificate:
 
 
 # ---------------------------------------------------------------------------
-# Backward compatibility — no key configured
+# Mandatory trust — no untrusted operation
 # ---------------------------------------------------------------------------
 
 
-class TestBackwardCompatibility:
+class TestMandatoryTrust:
     @pytest.mark.asyncio
-    async def test_no_key_no_certificate_works(self):
-        """Old flow: no authority_public_key → purchase works without certificate."""
+    async def test_no_public_key_rejects_purchase(self):
+        """Operators cannot operate without a trusted Authority."""
         result = await purchase_credits_tool(
             btcpay=_mock_btcpay(),
             cache=_mock_cache(),
             user_id="user-1",
             amount_sats=1000,
+            certificate="some.jwt.token",
+            authority_public_key="",
         )
-        assert result["success"] is True
-        assert "certificate_jti" not in result
+        assert result["success"] is False
+        assert "authority_public_key is required" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_certificate_ignored_without_key(self, keypair):
-        """If no authority_public_key, certificate param is ignored."""
-        private_key, _ = keypair
-        token = _sign_certificate(private_key)
+    async def test_empty_certificate_and_empty_key(self):
+        """Both missing — operator misconfigured."""
         result = await purchase_credits_tool(
             btcpay=_mock_btcpay(),
             cache=_mock_cache(),
             user_id="user-1",
             amount_sats=1000,
-            certificate=token,
-            # no authority_public_key
+            certificate="",
+            authority_public_key="",
         )
-        assert result["success"] is True
-        assert "certificate_jti" not in result
+        assert result["success"] is False
+        assert "authority_public_key is required" in result["error"]
