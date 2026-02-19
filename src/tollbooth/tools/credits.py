@@ -580,6 +580,77 @@ async def restore_credits_tool(
     }
 
 
+async def reconcile_pending_invoices(
+    btcpay: BTCPayClient,
+    cache: LedgerCache,
+    user_id: str,
+    tier_config_json: str | None = None,
+    user_tiers_json: str | None = None,
+) -> dict[str, Any]:
+    """Reconcile pending invoices on startup: credit settled, remove terminal.
+
+    Iterates pending_invoices, checks each against BTCPay, and:
+    - Settled + not yet credited → credit_deposit + record_invoice_settled
+    - Expired/Invalid → remove from pending + record_invoice_terminal
+    - BTCPay errors → skip (logged, not fatal)
+
+    A single flush_user() is called at the end if any changes were made.
+    Returns {"reconciled": N, "actions": [...]}.
+    """
+    ledger = await cache.get(user_id)
+    pending_copy = list(ledger.pending_invoices)
+    if not pending_copy:
+        return {"reconciled": 0, "actions": []}
+
+    actions: list[dict[str, Any]] = []
+    changed = False
+
+    for invoice_id in pending_copy:
+        try:
+            invoice = await btcpay.get_invoice(invoice_id)
+        except BTCPayError:
+            logger.warning("Reconciliation: skipping %s (BTCPay error).", invoice_id)
+            continue
+
+        status = invoice.get("status", "Unknown")
+
+        if status == "Settled" and invoice_id not in ledger.credited_invoices:
+            amount_str = invoice.get("amount", "0")
+            amount_sats = int(float(amount_str))
+            multiplier = _get_multiplier(user_id, tier_config_json, user_tiers_json)
+            credited = amount_sats * multiplier
+            ledger.credit_deposit(credited, invoice_id)
+            ledger.record_invoice_settled(
+                invoice_id=invoice_id,
+                api_sats_credited=credited,
+                settled_at=datetime.now(timezone.utc).isoformat(),
+                btcpay_status=status,
+            )
+            changed = True
+            actions.append({
+                "invoice_id": invoice_id,
+                "action": "credited",
+                "api_sats": credited,
+            })
+
+        elif status in ("Expired", "Invalid"):
+            if invoice_id in ledger.pending_invoices:
+                ledger.pending_invoices.remove(invoice_id)
+            ledger.record_invoice_terminal(invoice_id, status, status)
+            changed = True
+            actions.append({
+                "invoice_id": invoice_id,
+                "action": "removed",
+                "reason": status,
+            })
+
+    if changed:
+        cache.mark_dirty(user_id)
+        await cache.flush_user(user_id)
+
+    return {"reconciled": len(actions), "actions": actions}
+
+
 def compute_low_balance_warning(
     ledger: UserLedger,
     seed_balance_sats: int,

@@ -44,10 +44,14 @@ class LedgerCache:
         vault: VaultBackend,
         maxsize: int = 20,
         flush_interval_secs: int = 60,
+        flush_retries: int = 1,
+        flush_retry_delay: float = 2.0,
     ) -> None:
         self._vault = vault
         self._maxsize = maxsize
         self._flush_interval = flush_interval_secs
+        self._flush_retries = flush_retries
+        self._flush_retry_delay = flush_retry_delay
         self._entries: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
         self._flush_task: asyncio.Task[None] | None = None
@@ -138,18 +142,30 @@ class LedgerCache:
         self._locks.pop(user_id, None)
 
     async def _flush_entry(self, user_id: str, entry: _CacheEntry) -> bool:
-        """Flush a single entry to vault. Returns True on success."""
+        """Flush a single entry to vault with retry. Returns True on success."""
         from datetime import datetime, timezone
 
-        try:
-            await self._vault.store_ledger(user_id, entry.ledger.to_json())
-            entry.dirty = False
-            self._last_flush_at = datetime.now(timezone.utc).isoformat()
-            self._total_flushes += 1
-            return True
-        except Exception:
-            logger.warning("Failed to flush ledger to vault for %s.", user_id)
-            return False
+        max_attempts = 1 + self._flush_retries
+        for attempt in range(max_attempts):
+            try:
+                await self._vault.store_ledger(user_id, entry.ledger.to_json())
+                entry.dirty = False
+                self._last_flush_at = datetime.now(timezone.utc).isoformat()
+                self._total_flushes += 1
+                return True
+            except Exception:
+                if attempt < max_attempts - 1:
+                    logger.warning(
+                        "Flush attempt %d/%d failed for %s, retrying in %.1fs...",
+                        attempt + 1, max_attempts, user_id, self._flush_retry_delay,
+                    )
+                    await asyncio.sleep(self._flush_retry_delay)
+                else:
+                    logger.warning(
+                        "Failed to flush ledger to vault for %s after %d attempt(s).",
+                        user_id, max_attempts,
+                    )
+        return False
 
     async def flush_dirty(self) -> int:
         """Flush all dirty entries to vault. Returns count of flushed entries."""
@@ -241,6 +257,8 @@ class LedgerCache:
             "dirty_entries": self.dirty_count,
             "last_flush_at": self._last_flush_at,
             "total_flushes": self._total_flushes,
+            "flush_retries": self._flush_retries,
+            "flush_retry_delay": self._flush_retry_delay,
             "background_flush_running": self._flush_task is not None
                                         and not self._flush_task.done(),
             "last_flush_check_age_secs": round(
