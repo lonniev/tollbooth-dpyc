@@ -124,7 +124,7 @@ def verify_certificate(token: str, public_key_pem: str) -> dict[str, Any]:
         raise CertificateError(f"Certificate replay detected — jti {jti} already used.")
 
     return {
-        "operator_id": claims.get("operator_id", ""),
+        "operator_id": claims.get("sub", ""),
         "amount_sats": claims.get("amount_sats", 0),
         "tax_paid_sats": claims.get("tax_paid_sats", 0),
         "net_sats": claims.get("net_sats", 0),

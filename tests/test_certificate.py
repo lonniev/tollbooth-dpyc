@@ -52,7 +52,7 @@ def _sign_certificate(
 ) -> str:
     """Sign a test certificate JWT."""
     claims = {
-        "operator_id": operator_id,
+        "sub": operator_id,
         "amount_sats": amount_sats,
         "tax_paid_sats": tax_paid_sats,
         "net_sats": net_sats,
