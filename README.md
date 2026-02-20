@@ -153,6 +153,28 @@ Authority BTCPay                  BTCPayClient                      TOOL_COSTS m
 
 Dependency flows one way: `your-mcp-server --> tollbooth-dpyc`. Authority is a network peer, not a code dependency. Only runtime dependency: `httpx`.
 
+## DPYC Identity (Nostr npub)
+
+Every participant in the Tollbooth ecosystem — Authorities, Operators, and Users — is identified by a [Nostr](https://nostr.com/) keypair. The `npub` (public key) is your identity on the DPYC Honor Chain. The `nsec` (private key) stays with you — never shared, never sent to a service.
+
+Generate a keypair:
+
+```bash
+pip install nostr-sdk
+python scripts/generate_nostr_keypair.py
+```
+
+Then set the appropriate environment variable in your `.env`:
+
+| Role | Variable | Purpose |
+|------|----------|---------|
+| Authority | `DPYC_AUTHORITY_NPUB` | This Authority's identity on the Honor Chain |
+| Authority | `DPYC_UPSTREAM_AUTHORITY_NPUB` | The Authority above in the chain (empty for Prime) |
+| Operator | `DPYC_OPERATOR_NPUB` | This Operator's identity on the Honor Chain |
+| Operator | `DPYC_AUTHORITY_NPUB` | The Authority this Operator is registered with |
+
+Users provide their npub at session time via `activate_dpyc()` — no env var needed.
+
 ## Development
 
 ```bash
