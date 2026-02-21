@@ -53,13 +53,14 @@ def _test_certificate(net_sats: int = 980, amount_sats: int = 1000) -> str:
     global _jti_counter
     _jti_counter += 1
     claims = {
-        "operator_id": "test-op",
+        "sub": "test-op",
         "amount_sats": amount_sats,
         "tax_paid_sats": amount_sats - net_sats,
         "net_sats": net_sats,
         "jti": f"test-jti-{_jti_counter}-{time.time_ns()}",
         "iat": int(time.time()),
         "exp": int(time.time()) + 600,
+        "dpyc_protocol": "dpyp-01-base-certificate",
     }
     return pyjwt.encode(claims, _TEST_PRIVATE_KEY, algorithm="EdDSA")
 
