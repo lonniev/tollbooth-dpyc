@@ -157,6 +157,26 @@ class TheBrainVault:
             logger.warning("Failed to read graph for thought %s", thought_id)
         return {}
 
+    async def _get_link(self, link_id: str) -> dict[str, Any]:
+        """GET /links/{brainId}/{linkId} -> full link dict.
+
+        Returns the individual link object including ``name``, ``relation``,
+        ``thoughtIdA``, ``thoughtIdB``, etc. Returns empty dict on failure.
+
+        Note: The graph endpoint may omit link ``name`` fields due to
+        TheBrain Cloud API caching inconsistencies. This method fetches the
+        link individually and always returns the ``name`` field reliably.
+        """
+        try:
+            resp = await self._client.get(
+                f"/links/{self._brain_id}/{link_id}"
+            )
+            if resp.status_code == 200:
+                return resp.json()
+        except httpx.HTTPError:
+            logger.warning("Failed to read link %s", link_id)
+        return {}
+
     async def _update_link(self, link_id: str, updates: dict[str, Any]) -> None:
         """PATCH /links/{brainId}/{linkId} with JSON Patch format.
 
@@ -182,8 +202,18 @@ class TheBrainVault:
         Scans the home thought's graph for child links (relation == 1) with
         ``name == "hasMember"``. Returns ``{member_name: thought_id}``.
 
-        Results are cached in ``_index_cache``; call ``_invalidate_index()``
-        after registering new members.
+        TheBrain Cloud runs on Azure App Service with ARRAffinity session
+        pinning. Long-lived ``httpx`` connections may be pinned to a server
+        instance whose link-name cache is stale — the graph (and even
+        individual link GETs) on that instance omit the ``name`` field.
+
+        To work around this, when the graph response contains unnamed child
+        links, a **temporary** ``httpx`` client with ``Connection: close``
+        is used to fetch each link individually, forcing a fresh TCP
+        connection (and thus a potentially different, up-to-date instance).
+
+        Results are cached in ``_index_cache``; invalidated when a new
+        member is registered.
         """
         if self._index_cache is not None:
             return self._index_cache
@@ -198,13 +228,37 @@ class TheBrainVault:
         # Build child lookup: {child_id: child_name}
         child_map = {c["id"]: c.get("name", "") for c in children}
 
-        # Filter links: relation == 1 (child), name == "hasMember",
-        # one endpoint is home_thought_id
+        # Partition child links into named and unnamed
+        child_links = [l for l in links if l.get("relation") == 1]
+        unnamed = [l for l in child_links if l.get("name") is None]
+
+        # If the graph omitted link names, re-fetch them via a fresh
+        # connection to bypass Azure affinity staleness.
+        if unnamed:
+            async with httpx.AsyncClient(
+                base_url=_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Connection": "close",
+                },
+                timeout=30.0,
+            ) as fresh:
+                for link in unnamed:
+                    try:
+                        resp = await fresh.get(
+                            f"/links/{self._brain_id}/{link['id']}"
+                        )
+                        if resp.status_code == 200:
+                            fresh_data = resp.json()
+                            if fresh_data.get("name"):
+                                link["name"] = fresh_data["name"]
+                    except httpx.HTTPError:
+                        pass  # leave name as None — won't match hasMember
+
+        # Filter: name == "hasMember", one endpoint is home_thought_id
         members: dict[str, str] = {}
         home = self._home_thought_id
-        for link in links:
-            if link.get("relation") != 1:
-                continue
+        for link in child_links:
             if link.get("name") != "hasMember":
                 continue
             a = link.get("thoughtIdA", "")
