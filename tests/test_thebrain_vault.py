@@ -268,6 +268,36 @@ class TestUpdateLink:
 
 
 # ---------------------------------------------------------------------------
+# _get_link
+# ---------------------------------------------------------------------------
+
+
+class TestGetLink:
+    @pytest.mark.asyncio
+    async def test_returns_link_data(self) -> None:
+        vault = _vault()
+        link_data = {"id": "link-1", "name": "hasMember", "relation": 1}
+        vault._client.get = AsyncMock(return_value=_response(200, link_data))
+        result = await vault._get_link("link-1")
+        assert result == link_data
+        vault._client.get.assert_called_once_with(f"/links/{BRAIN_ID}/link-1")
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_failure(self) -> None:
+        vault = _vault()
+        vault._client.get = AsyncMock(side_effect=httpx.ConnectError("timeout"))
+        result = await vault._get_link("link-1")
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_404(self) -> None:
+        vault = _vault()
+        vault._client.get = AsyncMock(return_value=_response(404, {}))
+        result = await vault._get_link("link-1")
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
 # _discover_members
 # ---------------------------------------------------------------------------
 
@@ -284,6 +314,7 @@ class TestDiscoverMembers:
 
     @pytest.mark.asyncio
     async def test_ignores_non_has_member_links(self) -> None:
+        """Unnamed links that resolve to non-hasMember are excluded."""
         vault = _vault()
         graph = _graph_with_members(
             {"user1/ledger": "member-1"},
@@ -298,8 +329,68 @@ class TestDiscoverMembers:
         )
         vault._get_graph = AsyncMock(return_value=graph)
 
-        result = await vault._discover_members()
+        # The unnamed orphan link triggers a fresh-connection fetch.
+        # Mock httpx.AsyncClient context manager to return no name.
+        mock_resp = _response(200, {
+            "id": "link-orphan", "name": None, "relation": 1,
+            "thoughtIdA": HOME_ID, "thoughtIdB": "orphan-1",
+        })
+        mock_fresh_client = AsyncMock()
+        mock_fresh_client.get = AsyncMock(return_value=mock_resp)
+        mock_fresh_client.__aenter__ = AsyncMock(return_value=mock_fresh_client)
+        mock_fresh_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("tollbooth.vaults.thebrain.httpx.AsyncClient", return_value=mock_fresh_client):
+            result = await vault._discover_members()
+
         assert "orphan" not in result
+        assert result == {"user1/ledger": "member-1"}
+
+    @pytest.mark.asyncio
+    async def test_unnamed_links_resolved_via_fresh_connection(self) -> None:
+        """Azure affinity workaround: graph omits link names, fresh GET finds them."""
+        vault = _vault()
+        # Graph returns link without name (stale Azure instance)
+        graph = {
+            "children": [{"id": "member-1", "name": "user1"}],
+            "links": [{
+                "id": "link-1",
+                "thoughtIdA": HOME_ID,
+                "thoughtIdB": "member-1",
+                "name": None,  # Stale — graph omits the name
+                "relation": 1,
+            }],
+        }
+        vault._get_graph = AsyncMock(return_value=graph)
+
+        # Fresh connection returns the real link with hasMember
+        mock_resp = _response(200, {
+            "id": "link-1", "name": "hasMember", "relation": 1,
+            "thoughtIdA": HOME_ID, "thoughtIdB": "member-1",
+        })
+        mock_fresh_client = AsyncMock()
+        mock_fresh_client.get = AsyncMock(return_value=mock_resp)
+        mock_fresh_client.__aenter__ = AsyncMock(return_value=mock_fresh_client)
+        mock_fresh_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("tollbooth.vaults.thebrain.httpx.AsyncClient", return_value=mock_fresh_client):
+            result = await vault._discover_members()
+
+        assert result == {"user1": "member-1"}
+        # Verify fresh client was used with Connection: close
+        mock_fresh_client.get.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_fresh_fetch_when_graph_includes_names(self) -> None:
+        """When graph already includes link names, no fresh connection is needed."""
+        vault = _vault()
+        graph = _graph_with_members({"user1/ledger": "member-1"})
+        vault._get_graph = AsyncMock(return_value=graph)
+
+        with patch("tollbooth.vaults.thebrain.httpx.AsyncClient") as mock_cls:
+            result = await vault._discover_members()
+            mock_cls.assert_not_called()  # No fresh client needed
+
         assert result == {"user1/ledger": "member-1"}
 
     @pytest.mark.asyncio
