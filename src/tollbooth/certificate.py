@@ -9,6 +9,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Protocol identifiers this Operator understands.
+UNDERSTOOD_PROTOCOLS: frozenset[str] = frozenset({"dpyp-01-base-certificate"})
+
 
 def normalize_public_key(raw: str) -> str:
     """Accept a bare base64 key string or full PEM and return valid PEM.
@@ -65,17 +68,24 @@ class _JTIStore:
 _jti_store = _JTIStore()
 
 
-def verify_certificate(token: str, public_key_pem: str) -> dict[str, Any]:
+def verify_certificate(
+    token: str,
+    public_key_pem: str,
+    *,
+    understood_protocols: frozenset[str] | None = None,
+) -> dict[str, Any]:
     """Verify an Authority-signed Ed25519 JWT certificate.
 
     Args:
         token: The JWT string from certify_purchase.
         public_key_pem: The Authority's Ed25519 public key — either bare base64
             or full PEM format. The variable name indicates it's a public key.
+        understood_protocols: Protocol identifiers this Operator accepts.
+            Defaults to ``UNDERSTOOD_PROTOCOLS``.
 
     Returns:
         Dict with extracted claims: operator_id, amount_sats, tax_paid_sats,
-        net_sats, jti.
+        net_sats, jti, dpyc_protocol.
 
     Raises:
         CertificateError: On invalid, expired, tampered, or replayed certificates.
@@ -123,12 +133,27 @@ def verify_certificate(token: str, public_key_pem: str) -> dict[str, Any]:
     if not _jti_store.check_and_record(jti, float(exp)):
         raise CertificateError(f"Certificate replay detected — jti {jti} already used.")
 
+    # Protocol version check
+    protos = understood_protocols or UNDERSTOOD_PROTOCOLS
+    proto = claims.get("dpyc_protocol")
+    if not proto:
+        raise CertificateError(
+            "Certificate missing dpyc_protocol claim — "
+            "Authority may be running incompatible version"
+        )
+    if proto not in protos:
+        raise CertificateError(
+            f"Unsupported protocol '{proto}'. "
+            f"This Operator supports: {', '.join(sorted(protos))}"
+        )
+
     return {
         "operator_id": claims.get("sub", ""),
         "amount_sats": claims.get("amount_sats", 0),
         "tax_paid_sats": claims.get("tax_paid_sats", 0),
         "net_sats": claims.get("net_sats", 0),
         "jti": jti,
+        "dpyc_protocol": proto,
     }
 
 

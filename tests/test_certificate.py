@@ -8,7 +8,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-from tollbooth.certificate import CertificateError, verify_certificate, reset_jti_store
+from tollbooth.certificate import CertificateError, verify_certificate, reset_jti_store, UNDERSTOOD_PROTOCOLS
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
 from tollbooth.btcpay_client import BTCPayClient
@@ -59,6 +59,7 @@ def _sign_certificate(
         "jti": jti,
         "iat": int(time.time()),
         "exp": int(time.time()) + exp_offset,
+        "dpyc_protocol": "dpyp-01-base-certificate",
     }
     if extra_claims:
         claims.update(extra_claims)
@@ -199,6 +200,59 @@ class TestAntiReplay:
         token2 = _sign_certificate(private_key, jti="jti-b")
         verify_certificate(token1, public_pem)
         verify_certificate(token2, public_pem)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Protocol versioning (dpyc_protocol claim)
+# ---------------------------------------------------------------------------
+
+
+class TestProtocolVersioning:
+    def test_missing_protocol_rejected(self, keypair):
+        """Certificate without dpyc_protocol claim is rejected."""
+        private_key, public_pem = keypair
+        claims = {
+            "sub": "op-1",
+            "amount_sats": 1000,
+            "tax_paid_sats": 20,
+            "net_sats": 980,
+            "jti": "jti-no-proto",
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 600,
+        }
+        token = jwt.encode(claims, private_key, algorithm="EdDSA")
+        with pytest.raises(CertificateError, match="missing dpyc_protocol"):
+            verify_certificate(token, public_pem)
+
+    def test_unknown_protocol_rejected(self, keypair):
+        """Certificate with unrecognized protocol is rejected."""
+        private_key, public_pem = keypair
+        token = _sign_certificate(
+            private_key,
+            jti="jti-future-proto",
+            extra_claims={"dpyc_protocol": "dpyp-99-future"},
+        )
+        with pytest.raises(CertificateError, match="Unsupported protocol"):
+            verify_certificate(token, public_pem)
+
+    def test_valid_protocol_accepted(self, keypair):
+        """Certificate with correct dpyc_protocol passes verification."""
+        private_key, public_pem = keypair
+        token = _sign_certificate(private_key, jti="jti-valid-proto")
+        result = verify_certificate(token, public_pem)
+        assert result["dpyc_protocol"] == "dpyp-01-base-certificate"
+
+    def test_custom_understood_protocols(self, keypair):
+        """Operator can supply a custom set of understood protocols."""
+        private_key, public_pem = keypair
+        custom = frozenset({"dpyp-02-extended"})
+        token = _sign_certificate(
+            private_key,
+            jti="jti-custom-proto",
+            extra_claims={"dpyc_protocol": "dpyp-02-extended"},
+        )
+        result = verify_certificate(token, public_pem, understood_protocols=custom)
+        assert result["dpyc_protocol"] == "dpyp-02-extended"
 
 
 # ---------------------------------------------------------------------------
