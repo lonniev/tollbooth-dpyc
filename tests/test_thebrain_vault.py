@@ -32,6 +32,35 @@ def _response(status_code: int = 200, json_data: dict | list | None = None) -> h
     return resp
 
 
+def _graph_with_members(
+    members: dict[str, str],
+    extra_children: list[dict] | None = None,
+    extra_links: list[dict] | None = None,
+) -> dict:
+    """Build a mock graph response with hasMember-labeled child links.
+
+    ``members``: {thought_name: thought_id} — creates children + labeled links.
+    ``extra_children``: additional children without hasMember links.
+    ``extra_links``: additional links (e.g., unlabeled).
+    """
+    children = [{"id": tid, "name": name} for name, tid in members.items()]
+    links = [
+        {
+            "id": f"link-{tid}",
+            "thoughtIdA": HOME_ID,
+            "thoughtIdB": tid,
+            "name": "hasMember",
+            "relation": 1,
+        }
+        for tid in members.values()
+    ]
+    if extra_children:
+        children.extend(extra_children)
+    if extra_links:
+        links.extend(extra_links)
+    return {"children": children, "links": links}
+
+
 # ---------------------------------------------------------------------------
 # _get_note
 # ---------------------------------------------------------------------------
@@ -171,44 +200,292 @@ class TestGetChildren:
 
 
 # ---------------------------------------------------------------------------
-# Index management
+# _get_graph
 # ---------------------------------------------------------------------------
 
 
-class TestIndex:
+class TestGetGraph:
     @pytest.mark.asyncio
-    async def test_read_index_caches_result(self) -> None:
+    async def test_returns_full_graph(self) -> None:
         vault = _vault()
-        index = {"user1/ledger": "ledger-id"}
-        vault._get_note = AsyncMock(return_value=json.dumps(index))
-        result1 = await vault._read_index()
-        result2 = await vault._read_index()
-        assert result1 == index
-        # Second call should use cache, not call _get_note again
-        vault._get_note.assert_called_once()
+        graph = {
+            "children": [{"id": "c1", "name": "child1"}],
+            "links": [{"id": "link1", "relation": 1}],
+            "parents": [],
+        }
+        vault._client.get = AsyncMock(return_value=_response(200, graph))
+        result = await vault._get_graph("thought-1")
+        assert result["children"] == [{"id": "c1", "name": "child1"}]
+        assert result["links"] == [{"id": "link1", "relation": 1}]
 
     @pytest.mark.asyncio
-    async def test_read_index_returns_empty_on_no_note(self) -> None:
+    async def test_returns_empty_on_failure(self) -> None:
         vault = _vault()
-        vault._get_note = AsyncMock(return_value=None)
-        result = await vault._read_index()
+        vault._client.get = AsyncMock(side_effect=httpx.ConnectError("timeout"))
+        result = await vault._get_graph("thought-1")
         assert result == {}
 
     @pytest.mark.asyncio
-    async def test_read_index_returns_empty_on_bad_json(self) -> None:
+    async def test_returns_empty_on_404(self) -> None:
         vault = _vault()
-        vault._get_note = AsyncMock(return_value="not valid json")
-        result = await vault._read_index()
+        vault._client.get = AsyncMock(return_value=_response(404, {}))
+        result = await vault._get_graph("thought-1")
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# _update_link
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateLink:
+    @pytest.mark.asyncio
+    async def test_sends_json_patch(self) -> None:
+        vault = _vault()
+        vault._client.patch = AsyncMock(return_value=_response(200, {}))
+        await vault._update_link("link-1", {"name": "hasMember"})
+        vault._client.patch.assert_called_once_with(
+            f"/links/{BRAIN_ID}/link-1",
+            json=[{"op": "replace", "path": "/name", "value": "hasMember"}],
+            headers={"Content-Type": "application/json-patch+json"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_sends_multiple_fields(self) -> None:
+        vault = _vault()
+        vault._client.patch = AsyncMock(return_value=_response(200, {}))
+        await vault._update_link("link-1", {"name": "test", "color": "#ff0000"})
+        call_args = vault._client.patch.call_args
+        patch_body = call_args.kwargs["json"]
+        assert len(patch_body) == 2
+
+    @pytest.mark.asyncio
+    async def test_raises_on_failure(self) -> None:
+        vault = _vault()
+        vault._client.patch = AsyncMock(return_value=_response(500, {}))
+        with pytest.raises(httpx.HTTPStatusError):
+            await vault._update_link("link-1", {"name": "hasMember"})
+
+
+# ---------------------------------------------------------------------------
+# _discover_members
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverMembers:
+    @pytest.mark.asyncio
+    async def test_finds_has_member_links(self) -> None:
+        vault = _vault()
+        graph = _graph_with_members({"user1/ledger": "member-1", "user2/ledger": "member-2"})
+        vault._get_graph = AsyncMock(return_value=graph)
+
+        result = await vault._discover_members()
+        assert result == {"user1/ledger": "member-1", "user2/ledger": "member-2"}
+
+    @pytest.mark.asyncio
+    async def test_ignores_non_has_member_links(self) -> None:
+        vault = _vault()
+        graph = _graph_with_members(
+            {"user1/ledger": "member-1"},
+            extra_children=[{"id": "orphan-1", "name": "orphan"}],
+            extra_links=[{
+                "id": "link-orphan",
+                "thoughtIdA": HOME_ID,
+                "thoughtIdB": "orphan-1",
+                "name": None,
+                "relation": 1,
+            }],
+        )
+        vault._get_graph = AsyncMock(return_value=graph)
+
+        result = await vault._discover_members()
+        assert "orphan" not in result
+        assert result == {"user1/ledger": "member-1"}
+
+    @pytest.mark.asyncio
+    async def test_ignores_non_child_links(self) -> None:
+        vault = _vault()
+        graph = {
+            "children": [{"id": "member-1", "name": "user1"}],
+            "links": [{
+                "id": "link-1",
+                "thoughtIdA": HOME_ID,
+                "thoughtIdB": "member-1",
+                "name": "hasMember",
+                "relation": 3,  # Jump, not child
+            }],
+        }
+        vault._get_graph = AsyncMock(return_value=graph)
+
+        result = await vault._discover_members()
         assert result == {}
 
     @pytest.mark.asyncio
-    async def test_write_index_updates_cache(self) -> None:
+    async def test_empty_graph_returns_empty(self) -> None:
         vault = _vault()
+        vault._get_graph = AsyncMock(return_value={})
+
+        result = await vault._discover_members()
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_caches_result(self) -> None:
+        vault = _vault()
+        graph = _graph_with_members({"user1/ledger": "member-1"})
+        vault._get_graph = AsyncMock(return_value=graph)
+
+        result1 = await vault._discover_members()
+        result2 = await vault._discover_members()
+        assert result1 == result2
+        vault._get_graph.assert_called_once()  # Second call uses cache
+
+    @pytest.mark.asyncio
+    async def test_handles_reversed_endpoint_order(self) -> None:
+        """Link endpoints can be in either order (A=home or B=home)."""
+        vault = _vault()
+        graph = {
+            "children": [{"id": "member-1", "name": "user1"}],
+            "links": [{
+                "id": "link-1",
+                "thoughtIdA": "member-1",  # Reversed!
+                "thoughtIdB": HOME_ID,
+                "name": "hasMember",
+                "relation": 1,
+            }],
+        }
+        vault._get_graph = AsyncMock(return_value=graph)
+
+        result = await vault._discover_members()
+        assert result == {"user1": "member-1"}
+
+
+# ---------------------------------------------------------------------------
+# _register_member
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterMember:
+    @pytest.mark.asyncio
+    async def test_labels_existing_child_link(self) -> None:
+        vault = _vault()
+        graph = {
+            "children": [{"id": "member-1", "name": "user1"}],
+            "links": [{
+                "id": "link-1",
+                "thoughtIdA": HOME_ID,
+                "thoughtIdB": "member-1",
+                "name": None,
+                "relation": 1,
+            }],
+        }
+        vault._update_link = AsyncMock()
+
+        await vault._register_member("member-1", graph=graph)
+        vault._update_link.assert_called_once_with("link-1", {"name": "hasMember"})
+
+    @pytest.mark.asyncio
+    async def test_invalidates_cache(self) -> None:
+        vault = _vault()
+        vault._index_cache = {"old": "data"}
+        graph = {
+            "children": [{"id": "member-1", "name": "user1"}],
+            "links": [{
+                "id": "link-1",
+                "thoughtIdA": HOME_ID,
+                "thoughtIdB": "member-1",
+                "name": None,
+                "relation": 1,
+            }],
+        }
+        vault._update_link = AsyncMock()
+
+        await vault._register_member("member-1", graph=graph)
+        assert vault._index_cache is None
+
+    @pytest.mark.asyncio
+    async def test_fetches_graph_if_not_provided(self) -> None:
+        vault = _vault()
+        graph = {
+            "children": [{"id": "member-1", "name": "user1"}],
+            "links": [{
+                "id": "link-1",
+                "thoughtIdA": HOME_ID,
+                "thoughtIdB": "member-1",
+                "name": None,
+                "relation": 1,
+            }],
+        }
+        vault._get_graph = AsyncMock(return_value=graph)
+        vault._update_link = AsyncMock()
+
+        await vault._register_member("member-1")
+        vault._get_graph.assert_called_once_with(HOME_ID)
+
+    @pytest.mark.asyncio
+    async def test_no_error_when_link_not_found(self) -> None:
+        vault = _vault()
+        graph = {"children": [], "links": []}
+        vault._update_link = AsyncMock()
+
+        # Should not raise, just warn
+        await vault._register_member("nonexistent", graph=graph)
+        vault._update_link.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# store_member_note
+# ---------------------------------------------------------------------------
+
+
+class TestStoreMemberNote:
+    @pytest.mark.asyncio
+    async def test_existing_member_updates_note(self) -> None:
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={"user1": "thought-1"})
         vault._set_note = AsyncMock()
-        index = {"user1": "thought-1"}
-        await vault._write_index(index)
-        assert vault._index_cache == index
-        vault._set_note.assert_called_once_with(HOME_ID, json.dumps(index))
+
+        result = await vault.store_member_note("user1", "encrypted-blob")
+        assert result == "thought-1"
+        vault._set_note.assert_called_once_with("thought-1", "encrypted-blob")
+
+    @pytest.mark.asyncio
+    async def test_new_member_creates_and_labels(self) -> None:
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={})
+        vault._create_thought = AsyncMock(return_value={"id": "new-thought"})
+        vault._set_note = AsyncMock()
+        vault._get_graph = AsyncMock(return_value={"children": [], "links": []})
+        vault._register_member = AsyncMock()
+
+        result = await vault.store_member_note("user1", "encrypted-blob")
+        assert result == "new-thought"
+        vault._create_thought.assert_called_once_with("user1", HOME_ID)
+        vault._set_note.assert_called_once_with("new-thought", "encrypted-blob")
+        vault._register_member.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# fetch_member_note
+# ---------------------------------------------------------------------------
+
+
+class TestFetchMemberNote:
+    @pytest.mark.asyncio
+    async def test_found_returns_note(self) -> None:
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={"user1": "thought-1"})
+        vault._get_note = AsyncMock(return_value="encrypted-blob")
+
+        result = await vault.fetch_member_note("user1")
+        assert result == "encrypted-blob"
+
+    @pytest.mark.asyncio
+    async def test_not_found_returns_none(self) -> None:
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={})
+
+        result = await vault.fetch_member_note("unknown")
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -220,14 +497,15 @@ class TestStoreLedger:
     @pytest.mark.asyncio
     async def test_creates_ledger_parent_and_daily_child(self) -> None:
         vault = _vault()
-        vault._read_index = AsyncMock(return_value={})
-        vault._write_index = AsyncMock()
+        vault._discover_members = AsyncMock(return_value={})
         vault._create_thought = AsyncMock(
             side_effect=[
                 {"id": "ledger-parent-id"},   # ledger parent
                 {"id": "daily-child-id"},      # daily child
             ]
         )
+        vault._get_graph = AsyncMock(return_value={"children": [], "links": []})
+        vault._register_member = AsyncMock()
         vault._get_children = AsyncMock(return_value=[])
         vault._set_note = AsyncMock()
 
@@ -236,8 +514,8 @@ class TestStoreLedger:
 
         # Should have created ledger parent under home thought
         vault._create_thought.assert_any_call("user1/ledger", HOME_ID)
-        # Should have written index
-        vault._write_index.assert_called_once()
+        # Should have registered the new member
+        vault._register_member.assert_called_once()
         # Should have set note on daily child
         vault._set_note.assert_called_once_with("daily-child-id", '{"balance": 100}')
 
@@ -247,7 +525,7 @@ class TestStoreLedger:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         vault = _vault()
-        vault._read_index = AsyncMock(return_value={"user1/ledger": "ledger-parent-id"})
+        vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent-id"})
         vault._get_children = AsyncMock(
             return_value=[{"id": "existing-child", "name": today}]
         )
@@ -289,7 +567,7 @@ class TestStoreLedger:
                 )
 
         vault._set_note = AsyncMock(side_effect=_set_note_side_effect)
-        vault._read_index = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
+        vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
         vault._get_children = AsyncMock(
             return_value=[{"id": "fresh-child", "name": today}]
         )
@@ -309,14 +587,14 @@ class TestFetchLedger:
     @pytest.mark.asyncio
     async def test_returns_none_when_no_ledger(self) -> None:
         vault = _vault()
-        vault._read_index = AsyncMock(return_value={})
+        vault._discover_members = AsyncMock(return_value={})
         result = await vault.fetch_ledger("user1")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_returns_most_recent_daily_child(self) -> None:
         vault = _vault()
-        vault._read_index = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
+        vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
         vault._get_children = AsyncMock(return_value=[
             {"id": "c1", "name": "2026-02-19"},
             {"id": "c2", "name": "2026-02-21"},
@@ -332,7 +610,7 @@ class TestFetchLedger:
     @pytest.mark.asyncio
     async def test_falls_back_to_parent_note(self) -> None:
         vault = _vault()
-        vault._read_index = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
+        vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
         vault._get_children = AsyncMock(return_value=[])
         vault._get_note = AsyncMock(return_value='{"balance": 42}')
 
@@ -343,7 +621,7 @@ class TestFetchLedger:
     @pytest.mark.asyncio
     async def test_falls_back_when_child_note_empty(self) -> None:
         vault = _vault()
-        vault._read_index = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
+        vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
         vault._get_children = AsyncMock(
             return_value=[{"id": "c1", "name": "2026-02-21"}]
         )
@@ -372,14 +650,14 @@ class TestSnapshotLedger:
     @pytest.mark.asyncio
     async def test_returns_none_when_no_ledger(self) -> None:
         vault = _vault()
-        vault._read_index = AsyncMock(return_value={})
+        vault._discover_members = AsyncMock(return_value={})
         result = await vault.snapshot_ledger("user1", '{"balance": 100}', "2026-02-21T12:00:00Z")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_creates_snapshot_child(self) -> None:
         vault = _vault()
-        vault._read_index = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
+        vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
         vault._create_thought = AsyncMock(return_value={"id": "snapshot-id"})
         vault._set_note = AsyncMock()
 
