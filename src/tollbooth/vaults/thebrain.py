@@ -4,8 +4,10 @@ Self-contained: uses raw httpx, no thebrain-mcp dependency. Persists
 commerce ledgers via TheBrain's thought/note API in a daily-child pattern.
 Also provides generic member discovery and storage for credential vaults.
 
-Member discovery uses labeled child links (``name == "hasMember"``) on
-the vault home thought — no JSON note index.
+Member discovery enumerates all children of the vault home thought.
+Each child's ``name`` serves as the member key. Link labels (``hasMember``)
+are set as best-effort metadata but are NOT used for discovery — TheBrain
+Cloud's Azure App Service caching makes link metadata unreliable.
 
 Correct API endpoints (TheBrain Cloud API):
 - Base URL: https://api.bra.in
@@ -18,7 +20,6 @@ Correct API endpoints (TheBrain Cloud API):
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -31,7 +32,7 @@ _BASE_URL = "https://api.bra.in"
 
 
 class TheBrainVault:
-    """Vault persistence via TheBrain Cloud API using link-based member discovery.
+    """Vault persistence via TheBrain Cloud API using child-based member discovery.
 
     Implements the tollbooth ``VaultBackend`` protocol:
 
@@ -44,8 +45,14 @@ class TheBrainVault:
     - ``store_member_note(user_id, content) -> str``
     - ``fetch_member_note(user_id) -> str | None``
 
-    Member discovery: child links from the home thought labeled
-    ``name == "hasMember"`` identify vault members. No JSON note index.
+    Member discovery: all children of the vault home thought are treated
+    as members. Each child's ``name`` is the member key. Link labels
+    (``hasMember``) are set as best-effort metadata but are NOT used for
+    discovery — TheBrain Cloud's Azure caching makes link names unreliable.
+
+    **Vault home hygiene**: only member thoughts should be direct children.
+    Non-member thoughts (sub-vault homes, etc.) should be linked as jumps
+    or siblings, not children.
 
     Caching strategy:
 
@@ -194,23 +201,23 @@ class TheBrainVault:
         )
         resp.raise_for_status()
 
-    # -- Link-based member discovery -----------------------------------------
+    # -- Child-based member discovery ------------------------------------------
 
     async def _discover_members(self) -> dict[str, str]:
-        """Discover vault members via hasMember-labeled child links.
+        """Discover vault members from the home thought's children.
 
-        Scans the home thought's graph for child links (relation == 1) with
-        ``name == "hasMember"``. Returns ``{member_name: thought_id}``.
+        Returns ``{child_name: child_thought_id}`` for all children of the
+        vault home thought. Callers locate their member by name.
 
-        TheBrain Cloud runs on Azure App Service with ARRAffinity session
-        pinning. Long-lived ``httpx`` connections may be pinned to a server
-        instance whose link-name cache is stale — the graph (and even
-        individual link GETs) on that instance omit the ``name`` field.
+        This approach is intentionally simple: the graph endpoint reliably
+        returns children with their names and IDs. Earlier versions filtered
+        by hasMember-labeled links, but TheBrain Cloud's Azure App Service
+        caching makes link metadata (names, labels) unreliable — the graph
+        endpoint may omit link names for hours after they're set.
 
-        To work around this, when the graph response contains unnamed child
-        links, a **temporary** ``httpx`` client with ``Connection: close``
-        is used to fetch each link individually, forcing a fresh TCP
-        connection (and thus a potentially different, up-to-date instance).
+        **Vault home hygiene**: the vault home should only contain member
+        thoughts as children. Non-member children (sub-vault homes, etc.)
+        should be linked as jumps or siblings, not children.
 
         Results are cached in ``_index_cache``; invalidated when a new
         member is registered.
@@ -223,55 +230,7 @@ class TheBrainVault:
             return {}
 
         children = graph.get("children", [])
-        links = graph.get("links", [])
-
-        # Build child lookup: {child_id: child_name}
-        child_map = {c["id"]: c.get("name", "") for c in children}
-
-        # Partition child links into named and unnamed
-        child_links = [l for l in links if l.get("relation") == 1]
-        unnamed = [l for l in child_links if l.get("name") is None]
-
-        # If the graph omitted link names, re-fetch them via a fresh
-        # connection to bypass Azure affinity staleness.
-        if unnamed:
-            async with httpx.AsyncClient(
-                base_url=_BASE_URL,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Connection": "close",
-                },
-                timeout=30.0,
-            ) as fresh:
-                for link in unnamed:
-                    try:
-                        resp = await fresh.get(
-                            f"/links/{self._brain_id}/{link['id']}"
-                        )
-                        if resp.status_code == 200:
-                            fresh_data = resp.json()
-                            if fresh_data.get("name"):
-                                link["name"] = fresh_data["name"]
-                    except httpx.HTTPError:
-                        pass  # leave name as None — won't match hasMember
-
-        # Filter: name == "hasMember", one endpoint is home_thought_id
-        members: dict[str, str] = {}
-        home = self._home_thought_id
-        for link in child_links:
-            if link.get("name") != "hasMember":
-                continue
-            a = link.get("thoughtIdA", "")
-            b = link.get("thoughtIdB", "")
-            if a == home:
-                child_id = b
-            elif b == home:
-                child_id = a
-            else:
-                continue
-            child_name = child_map.get(child_id)
-            if child_name is not None:
-                members[child_name] = child_id
+        members = {c.get("name", ""): c["id"] for c in children if c.get("name")}
 
         self._index_cache = members
         return members

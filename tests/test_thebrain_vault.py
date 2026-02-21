@@ -1,7 +1,6 @@
 """Tests for TheBrainVault — VaultBackend via TheBrain Cloud API."""
 
-import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -32,16 +31,14 @@ def _response(status_code: int = 200, json_data: dict | list | None = None) -> h
     return resp
 
 
-def _graph_with_members(
+def _graph_with_children(
     members: dict[str, str],
-    extra_children: list[dict] | None = None,
     extra_links: list[dict] | None = None,
 ) -> dict:
-    """Build a mock graph response with hasMember-labeled child links.
+    """Build a mock graph response with children.
 
-    ``members``: {thought_name: thought_id} — creates children + labeled links.
-    ``extra_children``: additional children without hasMember links.
-    ``extra_links``: additional links (e.g., unlabeled).
+    ``members``: {thought_name: thought_id} — creates children.
+    ``extra_links``: additional links (for _register_member tests).
     """
     children = [{"id": tid, "name": name} for name, tid in members.items()]
     links = [
@@ -49,13 +46,11 @@ def _graph_with_members(
             "id": f"link-{tid}",
             "thoughtIdA": HOME_ID,
             "thoughtIdB": tid,
-            "name": "hasMember",
+            "name": None,
             "relation": 1,
         }
         for tid in members.values()
     ]
-    if extra_children:
-        children.extend(extra_children)
     if extra_links:
         links.extend(extra_links)
     return {"children": children, "links": links}
@@ -304,112 +299,60 @@ class TestGetLink:
 
 class TestDiscoverMembers:
     @pytest.mark.asyncio
-    async def test_finds_has_member_links(self) -> None:
+    async def test_returns_all_children_by_name(self) -> None:
         vault = _vault()
-        graph = _graph_with_members({"user1/ledger": "member-1", "user2/ledger": "member-2"})
+        graph = _graph_with_children({"user1/ledger": "member-1", "user2/ledger": "member-2"})
         vault._get_graph = AsyncMock(return_value=graph)
 
         result = await vault._discover_members()
         assert result == {"user1/ledger": "member-1", "user2/ledger": "member-2"}
 
     @pytest.mark.asyncio
-    async def test_ignores_non_has_member_links(self) -> None:
-        """Unnamed links that resolve to non-hasMember are excluded."""
-        vault = _vault()
-        graph = _graph_with_members(
-            {"user1/ledger": "member-1"},
-            extra_children=[{"id": "orphan-1", "name": "orphan"}],
-            extra_links=[{
-                "id": "link-orphan",
-                "thoughtIdA": HOME_ID,
-                "thoughtIdB": "orphan-1",
-                "name": None,
-                "relation": 1,
-            }],
-        )
-        vault._get_graph = AsyncMock(return_value=graph)
-
-        # The unnamed orphan link triggers a fresh-connection fetch.
-        # Mock httpx.AsyncClient context manager to return no name.
-        mock_resp = _response(200, {
-            "id": "link-orphan", "name": None, "relation": 1,
-            "thoughtIdA": HOME_ID, "thoughtIdB": "orphan-1",
-        })
-        mock_fresh_client = AsyncMock()
-        mock_fresh_client.get = AsyncMock(return_value=mock_resp)
-        mock_fresh_client.__aenter__ = AsyncMock(return_value=mock_fresh_client)
-        mock_fresh_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("tollbooth.vaults.thebrain.httpx.AsyncClient", return_value=mock_fresh_client):
-            result = await vault._discover_members()
-
-        assert "orphan" not in result
-        assert result == {"user1/ledger": "member-1"}
-
-    @pytest.mark.asyncio
-    async def test_unnamed_links_resolved_via_fresh_connection(self) -> None:
-        """Azure affinity workaround: graph omits link names, fresh GET finds them."""
-        vault = _vault()
-        # Graph returns link without name (stale Azure instance)
-        graph = {
-            "children": [{"id": "member-1", "name": "user1"}],
-            "links": [{
-                "id": "link-1",
-                "thoughtIdA": HOME_ID,
-                "thoughtIdB": "member-1",
-                "name": None,  # Stale — graph omits the name
-                "relation": 1,
-            }],
-        }
-        vault._get_graph = AsyncMock(return_value=graph)
-
-        # Fresh connection returns the real link with hasMember
-        mock_resp = _response(200, {
-            "id": "link-1", "name": "hasMember", "relation": 1,
-            "thoughtIdA": HOME_ID, "thoughtIdB": "member-1",
-        })
-        mock_fresh_client = AsyncMock()
-        mock_fresh_client.get = AsyncMock(return_value=mock_resp)
-        mock_fresh_client.__aenter__ = AsyncMock(return_value=mock_fresh_client)
-        mock_fresh_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("tollbooth.vaults.thebrain.httpx.AsyncClient", return_value=mock_fresh_client):
-            result = await vault._discover_members()
-
-        assert result == {"user1": "member-1"}
-        # Verify fresh client was used with Connection: close
-        mock_fresh_client.get.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_no_fresh_fetch_when_graph_includes_names(self) -> None:
-        """When graph already includes link names, no fresh connection is needed."""
-        vault = _vault()
-        graph = _graph_with_members({"user1/ledger": "member-1"})
-        vault._get_graph = AsyncMock(return_value=graph)
-
-        with patch("tollbooth.vaults.thebrain.httpx.AsyncClient") as mock_cls:
-            result = await vault._discover_members()
-            mock_cls.assert_not_called()  # No fresh client needed
-
-        assert result == {"user1/ledger": "member-1"}
-
-    @pytest.mark.asyncio
-    async def test_ignores_non_child_links(self) -> None:
+    async def test_includes_children_regardless_of_link_labels(self) -> None:
+        """Children are discovered by name, not by link labels."""
         vault = _vault()
         graph = {
-            "children": [{"id": "member-1", "name": "user1"}],
-            "links": [{
-                "id": "link-1",
-                "thoughtIdA": HOME_ID,
-                "thoughtIdB": "member-1",
-                "name": "hasMember",
-                "relation": 3,  # Jump, not child
-            }],
+            "children": [
+                {"id": "member-1", "name": "user1"},
+                {"id": "member-2", "name": "user2"},
+            ],
+            "links": [
+                {
+                    "id": "link-1",
+                    "thoughtIdA": HOME_ID,
+                    "thoughtIdB": "member-1",
+                    "name": "hasMember",
+                    "relation": 1,
+                },
+                {
+                    "id": "link-2",
+                    "thoughtIdA": HOME_ID,
+                    "thoughtIdB": "member-2",
+                    "name": None,  # No label — still discovered
+                    "relation": 1,
+                },
+            ],
         }
         vault._get_graph = AsyncMock(return_value=graph)
 
         result = await vault._discover_members()
-        assert result == {}
+        assert result == {"user1": "member-1", "user2": "member-2"}
+
+    @pytest.mark.asyncio
+    async def test_skips_children_without_names(self) -> None:
+        vault = _vault()
+        graph = {
+            "children": [
+                {"id": "member-1", "name": "user1"},
+                {"id": "member-2", "name": ""},
+                {"id": "member-3"},  # no name key at all
+            ],
+            "links": [],
+        }
+        vault._get_graph = AsyncMock(return_value=graph)
+
+        result = await vault._discover_members()
+        assert result == {"user1": "member-1"}
 
     @pytest.mark.asyncio
     async def test_empty_graph_returns_empty(self) -> None:
@@ -422,7 +365,7 @@ class TestDiscoverMembers:
     @pytest.mark.asyncio
     async def test_caches_result(self) -> None:
         vault = _vault()
-        graph = _graph_with_members({"user1/ledger": "member-1"})
+        graph = _graph_with_children({"user1/ledger": "member-1"})
         vault._get_graph = AsyncMock(return_value=graph)
 
         result1 = await vault._discover_members()
@@ -431,23 +374,12 @@ class TestDiscoverMembers:
         vault._get_graph.assert_called_once()  # Second call uses cache
 
     @pytest.mark.asyncio
-    async def test_handles_reversed_endpoint_order(self) -> None:
-        """Link endpoints can be in either order (A=home or B=home)."""
+    async def test_no_children_key_returns_empty(self) -> None:
         vault = _vault()
-        graph = {
-            "children": [{"id": "member-1", "name": "user1"}],
-            "links": [{
-                "id": "link-1",
-                "thoughtIdA": "member-1",  # Reversed!
-                "thoughtIdB": HOME_ID,
-                "name": "hasMember",
-                "relation": 1,
-            }],
-        }
-        vault._get_graph = AsyncMock(return_value=graph)
+        vault._get_graph = AsyncMock(return_value={"links": []})
 
         result = await vault._discover_members()
-        assert result == {"user1": "member-1"}
+        assert result == {}
 
 
 # ---------------------------------------------------------------------------
