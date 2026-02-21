@@ -14,6 +14,7 @@ from tollbooth.btcpay_client import (
     BTCPayAuthError,
     BTCPayClient,
     BTCPayConnectionError,
+    BTCPayError,
     BTCPayServerError,
 )
 from tollbooth.certificate import reset_jti_store
@@ -816,6 +817,27 @@ class TestCheckPaymentWithRoyalty:
         assert "royalty_payout" not in result
         btcpay.create_payout.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_payout_awaiting_approval_includes_hint(self) -> None:
+        """AwaitingApproval payout state includes a payout_hint for operators."""
+        btcpay = _mock_btcpay({
+            "id": "inv-1", "status": "Settled", "amount": "1000",
+        })
+        btcpay.create_payout = AsyncMock(
+            return_value={"id": "payout-1", "state": "AwaitingApproval"}
+        )
+        ledger = UserLedger()
+        cache = _mock_cache(ledger)
+        result = await check_payment_tool(
+            btcpay, cache, "user1", "inv-1",
+            royalty_address="addr@ln", royalty_percent=0.02, royalty_min_sats=10,
+        )
+        assert result["credits_granted"] == 1000
+        rp = result["royalty_payout"]
+        assert rp["payout_state"] == "AwaitingApproval"
+        assert "payout_hint" in rp
+        assert "Payout Processors" in rp["payout_hint"]
+
 
 # ---------------------------------------------------------------------------
 # btcpay_status with royalty (uses TollboothConfig)
@@ -866,13 +888,15 @@ class TestBTCPayStatusRoyalty:
                 "btcpay.store.cancreateinvoice",
                 "btcpay.store.canviewinvoices",
                 "btcpay.store.cancreatenonapprovedpullpayments",
+                "btcpay.store.canviewstoresettings",
             ]
         })
+        btcpay.get_payout_processors = AsyncMock(return_value=[])
 
         result = await btcpay_status_tool(config, btcpay)
         perms = result["api_key_permissions"]
         assert perms["missing"] == []
-        assert len(perms["present"]) == 3
+        assert len(perms["present"]) == 4
 
     @pytest.mark.asyncio
     async def test_missing_payout_perm(self) -> None:
@@ -905,6 +929,88 @@ class TestBTCPayStatusRoyalty:
 
         result = await btcpay_status_tool(config, btcpay)
         assert "error" in result["api_key_permissions"]
+
+    @pytest.mark.asyncio
+    async def test_payout_processor_present(self) -> None:
+        """Lightning payout processor configured → lightning_automated True, no warning."""
+        config = _make_config(tollbooth_royalty_address="toll@ln")
+
+        btcpay = AsyncMock(spec=BTCPayClient)
+        btcpay.health_check = AsyncMock(return_value={"synchronized": True})
+        btcpay.get_store = AsyncMock(return_value={"name": "Store"})
+        btcpay.get_api_key_info = AsyncMock(return_value={"permissions": []})
+        btcpay.get_payout_processors = AsyncMock(return_value=[
+            {"name": "AutomatedPayoutBlob", "friendlyName": "Automated Lightning Sender"},
+        ])
+
+        result = await btcpay_status_tool(config, btcpay)
+        pp = result["payout_processor"]
+        assert pp["configured_count"] == 1
+        assert pp["lightning_automated"] is True
+        assert "warning" not in pp
+
+    @pytest.mark.asyncio
+    async def test_payout_processor_missing(self) -> None:
+        """No payout processors → lightning_automated False, warning present."""
+        config = _make_config(tollbooth_royalty_address="toll@ln")
+
+        btcpay = AsyncMock(spec=BTCPayClient)
+        btcpay.health_check = AsyncMock(return_value={"synchronized": True})
+        btcpay.get_store = AsyncMock(return_value={"name": "Store"})
+        btcpay.get_api_key_info = AsyncMock(return_value={"permissions": []})
+        btcpay.get_payout_processors = AsyncMock(return_value=[])
+
+        result = await btcpay_status_tool(config, btcpay)
+        pp = result["payout_processor"]
+        assert pp["configured_count"] == 0
+        assert pp["lightning_automated"] is False
+        assert "warning" in pp
+        assert "Payout Processors" in pp["warning"]
+
+    @pytest.mark.asyncio
+    async def test_payout_processor_error(self) -> None:
+        """get_payout_processors fails → error captured, no crash."""
+        config = _make_config(tollbooth_royalty_address="toll@ln")
+
+        btcpay = AsyncMock(spec=BTCPayClient)
+        btcpay.health_check = AsyncMock(return_value={"synchronized": True})
+        btcpay.get_store = AsyncMock(return_value={"name": "Store"})
+        btcpay.get_api_key_info = AsyncMock(return_value={"permissions": []})
+        btcpay.get_payout_processors = AsyncMock(
+            side_effect=BTCPayError("forbidden", status_code=403)
+        )
+
+        result = await btcpay_status_tool(config, btcpay)
+        pp = result["payout_processor"]
+        assert "error" in pp
+
+    @pytest.mark.asyncio
+    async def test_payout_processor_skipped_no_royalty(self) -> None:
+        """Royalty disabled → payout_processor not in result."""
+        config = _make_config(tollbooth_royalty_address=None)
+
+        btcpay = AsyncMock(spec=BTCPayClient)
+        btcpay.health_check = AsyncMock(return_value={"synchronized": True})
+        btcpay.get_store = AsyncMock(return_value={"name": "Store"})
+        btcpay.get_api_key_info = AsyncMock(return_value={"permissions": []})
+
+        result = await btcpay_status_tool(config, btcpay)
+        assert "payout_processor" not in result
+
+    @pytest.mark.asyncio
+    async def test_required_perms_include_viewstoresettings_when_royalty(self) -> None:
+        """When royalty is enabled, canviewstoresettings is in required permissions."""
+        config = _make_config(tollbooth_royalty_address="toll@ln")
+
+        btcpay = AsyncMock(spec=BTCPayClient)
+        btcpay.health_check = AsyncMock(return_value={"synchronized": True})
+        btcpay.get_store = AsyncMock(return_value={"name": "Store"})
+        btcpay.get_api_key_info = AsyncMock(return_value={"permissions": []})
+        btcpay.get_payout_processors = AsyncMock(return_value=[])
+
+        result = await btcpay_status_tool(config, btcpay)
+        perms = result["api_key_permissions"]
+        assert "btcpay.store.canviewstoresettings" in perms["required"]
 
 
 # ---------------------------------------------------------------------------

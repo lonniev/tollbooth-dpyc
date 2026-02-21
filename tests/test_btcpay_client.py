@@ -314,6 +314,51 @@ class TestCreatePayout:
 
 
 # ---------------------------------------------------------------------------
+# get_payout_processors
+# ---------------------------------------------------------------------------
+
+
+class TestGetPayoutProcessors:
+    @pytest.mark.asyncio
+    async def test_success(self) -> None:
+        client = BTCPayClient("https://x.com", "k", "my-store")
+        processors = [
+            {"name": "AutomatedPayoutBlob", "friendlyName": "Automated Lightning Sender"},
+        ]
+        resp = httpx.Response(
+            status_code=200,
+            json=processors,
+            request=httpx.Request("GET", "https://example.com"),
+        )
+        client._client.request = AsyncMock(return_value=resp)
+        result = await client.get_payout_processors()
+        assert result == processors
+        client._client.request.assert_called_once_with(
+            "GET", "/stores/my-store/payout-processors", json=None
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_list(self) -> None:
+        client = BTCPayClient("https://x.com", "k", "s")
+        resp = httpx.Response(
+            status_code=200,
+            json=[],
+            request=httpx.Request("GET", "https://example.com"),
+        )
+        client._client.request = AsyncMock(return_value=resp)
+        result = await client.get_payout_processors()
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_auth_error(self) -> None:
+        client = BTCPayClient("https://x.com", "k", "s")
+        client._client.request = AsyncMock(return_value=_mock_response(403))
+        with pytest.raises(BTCPayAuthError) as exc_info:
+            await client.get_payout_processors()
+        assert exc_info.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
 # Context manager
 # ---------------------------------------------------------------------------
 

@@ -107,7 +107,7 @@ class BTCPayClient:
         method: str,
         endpoint: str,
         json_data: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """Send a request and map errors to the BTCPay exception hierarchy."""
         try:
             response = await self._client.request(method, endpoint, json=json_data)
@@ -181,6 +181,12 @@ class BTCPayClient:
         }
         return await self._request(
             "POST", f"/stores/{self._store_id}/payouts", json_data=payload
+        )
+
+    async def get_payout_processors(self) -> list[dict[str, Any]]:
+        """GET /stores/{storeId}/payout-processors — list configured payout processors."""
+        return await self._request(
+            "GET", f"/stores/{self._store_id}/payout-processors"
         )
 
     # -- lifecycle ------------------------------------------------------------

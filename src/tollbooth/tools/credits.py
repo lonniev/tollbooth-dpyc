@@ -60,12 +60,18 @@ async def _attempt_royalty_payout(
 
     try:
         payout = await btcpay.create_payout(royalty_address, royalty_sats)
-        return {
+        result = {
             "royalty_sats": royalty_sats,
             "royalty_address": royalty_address,
             "payout_id": payout.get("id", ""),
             "payout_state": payout.get("state", "Unknown"),
         }
+        if result["payout_state"] == "AwaitingApproval":
+            result["payout_hint"] = (
+                "Payout is awaiting approval. If payouts never settle, "
+                "check Store Settings > Payout Processors > Automated Lightning Sender."
+            )
+        return result
     except BTCPayError as e:
         logger.warning("Royalty payout failed: %s", e)
         return {
@@ -821,6 +827,7 @@ async def btcpay_status_tool(
             required = ["btcpay.store.cancreateinvoice", "btcpay.store.canviewinvoices"]
             if royalty_enabled:
                 required.append("btcpay.store.cancreatenonapprovedpullpayments")
+                required.append("btcpay.store.canviewstoresettings")
             present = [p for p in required if p in permissions]
             missing = [p for p in required if p not in permissions]
             result["api_key_permissions"] = {
@@ -833,6 +840,29 @@ async def btcpay_status_tool(
             result["api_key_permissions"] = {"error": str(e)}
         except Exception as e:
             result["api_key_permissions"] = {"error": str(e)}
+
+        # Payout processor check (only if royalties enabled)
+        if royalty_enabled:
+            try:
+                processors = await btcpay.get_payout_processors()
+                lightning_processor = any(
+                    "Lightning" in p.get("name", "") or "Lightning" in p.get("friendlyName", "")
+                    for p in processors
+                )
+                result["payout_processor"] = {
+                    "configured_count": len(processors),
+                    "lightning_automated": lightning_processor,
+                }
+                if not lightning_processor:
+                    result["payout_processor"]["warning"] = (
+                        "No Lightning Payout Processor configured. "
+                        "Royalty payouts will be created but never settle automatically. "
+                        "Go to: Store Settings > Payout Processors > Automated Lightning Sender"
+                    )
+            except BTCPayError as e:
+                result["payout_processor"] = {"error": str(e)}
+            except Exception as e:
+                result["payout_processor"] = {"error": str(e)}
     else:
         result["server_reachable"] = None
         result["store_name"] = None
