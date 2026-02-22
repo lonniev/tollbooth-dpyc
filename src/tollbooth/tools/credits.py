@@ -6,7 +6,7 @@ import importlib.metadata
 import json
 import logging
 import platform
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from tollbooth.btcpay_client import BTCPayClient, BTCPayAuthError, BTCPayError
@@ -652,6 +652,116 @@ def compute_low_balance_warning(
             f"(warning threshold: {threshold}). "
             f"Consider topping up with purchase_credits."
         ),
+    }
+
+
+async def account_statement_tool(
+    cache: LedgerCache,
+    user_id: str,
+    days: int = 30,
+) -> dict[str, Any]:
+    """Generate a customer-facing account statement with purchase history and usage.
+
+    Returns a structured statement suitable for customer proof-of-purchase
+    and usage auditing. Includes: account summary, invoice line items, active
+    credit tranches, all-time tool usage, and recent daily usage.
+
+    Args:
+        cache: The LedgerCache instance.
+        user_id: The user's identity key.
+        days: Number of days of daily usage to include (default 30).
+    """
+    ledger = await cache.get(user_id)
+    now = datetime.now(timezone.utc)
+    today = date.today()
+
+    # -- Account summary ---------------------------------------------------
+    summary: dict[str, Any] = {
+        "balance_api_sats": ledger.balance_api_sats,
+        "total_deposited_api_sats": ledger.total_deposited_api_sats,
+        "total_consumed_api_sats": ledger.total_consumed_api_sats,
+        "total_expired_api_sats": ledger.total_expired_api_sats,
+    }
+
+    # -- Invoice line items (sorted by created_at, most recent first) ------
+    invoice_items: list[dict[str, Any]] = []
+    for rec in sorted(
+        ledger.invoices.values(),
+        key=lambda r: r.created_at or "",
+        reverse=True,
+    ):
+        item: dict[str, Any] = {
+            "invoice_id": rec.invoice_id,
+            "status": rec.status,
+            "amount_sats": rec.amount_sats,
+            "api_sats_credited": rec.api_sats_credited,
+            "multiplier": rec.multiplier,
+            "created_at": rec.created_at,
+        }
+        if rec.settled_at:
+            item["settled_at"] = rec.settled_at
+        invoice_items.append(item)
+
+    # -- Active tranches ---------------------------------------------------
+    tranche_items: list[dict[str, Any]] = []
+    for t in ledger.tranches:
+        if t.remaining_sats <= 0 or t.is_expired_at(now):
+            continue
+        entry: dict[str, Any] = {
+            "granted_at": t.granted_at,
+            "original_sats": t.original_sats,
+            "remaining_sats": t.remaining_sats,
+            "invoice_id": t.invoice_id,
+        }
+        if t.expires_at:
+            entry["expires_at"] = t.expires_at
+        tranche_items.append(entry)
+
+    # -- All-time tool usage (sorted by api_sats descending) ---------------
+    tool_usage_items: list[dict[str, Any]] = []
+    for tool_name, usage in sorted(
+        ledger.history.items(),
+        key=lambda kv: kv[1].api_sats,
+        reverse=True,
+    ):
+        tool_usage_items.append({
+            "tool": tool_name,
+            "calls": usage.calls,
+            "api_sats": usage.api_sats,
+        })
+
+    # -- Daily usage log (last N days, most recent first) ------------------
+    cutoff_date = (today - timedelta(days=days)).isoformat()
+    daily_items: list[dict[str, Any]] = []
+    for day_iso in sorted(ledger.daily_log.keys(), reverse=True):
+        if day_iso < cutoff_date:
+            break
+        day_tools = ledger.daily_log[day_iso]
+        day_total_calls = sum(u.calls for u in day_tools.values())
+        day_total_sats = sum(u.api_sats for u in day_tools.values())
+        daily_items.append({
+            "date": day_iso,
+            "total_calls": day_total_calls,
+            "total_api_sats": day_total_sats,
+            "tools": {
+                name: {"calls": u.calls, "api_sats": u.api_sats}
+                for name, u in sorted(
+                    day_tools.items(),
+                    key=lambda kv: kv[1].api_sats,
+                    reverse=True,
+                )
+            },
+        })
+
+    return {
+        "success": True,
+        "generated_at": now.isoformat(),
+        "statement_period_days": days,
+        "account_summary": summary,
+        "purchase_history": invoice_items,
+        "active_tranches": tranche_items,
+        "tool_usage_all_time": tool_usage_items,
+        "daily_usage": daily_items,
     }
 
 
