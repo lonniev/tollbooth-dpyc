@@ -17,8 +17,16 @@ HOME_ID = "home-thought-id"
 API_KEY = "test-api-key"
 
 
-def _vault() -> TheBrainVault:
-    return TheBrainVault(api_key=API_KEY, brain_id=BRAIN_ID, home_thought_id=HOME_ID)
+TRASH_ID = "trash-thought-id"
+
+
+def _vault(trash: bool = False) -> TheBrainVault:
+    return TheBrainVault(
+        api_key=API_KEY,
+        brain_id=BRAIN_ID,
+        home_thought_id=HOME_ID,
+        trash_thought_id=TRASH_ID if trash else None,
+    )
 
 
 def _response(status_code: int = 200, json_data: dict | list | None = None) -> httpx.Response:
@@ -260,6 +268,89 @@ class TestUpdateLink:
         vault._client.patch = AsyncMock(return_value=_response(500, {}))
         with pytest.raises(httpx.HTTPStatusError):
             await vault._update_link("link-1", {"name": "hasMember"})
+
+
+# ---------------------------------------------------------------------------
+# _update_thought
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateThought:
+    @pytest.mark.asyncio
+    async def test_sends_json_patch(self) -> None:
+        vault = _vault()
+        vault._client.patch = AsyncMock(return_value=_response(200, {}))
+        await vault._update_thought("thought-1", {"name": "new name"})
+        vault._client.patch.assert_called_once_with(
+            f"/thoughts/{BRAIN_ID}/thought-1",
+            json=[{"op": "replace", "path": "/name", "value": "new name"}],
+            headers={"Content-Type": "application/json-patch+json"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_raises_on_failure(self) -> None:
+        vault = _vault()
+        vault._client.patch = AsyncMock(return_value=_response(500, {}))
+        with pytest.raises(httpx.HTTPStatusError):
+            await vault._update_thought("thought-1", {"name": "x"})
+
+
+# ---------------------------------------------------------------------------
+# _delete_link
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteLink:
+    @pytest.mark.asyncio
+    async def test_calls_delete_endpoint(self) -> None:
+        vault = _vault()
+        vault._client.delete = AsyncMock(return_value=_response(200, {}))
+        await vault._delete_link("link-1")
+        vault._client.delete.assert_called_once_with(f"/links/{BRAIN_ID}/link-1")
+
+    @pytest.mark.asyncio
+    async def test_raises_on_failure(self) -> None:
+        vault = _vault()
+        vault._client.delete = AsyncMock(return_value=_response(500, {}))
+        with pytest.raises(httpx.HTTPStatusError):
+            await vault._delete_link("link-1")
+
+
+# ---------------------------------------------------------------------------
+# _create_link
+# ---------------------------------------------------------------------------
+
+
+class TestCreateLink:
+    @pytest.mark.asyncio
+    async def test_sends_correct_body(self) -> None:
+        vault = _vault()
+        vault._client.post = AsyncMock(return_value=_response(200, {"id": "new-link"}))
+        result = await vault._create_link("thought-a", "thought-b", relation=1)
+        assert result == {"id": "new-link"}
+        vault._client.post.assert_called_once_with(
+            f"/links/{BRAIN_ID}",
+            json={
+                "thoughtIdA": "thought-a",
+                "thoughtIdB": "thought-b",
+                "relation": 1,
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_includes_name_when_provided(self) -> None:
+        vault = _vault()
+        vault._client.post = AsyncMock(return_value=_response(200, {"id": "new-link"}))
+        await vault._create_link("a", "b", relation=3, name="soft-deleted")
+        call_args = vault._client.post.call_args
+        assert call_args.kwargs["json"]["name"] == "soft-deleted"
+
+    @pytest.mark.asyncio
+    async def test_raises_on_failure_without_id(self) -> None:
+        vault = _vault()
+        vault._client.post = AsyncMock(return_value=_response(500, {"error": "bad"}))
+        with pytest.raises(httpx.HTTPStatusError):
+            await vault._create_link("a", "b")
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +600,125 @@ class TestFetchMemberNote:
 
         result = await vault.fetch_member_note("unknown")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# soft_delete_member
+# ---------------------------------------------------------------------------
+
+
+class TestSoftDeleteMember:
+    @pytest.mark.asyncio
+    async def test_not_found_returns_none(self) -> None:
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={})
+        result = await vault.soft_delete_member("unknown", "cleanup")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_unlinks_renames_annotates(self) -> None:
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={"user1": "thought-1"})
+        vault._get_graph = AsyncMock(return_value={
+            "links": [
+                {"id": "link-a"},
+                {"id": "link-b"},
+            ],
+        })
+        vault._delete_link = AsyncMock()
+        vault._update_thought = AsyncMock()
+        vault._get_note = AsyncMock(return_value="original content")
+        vault._set_note = AsyncMock()
+
+        result = await vault.soft_delete_member("user1", "orphan cleanup")
+        assert result == "thought-1"
+
+        # All links deleted
+        assert vault._delete_link.call_count == 2
+        vault._delete_link.assert_any_call("link-a")
+        vault._delete_link.assert_any_call("link-b")
+
+        # Renamed
+        vault._update_thought.assert_called_once_with(
+            "thought-1", {"name": "DELETED thought-1"},
+        )
+
+        # Note prepended
+        vault._set_note.assert_called_once()
+        note_content = vault._set_note.call_args[0][1]
+        assert note_content.startswith("DELETED because orphan cleanup")
+        assert "original content" in note_content
+
+    @pytest.mark.asyncio
+    async def test_moves_to_trash_when_configured(self) -> None:
+        vault = _vault(trash=True)
+        vault._discover_members = AsyncMock(return_value={"user1": "thought-1"})
+        vault._get_graph = AsyncMock(return_value={"links": []})
+        vault._delete_link = AsyncMock()
+        vault._update_thought = AsyncMock()
+        vault._get_note = AsyncMock(return_value=None)
+        vault._set_note = AsyncMock()
+        vault._create_link = AsyncMock(return_value={"id": "trash-link"})
+
+        await vault.soft_delete_member("user1", "retired")
+
+        vault._create_link.assert_called_once_with(
+            TRASH_ID, "thought-1", relation=1, name="soft-deleted",
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_trash_link_without_config(self) -> None:
+        vault = _vault(trash=False)
+        vault._discover_members = AsyncMock(return_value={"user1": "thought-1"})
+        vault._get_graph = AsyncMock(return_value={"links": []})
+        vault._delete_link = AsyncMock()
+        vault._update_thought = AsyncMock()
+        vault._get_note = AsyncMock(return_value=None)
+        vault._set_note = AsyncMock()
+        vault._create_link = AsyncMock()
+
+        await vault.soft_delete_member("user1", "retired")
+
+        vault._create_link.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalidates_cache(self) -> None:
+        vault = _vault()
+        vault._index_cache = {"user1": "thought-1"}
+        vault._discover_members = AsyncMock(return_value={"user1": "thought-1"})
+        vault._get_graph = AsyncMock(return_value={"links": []})
+        vault._delete_link = AsyncMock()
+        vault._update_thought = AsyncMock()
+        vault._get_note = AsyncMock(return_value=None)
+        vault._set_note = AsyncMock()
+
+        await vault.soft_delete_member("user1", "cleanup")
+        assert vault._index_cache is None
+
+    @pytest.mark.asyncio
+    async def test_continues_on_link_delete_failure(self) -> None:
+        """A failing link delete should not abort the soft-delete."""
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={"user1": "thought-1"})
+        vault._get_graph = AsyncMock(return_value={
+            "links": [{"id": "bad-link"}, {"id": "good-link"}],
+        })
+        vault._delete_link = AsyncMock(side_effect=[
+            httpx.HTTPStatusError(
+                "400", request=httpx.Request("DELETE", "https://api.bra.in"),
+                response=_response(400),
+            ),
+            None,  # second link succeeds
+        ])
+        vault._update_thought = AsyncMock()
+        vault._get_note = AsyncMock(return_value=None)
+        vault._set_note = AsyncMock()
+
+        result = await vault.soft_delete_member("user1", "cleanup")
+        assert result == "thought-1"
+        # Rename and note update still happened
+        vault._update_thought.assert_called_once()
+        vault._set_note.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

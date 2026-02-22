@@ -44,6 +44,7 @@ class TheBrainVault:
 
     - ``store_member_note(user_id, content) -> str``
     - ``fetch_member_note(user_id) -> str | None``
+    - ``soft_delete_member(user_id, reason) -> str | None``
 
     Member discovery: all children of the vault home thought are treated
     as members. Each child's ``name`` is the member key. Link labels
@@ -68,10 +69,12 @@ class TheBrainVault:
         api_key: str,
         brain_id: str,
         home_thought_id: str,
+        trash_thought_id: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._brain_id = brain_id
         self._home_thought_id = home_thought_id
+        self._trash_thought_id = trash_thought_id
         self._client = httpx.AsyncClient(
             base_url=_BASE_URL,
             headers={"Authorization": f"Bearer {api_key}"},
@@ -201,6 +204,65 @@ class TheBrainVault:
         )
         resp.raise_for_status()
 
+    async def _update_thought(
+        self, thought_id: str, updates: dict[str, Any],
+    ) -> None:
+        """PATCH /thoughts/{brainId}/{thoughtId} with JSON Patch format.
+
+        ``updates`` is a dict of field -> value, e.g. ``{"name": "new name"}``.
+        Converted to JSON Patch format internally.
+        """
+        patch = [
+            {"op": "replace", "path": f"/{field}", "value": value}
+            for field, value in updates.items()
+        ]
+        resp = await self._client.patch(
+            f"/thoughts/{self._brain_id}/{thought_id}",
+            json=patch,
+            headers={"Content-Type": "application/json-patch+json"},
+        )
+        resp.raise_for_status()
+
+    async def _delete_link(self, link_id: str) -> None:
+        """DELETE /links/{brainId}/{linkId}."""
+        resp = await self._client.delete(
+            f"/links/{self._brain_id}/{link_id}"
+        )
+        resp.raise_for_status()
+
+    async def _create_link(
+        self,
+        thought_id_a: str,
+        thought_id_b: str,
+        relation: int = 1,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """POST /links/{brainId} to create a relationship.
+
+        ``relation``: 1=Child, 2=Parent, 3=Jump, 4=Sibling.
+        Returns ``{"id": "..."}`` on success.
+        """
+        body: dict[str, Any] = {
+            "thoughtIdA": thought_id_a,
+            "thoughtIdB": thought_id_b,
+            "relation": relation,
+        }
+        if name:
+            body["name"] = name
+        resp = await self._client.post(
+            f"/links/{self._brain_id}",
+            json=body,
+        )
+        try:
+            data = resp.json()
+        except Exception:
+            resp.raise_for_status()
+            return {}
+        if "id" in data:
+            return data
+        resp.raise_for_status()
+        return data
+
     # -- Child-based member discovery ------------------------------------------
 
     async def _discover_members(self) -> dict[str, str]:
@@ -302,6 +364,55 @@ class TheBrainVault:
         if not thought_id:
             return None
         return await self._get_note(thought_id)
+
+    async def soft_delete_member(self, user_id: str, reason: str) -> str | None:
+        """Soft-delete a vault member: unlink, rename, annotate, and move to trash.
+
+        TheBrain's ``DELETE /thoughts`` is slow and leaves ghost entries in the
+        Azure-cached graph endpoint for hours. This method avoids hard deletes:
+
+        1. Unlink the thought from all linked peers.
+        2. Rename to ``DELETED <thought_id>``.
+        3. Prepend the note with ``DELETED because <reason>``.
+        4. Child-link to the Trash Can thought (if ``trash_thought_id`` was set).
+
+        Returns the thought ID if found and soft-deleted, ``None`` if the
+        member was not found.
+        """
+        members = await self._discover_members()
+        thought_id = members.get(user_id)
+        if not thought_id:
+            return None
+
+        # 1. Unlink from all peers
+        graph = await self._get_graph(thought_id)
+        for link in graph.get("links", []):
+            try:
+                await self._delete_link(link["id"])
+            except httpx.HTTPError:
+                logger.warning(
+                    "Failed to delete link %s during soft-delete of %s",
+                    link.get("id"), thought_id,
+                )
+
+        # 2. Rename
+        await self._update_thought(thought_id, {"name": f"DELETED {thought_id}"})
+
+        # 3. Prepend note with deletion reason
+        existing_note = await self._get_note(thought_id) or ""
+        deletion_header = f"DELETED because {reason}\n\n---\n\n"
+        await self._set_note(thought_id, deletion_header + existing_note)
+
+        # 4. Move to trash
+        if self._trash_thought_id:
+            await self._create_link(
+                self._trash_thought_id, thought_id, relation=1, name="soft-deleted",
+            )
+
+        # 5. Invalidate cache
+        self._index_cache = None
+
+        return thought_id
 
     # -- VaultBackend protocol -----------------------------------------------
 
