@@ -19,13 +19,14 @@ from tollbooth.btcpay_client import (
 )
 from tollbooth.certificate import reset_jti_store
 from tollbooth.config import TollboothConfig
-from tollbooth.ledger import Tranche, UserLedger
+from tollbooth.ledger import ToolUsage, Tranche, UserLedger
 from tollbooth.ledger_cache import LedgerCache
 from tollbooth.tools.credits import (
     ROYALTY_PAYOUT_MAX_SATS,
     _attempt_royalty_payout,
     _get_multiplier,
     _get_tier_info,
+    account_statement_tool,
     btcpay_status_tool,
     check_balance_tool,
     check_payment_tool,
@@ -1382,3 +1383,129 @@ class TestReconcilePendingInvoices:
         # Balance should not increase
         assert ledger.balance_api_sats == 500
         cache.flush_user.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# AccountStatement
+# ---------------------------------------------------------------------------
+
+
+class TestAccountStatement:
+    @pytest.mark.asyncio
+    async def test_empty_ledger(self) -> None:
+        """Fresh user gets a valid statement with zero values."""
+        cache = _mock_cache()
+        result = await account_statement_tool(cache, "user1")
+
+        assert result["success"] is True
+        assert "generated_at" in result
+        assert result["statement_period_days"] == 30
+        assert result["account_summary"]["balance_api_sats"] == 0
+        assert result["account_summary"]["total_deposited_api_sats"] == 0
+        assert result["purchase_history"] == []
+        assert result["active_tranches"] == []
+        assert result["tool_usage_all_time"] == []
+        assert result["daily_usage"] == []
+
+    @pytest.mark.asyncio
+    async def test_with_invoices(self) -> None:
+        """Statement includes invoice line items sorted by date descending."""
+        ledger = UserLedger()
+        ledger.record_invoice_created("inv-a", 500, 1, "2026-02-20T10:00:00+00:00")
+        ledger.record_invoice_settled("inv-a", 500, "2026-02-20T10:05:00+00:00", "Settled")
+        ledger.credit_deposit(500, "inv-a")
+
+        ledger.record_invoice_created("inv-b", 1000, 1, "2026-02-21T12:00:00+00:00")
+        ledger.record_invoice_settled("inv-b", 1000, "2026-02-21T12:05:00+00:00", "Settled")
+        ledger.credit_deposit(1000, "inv-b")
+
+        cache = _mock_cache(ledger)
+        result = await account_statement_tool(cache, "user1")
+
+        assert result["success"] is True
+        history = result["purchase_history"]
+        assert len(history) == 2
+        # Most recent first
+        assert history[0]["invoice_id"] == "inv-b"
+        assert history[1]["invoice_id"] == "inv-a"
+        assert history[0]["amount_sats"] == 1000
+        assert history[0]["settled_at"] == "2026-02-21T12:05:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_active_tranches(self) -> None:
+        """Statement lists non-expired, non-zero tranches."""
+        ledger = UserLedger()
+        # First tranche — will be fully consumed by FIFO debit
+        ledger.credit_deposit(100, "inv-a")
+        # Second tranche — survives
+        ledger.credit_deposit(300, "inv-b")
+        # FIFO debit consumes oldest (inv-a) fully
+        ledger.debit("test_tool", 100)
+
+        cache = _mock_cache(ledger)
+        result = await account_statement_tool(cache, "user1")
+
+        tranches = result["active_tranches"]
+        assert len(tranches) == 1
+        assert tranches[0]["remaining_sats"] == 300
+        assert tranches[0]["invoice_id"] == "inv-b"
+
+    @pytest.mark.asyncio
+    async def test_tool_usage(self) -> None:
+        """All-time usage sorted by api_sats descending."""
+        ledger = _ledger_with_balance(5000)
+        ledger.debit("search_thoughts", 10)
+        ledger.debit("search_thoughts", 10)
+        ledger.debit("brain_query", 100)
+
+        cache = _mock_cache(ledger)
+        result = await account_statement_tool(cache, "user1")
+
+        usage = result["tool_usage_all_time"]
+        assert len(usage) == 2
+        # brain_query has more api_sats, so comes first
+        assert usage[0]["tool"] == "brain_query"
+        assert usage[0]["api_sats"] == 100
+        assert usage[0]["calls"] == 1
+        assert usage[1]["tool"] == "search_thoughts"
+        assert usage[1]["api_sats"] == 20
+        assert usage[1]["calls"] == 2
+
+    @pytest.mark.asyncio
+    async def test_daily_usage_respects_days_param(self) -> None:
+        """Daily log only includes entries within the requested window."""
+        ledger = _ledger_with_balance(5000)
+        today = date.today()
+        # Add entries for 3 days
+        for offset in (0, 15, 45):
+            day = (today - timedelta(days=offset)).isoformat()
+            ledger.daily_log[day] = {
+                "get_thought": ToolUsage(calls=5, api_sats=5),
+            }
+
+        cache = _mock_cache(ledger)
+        result = await account_statement_tool(cache, "user1", days=30)
+
+        daily = result["daily_usage"]
+        # Only today (0 days ago) and 15 days ago are within 30 days
+        assert len(daily) == 2
+        assert daily[0]["date"] == today.isoformat()
+        assert daily[1]["date"] == (today - timedelta(days=15)).isoformat()
+
+    @pytest.mark.asyncio
+    async def test_summary_totals(self) -> None:
+        """Account summary reflects deposited, consumed, expired correctly."""
+        ledger = UserLedger()
+        ledger.credit_deposit(1000, "inv-1")
+        ledger.debit("tool_a", 300)
+        # Simulate some previously expired amount
+        ledger.total_expired_api_sats = 200
+
+        cache = _mock_cache(ledger)
+        result = await account_statement_tool(cache, "user1")
+
+        summary = result["account_summary"]
+        assert summary["balance_api_sats"] == 700
+        assert summary["total_deposited_api_sats"] == 1000
+        assert summary["total_consumed_api_sats"] == 300
+        assert summary["total_expired_api_sats"] == 200
