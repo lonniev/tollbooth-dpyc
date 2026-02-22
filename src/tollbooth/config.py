@@ -19,3 +19,4 @@ class TollboothConfig:
     tollbooth_royalty_percent: float = 0.02
     tollbooth_royalty_min_sats: int = 10
     authority_public_key: str | None = None
+    credit_ttl_seconds: int | None = 604800  # 7 days default, None = never

@@ -3,6 +3,12 @@
 Pure data model — no I/O. All api_sats values are integer API credits
 (not real Bitcoin satoshis). Real BTC amounts use ``amount_sats`` and
 only appear in invoice/BTCPay contexts.
+
+Credits are stored as ordered tranches. Each tranche has an optional
+TTL (time-to-live). Debits consume FIFO from the oldest non-expired
+tranche. Expired tranches are collected lazily — their remaining
+balance moves to ``total_expired_api_sats`` during debits and
+serialization.
 """
 
 from __future__ import annotations
@@ -10,12 +16,12 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 
 # ---------------------------------------------------------------------------
@@ -87,28 +93,93 @@ class InvoiceRecord:
 
 
 # ---------------------------------------------------------------------------
+# Tranche
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Tranche:
+    """A discrete credit allocation with optional expiration.
+
+    Tranches are consumed FIFO — oldest first. Once remaining_sats
+    reaches 0, the tranche is inert. Expired tranches have their
+    remaining balance swept into total_expired_api_sats during debits.
+    """
+
+    granted_at: str  # ISO datetime
+    original_sats: int
+    remaining_sats: int
+    invoice_id: str = ""
+    expires_at: str | None = None  # ISO datetime, None = never expires
+
+    def is_expired_at(self, now: datetime) -> bool:
+        """Check if this tranche is expired at the given time."""
+        if self.expires_at is None:
+            return False
+        try:
+            exp = datetime.fromisoformat(self.expires_at)
+            return now >= exp
+        except (ValueError, TypeError):
+            return False  # Malformed → treat as never-expiring
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "granted_at": self.granted_at,
+            "original_sats": self.original_sats,
+            "remaining_sats": self.remaining_sats,
+            "invoice_id": self.invoice_id,
+        }
+        if self.expires_at is not None:
+            d["expires_at"] = self.expires_at
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Tranche:
+        return cls(
+            granted_at=str(data.get("granted_at", "")),
+            original_sats=int(data.get("original_sats", 0)),
+            remaining_sats=int(data.get("remaining_sats", 0)),
+            invoice_id=str(data.get("invoice_id", "")),
+            expires_at=data.get("expires_at"),
+        )
+
+
+# ---------------------------------------------------------------------------
 # UserLedger
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class UserLedger:
-    """Per-user credit balance and usage tracking.
+    """Per-user credit balance with tranche-based expiration.
 
-    All balance/cost values are in api_sats (integer API credits).
-    ``debit()`` returns False on insufficient balance (not exceptional).
+    Credits live in ordered tranches. ``balance_api_sats`` is a computed
+    property that sums non-expired tranche balances. Debits draw FIFO
+    from the oldest non-expired tranche. Rollbacks create compensating
+    tranches (never-expiring) rather than modifying existing ones.
+
     ``from_json()`` returns a fresh ledger on corrupt data (never blocks a user).
     """
 
-    balance_api_sats: int = 0
+    tranches: list[Tranche] = field(default_factory=list)
     total_deposited_api_sats: int = 0
     total_consumed_api_sats: int = 0
+    total_expired_api_sats: int = 0
     pending_invoices: list[str] = field(default_factory=list)
     credited_invoices: list[str] = field(default_factory=list)
     last_deposit_at: str | None = None
     daily_log: dict[str, dict[str, ToolUsage]] = field(default_factory=dict)
     history: dict[str, ToolUsage] = field(default_factory=dict)
     invoices: dict[str, InvoiceRecord] = field(default_factory=dict)
+
+    @property
+    def balance_api_sats(self) -> int:
+        """Sum of remaining_sats in non-expired tranches (read-only, no mutation)."""
+        now = datetime.now(timezone.utc)
+        return sum(
+            t.remaining_sats for t in self.tranches
+            if t.remaining_sats > 0 and not t.is_expired_at(now)
+        )
 
     # -- invoice record helpers ------------------------------------------------
 
@@ -132,11 +203,7 @@ class UserLedger:
         settled_at: str,
         btcpay_status: str = "Settled",
     ) -> None:
-        """Update an existing invoice record to Settled with credit info.
-
-        Creates a retroactive record if the invoice wasn't tracked at creation
-        (e.g. invoices created before this feature was deployed).
-        """
+        """Update an existing invoice record to Settled with credit info."""
         rec = self.invoices.get(invoice_id)
         if rec:
             rec.status = "Settled"
@@ -166,14 +233,51 @@ class UserLedger:
 
     # -- mutations ------------------------------------------------------------
 
+    def _collect_expired(self, now: datetime | None = None) -> int:
+        """Sweep expired tranches: move their remaining balance to total_expired_api_sats.
+
+        Returns the number of sats newly collected.
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+        collected = 0
+        for t in self.tranches:
+            if t.remaining_sats > 0 and t.is_expired_at(now):
+                collected += t.remaining_sats
+                t.remaining_sats = 0
+        self.total_expired_api_sats += collected
+        return collected
+
     def debit(self, tool_name: str, api_sats: int) -> bool:
-        """Deduct ``api_sats`` from balance. Returns False if insufficient."""
+        """Deduct api_sats via FIFO from oldest non-expired tranche.
+
+        Returns False if insufficient balance (no partial debit).
+        """
         if api_sats < 0:
             return False
-        if self.balance_api_sats < api_sats:
+
+        now = datetime.now(timezone.utc)
+        self._collect_expired(now)
+
+        # Compute available from non-expired tranches
+        available = sum(
+            t.remaining_sats for t in self.tranches
+            if t.remaining_sats > 0 and not t.is_expired_at(now)
+        )
+        if available < api_sats:
             return False
 
-        self.balance_api_sats -= api_sats
+        # FIFO draw
+        remaining_to_debit = api_sats
+        for t in self.tranches:
+            if remaining_to_debit <= 0:
+                break
+            if t.remaining_sats <= 0 or t.is_expired_at(now):
+                continue
+            draw = min(remaining_to_debit, t.remaining_sats)
+            t.remaining_sats -= draw
+            remaining_to_debit -= draw
+
         self.total_consumed_api_sats += api_sats
 
         today = date.today().isoformat()
@@ -188,9 +292,23 @@ class UserLedger:
 
         return True
 
-    def credit_deposit(self, api_sats: int, invoice_id: str) -> None:
-        """Add credits from a settled invoice."""
-        self.balance_api_sats += api_sats
+    def credit_deposit(
+        self, api_sats: int, invoice_id: str, ttl_seconds: int | None = None,
+    ) -> None:
+        """Add credits as a new tranche with optional TTL."""
+        now = datetime.now(timezone.utc)
+        expires_at = (
+            (now + timedelta(seconds=ttl_seconds)).isoformat()
+            if ttl_seconds is not None
+            else None
+        )
+        self.tranches.append(Tranche(
+            granted_at=now.isoformat(),
+            original_sats=api_sats,
+            remaining_sats=api_sats,
+            invoice_id=invoice_id,
+            expires_at=expires_at,
+        ))
         self.total_deposited_api_sats += api_sats
         self.last_deposit_at = date.today().isoformat()
         if invoice_id in self.pending_invoices:
@@ -199,8 +317,17 @@ class UserLedger:
             self.credited_invoices.append(invoice_id)
 
     def rollback_debit(self, tool_name: str, api_sats: int) -> None:
-        """Undo a previous debit (e.g. tool call failed)."""
-        self.balance_api_sats += api_sats
+        """Undo a previous debit by creating a compensating tranche (never expires)."""
+        if api_sats <= 0:
+            return
+        now = datetime.now(timezone.utc)
+        self.tranches.append(Tranche(
+            granted_at=now.isoformat(),
+            original_sats=api_sats,
+            remaining_sats=api_sats,
+            invoice_id=f"rollback:{tool_name}",
+            expires_at=None,  # Compensating tranches never expire
+        ))
         self.total_consumed_api_sats -= api_sats
 
         today = date.today().isoformat()
@@ -220,21 +347,56 @@ class UserLedger:
         cutoff = (date.today() - timedelta(days=retention_days)).isoformat()
         expired_keys = [d for d in self.daily_log if d < cutoff]
         for day_key in expired_keys:
-            for tool_name, usage in self.daily_log[day_key].items():
-                # daily_log entries are already counted in history via debit(),
-                # so we only remove the daily entry — no double-counting.
-                pass
             del self.daily_log[day_key]
+
+    # -- expiration analytics -------------------------------------------------
+
+    def expiring_within(self, seconds: int) -> int:
+        """Sum of remaining_sats in tranches expiring within the given window."""
+        now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(seconds=seconds)
+        total = 0
+        for t in self.tranches:
+            if t.remaining_sats <= 0 or t.is_expired_at(now):
+                continue
+            if t.expires_at is not None:
+                try:
+                    exp = datetime.fromisoformat(t.expires_at)
+                    if exp <= cutoff:
+                        total += t.remaining_sats
+                except (ValueError, TypeError):
+                    pass
+        return total
+
+    def next_expiration(self) -> str | None:
+        """ISO datetime of the earliest tranche expiration, or None."""
+        now = datetime.now(timezone.utc)
+        earliest: datetime | None = None
+        for t in self.tranches:
+            if t.remaining_sats <= 0 or t.is_expired_at(now):
+                continue
+            if t.expires_at is not None:
+                try:
+                    exp = datetime.fromisoformat(t.expires_at)
+                    if earliest is None or exp < earliest:
+                        earliest = exp
+                except (ValueError, TypeError):
+                    pass
+        return earliest.isoformat() if earliest else None
 
     # -- serialization --------------------------------------------------------
 
     def to_json(self) -> str:
-        """Serialize to JSON string with schema version."""
+        """Serialize to JSON (schema v4). Prunes empty/expired tranches."""
+        self._collect_expired()
+        # Prune fully consumed tranches
+        active = [t for t in self.tranches if t.remaining_sats > 0]
         return json.dumps({
             "v": _SCHEMA_VERSION,
-            "balance_api_sats": self.balance_api_sats,
+            "tranches": [t.to_dict() for t in active],
             "total_deposited_api_sats": self.total_deposited_api_sats,
             "total_consumed_api_sats": self.total_consumed_api_sats,
+            "total_expired_api_sats": self.total_expired_api_sats,
             "pending_invoices": self.pending_invoices,
             "credited_invoices": self.credited_invoices,
             "last_deposit_at": self.last_deposit_at,
@@ -252,10 +414,7 @@ class UserLedger:
 
     @classmethod
     def from_json(cls, data: str) -> UserLedger:
-        """Deserialize from JSON. Returns fresh ledger on corrupt/missing data.
-
-        Handles migration from v1 (``*_sats``) to v2 (``*_api_sats``) keys.
-        """
+        """Deserialize from JSON. v4 only — non-v4 data returns a fresh ledger."""
         try:
             obj = json.loads(data)
         except (json.JSONDecodeError, TypeError):
@@ -265,6 +424,20 @@ class UserLedger:
         if not isinstance(obj, dict):
             logger.warning("Ledger data is not a dict; returning fresh ledger.")
             return cls()
+
+        version = obj.get("v", 0)
+        if version != 4:
+            logger.warning(
+                "Ledger schema v%s is not supported (expected v4); returning fresh ledger.",
+                version,
+            )
+            return cls()
+
+        # Parse tranches
+        tranches: list[Tranche] = []
+        for t_data in obj.get("tranches", []):
+            if isinstance(t_data, dict):
+                tranches.append(Tranche.from_dict(t_data))
 
         daily_log: dict[str, dict[str, ToolUsage]] = {}
         raw_daily = obj.get("daily_log", {})
@@ -293,14 +466,11 @@ class UserLedger:
                 if isinstance(rec_data, dict):
                     invoices[iid] = InvoiceRecord.from_dict(rec_data)
 
-        # Migration: accept v1 keys (*_sats) or v2 keys (*_api_sats)
-        def _get_int(new_key: str, old_key: str) -> int:
-            return int(obj.get(new_key, obj.get(old_key, 0)))
-
         return cls(
-            balance_api_sats=_get_int("balance_api_sats", "balance_sats"),
-            total_deposited_api_sats=_get_int("total_deposited_api_sats", "total_deposited_sats"),
-            total_consumed_api_sats=_get_int("total_consumed_api_sats", "total_consumed_sats"),
+            tranches=tranches,
+            total_deposited_api_sats=int(obj.get("total_deposited_api_sats", 0)),
+            total_consumed_api_sats=int(obj.get("total_consumed_api_sats", 0)),
+            total_expired_api_sats=int(obj.get("total_expired_api_sats", 0)),
             pending_invoices=list(obj.get("pending_invoices", [])),
             credited_invoices=list(obj.get("credited_invoices", [])),
             last_deposit_at=obj.get("last_deposit_at"),
