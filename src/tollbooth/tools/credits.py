@@ -85,24 +85,33 @@ def _get_tier_info(
     user_id: str,
     tier_config_json: str | None,
     user_tiers_json: str | None,
-) -> tuple[str, int]:
-    """Look up tier name and credit multiplier for a user.
+    default_credit_ttl_seconds: int | None = None,
+) -> tuple[str, int, int | None]:
+    """Look up tier name, credit multiplier, and credit TTL for a user.
 
-    Returns (tier_name, multiplier).
+    Returns (tier_name, multiplier, credit_ttl_seconds).
     """
     if not tier_config_json or not user_tiers_json:
-        return "default", _DEFAULT_MULTIPLIER
+        return "default", _DEFAULT_MULTIPLIER, default_credit_ttl_seconds
 
     try:
         tier_config = json.loads(tier_config_json)
         user_tiers = json.loads(user_tiers_json)
     except (json.JSONDecodeError, TypeError):
         logger.warning("Invalid tier config JSON; using default multiplier.")
-        return "default", _DEFAULT_MULTIPLIER
+        return "default", _DEFAULT_MULTIPLIER, default_credit_ttl_seconds
 
     tier_name = user_tiers.get(user_id, "default")
     tier = tier_config.get(tier_name, tier_config.get("default", {}))
-    return tier_name, int(tier.get("credit_multiplier", _DEFAULT_MULTIPLIER))
+    multiplier = int(tier.get("credit_multiplier", _DEFAULT_MULTIPLIER))
+
+    # TTL: per-tier override, then config default, then None (never)
+    ttl_raw = tier.get("credit_ttl_seconds")
+    if ttl_raw is not None:
+        ttl = int(ttl_raw)
+    else:
+        ttl = default_credit_ttl_seconds
+    return tier_name, multiplier, ttl
 
 
 def _get_multiplier(
@@ -111,7 +120,7 @@ def _get_multiplier(
     user_tiers_json: str | None,
 ) -> int:
     """Look up credit multiplier for a user based on tier config."""
-    _, multiplier = _get_tier_info(user_id, tier_config_json, user_tiers_json)
+    _, multiplier, _ = _get_tier_info(user_id, tier_config_json, user_tiers_json)
     return multiplier
 
 
@@ -123,6 +132,7 @@ async def _create_purchase_invoice(
     tier_config_json: str | None,
     user_tiers_json: str | None,
     extra_metadata: dict[str, Any] | None = None,
+    default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Shared logic: validate amount, create BTCPay invoice, record in ledger.
 
@@ -156,7 +166,9 @@ async def _create_purchase_invoice(
     checkout_link = invoice.get("checkoutLink", "")
     expiry = invoice.get("expirationTime", "")
 
-    tier_name, multiplier = _get_tier_info(user_id, tier_config_json, user_tiers_json)
+    tier_name, multiplier, ttl = _get_tier_info(
+        user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
+    )
     expected_credits = amount_sats * multiplier
 
     # Record pending invoice — flush immediately so the invoice survives cache loss
@@ -172,7 +184,7 @@ async def _create_purchase_invoice(
     if not await cache.flush_user(user_id):
         logger.warning("Failed to flush pending invoice %s for %s.", invoice_id, user_id)
 
-    return {
+    result: dict[str, Any] = {
         "success": True,
         "invoice_id": invoice_id,
         "amount_sats": amount_sats,
@@ -190,6 +202,9 @@ async def _create_purchase_invoice(
             f'After paying, call check_payment with invoice_id: "{invoice_id}"'
         ),
     }
+    if ttl is not None:
+        result["credit_ttl_seconds"] = ttl
+    return result
 
 
 async def purchase_credits_tool(
@@ -201,19 +216,13 @@ async def purchase_credits_tool(
     authority_public_key: str,
     tier_config_json: str | None = None,
     user_tiers_json: str | None = None,
+    default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Create a BTCPay invoice after verifying an Authority certificate.
 
     For OPERATOR use: the certified purchase flow. Every credit purchase
     requires a valid Authority-signed Ed25519 JWT certificate. The
     certificate's net_sats (amount after tax) determines the invoice amount.
-
-    Call flow: user requests credits → operator calls Authority's
-    certify_purchase → Authority returns signed JWT → operator passes JWT
-    here → this function verifies it and creates the BTCPay invoice.
-
-    For Authority-side tax credit purchases (no certificate needed), use
-    purchase_tax_credits_tool instead.
     """
     # Trust gate — no Authority key means the operator is misconfigured
     if not authority_public_key:
@@ -242,6 +251,7 @@ async def purchase_credits_tool(
         btcpay, cache, user_id, net_sats,
         tier_config_json, user_tiers_json,
         extra_metadata={"certificate_jti": cert_claims["jti"]},
+        default_credit_ttl_seconds=default_credit_ttl_seconds,
     )
     if result.get("success"):
         result["certificate_jti"] = cert_claims["jti"]
@@ -255,20 +265,18 @@ async def purchase_tax_credits_tool(
     amount_sats: int,
     tier_config_json: str | None = None,
     user_tiers_json: str | None = None,
+    default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Create a BTCPay invoice for a direct tax credit purchase.
 
     For AUTHORITY use: operators buy tax credits directly from the Authority.
     No certificate needed — the Authority IS the trust anchor.
-
-    The amount_sats is used directly as the invoice amount (no certificate
-    verification or tax deduction — the Authority handles tax via
-    certify_purchase separately).
     """
     return await _create_purchase_invoice(
         btcpay, cache, user_id, amount_sats,
         tier_config_json, user_tiers_json,
         extra_metadata={"purpose": "tax_credit_purchase"},
+        default_credit_ttl_seconds=default_credit_ttl_seconds,
     )
 
 
@@ -279,6 +287,7 @@ async def check_payment_tool(
     invoice_id: str,
     tier_config_json: str | None = None,
     user_tiers_json: str | None = None,
+    default_credit_ttl_seconds: int | None = None,
     royalty_address: str | None = None,
     royalty_percent: float = 0.02,
     royalty_min_sats: int = 10,
@@ -289,32 +298,6 @@ async def check_payment_tool(
     to call multiple times — credits are only granted once per invoice
     (idempotent via credited_invoices). On settlement, also fires a royalty
     payout to the Tollbooth originator if royalty_address is configured.
-
-    Invoice lifecycle: New → Processing → Settled (credits granted) or
-    Expired/Invalid (invoice removed from pending list).
-
-    Args:
-        btcpay: BTCPay client for the operator's store.
-        cache: Ledger cache for the user.
-        user_id: The user's identity string.
-        invoice_id: BTCPay invoice ID from purchase_credits_tool.
-        tier_config_json: Optional JSON string of tier definitions.
-        user_tiers_json: Optional JSON string mapping user IDs to tier names.
-        royalty_address: Lightning Address for the 2% royalty payout.
-        royalty_percent: Royalty fraction (0.02 = 2%).
-        royalty_min_sats: Minimum sats for a royalty payout to fire.
-
-    Returns dict with:
-        success: True on any valid response.
-        invoice_id: Echo of the input.
-        status: BTCPay status (New, Processing, Settled, Expired, Invalid).
-        credits_granted: Sats credited (only on first Settled check; 0 if already credited).
-        balance_api_sats: Updated balance after any crediting.
-        royalty_payout: Present only on settlement with royalty configured.
-        message: Human-readable status summary.
-
-    Errors: Returns success=False if the invoice_id is invalid or BTCPay
-    is unreachable.
     """
     try:
         invoice = await btcpay.get_invoice(invoice_id)
@@ -348,9 +331,11 @@ async def check_payment_tool(
             # Credit the user — flush immediately so credits survive cache loss
             amount_str = invoice.get("amount", "0")
             amount_sats = int(float(amount_str))
-            multiplier = _get_multiplier(user_id, tier_config_json, user_tiers_json)
+            _, multiplier, ttl = _get_tier_info(
+                user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
+            )
             credited = amount_sats * multiplier
-            ledger.credit_deposit(credited, invoice_id)
+            ledger.credit_deposit(credited, invoice_id, ttl_seconds=ttl)
             ledger.record_invoice_settled(
                 invoice_id=invoice_id,
                 api_sats_credited=credited,
@@ -405,34 +390,15 @@ async def check_balance_tool(
     user_id: str,
     tier_config_json: str | None = None,
     user_tiers_json: str | None = None,
+    default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
-    """Return the user's current credit balance, tier info, and usage summary.
-
-    Read-only — no side effects. Call anytime to check funding level, review
-    today's per-tool usage breakdown, or inspect invoice history.
-
-    Args:
-        cache: Ledger cache for the user.
-        user_id: The user's identity string.
-        tier_config_json: Optional JSON string of tier definitions.
-        user_tiers_json: Optional JSON string mapping user IDs to tier names.
-
-    Returns dict with:
-        success: Always True.
-        tier/multiplier: User's current tier name and credit multiplier.
-        balance_api_sats: Current available credit balance.
-        total_deposited_api_sats: Lifetime credits purchased.
-        total_consumed_api_sats: Lifetime credits consumed by tool calls.
-        pending_invoices: Count of unpaid invoices.
-        last_deposit_at: Timestamp of most recent credit deposit.
-        seed_balance_granted: True if the user received a starter balance.
-        today_usage: Per-tool call counts and sats consumed today (if any).
-        invoice_summary: Settled/pending counts and totals (if invoices exist).
-    """
+    """Return the user's current credit balance, tier info, and usage summary."""
     ledger = await cache.get(user_id)
     today = date.today().isoformat()
 
-    tier_name, multiplier = _get_tier_info(user_id, tier_config_json, user_tiers_json)
+    tier_name, multiplier, _ = _get_tier_info(
+        user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
+    )
 
     result: dict[str, Any] = {
         "success": True,
@@ -447,6 +413,18 @@ async def check_balance_tool(
 
     if "seed_balance_v1" in ledger.credited_invoices:
         result["seed_balance_granted"] = True
+
+    # Tranche expiration info
+    result["total_expired_api_sats"] = ledger.total_expired_api_sats
+    expiring_24h = ledger.expiring_within(86400)
+    if expiring_24h > 0:
+        result["expiring_within_24h_sats"] = expiring_24h
+    next_exp = ledger.next_expiration()
+    if next_exp:
+        result["next_expiration_iso"] = next_exp
+    result["active_tranches"] = len([
+        t for t in ledger.tranches if t.remaining_sats > 0
+    ])
 
     # Include today's usage if available
     today_log = ledger.daily_log.get(today)
@@ -478,34 +456,9 @@ async def restore_credits_tool(
     invoice_id: str,
     tier_config_json: str | None = None,
     user_tiers_json: str | None = None,
+    default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
-    """Restore credits from a paid invoice that was lost due to cache or vault issues.
-
-    Emergency recovery tool. Checks three sources in order: (1) idempotency
-    guard (already credited? no-op), (2) vault invoice record (restore without
-    BTCPay call), (3) BTCPay API (verify Settled status, then credit).
-
-    Call this when a user reports "I paid but my balance didn't update" — typically
-    caused by a cache eviction or vault flush failure between payment and crediting.
-    Safe to call multiple times; will never double-credit.
-
-    Args:
-        btcpay: BTCPay client for the operator's store.
-        cache: Ledger cache for the user.
-        user_id: The user's identity string.
-        invoice_id: BTCPay invoice ID that the user claims to have paid.
-        tier_config_json: Optional JSON string of tier definitions.
-        user_tiers_json: Optional JSON string mapping user IDs to tier names.
-
-    Returns dict with:
-        success: True if credits were restored or already credited.
-        source: 'vault_record' or 'btcpay' — where the settlement was confirmed.
-        credits_granted: Sats credited (0 if already credited).
-        balance_api_sats: Updated balance.
-
-    Errors: Returns success=False if invoice is not Settled or BTCPay is
-    unreachable and no vault record exists.
-    """
+    """Restore credits from a paid invoice that was lost due to cache or vault issues."""
     # Check idempotency first
     ledger = await cache.get(user_id)
     if invoice_id in ledger.credited_invoices:
@@ -522,7 +475,10 @@ async def restore_credits_tool(
     if vault_record and vault_record.status == "Settled" and vault_record.api_sats_credited > 0:
         # Restore from vault record — no BTCPay call needed
         credited = vault_record.api_sats_credited
-        ledger.credit_deposit(credited, invoice_id)
+        _, _, ttl = _get_tier_info(
+            user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
+        )
+        ledger.credit_deposit(credited, invoice_id, ttl_seconds=ttl)
         cache.mark_dirty(user_id)
         if not await cache.flush_user(user_id):
             logger.error(
@@ -557,10 +513,12 @@ async def restore_credits_tool(
     # Credit the balance
     amount_str = invoice.get("amount", "0")
     amount_sats = int(float(amount_str))
-    multiplier = _get_multiplier(user_id, tier_config_json, user_tiers_json)
+    _, multiplier, ttl = _get_tier_info(
+        user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
+    )
     credited = amount_sats * multiplier
 
-    ledger.credit_deposit(credited, invoice_id)
+    ledger.credit_deposit(credited, invoice_id, ttl_seconds=ttl)
     ledger.record_invoice_settled(
         invoice_id=invoice_id,
         api_sats_credited=credited,
@@ -592,17 +550,9 @@ async def reconcile_pending_invoices(
     user_id: str,
     tier_config_json: str | None = None,
     user_tiers_json: str | None = None,
+    default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
-    """Reconcile pending invoices on startup: credit settled, remove terminal.
-
-    Iterates pending_invoices, checks each against BTCPay, and:
-    - Settled + not yet credited → credit_deposit + record_invoice_settled
-    - Expired/Invalid → remove from pending + record_invoice_terminal
-    - BTCPay errors → skip (logged, not fatal)
-
-    A single flush_user() is called at the end if any changes were made.
-    Returns {"reconciled": N, "actions": [...]}.
-    """
+    """Reconcile pending invoices on startup: credit settled, remove terminal."""
     ledger = await cache.get(user_id)
     pending_copy = list(ledger.pending_invoices)
     if not pending_copy:
@@ -623,9 +573,11 @@ async def reconcile_pending_invoices(
         if status == "Settled" and invoice_id not in ledger.credited_invoices:
             amount_str = invoice.get("amount", "0")
             amount_sats = int(float(amount_str))
-            multiplier = _get_multiplier(user_id, tier_config_json, user_tiers_json)
+            _, multiplier, ttl = _get_tier_info(
+                user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
+            )
             credited = amount_sats * multiplier
-            ledger.credit_deposit(credited, invoice_id)
+            ledger.credit_deposit(credited, invoice_id, ttl_seconds=ttl)
             ledger.record_invoice_settled(
                 invoice_id=invoice_id,
                 api_sats_credited=credited,
@@ -707,30 +659,7 @@ async def btcpay_status_tool(
     config: TollboothConfig,
     btcpay: BTCPayClient | None,
 ) -> dict[str, Any]:
-    """Report BTCPay configuration state, connectivity, and permissions for diagnostics.
-
-    Admin/operator tool. Checks whether BTCPay is reachable, the store exists,
-    the API key has required permissions (invoice creation, invoice viewing,
-    and payout creation if royalties are enabled), and tier/royalty config
-    is valid.
-
-    Call this during initial setup to verify configuration, or when payments
-    aren't working to diagnose connectivity or permission issues.
-
-    Args:
-        config: TollboothConfig with BTCPay and royalty settings.
-        btcpay: BTCPay client (may be None if connection vars are missing).
-
-    Returns dict with:
-        btcpay_host/btcpay_store_id: Configured endpoints.
-        btcpay_api_key_status: 'present' or 'missing'.
-        authority_config: Trust chain status — key configured/valid, fingerprint.
-        server_reachable: True/False/None (None if not configured).
-        store_name: Store name or error status.
-        api_key_permissions: Required vs present permissions, with missing list.
-        tier_config/user_tiers: Config status summaries.
-        royalty_config: Royalty address, percent, min_sats, enabled flag.
-    """
+    """Report BTCPay configuration state, connectivity, and permissions for diagnostics."""
     result: dict[str, Any] = {
         "btcpay_host": config.btcpay_host or None,
         "btcpay_store_id": config.btcpay_store_id or None,
@@ -765,6 +694,9 @@ async def btcpay_status_tool(
             result["user_tiers"] = "invalid JSON"
     else:
         result["user_tiers"] = "missing"
+
+    # Credit TTL
+    result["credit_ttl_seconds"] = config.credit_ttl_seconds
 
     # Authority trust chain config
     from tollbooth.certificate import normalize_public_key, key_fingerprint
