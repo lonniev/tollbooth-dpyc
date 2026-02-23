@@ -12,7 +12,7 @@ from tollbooth.btcpay_client import BTCPayClient, BTCPayError, BTCPayAuthError
 from tollbooth.vault_backend import VaultBackend
 from tollbooth.ledger_cache import LedgerCache
 from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_API_SATS
-from tollbooth.vaults import TheBrainVault
+from tollbooth.vaults import TheBrainVault, NeonVault, NeonQueryError
 
 __all__ = [
     "CertificateError",
@@ -27,6 +27,8 @@ __all__ = [
     "VaultBackend",
     "LedgerCache",
     "TheBrainVault",
+    "NeonVault",
+    "NeonQueryError",
     "ToolTier",
     "MAX_INVOICE_SATS",
     "LOW_BALANCE_FLOOR_API_SATS",
