@@ -29,6 +29,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+nostr = [
+    "pynostr>=0.6.0",
+    "websocket-client>=1.6.0",
+]
 dev = [
     "pytest==9.0.2",
     "pytest-asyncio==1.3.0",

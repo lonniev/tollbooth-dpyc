@@ -14,6 +14,12 @@ from tollbooth.ledger_cache import LedgerCache
 from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_API_SATS
 from tollbooth.vaults import TheBrainVault, NeonVault, NeonQueryError
 
+try:
+    from tollbooth.nostr_audit import NostrAuditPublisher, AuditedVault
+except ImportError:
+    NostrAuditPublisher = None  # type: ignore[assignment,misc]
+    AuditedVault = None  # type: ignore[assignment,misc]
+
 __all__ = [
     "CertificateError",
     "TollboothConfig",
@@ -36,4 +42,6 @@ __all__ = [
     "normalize_public_key",
     "key_fingerprint",
     "UNDERSTOOD_PROTOCOLS",
+    "NostrAuditPublisher",
+    "AuditedVault",
 ]
