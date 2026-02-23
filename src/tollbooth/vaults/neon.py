@@ -89,7 +89,7 @@ class NeonVault:
         Raises ``NeonQueryError`` on SQL errors, ``httpx.HTTPStatusError``
         on transport errors.
         """
-        body = {"query": query, "params": params or []}
+        body = {"query": query, "params": params or [], "arrayMode": True}
         resp = await self._client.post(self._endpoint, json=body)
         resp.raise_for_status()
         data = resp.json()
