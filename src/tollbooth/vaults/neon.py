@@ -236,6 +236,131 @@ class NeonVault:
             "CREATE INDEX IF NOT EXISTS idx_transactions_created "
             "ON transactions(created_at)"
         )
+        # -- Anchors table (OTS Bitcoin anchoring) --
+        await self._execute(
+            "CREATE TABLE IF NOT EXISTS anchors ("
+            "    id BIGSERIAL PRIMARY KEY,"
+            "    root_hash TEXT NOT NULL UNIQUE,"
+            "    leaf_count INTEGER NOT NULL,"
+            "    status TEXT NOT NULL DEFAULT 'pending',"
+            "    ots_receipts_json TEXT,"
+            "    snapshot_json TEXT NOT NULL,"
+            "    leaf_hashes_json TEXT NOT NULL,"
+            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    confirmed_at TIMESTAMPTZ"
+            ")"
+        )
+        await self._execute(
+            "CREATE INDEX IF NOT EXISTS idx_anchors_created "
+            "ON anchors(created_at)"
+        )
+        await self._execute(
+            "CREATE INDEX IF NOT EXISTS idx_anchors_status "
+            "ON anchors(status)"
+        )
+
+    # -- Anchor operations ---------------------------------------------------
+
+    async def fetch_all_balances(self) -> list[tuple[str, str]]:
+        """Fetch all (npub, ledger_json) pairs, sorted by npub.
+
+        Used by the OTS anchoring system to build a Merkle tree of all
+        ledger balances.
+        """
+        result = await self._execute(
+            "SELECT npub, ledger_json FROM balances ORDER BY npub"
+        )
+        rows = result.get("rows", [])
+        return [(row["npub"], row["ledger_json"]) for row in rows]
+
+    async def store_anchor(
+        self,
+        root_hash: str,
+        leaf_count: int,
+        status: str,
+        ots_receipts_json: str | None,
+        snapshot_json: str,
+        leaf_hashes_json: str,
+        created_at: str,
+    ) -> str:
+        """Store an anchor record. Returns the anchor ID as a string."""
+        result = await self._execute(
+            "INSERT INTO anchors "
+            "(root_hash, leaf_count, status, ots_receipts_json, "
+            " snapshot_json, leaf_hashes_json, created_at) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz) "
+            "RETURNING id",
+            [root_hash, leaf_count, status, ots_receipts_json,
+             snapshot_json, leaf_hashes_json, created_at],
+        )
+        rows = result.get("rows", [])
+        if rows:
+            return str(rows[0]["id"])
+        raise NeonQueryError("INSERT anchor returned no rows")
+
+    async def fetch_anchor(self, anchor_id: str) -> dict[str, Any] | None:
+        """Fetch a single anchor record by ID."""
+        result = await self._execute(
+            "SELECT id, root_hash, leaf_count, status, ots_receipts_json, "
+            "snapshot_json, leaf_hashes_json, created_at, confirmed_at "
+            "FROM anchors WHERE id = $1",
+            [int(anchor_id)],
+        )
+        rows = result.get("rows", [])
+        return rows[0] if rows else None
+
+    async def list_anchors(
+        self,
+        limit: int = 20,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List recent anchor records, optionally filtered by status."""
+        if status:
+            result = await self._execute(
+                "SELECT id, root_hash, leaf_count, status, ots_receipts_json, "
+                "created_at, confirmed_at "
+                "FROM anchors WHERE status = $1 "
+                "ORDER BY created_at DESC LIMIT $2",
+                [status, limit],
+            )
+        else:
+            result = await self._execute(
+                "SELECT id, root_hash, leaf_count, status, ots_receipts_json, "
+                "created_at, confirmed_at "
+                "FROM anchors ORDER BY created_at DESC LIMIT $1",
+                [limit],
+            )
+        return result.get("rows", [])
+
+    async def update_anchor_status(
+        self,
+        anchor_id: str,
+        status: str,
+        confirmed_at: str | None = None,
+    ) -> None:
+        """Update an anchor's status (e.g., 'submitted' → 'confirmed')."""
+        if confirmed_at:
+            await self._execute(
+                "UPDATE anchors SET status = $1, confirmed_at = $2::timestamptz "
+                "WHERE id = $3",
+                [status, confirmed_at, int(anchor_id)],
+            )
+        else:
+            await self._execute(
+                "UPDATE anchors SET status = $1 WHERE id = $2",
+                [status, int(anchor_id)],
+            )
+
+    async def update_anchor_receipts(
+        self,
+        anchor_id: str,
+        ots_receipts_json: str,
+    ) -> None:
+        """Update an anchor's OTS receipts (e.g., after upgrade)."""
+        await self._execute(
+            "UPDATE anchors SET ots_receipts_json = $1 WHERE id = $2",
+            [ots_receipts_json, int(anchor_id)],
+        )
 
     # -- Helpers -------------------------------------------------------------
 
