@@ -22,3 +22,6 @@ class TollboothConfig:
     credit_ttl_seconds: int | None = 604800  # 7 days default, None = never
     flush_batch_size: int = 10
     flush_staleness_secs: float = 120.0
+    # OpenTimestamps Bitcoin anchoring
+    ots_enabled: bool = False
+    ots_calendars: str | None = None  # Comma-separated URLs; None = defaults
