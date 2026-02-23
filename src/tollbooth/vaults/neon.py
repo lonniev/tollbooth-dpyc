@@ -9,7 +9,7 @@ Neon HTTP API:
 - Endpoint: https://{host}/sql (derived from NEON_DATABASE_URL)
 - Auth: Neon-Connection-String header with full connection string
 - Request: {"query": "SELECT $1::text", "params": ["hello"]}
-- Response: {"fields": [...], "rows": [["hello"]], "rowCount": 1, "command": "SELECT"}
+- Response: {"fields": [...], "rows": [{"text": "hello"}], "rowCount": 1, "command": "SELECT"}
 
 Call ``ensure_schema()`` once at startup to create tables if they don't exist.
 """
@@ -89,7 +89,7 @@ class NeonVault:
         Raises ``NeonQueryError`` on SQL errors, ``httpx.HTTPStatusError``
         on transport errors.
         """
-        body = {"query": query, "params": params or [], "arrayMode": True}
+        body = {"query": query, "params": params or []}
         resp = await self._client.post(self._endpoint, json=body)
         resp.raise_for_status()
         data = resp.json()
@@ -123,7 +123,7 @@ class NeonVault:
             )
             rows = result.get("rows", [])
             if rows:
-                new_version = rows[0][0]
+                new_version = rows[0]["version"]
                 self._version_cache[user_id] = new_version
                 return str(new_version)
 
@@ -146,7 +146,7 @@ class NeonVault:
         )
         rows = result.get("rows", [])
         if rows:
-            new_version = rows[0][0]
+            new_version = rows[0]["version"]
             self._version_cache[user_id] = new_version
             return str(new_version)
 
@@ -166,8 +166,8 @@ class NeonVault:
         if not rows:
             return None
 
-        ledger_json = rows[0][0]
-        version = rows[0][1]
+        ledger_json = rows[0]["ledger_json"]
+        version = rows[0]["version"]
         self._version_cache[user_id] = version
         return ledger_json
 
@@ -193,7 +193,7 @@ class NeonVault:
             )
             rows = result.get("rows", [])
             if rows:
-                return str(rows[0][0])
+                return str(rows[0]["id"])
         except (NeonQueryError, httpx.HTTPError) as e:
             logger.warning("Failed to record snapshot for %s: %s", user_id, e)
 

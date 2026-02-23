@@ -35,12 +35,12 @@ def _response(
 
 
 def _sql_result(
-    rows: list[list] | None = None,
+    rows: list[dict] | None = None,
     row_count: int | None = None,
     command: str = "SELECT",
     fields: list[dict] | None = None,
 ) -> dict:
-    """Build a Neon SQL result dict."""
+    """Build a Neon SQL result dict (JSON object mode — rows are dicts)."""
     result: dict = {"command": command}
     if rows is not None:
         result["rows"] = rows
@@ -78,18 +78,18 @@ class TestExecute:
     @pytest.mark.asyncio
     async def test_returns_result_dict(self) -> None:
         vault = _vault()
-        result = _sql_result(rows=[[1]], command="SELECT")
+        result = _sql_result(rows=[{"num": 1}], command="SELECT")
         vault._client.post = AsyncMock(return_value=_response(200, result))
 
-        data = await vault._execute("SELECT 1")
-        assert data["rows"] == [[1]]
+        data = await vault._execute("SELECT 1 AS num")
+        assert data["rows"] == [{"num": 1}]
         vault._client.post.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_sends_query_and_params(self) -> None:
         vault = _vault()
         vault._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(rows=[["hello"]]))
+            return_value=_response(200, _sql_result(rows=[{"text": "hello"}]))
         )
         await vault._execute("SELECT $1::text", ["hello"])
         call_args = vault._client.post.call_args
@@ -124,7 +124,9 @@ class TestStoreLedger:
     async def test_inserts_new_ledger(self) -> None:
         vault = _vault()
         vault._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(rows=[[1]], command="INSERT"))
+            return_value=_response(200, _sql_result(
+                rows=[{"version": 1}], command="INSERT",
+            ))
         )
         result = await vault.store_ledger("npub1abc", '{"v": 4, "tranches": []}')
         assert result == "1"
@@ -135,7 +137,9 @@ class TestStoreLedger:
         vault = _vault()
         vault._version_cache["npub1abc"] = 3
         vault._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(rows=[[4]], command="UPDATE"))
+            return_value=_response(200, _sql_result(
+                rows=[{"version": 4}], command="UPDATE",
+            ))
         )
         result = await vault.store_ledger("npub1abc", '{"v": 4}')
         assert result == "4"
@@ -162,7 +166,9 @@ class TestStoreLedger:
                 return _response(200, _sql_result(rows=[], command="UPDATE"))
             else:
                 # Upsert succeeds
-                return _response(200, _sql_result(rows=[[6]], command="INSERT"))
+                return _response(200, _sql_result(
+                    rows=[{"version": 6}], command="INSERT",
+                ))
 
         vault._client.post = AsyncMock(side_effect=mock_post)
         result = await vault.store_ledger("npub1abc", '{"v": 4}')
@@ -190,7 +196,9 @@ class TestFetchLedger:
     async def test_returns_ledger_json(self) -> None:
         vault = _vault()
         vault._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(rows=[['{"v": 4}', 3]]))
+            return_value=_response(200, _sql_result(
+                rows=[{"ledger_json": '{"v": 4}', "version": 3}],
+            ))
         )
         result = await vault.fetch_ledger("npub1abc")
         assert result == '{"v": 4}'
@@ -209,7 +217,9 @@ class TestFetchLedger:
     async def test_caches_version(self) -> None:
         vault = _vault()
         vault._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(rows=[['{"v": 4}', 7]]))
+            return_value=_response(200, _sql_result(
+                rows=[{"ledger_json": '{"v": 4}', "version": 7}],
+            ))
         )
         await vault.fetch_ledger("npub1abc")
         assert vault._version_cache["npub1abc"] == 7
@@ -232,10 +242,14 @@ class TestSnapshotLedger:
             call_count += 1
             if call_count == 1:
                 # store_ledger UPSERT
-                return _response(200, _sql_result(rows=[[2]], command="INSERT"))
+                return _response(200, _sql_result(
+                    rows=[{"version": 2}], command="INSERT",
+                ))
             else:
                 # snapshot journal INSERT
-                return _response(200, _sql_result(rows=[[42]], command="INSERT"))
+                return _response(200, _sql_result(
+                    rows=[{"id": 42}], command="INSERT",
+                ))
 
         vault._client.post = AsyncMock(side_effect=mock_post)
 
@@ -254,7 +268,9 @@ class TestSnapshotLedger:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return _response(200, _sql_result(rows=[[1]], command="INSERT"))
+                return _response(200, _sql_result(
+                    rows=[{"version": 1}], command="INSERT",
+                ))
             else:
                 return _response(200, {"message": "ERROR: relation does not exist"})
 
@@ -271,9 +287,15 @@ class TestSnapshotLedger:
 
         async def mock_post(url: str, **kwargs: dict) -> httpx.Response:
             body = kwargs.get("json", {})
-            if isinstance(body, dict) and "snapshot" in body.get("query", ""):
+            query = body.get("query", "") if isinstance(body, dict) else ""
+            if "snapshot" in query:
                 captured_params.extend(body.get("params", []))
-            return _response(200, _sql_result(rows=[[1]], command="INSERT"))
+                return _response(200, _sql_result(
+                    rows=[{"id": 99}], command="INSERT",
+                ))
+            return _response(200, _sql_result(
+                rows=[{"version": 1}], command="INSERT",
+            ))
 
         vault._client.post = AsyncMock(side_effect=mock_post)
 
