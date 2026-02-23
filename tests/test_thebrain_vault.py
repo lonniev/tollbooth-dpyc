@@ -810,6 +810,59 @@ class TestStoreLedger:
         # Cache should be updated
         assert vault._daily_child_cache[f"user1/{today}"] == "fresh-child"
 
+    @pytest.mark.asyncio
+    async def test_search_fallback_finds_daily_child(self) -> None:
+        """When graph returns stale data, search endpoint finds the child."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
+        # Graph returns empty (stale) — child exists but not visible
+        vault._get_children = AsyncMock(return_value=[])
+        # Search finds the child
+        vault._search_children_by_name = AsyncMock(return_value="search-found-child")
+        vault._set_note = AsyncMock()
+
+        result = await vault.store_ledger("user1", '{"balance": 500}')
+        assert result == "search-found-child"
+        vault._set_note.assert_called_once_with("search-found-child", '{"balance": 500}')
+        # Should NOT have created a new thought
+        assert not hasattr(vault._create_thought, 'called') or not vault._create_thought.called
+
+    @pytest.mark.asyncio
+    async def test_creates_only_when_graph_and_search_both_miss(self) -> None:
+        """Creates daily child only when both graph and search find nothing."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
+        vault._get_children = AsyncMock(return_value=[])
+        vault._search_children_by_name = AsyncMock(return_value=None)
+        vault._create_thought = AsyncMock(return_value={"id": "new-child"})
+        vault._set_note = AsyncMock()
+
+        result = await vault.store_ledger("user1", '{"balance": 600}')
+        assert result == "new-child"
+        vault._create_thought.assert_called_once_with(today, "ledger-parent")
+
+    @pytest.mark.asyncio
+    async def test_get_children_passes_no_cache_in_store_ledger(self) -> None:
+        """store_ledger calls _get_children with no_cache=True."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
+        vault._get_children = AsyncMock(
+            return_value=[{"id": "child-1", "name": today}]
+        )
+        vault._set_note = AsyncMock()
+
+        await vault.store_ledger("user1", '{"data": "test"}')
+        vault._get_children.assert_called_once_with("ledger-parent", no_cache=True)
+
 
 # ---------------------------------------------------------------------------
 # fetch_ledger
@@ -872,6 +925,39 @@ class TestFetchLedger:
 
         result = await vault.fetch_ledger("user1")
         assert result == '{"balance": 42}'
+
+    @pytest.mark.asyncio
+    async def test_skips_empty_duplicates(self) -> None:
+        """fetch_ledger skips children with empty notes (duplicates from bug)."""
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
+        vault._get_children = AsyncMock(return_value=[
+            {"id": "dup1", "name": "2026-02-22"},
+            {"id": "dup2", "name": "2026-02-22"},
+            {"id": "dup3", "name": "2026-02-22"},
+            {"id": "good", "name": "2026-02-21"},
+        ])
+
+        async def _get_note_side_effect(thought_id: str) -> str | None:
+            if thought_id == "good":
+                return '{"balance": 777}'
+            return None  # Empty duplicates
+
+        vault._get_note = AsyncMock(side_effect=_get_note_side_effect)
+
+        result = await vault.fetch_ledger("user1")
+        assert result == '{"balance": 777}'
+
+    @pytest.mark.asyncio
+    async def test_fetch_uses_no_cache(self) -> None:
+        """fetch_ledger calls _get_children with no_cache=True."""
+        vault = _vault()
+        vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
+        vault._get_children = AsyncMock(return_value=[])
+        vault._get_note = AsyncMock(return_value=None)
+
+        await vault.fetch_ledger("user1")
+        vault._get_children.assert_called_once_with("ledger-parent", no_cache=True)
 
 
 # ---------------------------------------------------------------------------

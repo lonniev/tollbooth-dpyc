@@ -138,11 +138,23 @@ class TheBrainVault:
         resp.raise_for_status()
         return data
 
-    async def _get_children(self, thought_id: str) -> list[dict[str, Any]]:
-        """Get a thought's children via the graph endpoint."""
+    async def _get_children(
+        self, thought_id: str, *, no_cache: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Get a thought's children via the graph endpoint.
+
+        When *no_cache* is True, cache-busting headers are sent to bypass
+        Azure App Service CDN caching — critical for write paths where a
+        recently created child must be visible.
+        """
+        headers: dict[str, str] = {}
+        if no_cache:
+            headers["Cache-Control"] = "no-cache"
+            headers["Pragma"] = "no-cache"
         try:
             resp = await self._client.get(
-                f"/thoughts/{self._brain_id}/{thought_id}/graph"
+                f"/thoughts/{self._brain_id}/{thought_id}/graph",
+                headers=headers,
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -150,6 +162,36 @@ class TheBrainVault:
         except httpx.HTTPError:
             logger.warning("Failed to read graph for thought %s", thought_id)
         return []
+
+    async def _search_children_by_name(
+        self, parent_id: str, name: str,
+    ) -> str | None:
+        """Search for a child thought by exact name under a parent.
+
+        Uses the ``/search`` endpoint as a fallback when the graph endpoint
+        returns stale data. Returns the thought ID if found, else None.
+        """
+        try:
+            resp = await self._client.get(
+                f"/search/{self._brain_id}",
+                params={"queryText": name, "maxResults": 10},
+            )
+            if resp.status_code == 200:
+                results = resp.json()
+                for r in results:
+                    if r.get("name") == name and r.get("sourceThoughtId") == parent_id:
+                        return r.get("id")
+                    # Fallback: check by verifying parentage via graph
+                    if r.get("name") == name:
+                        # Verify this is actually a child of parent_id
+                        graph = await self._get_graph(r["id"])
+                        parents = graph.get("parents", [])
+                        for p in parents:
+                            if p.get("id") == parent_id:
+                                return r["id"]
+        except httpx.HTTPError:
+            logger.warning("Search failed for '%s' under %s", name, parent_id)
+        return None
 
     async def _get_graph(self, thought_id: str) -> dict[str, Any]:
         """GET /thoughts/{brainId}/{thoughtId}/graph -> full graph dict.
@@ -456,13 +498,25 @@ class TheBrainVault:
             graph = await self._get_graph(self._home_thought_id)
             await self._register_member(ledger_parent_id, graph)
 
-        # Find or create today's daily child
-        children = await self._get_children(ledger_parent_id)
+        # Find or create today's daily child.
+        # Use no_cache=True to bypass Azure App Service CDN staleness.
+        children = await self._get_children(ledger_parent_id, no_cache=True)
         daily_child_id: str | None = None
         for child in children:
             if child.get("name") == today:
                 daily_child_id = child.get("id")
                 break
+
+        # Fallback: search endpoint (separate index from graph cache)
+        if not daily_child_id:
+            daily_child_id = await self._search_children_by_name(
+                ledger_parent_id, today,
+            )
+            if daily_child_id:
+                logger.info(
+                    "Found daily child via search fallback: %s/%s -> %s",
+                    user_id, today, daily_child_id,
+                )
 
         if daily_child_id:
             await self._set_note(daily_child_id, ledger_json)
@@ -489,16 +543,18 @@ class TheBrainVault:
         if not ledger_parent_id:
             return None
 
-        children = await self._get_children(ledger_parent_id)
+        children = await self._get_children(ledger_parent_id, no_cache=True)
         if children:
             # Sort by name descending -- ISO dates sort lexicographically
             children_sorted = sorted(
                 children, key=lambda t: t.get("name", ""), reverse=True
             )
-            most_recent = children_sorted[0]
-            note = await self._get_note(most_recent["id"])
-            if note:
-                return note
+            # Try children in order until we find one with a non-empty note.
+            # Duplicates from earlier bugs may have empty notes — skip them.
+            for child in children_sorted:
+                note = await self._get_note(child["id"])
+                if note:
+                    return note
 
         # Fallback: read parent note (pre-migration state)
         return await self._get_note(ledger_parent_id)
