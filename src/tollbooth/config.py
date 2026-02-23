@@ -20,3 +20,5 @@ class TollboothConfig:
     tollbooth_royalty_min_sats: int = 10
     authority_public_key: str | None = None
     credit_ttl_seconds: int | None = 604800  # 7 days default, None = never
+    flush_batch_size: int = 10
+    flush_staleness_secs: float = 120.0

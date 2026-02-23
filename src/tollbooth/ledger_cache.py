@@ -27,6 +27,8 @@ class _CacheEntry:
 
     ledger: UserLedger
     dirty: bool = False
+    dirty_count: int = 0
+    last_flush_time: float = field(default_factory=time.monotonic)
 
 
 class LedgerCache:
@@ -46,18 +48,21 @@ class LedgerCache:
         flush_interval_secs: int = 60,
         flush_retries: int = 1,
         flush_retry_delay: float = 2.0,
+        flush_batch_size: int = 10,
+        flush_staleness_secs: float = 120.0,
     ) -> None:
         self._vault = vault
         self._maxsize = maxsize
         self._flush_interval = flush_interval_secs
         self._flush_retries = flush_retries
         self._flush_retry_delay = flush_retry_delay
+        self._flush_batch_size = flush_batch_size
+        self._flush_staleness_secs = flush_staleness_secs
         self._entries: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
         self._flush_task: asyncio.Task[None] | None = None
         self._last_flush_at: str | None = None
         self._total_flushes: int = 0
-        self._last_flush_check: float = time.monotonic()
 
     def _get_lock(self, user_id: str) -> asyncio.Lock:
         """Get or create a per-user lock."""
@@ -65,30 +70,33 @@ class LedgerCache:
             self._locks[user_id] = asyncio.Lock()
         return self._locks[user_id]
 
-    async def _maybe_flush(self) -> None:
-        """Flush dirty entries if enough time has passed since the last flush.
+    def _flush_due_entry(self, entry: _CacheEntry) -> bool:
+        """Check if this entry needs flushing based on count or staleness."""
+        if not entry.dirty:
+            return False
+        if entry.dirty_count >= self._flush_batch_size:
+            return True
+        if time.monotonic() - entry.last_flush_time > self._flush_staleness_secs:
+            return True
+        return False
 
-        Called from get() to piggyback on request-driven event loop activity.
-        In serverless environments where asyncio.sleep() doesn't advance
-        between requests, this ensures dirty entries are eventually persisted.
-        """
-        now = time.monotonic()
-        if now - self._last_flush_check < self._flush_interval:
-            return
-        self._last_flush_check = now
-        if self.dirty_count > 0:
-            count = await self.flush_dirty()
-            if count > 0:
-                logger.info("Opportunistic flush: wrote %d ledger(s).", count)
+    def flush_due(self, user_id: str) -> bool:
+        """Check if a user's cache entry is due for flushing."""
+        entry = self._entries.get(user_id)
+        if entry is None:
+            return False
+        return self._flush_due_entry(entry)
 
     async def get(self, user_id: str) -> UserLedger:
         """Return the cached ledger, loading from vault on miss."""
-        await self._maybe_flush()
         lock = self._get_lock(user_id)
         async with lock:
             if user_id in self._entries:
+                entry = self._entries[user_id]
+                if self._flush_due_entry(entry):
+                    await self._flush_entry(user_id, entry)
                 self._entries.move_to_end(user_id)
-                return self._entries[user_id].ledger
+                return entry.ledger
 
             # Cache miss — load from vault
             ledger = await self._load_from_vault(user_id)
@@ -106,6 +114,7 @@ class LedgerCache:
         entry = self._entries.get(user_id)
         if entry:
             entry.dirty = True
+            entry.dirty_count += 1
 
     async def flush_user(self, user_id: str) -> bool:
         """Immediately flush a single user's entry to vault.
@@ -118,6 +127,23 @@ class LedgerCache:
         if not entry or not entry.dirty:
             return True  # Nothing to flush
         return await self._flush_entry(user_id, entry)
+
+    async def debit(self, user_id: str, tool_name: str, cost: int) -> bool:
+        """Debit a tool cost from a user's ledger.
+
+        Handles hydration (load from vault on miss), flush-due check,
+        and dirty tracking. Returns False if insufficient balance.
+        """
+        ledger = await self.get(user_id)  # hydrate + flush-due check
+        if not ledger.debit(tool_name, cost):
+            return False
+        self.mark_dirty(user_id)
+        return True
+
+    async def write_through_credit(self, user_id: str) -> bool:
+        """Mark dirty and immediately flush. Use for credit settlements."""
+        self.mark_dirty(user_id)
+        return await self.flush_user(user_id)
 
     async def _load_from_vault(self, user_id: str) -> UserLedger:
         """Load ledger JSON from vault, returning fresh ledger on miss/error."""
@@ -150,6 +176,8 @@ class LedgerCache:
             try:
                 await self._vault.store_ledger(user_id, entry.ledger.to_json())
                 entry.dirty = False
+                entry.dirty_count = 0
+                entry.last_flush_time = time.monotonic()
                 self._last_flush_at = datetime.now(timezone.utc).isoformat()
                 self._total_flushes += 1
                 return True
@@ -259,9 +287,8 @@ class LedgerCache:
             "total_flushes": self._total_flushes,
             "flush_retries": self._flush_retries,
             "flush_retry_delay": self._flush_retry_delay,
+            "flush_batch_size": self._flush_batch_size,
+            "flush_staleness_secs": self._flush_staleness_secs,
             "background_flush_running": self._flush_task is not None
                                         and not self._flush_task.done(),
-            "last_flush_check_age_secs": round(
-                time.monotonic() - self._last_flush_check, 1
-            ),
         }
