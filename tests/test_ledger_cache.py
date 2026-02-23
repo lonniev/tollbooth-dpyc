@@ -1,9 +1,10 @@
 """Tests for LedgerCache: LRU eviction, background flush, concurrency."""
 
 import asyncio
+import time
 
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
@@ -23,6 +24,13 @@ def _mock_vault(ledger_json: str | None = None, fail_store: bool = False):
     else:
         vault.store_ledger = AsyncMock(return_value="ledger-thought-id")
     return vault
+
+
+def _funded_vault(balance: int = 500) -> AsyncMock:
+    """Create a mock vault that returns a funded ledger."""
+    ledger = UserLedger()
+    ledger.credit_deposit(balance, "seed")
+    return _mock_vault(ledger_json=ledger.to_json())
 
 
 # ---------------------------------------------------------------------------
@@ -148,9 +156,13 @@ class TestLedgerCacheFlush:
         ledger = await cache.get("user1")
         ledger.credit_deposit(100, "test")
         cache.mark_dirty("user1")
+        # dirty_count should be 1
+        assert cache._entries["user1"].dirty_count == 1
         count = await cache.flush_dirty()
         assert count == 1
         vault.store_ledger.assert_called_once()
+        # After flush, dirty_count should be reset
+        assert cache._entries["user1"].dirty_count == 0
 
     @pytest.mark.asyncio
     async def test_flush_skips_clean_entries(self) -> None:
@@ -182,6 +194,8 @@ class TestLedgerCacheFlush:
         cache.mark_dirty("user1")
         count = await cache.flush_dirty()
         assert count == 0  # failed, entry still dirty
+        # dirty_count should be preserved on failure
+        assert cache._entries["user1"].dirty_count == 1
         # Retry should attempt again
         vault.store_ledger.reset_mock()
         vault.store_ledger = AsyncMock(return_value="ok")
@@ -204,6 +218,16 @@ class TestLedgerCacheFlush:
         vault = _mock_vault()
         cache = LedgerCache(vault, maxsize=5)
         cache.mark_dirty("ghost")  # should not raise
+
+    @pytest.mark.asyncio
+    async def test_mark_dirty_increments_count(self) -> None:
+        vault = _mock_vault()
+        cache = LedgerCache(vault, maxsize=5)
+        await cache.get("user1")
+        cache.mark_dirty("user1")
+        cache.mark_dirty("user1")
+        cache.mark_dirty("user1")
+        assert cache._entries["user1"].dirty_count == 3
 
 
 # ---------------------------------------------------------------------------
@@ -428,3 +452,210 @@ class TestLedgerCacheSize:
         await cache.get("user1")
         await cache.get("user2")
         assert cache.size == 2
+
+
+# ---------------------------------------------------------------------------
+# Flush-due (per-entry triggers)
+# ---------------------------------------------------------------------------
+
+
+class TestFlushDue:
+    @pytest.mark.asyncio
+    async def test_flush_due_after_count_threshold(self) -> None:
+        """dirty_count >= N triggers flush_due."""
+        vault = _mock_vault()
+        cache = LedgerCache(vault, maxsize=5, flush_batch_size=3)
+        await cache.get("user1")
+        cache.mark_dirty("user1")
+        cache.mark_dirty("user1")
+        assert not cache.flush_due("user1")  # 2 < 3
+        cache.mark_dirty("user1")
+        assert cache.flush_due("user1")  # 3 >= 3
+
+    @pytest.mark.asyncio
+    async def test_flush_not_due_below_threshold(self) -> None:
+        """dirty_count < N doesn't trigger flush."""
+        vault = _mock_vault()
+        cache = LedgerCache(vault, maxsize=5, flush_batch_size=10)
+        await cache.get("user1")
+        cache.mark_dirty("user1")
+        assert not cache.flush_due("user1")
+
+    @pytest.mark.asyncio
+    async def test_flush_due_after_staleness(self) -> None:
+        """Time > T since last flush triggers flush_due."""
+        vault = _mock_vault()
+        cache = LedgerCache(vault, maxsize=5, flush_staleness_secs=0.05)
+        await cache.get("user1")
+        cache.mark_dirty("user1")
+        assert not cache.flush_due("user1")  # just created, not stale yet
+        # Simulate time passing by backdating last_flush_time
+        cache._entries["user1"].last_flush_time = time.monotonic() - 0.1
+        assert cache.flush_due("user1")
+
+    @pytest.mark.asyncio
+    async def test_flush_due_requires_dirty(self) -> None:
+        """Clean entries never trigger flush_due."""
+        vault = _mock_vault()
+        cache = LedgerCache(vault, maxsize=5, flush_batch_size=1)
+        await cache.get("user1")
+        assert not cache.flush_due("user1")
+
+    @pytest.mark.asyncio
+    async def test_flush_due_resets_after_flush(self) -> None:
+        """dirty_count resets to 0 after a successful flush."""
+        vault = _mock_vault()
+        cache = LedgerCache(vault, maxsize=5, flush_batch_size=2)
+        await cache.get("user1")
+        cache.mark_dirty("user1")
+        cache.mark_dirty("user1")
+        assert cache.flush_due("user1")
+        await cache.flush_user("user1")
+        assert not cache.flush_due("user1")
+        assert cache._entries["user1"].dirty_count == 0
+
+    @pytest.mark.asyncio
+    async def test_flush_due_nonexistent_user(self) -> None:
+        """flush_due for unknown user returns False."""
+        vault = _mock_vault()
+        cache = LedgerCache(vault, maxsize=5)
+        assert not cache.flush_due("ghost")
+
+    @pytest.mark.asyncio
+    async def test_get_triggers_flush_at_threshold(self) -> None:
+        """get() auto-flushes when the entry hits the batch threshold."""
+        vault = _mock_vault()
+        cache = LedgerCache(vault, maxsize=5, flush_batch_size=3)
+        await cache.get("user1")
+        cache.mark_dirty("user1")
+        cache.mark_dirty("user1")
+        cache.mark_dirty("user1")  # dirty_count = 3 = batch_size
+        vault.store_ledger.assert_not_called()
+        # Next get() should trigger the flush
+        await cache.get("user1")
+        vault.store_ledger.assert_called_once()
+        assert cache._entries["user1"].dirty_count == 0
+
+    @pytest.mark.asyncio
+    async def test_get_triggers_flush_on_staleness(self) -> None:
+        """get() auto-flushes when entry is stale."""
+        vault = _mock_vault()
+        cache = LedgerCache(vault, maxsize=5, flush_staleness_secs=0.05)
+        await cache.get("user1")
+        cache.mark_dirty("user1")
+        # Backdate last_flush_time to simulate staleness
+        cache._entries["user1"].last_flush_time = time.monotonic() - 0.1
+        vault.store_ledger.assert_not_called()
+        await cache.get("user1")
+        vault.store_ledger.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Debit method
+# ---------------------------------------------------------------------------
+
+
+class TestDebitMethod:
+    @pytest.mark.asyncio
+    async def test_debit_succeeds_with_balance(self) -> None:
+        """debit() returns True and ledger is debited."""
+        vault = _funded_vault(500)
+        cache = LedgerCache(vault, maxsize=5)
+        result = await cache.debit("user1", "search_thoughts", 10)
+        assert result is True
+        ledger = await cache.get("user1")
+        assert ledger.balance_api_sats == 490
+        assert cache._entries["user1"].dirty is True
+
+    @pytest.mark.asyncio
+    async def test_debit_fails_insufficient_balance(self) -> None:
+        """debit() returns False when balance is insufficient, no state change."""
+        vault = _mock_vault()  # empty ledger, 0 balance
+        cache = LedgerCache(vault, maxsize=5)
+        result = await cache.debit("user1", "search_thoughts", 10)
+        assert result is False
+        # Entry should not be dirty (debit didn't happen)
+        assert not cache._entries["user1"].dirty
+
+    @pytest.mark.asyncio
+    async def test_debit_triggers_flush_at_threshold(self) -> None:
+        """After N debits via debit(), vault.store_ledger is called on next get()."""
+        vault = _funded_vault(500)
+        cache = LedgerCache(vault, maxsize=5, flush_batch_size=3)
+        await cache.debit("user1", "tool_a", 1)
+        await cache.debit("user1", "tool_b", 1)
+        await cache.debit("user1", "tool_c", 1)  # dirty_count = 3
+        vault.store_ledger.assert_not_called()
+        # Next get() triggers the flush
+        await cache.get("user1")
+        vault.store_ledger.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_debit_no_flush_below_threshold(self) -> None:
+        """Below N debits, no vault write happens."""
+        vault = _funded_vault(500)
+        cache = LedgerCache(vault, maxsize=5, flush_batch_size=10)
+        await cache.debit("user1", "tool_a", 1)
+        await cache.debit("user1", "tool_b", 1)
+        # Access entry again — should NOT flush (2 < 10)
+        await cache.get("user1")
+        vault.store_ledger.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Write-through credit
+# ---------------------------------------------------------------------------
+
+
+class TestWriteThroughCredit:
+    @pytest.mark.asyncio
+    async def test_write_through_credit_flushes_immediately(self) -> None:
+        """write_through_credit() calls vault.store_ledger right away."""
+        vault = _mock_vault()
+        cache = LedgerCache(vault, maxsize=5)
+        ledger = await cache.get("user1")
+        ledger.credit_deposit(1000, "invoice-123")
+        result = await cache.write_through_credit("user1")
+        assert result is True
+        vault.store_ledger.assert_called_once()
+        # Entry should be clean after write-through
+        assert not cache._entries["user1"].dirty
+
+    @pytest.mark.asyncio
+    async def test_write_through_credit_returns_false_on_failure(self) -> None:
+        """write_through_credit() returns False when vault write fails."""
+        vault = _mock_vault(fail_store=True)
+        cache = LedgerCache(vault, maxsize=5, flush_retries=0)
+        await cache.get("user1")
+        result = await cache.write_through_credit("user1")
+        assert result is False
+        # Entry should still be dirty
+        assert cache._entries["user1"].dirty is True
+
+
+# ---------------------------------------------------------------------------
+# Health metrics
+# ---------------------------------------------------------------------------
+
+
+class TestLedgerCacheHealth:
+    def test_health_includes_flush_config(self) -> None:
+        vault = _mock_vault()
+        cache = LedgerCache(
+            vault,
+            flush_batch_size=5,
+            flush_staleness_secs=60.0,
+        )
+        health = cache.health()
+        assert health["flush_batch_size"] == 5
+        assert health["flush_staleness_secs"] == 60.0
+        assert "last_flush_check_age_secs" not in health
+
+    def test_health_default_values(self) -> None:
+        vault = _mock_vault()
+        cache = LedgerCache(vault)
+        health = cache.health()
+        assert health["flush_batch_size"] == 10
+        assert health["flush_staleness_secs"] == 120.0
+        assert health["flush_retries"] == 1
+        assert health["flush_retry_delay"] == 2.0
