@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import ssl
 import threading
 import time
 from typing import Any
@@ -212,7 +211,7 @@ class NostrAuditPublisher:
 
     def _publish_to_relays(self, message: str) -> None:
         """Send event to all configured relays. Catches all exceptions."""
-        sslopt = {"cert_reqs": ssl.CERT_NONE}
+        sslopt: dict[str, Any] = {}
         for relay_url in self._relays:
             try:
                 ws = create_connection(relay_url, timeout=10, sslopt=sslopt)

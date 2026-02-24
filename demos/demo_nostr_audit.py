@@ -18,8 +18,8 @@ After running, verify events on a relay:
 import asyncio
 import json
 import os
-import ssl
 import sys
+from typing import Any
 import time
 
 from tollbooth import UserLedger
@@ -139,7 +139,7 @@ async def main() -> None:
             ["REQ", "demo-verify", {"kinds": [30078], "#t": ["tollbooth-audit"], "limit": 5}]
         )
         print(f"  Connecting to {relay}...")
-        sslopt = {"cert_reqs": ssl.CERT_NONE}
+        sslopt: dict[str, Any] = {}
         ws = create_connection(relay, timeout=10, sslopt=sslopt)
         try:
             ws.send(sub_filter)
