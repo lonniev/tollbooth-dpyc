@@ -369,3 +369,35 @@ class TestEventContent:
 
             content = json.loads(MockEvent.call_args.kwargs["content"])
             assert content["event_type"] == "snapshot"
+
+
+# ---------------------------------------------------------------------------
+# SSL certificate verification
+# ---------------------------------------------------------------------------
+
+
+class TestSSLCertVerification:
+    @patch("tollbooth.nostr_audit._HAS_PYNOSTR", True)
+    @patch("tollbooth.nostr_audit._HAS_WEBSOCKET", True)
+    def test_sslopt_does_not_disable_cert_verification(self) -> None:
+        """Ensure _publish_to_relays does NOT set cert_reqs to CERT_NONE."""
+        mock_pk = _mock_private_key()
+
+        with (
+            patch("tollbooth.nostr_audit.PrivateKey", create=True) as MockPK,
+            patch("tollbooth.nostr_audit.create_connection", create=True) as mock_ws,
+        ):
+            MockPK.from_nsec.return_value = mock_pk
+            mock_conn = MagicMock()
+            mock_conn.recv.return_value = '["OK"]'
+            mock_ws.return_value = mock_conn
+
+            pub = NostrAuditPublisher(FAKE_NSEC, FAKE_RELAYS, enabled=True)
+            pub._publish_to_relays('["EVENT", {}]')
+
+            # Verify sslopt does NOT contain cert_reqs disabling verification
+            for call in mock_ws.call_args_list:
+                sslopt = call.kwargs.get("sslopt", {})
+                assert "cert_reqs" not in sslopt, (
+                    "sslopt must not disable SSL certificate verification"
+                )
