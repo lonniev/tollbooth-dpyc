@@ -3,9 +3,9 @@
 Bitcoin Lightning micropayments for MCP servers.
 """
 
-__version__ = "0.1.26"
+__version__ = "0.1.27"
 
-from tollbooth.certificate import CertificateError, verify_certificate, verify_certificate_auto, normalize_public_key, key_fingerprint, UNDERSTOOD_PROTOCOLS
+from tollbooth.certificate import CertificateError, verify_certificate_auto, UNDERSTOOD_PROTOCOLS
 from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger, ToolUsage, InvoiceRecord, Tranche
 from tollbooth.btcpay_client import BTCPayClient, BTCPayError, BTCPayAuthError
@@ -15,18 +15,13 @@ from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_AP
 from tollbooth.pricing import ToolPricing
 from tollbooth.vaults import TheBrainVault, NeonVault, NeonQueryError
 from tollbooth.ots import MerkleTree, InclusionProof, OTSCalendarClient
+from tollbooth.nostr_certificate import verify_nostr_certificate, NOSTR_CERT_KIND
 
 try:
     from tollbooth.nostr_audit import NostrAuditPublisher, AuditedVault
 except ImportError:
     NostrAuditPublisher = None  # type: ignore[assignment,misc]
     AuditedVault = None  # type: ignore[assignment,misc]
-
-try:
-    from tollbooth.nostr_certificate import verify_nostr_certificate, NOSTR_CERT_KIND
-except ImportError:
-    verify_nostr_certificate = None  # type: ignore[assignment,misc]
-    NOSTR_CERT_KIND = 30079
 
 __all__ = [
     "CertificateError",
@@ -47,12 +42,9 @@ __all__ = [
     "ToolTier",
     "MAX_INVOICE_SATS",
     "LOW_BALANCE_FLOOR_API_SATS",
-    "verify_certificate",
     "verify_certificate_auto",
     "verify_nostr_certificate",
     "NOSTR_CERT_KIND",
-    "normalize_public_key",
-    "key_fingerprint",
     "UNDERSTOOD_PROTOCOLS",
     "NostrAuditPublisher",
     "AuditedVault",

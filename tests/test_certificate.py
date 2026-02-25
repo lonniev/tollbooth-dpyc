@@ -1,18 +1,21 @@
-"""Tests for Authority certificate verification: Ed25519 JWT validation and anti-replay."""
+"""Tests for shared certificate infrastructure: JTI store, error class, and auto-verify routing."""
 
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock
 
-import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives import serialization
+from pynostr.event import Event  # type: ignore[import-untyped]
+from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
-from tollbooth.certificate import CertificateError, verify_certificate, reset_jti_store, UNDERSTOOD_PROTOCOLS
-from tollbooth.ledger import UserLedger
-from tollbooth.ledger_cache import LedgerCache
-from tollbooth.btcpay_client import BTCPayClient
-from tollbooth.tools.credits import purchase_credits_tool
+from tollbooth.certificate import (
+    CertificateError,
+    _JTIStore,
+    reset_jti_store,
+    verify_certificate_auto,
+    UNDERSTOOD_PROTOCOLS,
+)
+from tollbooth.nostr_certificate import NOSTR_CERT_KIND, NOSTR_CERT_TAG, NOSTR_CERT_LABEL
 
 
 # ---------------------------------------------------------------------------
@@ -29,377 +32,172 @@ def _clean_jti_store():
 
 
 @pytest.fixture()
-def keypair():
-    """Generate an Ed25519 keypair for testing."""
-    private_key = Ed25519PrivateKey.generate()
-    public_pem = private_key.public_key().public_bytes(
-        serialization.Encoding.PEM,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
-    return private_key, public_pem
+def nostr_keypair():
+    """Generate a Nostr keypair for testing."""
+    private_key = PrivateKey()
+    npub = private_key.public_key.bech32()
+    return private_key, npub
 
 
-def _sign_certificate(
-    private_key: Ed25519PrivateKey,
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_jti_counter = 0
+
+
+def _sign_nostr_certificate(
+    private_key: PrivateKey,
     *,
-    operator_id: str = "op-1",
+    operator_id: str = "npub1operator",
     amount_sats: int = 1000,
     tax_paid_sats: int = 20,
     net_sats: int = 980,
-    jti: str = "jti-unique-1",
+    jti: str | None = None,
     exp_offset: int = 600,
-    extra_claims: dict | None = None,
 ) -> str:
-    """Sign a test certificate JWT."""
+    """Sign a test Nostr certificate event. Returns JSON string."""
+    global _jti_counter
+    if jti is None:
+        _jti_counter += 1
+        jti = f"cert-jti-{_jti_counter}-{time.time_ns()}"
+
     claims = {
         "sub": operator_id,
         "amount_sats": amount_sats,
         "tax_paid_sats": tax_paid_sats,
         "net_sats": net_sats,
-        "jti": jti,
-        "iat": int(time.time()),
-        "exp": int(time.time()) + exp_offset,
         "dpyc_protocol": "dpyp-01-base-certificate",
     }
-    if extra_claims:
-        claims.update(extra_claims)
-    return jwt.encode(claims, private_key, algorithm="EdDSA")
 
+    expiration = int(time.time()) + exp_offset
+    tags: list[list[str]] = [
+        ["d", jti],
+        ["p", "deadbeef" * 8],
+        ["t", NOSTR_CERT_TAG],
+        ["L", NOSTR_CERT_LABEL],
+        ["expiration", str(expiration)],
+    ]
 
-def _mock_btcpay(invoice_response: dict | None = None):
-    client = AsyncMock(spec=BTCPayClient)
-    resp = invoice_response or {"id": "inv-1", "checkoutLink": "https://pay.example.com/inv-1"}
-    client.create_invoice = AsyncMock(return_value=resp)
-    return client
-
-
-def _mock_cache(ledger: UserLedger | None = None):
-    cache = AsyncMock(spec=LedgerCache)
-    cache.get = AsyncMock(return_value=ledger or UserLedger())
-    cache.mark_dirty = MagicMock()
-    return cache
+    event = Event(
+        kind=NOSTR_CERT_KIND,
+        content=json.dumps(claims),
+        tags=tags,
+        pubkey=private_key.public_key.hex(),
+        created_at=int(time.time()),
+    )
+    event.sign(private_key.hex())
+    return json.dumps(event.to_dict())
 
 
 # ---------------------------------------------------------------------------
-# verify_certificate — valid
+# _JTIStore
 # ---------------------------------------------------------------------------
 
 
-class TestVerifyCertificateValid:
-    def test_valid_certificate(self, keypair):
-        private_key, public_pem = keypair
-        token = _sign_certificate(private_key)
-        result = verify_certificate(token, public_pem)
-        assert result["operator_id"] == "op-1"
-        assert result["amount_sats"] == 1000
-        assert result["tax_paid_sats"] == 20
+class TestJTIStore:
+    def test_check_and_record_new(self):
+        """New JTI is accepted."""
+        store = _JTIStore()
+        assert store.check_and_record("jti-1", time.time() + 600) is True
+
+    def test_check_and_record_replay(self):
+        """Same JTI is rejected (replay)."""
+        store = _JTIStore()
+        store.check_and_record("jti-1", time.time() + 600)
+        assert store.check_and_record("jti-1", time.time() + 600) is False
+
+    def test_cleanup_expired(self):
+        """Expired JTIs are cleaned up and can be re-used."""
+        store = _JTIStore()
+        # Record with expiry in the past
+        store.check_and_record("jti-old", time.time() - 10)
+        # After cleanup, the JTI should be accepted again
+        assert store.check_and_record("jti-old", time.time() + 600) is True
+
+    def test_different_jtis_accepted(self):
+        """Different JTIs are all accepted."""
+        store = _JTIStore()
+        assert store.check_and_record("jti-a", time.time() + 600) is True
+        assert store.check_and_record("jti-b", time.time() + 600) is True
+        assert store.check_and_record("jti-c", time.time() + 600) is True
+
+
+# ---------------------------------------------------------------------------
+# reset_jti_store
+# ---------------------------------------------------------------------------
+
+
+class TestResetJTIStore:
+    def test_reset_clears_store(self, nostr_keypair):
+        """After reset, previously seen JTIs are forgotten."""
+        private_key, npub = nostr_keypair
+        event_json = _sign_nostr_certificate(private_key, jti="jti-reset-test")
+        verify_certificate_auto(event_json, authority_npub=npub)
+
+        # Reset and re-verify the same JTI — should succeed after reset
+        reset_jti_store()
+        event_json2 = _sign_nostr_certificate(private_key, jti="jti-reset-test")
+        result = verify_certificate_auto(event_json2, authority_npub=npub)
+        assert result["jti"] == "jti-reset-test"
+
+
+# ---------------------------------------------------------------------------
+# CertificateError
+# ---------------------------------------------------------------------------
+
+
+class TestCertificateError:
+    def test_can_be_raised(self):
+        with pytest.raises(CertificateError, match="test error"):
+            raise CertificateError("test error")
+
+    def test_is_exception(self):
+        assert issubclass(CertificateError, Exception)
+
+
+# ---------------------------------------------------------------------------
+# verify_certificate_auto — Nostr routing
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyCertificateAuto:
+    def test_nostr_event_verified(self, nostr_keypair):
+        """Nostr event JSON is verified successfully."""
+        private_key, npub = nostr_keypair
+        event_json = _sign_nostr_certificate(private_key, jti="auto-nostr-1")
+        result = verify_certificate_auto(event_json, authority_npub=npub)
+        assert result["jti"] == "auto-nostr-1"
+        assert result["operator_id"] == "npub1operator"
         assert result["net_sats"] == 980
-        assert result["jti"] == "jti-unique-1"
 
-    def test_bare_base64_key_accepted(self, keypair):
-        """Bare base64 key (no PEM headers) works for verification."""
-        private_key, public_pem = keypair
-        # Strip PEM headers to get bare base64
-        lines = [ln for ln in public_pem.strip().splitlines() if not ln.startswith("-----")]
-        bare_b64 = "".join(lines).strip()
-        token = _sign_certificate(private_key, jti="jti-bare-b64")
-        result = verify_certificate(token, bare_b64)
-        assert result["operator_id"] == "op-1"
-        assert result["jti"] == "jti-bare-b64"
+    def test_no_authority_npub_fails(self, nostr_keypair):
+        """Missing authority_npub raises CertificateError."""
+        private_key, _ = nostr_keypair
+        event_json = _sign_nostr_certificate(private_key, jti="auto-no-npub")
+        with pytest.raises(CertificateError, match="No authority_npub configured"):
+            verify_certificate_auto(event_json, authority_npub="")
 
-    def test_extracts_all_claims(self, keypair):
-        private_key, public_pem = keypair
-        token = _sign_certificate(
-            private_key,
-            operator_id="op-42",
-            amount_sats=5000,
-            tax_paid_sats=100,
-            net_sats=4900,
-            jti="jti-42",
-        )
-        result = verify_certificate(token, public_pem)
-        assert result["operator_id"] == "op-42"
-        assert result["amount_sats"] == 5000
-        assert result["net_sats"] == 4900
+    def test_empty_string_npub_fails(self, nostr_keypair):
+        """Empty string authority_npub raises CertificateError."""
+        private_key, _ = nostr_keypair
+        event_json = _sign_nostr_certificate(private_key, jti="auto-empty-npub")
+        with pytest.raises(CertificateError, match="No authority_npub configured"):
+            verify_certificate_auto(event_json)
 
+    def test_wrong_signer_fails(self, nostr_keypair):
+        """Certificate signed by wrong key is rejected."""
+        _, npub = nostr_keypair
+        other_key = PrivateKey()
+        event_json = _sign_nostr_certificate(other_key, jti="auto-wrong-signer")
+        with pytest.raises(CertificateError, match="not signed by registered Authority"):
+            verify_certificate_auto(event_json, authority_npub=npub)
 
-# ---------------------------------------------------------------------------
-# verify_certificate — invalid
-# ---------------------------------------------------------------------------
-
-
-class TestVerifyCertificateInvalid:
-    def test_expired_certificate(self, keypair):
-        private_key, public_pem = keypair
-        token = _sign_certificate(private_key, exp_offset=-10)
-        with pytest.raises(CertificateError, match="expired"):
-            verify_certificate(token, public_pem)
-
-    def test_tampered_certificate(self, keypair):
-        private_key, public_pem = keypair
-        token = _sign_certificate(private_key)
-        # Flip a character in the signature portion
-        parts = token.split(".")
-        sig = list(parts[2])
-        sig[0] = "A" if sig[0] != "A" else "B"
-        parts[2] = "".join(sig)
-        tampered = ".".join(parts)
-        with pytest.raises(CertificateError, match="invalid|decoded"):
-            verify_certificate(tampered, public_pem)
-
-    def test_wrong_key(self, keypair):
-        private_key, public_pem = keypair
-        # Sign with a different key
-        other_key = Ed25519PrivateKey.generate()
-        token = _sign_certificate(other_key)
-        with pytest.raises(CertificateError, match="invalid|signature"):
-            verify_certificate(token, public_pem)
-
-    def test_garbage_token(self, keypair):
-        _, public_pem = keypair
-        with pytest.raises(CertificateError, match="decoded|Invalid"):
-            verify_certificate("not.a.jwt", public_pem)
-
-    def test_invalid_public_key(self):
-        with pytest.raises(CertificateError, match="Invalid authority public key"):
-            verify_certificate("some.jwt.token", "not a valid pem")
-
-    def test_missing_jti(self, keypair):
-        private_key, public_pem = keypair
-        claims = {
-            "operator_id": "op-1",
-            "amount_sats": 1000,
-            "net_sats": 980,
-            "iat": int(time.time()),
-            "exp": int(time.time()) + 600,
-        }
-        token = jwt.encode(claims, private_key, algorithm="EdDSA")
-        with pytest.raises(CertificateError, match="missing jti"):
-            verify_certificate(token, public_pem)
-
-
-# ---------------------------------------------------------------------------
-# Anti-replay (JTI)
-# ---------------------------------------------------------------------------
-
-
-class TestAntiReplay:
-    def test_duplicate_jti_rejected(self, keypair):
-        private_key, public_pem = keypair
-        token = _sign_certificate(private_key, jti="jti-dup")
-        # First call succeeds
-        verify_certificate(token, public_pem)
-        # Second call with same JTI — replay
-        token2 = _sign_certificate(private_key, jti="jti-dup")
+    def test_replay_detected(self, nostr_keypair):
+        """Same JTI is rejected on second use."""
+        private_key, npub = nostr_keypair
+        event_json = _sign_nostr_certificate(private_key, jti="auto-replay")
+        verify_certificate_auto(event_json, authority_npub=npub)
+        event_json2 = _sign_nostr_certificate(private_key, jti="auto-replay")
         with pytest.raises(CertificateError, match="replay"):
-            verify_certificate(token2, public_pem)
-
-    def test_different_jti_accepted(self, keypair):
-        private_key, public_pem = keypair
-        token1 = _sign_certificate(private_key, jti="jti-a")
-        token2 = _sign_certificate(private_key, jti="jti-b")
-        verify_certificate(token1, public_pem)
-        verify_certificate(token2, public_pem)  # should not raise
-
-
-# ---------------------------------------------------------------------------
-# Protocol versioning (dpyc_protocol claim)
-# ---------------------------------------------------------------------------
-
-
-class TestProtocolVersioning:
-    def test_missing_protocol_rejected(self, keypair):
-        """Certificate without dpyc_protocol claim is rejected."""
-        private_key, public_pem = keypair
-        claims = {
-            "sub": "op-1",
-            "amount_sats": 1000,
-            "tax_paid_sats": 20,
-            "net_sats": 980,
-            "jti": "jti-no-proto",
-            "iat": int(time.time()),
-            "exp": int(time.time()) + 600,
-        }
-        token = jwt.encode(claims, private_key, algorithm="EdDSA")
-        with pytest.raises(CertificateError, match="missing dpyc_protocol"):
-            verify_certificate(token, public_pem)
-
-    def test_unknown_protocol_rejected(self, keypair):
-        """Certificate with unrecognized protocol is rejected."""
-        private_key, public_pem = keypair
-        token = _sign_certificate(
-            private_key,
-            jti="jti-future-proto",
-            extra_claims={"dpyc_protocol": "dpyp-99-future"},
-        )
-        with pytest.raises(CertificateError, match="Unsupported protocol"):
-            verify_certificate(token, public_pem)
-
-    def test_valid_protocol_accepted(self, keypair):
-        """Certificate with correct dpyc_protocol passes verification."""
-        private_key, public_pem = keypair
-        token = _sign_certificate(private_key, jti="jti-valid-proto")
-        result = verify_certificate(token, public_pem)
-        assert result["dpyc_protocol"] == "dpyp-01-base-certificate"
-
-    def test_custom_understood_protocols(self, keypair):
-        """Operator can supply a custom set of understood protocols."""
-        private_key, public_pem = keypair
-        custom = frozenset({"dpyp-02-extended"})
-        token = _sign_certificate(
-            private_key,
-            jti="jti-custom-proto",
-            extra_claims={"dpyc_protocol": "dpyp-02-extended"},
-        )
-        result = verify_certificate(token, public_pem, understood_protocols=custom)
-        assert result["dpyc_protocol"] == "dpyp-02-extended"
-
-
-# ---------------------------------------------------------------------------
-# purchase_credits_tool with certificate
-# ---------------------------------------------------------------------------
-
-
-class TestPurchaseWithCertificate:
-    @pytest.mark.asyncio
-    async def test_missing_certificate_rejected(self, keypair):
-        _, public_pem = keypair
-        result = await purchase_credits_tool(
-            btcpay=_mock_btcpay(),
-            cache=_mock_cache(),
-            user_id="user-1",
-            amount_sats=1000,
-            certificate="",
-            authority_public_key=public_pem,
-        )
-        assert result["success"] is False
-        assert "certificate is required" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_invalid_certificate_rejected(self, keypair):
-        _, public_pem = keypair
-        result = await purchase_credits_tool(
-            btcpay=_mock_btcpay(),
-            cache=_mock_cache(),
-            user_id="user-1",
-            amount_sats=1000,
-            certificate="bad.jwt.token",
-            authority_public_key=public_pem,
-        )
-        assert result["success"] is False
-        assert "Certificate rejected" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_valid_certificate_creates_invoice(self, keypair):
-        private_key, public_pem = keypair
-        token = _sign_certificate(private_key, net_sats=980)
-        result = await purchase_credits_tool(
-            btcpay=_mock_btcpay(),
-            cache=_mock_cache(),
-            user_id="user-1",
-            amount_sats=1000,
-            certificate=token,
-            authority_public_key=public_pem,
-        )
-        assert result["success"] is True
-        assert result["amount_sats"] == 980  # from certificate net_sats
-        assert result["certificate_jti"] == "jti-unique-1"
-
-    @pytest.mark.asyncio
-    async def test_certificate_net_sats_overrides_amount(self, keypair):
-        private_key, public_pem = keypair
-        token = _sign_certificate(private_key, net_sats=500, jti="jti-override")
-        btcpay = _mock_btcpay()
-        result = await purchase_credits_tool(
-            btcpay=btcpay,
-            cache=_mock_cache(),
-            user_id="user-1",
-            amount_sats=9999,  # should be overridden by cert's net_sats
-            certificate=token,
-            authority_public_key=public_pem,
-        )
-        assert result["success"] is True
-        assert result["amount_sats"] == 500
-        btcpay.create_invoice.assert_called_once()
-        call_args = btcpay.create_invoice.call_args
-        assert call_args[0][0] == 500
-
-    @pytest.mark.asyncio
-    async def test_certificate_jti_in_invoice_metadata(self, keypair):
-        private_key, public_pem = keypair
-        token = _sign_certificate(private_key, jti="jti-meta-test")
-        btcpay = _mock_btcpay()
-        await purchase_credits_tool(
-            btcpay=btcpay,
-            cache=_mock_cache(),
-            user_id="user-1",
-            amount_sats=1000,
-            certificate=token,
-            authority_public_key=public_pem,
-        )
-        call_kwargs = btcpay.create_invoice.call_args[1]
-        assert call_kwargs["metadata"]["certificate_jti"] == "jti-meta-test"
-
-    @pytest.mark.asyncio
-    async def test_replay_rejected_in_purchase(self, keypair):
-        private_key, public_pem = keypair
-        token = _sign_certificate(private_key, jti="jti-replay-purchase")
-        result1 = await purchase_credits_tool(
-            btcpay=_mock_btcpay(),
-            cache=_mock_cache(),
-            user_id="user-1",
-            amount_sats=1000,
-            certificate=token,
-            authority_public_key=public_pem,
-        )
-        assert result1["success"] is True
-        # Replayed certificate fails
-        token2 = _sign_certificate(private_key, jti="jti-replay-purchase")
-        result2 = await purchase_credits_tool(
-            btcpay=_mock_btcpay(),
-            cache=_mock_cache(),
-            user_id="user-1",
-            amount_sats=1000,
-            certificate=token2,
-            authority_public_key=public_pem,
-        )
-        assert result2["success"] is False
-        assert "replay" in result2["error"].lower()
-
-
-# ---------------------------------------------------------------------------
-# Mandatory trust — no untrusted operation
-# ---------------------------------------------------------------------------
-
-
-class TestMandatoryTrust:
-    @pytest.mark.asyncio
-    async def test_no_authority_key_rejects_purchase(self):
-        """Operators cannot operate without a trusted Authority."""
-        result = await purchase_credits_tool(
-            btcpay=_mock_btcpay(),
-            cache=_mock_cache(),
-            user_id="user-1",
-            amount_sats=1000,
-            certificate="some.jwt.token",
-            authority_public_key="",
-            authority_npub="",
-        )
-        assert result["success"] is False
-        assert "authority_public_key" in result["error"]
-        assert "authority_npub" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_empty_certificate_and_empty_keys(self):
-        """Both missing — operator misconfigured."""
-        result = await purchase_credits_tool(
-            btcpay=_mock_btcpay(),
-            cache=_mock_cache(),
-            user_id="user-1",
-            amount_sats=1000,
-            certificate="",
-            authority_public_key="",
-            authority_npub="",
-        )
-        assert result["success"] is False
-        assert "authority_public_key" in result["error"]
+            verify_certificate_auto(event_json2, authority_npub=npub)

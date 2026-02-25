@@ -245,38 +245,6 @@ class TestNostrAntiReplay:
         verify_nostr_certificate(event_json1, npub)
         verify_nostr_certificate(event_json2, npub)  # should not raise
 
-    def test_jwt_and_nostr_share_jti_store(self, nostr_keypair):
-        """JTI store is shared — a JTI used by JWT blocks the same JTI in Nostr."""
-        import jwt as pyjwt
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-        from cryptography.hazmat.primitives import serialization
-        from tollbooth.certificate import verify_certificate
-
-        # First: verify a JWT with jti "shared-jti"
-        ed_key = Ed25519PrivateKey.generate()
-        ed_pub = ed_key.public_key().public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        ).decode()
-        jwt_claims = {
-            "sub": "op-1",
-            "amount_sats": 1000,
-            "tax_paid_sats": 20,
-            "net_sats": 980,
-            "jti": "shared-jti",
-            "iat": int(time.time()),
-            "exp": int(time.time()) + 600,
-            "dpyc_protocol": "dpyp-01-base-certificate",
-        }
-        jwt_token = pyjwt.encode(jwt_claims, ed_key, algorithm="EdDSA")
-        verify_certificate(jwt_token, ed_pub)
-
-        # Now: try to verify a Nostr event with the same JTI
-        private_key, npub = nostr_keypair
-        event_json = _sign_nostr_certificate(private_key, jti="shared-jti")
-        with pytest.raises(CertificateError, match="replay"):
-            verify_nostr_certificate(event_json, npub)
-
 
 # ---------------------------------------------------------------------------
 # Protocol versioning
@@ -314,50 +282,19 @@ class TestNostrProtocolVersioning:
 
 
 class TestAutoDetect:
-    def test_jwt_routed_to_jwt_verifier(self):
-        """JWT-like string (no leading {) routes to JWT path."""
-        import jwt as pyjwt
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-        from cryptography.hazmat.primitives import serialization
-
-        ed_key = Ed25519PrivateKey.generate()
-        ed_pub = ed_key.public_key().public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        ).decode()
-        claims = {
-            "sub": "op-1",
-            "amount_sats": 1000,
-            "tax_paid_sats": 20,
-            "net_sats": 980,
-            "jti": "auto-jwt-1",
-            "iat": int(time.time()),
-            "exp": int(time.time()) + 600,
-            "dpyc_protocol": "dpyp-01-base-certificate",
-        }
-        token = pyjwt.encode(claims, ed_key, algorithm="EdDSA")
-        result = verify_certificate_auto(token, authority_public_key=ed_pub)
-        assert result["operator_id"] == "op-1"
-        assert result["jti"] == "auto-jwt-1"
-
     def test_nostr_event_routed_to_nostr_verifier(self, nostr_keypair):
-        """JSON string (starts with {) routes to Nostr path."""
+        """Nostr event JSON is verified via verify_certificate_auto."""
         private_key, npub = nostr_keypair
         event_json = _sign_nostr_certificate(private_key, jti="auto-nostr-1")
         result = verify_certificate_auto(event_json, authority_npub=npub)
         assert result["jti"] == "auto-nostr-1"
 
     def test_nostr_without_npub_fails(self, nostr_keypair):
-        """Nostr event detected but no npub configured."""
+        """No npub configured raises CertificateError."""
         private_key, _ = nostr_keypair
         event_json = _sign_nostr_certificate(private_key, jti="auto-no-npub")
-        with pytest.raises(CertificateError, match="no authority_npub"):
+        with pytest.raises(CertificateError, match="No authority_npub"):
             verify_certificate_auto(event_json)
-
-    def test_jwt_without_public_key_fails(self):
-        """JWT detected but no public key configured."""
-        with pytest.raises(CertificateError, match="no authority_public_key"):
-            verify_certificate_auto("eyJhbGciOi.fake.jwt")
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +329,6 @@ class TestPurchaseWithNostrCertificate:
             user_id="user-1",
             amount_sats=1000,
             certificate=event_json,
-            authority_public_key="",  # no JWT key
             authority_npub=npub,
         )
         assert result["success"] is True
