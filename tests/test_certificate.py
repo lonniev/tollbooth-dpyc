@@ -374,7 +374,7 @@ class TestPurchaseWithCertificate:
 
 class TestMandatoryTrust:
     @pytest.mark.asyncio
-    async def test_no_public_key_rejects_purchase(self):
+    async def test_no_authority_key_rejects_purchase(self):
         """Operators cannot operate without a trusted Authority."""
         result = await purchase_credits_tool(
             btcpay=_mock_btcpay(),
@@ -383,12 +383,14 @@ class TestMandatoryTrust:
             amount_sats=1000,
             certificate="some.jwt.token",
             authority_public_key="",
+            authority_npub="",
         )
         assert result["success"] is False
-        assert "authority_public_key is required" in result["error"]
+        assert "authority_public_key" in result["error"]
+        assert "authority_npub" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_empty_certificate_and_empty_key(self):
+    async def test_empty_certificate_and_empty_keys(self):
         """Both missing — operator misconfigured."""
         result = await purchase_credits_tool(
             btcpay=_mock_btcpay(),
@@ -397,6 +399,7 @@ class TestMandatoryTrust:
             amount_sats=1000,
             certificate="",
             authority_public_key="",
+            authority_npub="",
         )
         assert result["success"] is False
-        assert "authority_public_key is required" in result["error"]
+        assert "authority_public_key" in result["error"]

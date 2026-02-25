@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from tollbooth.btcpay_client import BTCPayClient, BTCPayAuthError, BTCPayError
-from tollbooth.certificate import CertificateError, verify_certificate
+from tollbooth.certificate import CertificateError, verify_certificate_auto
 from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
@@ -213,22 +213,28 @@ async def purchase_credits_tool(
     user_id: str,
     amount_sats: int,
     certificate: str,
-    authority_public_key: str,
+    authority_public_key: str = "",
     tier_config_json: str | None = None,
     user_tiers_json: str | None = None,
     default_credit_ttl_seconds: int | None = None,
+    authority_npub: str = "",
 ) -> dict[str, Any]:
     """Create a BTCPay invoice after verifying an Authority certificate.
 
     For OPERATOR use: the certified purchase flow. Every credit purchase
-    requires a valid Authority-signed Ed25519 JWT certificate. The
-    certificate's net_sats (amount after tax) determines the invoice amount.
+    requires a valid Authority-signed certificate (JWT or Nostr event).
+    The certificate's net_sats (amount after tax) determines the invoice amount.
+
+    Accepts either an Ed25519 JWT (verified via *authority_public_key*) or a
+    Schnorr-signed Nostr event (verified via *authority_npub*). At least one
+    authority key must be configured. Format is auto-detected.
     """
-    # Trust gate — no Authority key means the operator is misconfigured
-    if not authority_public_key:
+    # Trust gate — at least one Authority key must be configured
+    if not authority_public_key and not authority_npub:
         return {
             "success": False,
-            "error": "Operator misconfigured: authority_public_key is required. "
+            "error": "Operator misconfigured: neither authority_public_key nor "
+            "authority_npub is set. "
             "A Tollbooth Operator cannot operate without a trusted Authority.",
         }
 
@@ -236,11 +242,13 @@ async def purchase_credits_tool(
         return {
             "success": False,
             "error": "A valid Authority certificate is required for every credit purchase. "
-            "Call the Authority's certify_purchase tool first.",
+            "Call the Authority's certify_credits tool first.",
         }
 
     try:
-        cert_claims = verify_certificate(certificate, authority_public_key)
+        cert_claims = verify_certificate_auto(
+            certificate, authority_public_key, authority_npub,
+        )
     except CertificateError as e:
         return {"success": False, "error": f"Certificate rejected: {e}"}
 
@@ -812,6 +820,7 @@ async def btcpay_status_tool(
     from tollbooth.certificate import normalize_public_key, key_fingerprint
     authority_config: dict[str, Any] = {
         "public_key_configured": bool(config.authority_public_key),
+        "npub_configured": bool(config.authority_npub),
         "certificate_verification_enabled": False,
     }
     if config.authority_public_key:
@@ -825,6 +834,9 @@ async def btcpay_status_tool(
         except Exception as e:
             authority_config["public_key_valid"] = False
             authority_config["public_key_error"] = str(e)
+    if config.authority_npub:
+        authority_config["authority_npub"] = config.authority_npub
+        authority_config["certificate_verification_enabled"] = True
     result["authority_config"] = authority_config
 
     # Connectivity checks — only if all 3 connection vars present and client available

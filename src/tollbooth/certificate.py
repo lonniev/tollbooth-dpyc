@@ -157,6 +157,55 @@ def verify_certificate(
     }
 
 
+def verify_certificate_auto(
+    token: str,
+    authority_public_key: str = "",
+    authority_npub: str = "",
+    *,
+    understood_protocols: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Auto-detect certificate format and verify.
+
+    If *token* looks like JSON (starts with ``{``), it is treated as a Nostr
+    event and verified via Schnorr signature against *authority_npub*.
+    Otherwise it is treated as a JWT and verified via Ed25519 against
+    *authority_public_key*.
+
+    Args:
+        token: JWT string **or** Nostr event JSON string.
+        authority_public_key: Ed25519 public key (PEM or bare base64) for JWT mode.
+        authority_npub: Authority's bech32 npub for Nostr mode.
+        understood_protocols: Protocol identifiers this Operator accepts.
+
+    Returns:
+        Same claims dict as ``verify_certificate()`` and ``verify_nostr_certificate()``.
+
+    Raises:
+        CertificateError: On verification failure or missing key for the detected format.
+    """
+    stripped = token.strip()
+    if stripped.startswith("{"):
+        # Nostr event JSON
+        if not authority_npub:
+            raise CertificateError(
+                "Certificate appears to be a Nostr event but no authority_npub configured."
+            )
+        from tollbooth.nostr_certificate import verify_nostr_certificate
+
+        return verify_nostr_certificate(
+            stripped, authority_npub, understood_protocols=understood_protocols,
+        )
+    else:
+        # JWT
+        if not authority_public_key:
+            raise CertificateError(
+                "Certificate appears to be a JWT but no authority_public_key configured."
+            )
+        return verify_certificate(
+            stripped, authority_public_key, understood_protocols=understood_protocols,
+        )
+
+
 def reset_jti_store() -> None:
     """Reset the JTI store — for testing only."""
     global _jti_store

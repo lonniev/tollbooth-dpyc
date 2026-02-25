@@ -18,7 +18,8 @@ class TollboothConfig:
     tollbooth_royalty_address: str | None = None
     tollbooth_royalty_percent: float = 0.02
     tollbooth_royalty_min_sats: int = 10
-    authority_public_key: str | None = None
+    authority_public_key: str | None = None  # Ed25519 PEM (JWT verification)
+    authority_npub: str | None = None  # Nostr npub (Schnorr verification)
     credit_ttl_seconds: int | None = 604800  # 7 days default, None = never
     flush_batch_size: int = 10
     flush_staleness_secs: float = 120.0

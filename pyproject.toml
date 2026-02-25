@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tollbooth-dpyc"
-version = "0.1.25"
+version = "0.1.26"
 description = "Don't Pester Your Customer — Bitcoin Lightning micropayments for MCP servers"
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,11 +26,11 @@ classifiers = [
 dependencies = [
     "httpx==0.28.1",
     "PyJWT[crypto]==2.11.0",
+    "pynostr>=0.6.0",
 ]
 
 [project.optional-dependencies]
 nostr = [
-    "pynostr>=0.6.0",
     "websocket-client>=1.6.0",
 ]
 ots = []  # Reserved — no extra deps needed (uses stdlib hashlib + existing httpx)
