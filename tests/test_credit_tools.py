@@ -5,10 +5,9 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
-import jwt as pyjwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives import serialization
+from pynostr.event import Event  # type: ignore[import-untyped]
+from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
 from tollbooth.btcpay_client import (
     BTCPayAuthError,
@@ -21,6 +20,7 @@ from tollbooth.certificate import reset_jti_store
 from tollbooth.config import TollboothConfig
 from tollbooth.ledger import ToolUsage, Tranche, UserLedger
 from tollbooth.ledger_cache import LedgerCache
+from tollbooth.nostr_certificate import NOSTR_CERT_KIND, NOSTR_CERT_TAG, NOSTR_CERT_LABEL
 from tollbooth.tools.credits import (
     ROYALTY_PAYOUT_MAX_SATS,
     _attempt_royalty_payout,
@@ -38,33 +38,44 @@ from tollbooth.constants import MAX_INVOICE_SATS
 
 
 # ---------------------------------------------------------------------------
-# Module-level test keypair for certificate signing
+# Module-level Nostr test keypair for certificate signing
 # ---------------------------------------------------------------------------
 
-_TEST_PRIVATE_KEY = Ed25519PrivateKey.generate()
-_TEST_PUBLIC_PEM = _TEST_PRIVATE_KEY.public_key().public_bytes(
-    serialization.Encoding.PEM,
-    serialization.PublicFormat.SubjectPublicKeyInfo,
-).decode()
+_TEST_NOSTR_PRIVKEY = PrivateKey()
+_TEST_AUTHORITY_NPUB = _TEST_NOSTR_PRIVKEY.public_key.bech32()
 
 _jti_counter = 0
 
 
 def _test_certificate(net_sats: int = 980, amount_sats: int = 1000) -> str:
-    """Sign a test certificate with a unique JTI for each call."""
+    """Sign a test Nostr certificate event with a unique JTI for each call."""
     global _jti_counter
     _jti_counter += 1
+    jti = f"test-jti-{_jti_counter}-{time.time_ns()}"
     claims = {
         "sub": "test-op",
         "amount_sats": amount_sats,
         "tax_paid_sats": amount_sats - net_sats,
         "net_sats": net_sats,
-        "jti": f"test-jti-{_jti_counter}-{time.time_ns()}",
-        "iat": int(time.time()),
-        "exp": int(time.time()) + 600,
         "dpyc_protocol": "dpyp-01-base-certificate",
     }
-    return pyjwt.encode(claims, _TEST_PRIVATE_KEY, algorithm="EdDSA")
+    expiration = int(time.time()) + 600
+    tags: list[list[str]] = [
+        ["d", jti],
+        ["p", "deadbeef" * 8],
+        ["t", NOSTR_CERT_TAG],
+        ["L", NOSTR_CERT_LABEL],
+        ["expiration", str(expiration)],
+    ]
+    event = Event(
+        kind=NOSTR_CERT_KIND,
+        content=json.dumps(claims),
+        tags=tags,
+        pubkey=_TEST_NOSTR_PRIVKEY.public_key.hex(),
+        created_at=int(time.time()),
+    )
+    event.sign(_TEST_NOSTR_PRIVKEY.hex())
+    return json.dumps(event.to_dict())
 
 
 @pytest.fixture(autouse=True)
@@ -256,7 +267,7 @@ class TestPurchaseCredits:
         result = await purchase_credits_tool(
             btcpay, cache, "user1", 1000,
             certificate=_test_certificate(net_sats=1000),
-            authority_public_key=_TEST_PUBLIC_PEM,
+            authority_npub=_TEST_AUTHORITY_NPUB,
         )
         assert result["success"] is True
         assert result["invoice_id"] == "inv-42"
@@ -273,7 +284,7 @@ class TestPurchaseCredits:
         result = await purchase_credits_tool(
             btcpay, cache, "user1", 0,
             certificate=_test_certificate(net_sats=0),
-            authority_public_key=_TEST_PUBLIC_PEM,
+            authority_npub=_TEST_AUTHORITY_NPUB,
         )
         assert result["success"] is False
         assert "positive" in result["error"]
@@ -285,7 +296,7 @@ class TestPurchaseCredits:
         result = await purchase_credits_tool(
             btcpay, cache, "user1", -100,
             certificate=_test_certificate(net_sats=-100),
-            authority_public_key=_TEST_PUBLIC_PEM,
+            authority_npub=_TEST_AUTHORITY_NPUB,
         )
         assert result["success"] is False
 
@@ -296,7 +307,7 @@ class TestPurchaseCredits:
         result = await purchase_credits_tool(
             btcpay, cache, "user1", 1000,
             certificate=_test_certificate(net_sats=1000),
-            authority_public_key=_TEST_PUBLIC_PEM,
+            authority_npub=_TEST_AUTHORITY_NPUB,
         )
         assert result["success"] is False
         assert "BTCPay error" in result["error"]
@@ -309,7 +320,7 @@ class TestPurchaseCredits:
         await purchase_credits_tool(
             btcpay, cache, "user1", 500,
             certificate=_test_certificate(net_sats=500),
-            authority_public_key=_TEST_PUBLIC_PEM,
+            authority_npub=_TEST_AUTHORITY_NPUB,
         )
         assert "inv-99" in ledger.pending_invoices
 
@@ -320,7 +331,7 @@ class TestPurchaseCredits:
         result = await purchase_credits_tool(
             btcpay, cache, "user1", 1000,
             certificate=_test_certificate(net_sats=1000),
-            authority_public_key=_TEST_PUBLIC_PEM,
+            authority_npub=_TEST_AUTHORITY_NPUB,
             tier_config_json=TIER_CONFIG, user_tiers_json=USER_TIERS,
         )
         assert result["tier"] == "default"
@@ -334,7 +345,7 @@ class TestPurchaseCredits:
         result = await purchase_credits_tool(
             btcpay, cache, "user-vip", 500,
             certificate=_test_certificate(net_sats=500),
-            authority_public_key=_TEST_PUBLIC_PEM,
+            authority_npub=_TEST_AUTHORITY_NPUB,
             tier_config_json=TIER_CONFIG, user_tiers_json=USER_TIERS,
         )
         assert result["tier"] == "vip"
@@ -706,7 +717,7 @@ class TestPurchaseCap:
         result = await purchase_credits_tool(
             btcpay, cache, "user1", MAX_INVOICE_SATS,
             certificate=_test_certificate(net_sats=MAX_INVOICE_SATS),
-            authority_public_key=_TEST_PUBLIC_PEM,
+            authority_npub=_TEST_AUTHORITY_NPUB,
         )
         assert result["success"] is True
 
@@ -718,7 +729,7 @@ class TestPurchaseCap:
         result = await purchase_credits_tool(
             btcpay, cache, "user1", MAX_INVOICE_SATS + 1,
             certificate=_test_certificate(net_sats=MAX_INVOICE_SATS + 1),
-            authority_public_key=_TEST_PUBLIC_PEM,
+            authority_npub=_TEST_AUTHORITY_NPUB,
         )
         assert result["success"] is False
         assert "maximum" in result["error"]
@@ -1230,74 +1241,26 @@ class TestBTCPayStatus:
 
 class TestBTCPayStatusAuthorityConfig:
     @pytest.mark.asyncio
-    async def test_authority_key_configured_and_valid(self) -> None:
-        """Valid Ed25519 PEM key shows configured, valid, fingerprint, verification enabled."""
-        config = _make_config(authority_public_key=_TEST_PUBLIC_PEM)
+    async def test_authority_npub_configured(self) -> None:
+        """Valid npub shows configured, verification enabled."""
+        config = _make_config(authority_npub=_TEST_AUTHORITY_NPUB)
         result = await btcpay_status_tool(config, None)
 
         auth = result["authority_config"]
-        assert auth["public_key_configured"] is True
-        assert auth["public_key_valid"] is True
+        assert auth["npub_configured"] is True
         assert auth["certificate_verification_enabled"] is True
-        assert len(auth["public_key_fingerprint"]) == 8
-        assert "public_key_error" not in auth
+        assert auth["authority_npub"] == _TEST_AUTHORITY_NPUB
 
     @pytest.mark.asyncio
-    async def test_authority_key_not_configured(self) -> None:
-        """No key set — configured false, verification disabled."""
-        config = _make_config(authority_public_key=None)
+    async def test_authority_npub_not_configured(self) -> None:
+        """No npub set — configured false, verification disabled."""
+        config = _make_config(authority_npub=None)
         result = await btcpay_status_tool(config, None)
 
         auth = result["authority_config"]
-        assert auth["public_key_configured"] is False
+        assert auth["npub_configured"] is False
         assert auth["certificate_verification_enabled"] is False
-        assert "public_key_fingerprint" not in auth
-        assert "public_key_valid" not in auth
-
-    @pytest.mark.asyncio
-    async def test_authority_key_invalid_pem(self) -> None:
-        """Malformed PEM key — configured true, valid false, error reported."""
-        config = _make_config(authority_public_key="not a valid PEM key")
-        result = await btcpay_status_tool(config, None)
-
-        auth = result["authority_config"]
-        assert auth["public_key_configured"] is True
-        assert auth["public_key_valid"] is False
-        assert auth["certificate_verification_enabled"] is False
-        assert "public_key_error" in auth
-
-    @pytest.mark.asyncio
-    async def test_bare_base64_key_accepted(self) -> None:
-        """Bare base64 key (no PEM headers) works for diagnostics."""
-        # Extract just the base64 body from the PEM
-        lines = [ln for ln in _TEST_PUBLIC_PEM.strip().splitlines() if not ln.startswith("-----")]
-        bare_b64 = "".join(lines).strip()
-        config = _make_config(authority_public_key=bare_b64)
-        result = await btcpay_status_tool(config, None)
-
-        auth = result["authority_config"]
-        assert auth["public_key_configured"] is True
-        assert auth["public_key_valid"] is True
-        assert auth["certificate_verification_enabled"] is True
-        assert len(auth["public_key_fingerprint"]) == 8
-        assert "authority_url" not in auth
-
-    @pytest.mark.asyncio
-    async def test_fingerprint_matches_key_tail(self) -> None:
-        """Fingerprint is last 8 chars of the base64 key body."""
-        lines = [ln for ln in _TEST_PUBLIC_PEM.strip().splitlines() if not ln.startswith("-----")]
-        bare_b64 = "".join(lines).strip()
-        expected = bare_b64[-8:]
-
-        # Test with full PEM
-        config_pem = _make_config(authority_public_key=_TEST_PUBLIC_PEM)
-        result_pem = await btcpay_status_tool(config_pem, None)
-        assert result_pem["authority_config"]["public_key_fingerprint"] == expected
-
-        # Test with bare base64
-        config_bare = _make_config(authority_public_key=bare_b64)
-        result_bare = await btcpay_status_tool(config_bare, None)
-        assert result_bare["authority_config"]["public_key_fingerprint"] == expected
+        assert "authority_npub" not in auth
 
 
 # ---------------------------------------------------------------------------

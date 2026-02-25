@@ -213,28 +213,22 @@ async def purchase_credits_tool(
     user_id: str,
     amount_sats: int,
     certificate: str,
-    authority_public_key: str = "",
+    authority_npub: str,
     tier_config_json: str | None = None,
     user_tiers_json: str | None = None,
     default_credit_ttl_seconds: int | None = None,
-    authority_npub: str = "",
 ) -> dict[str, Any]:
     """Create a BTCPay invoice after verifying an Authority certificate.
 
     For OPERATOR use: the certified purchase flow. Every credit purchase
-    requires a valid Authority-signed certificate (JWT or Nostr event).
+    requires a valid Authority-signed Nostr event certificate.
     The certificate's net_sats (amount after tax) determines the invoice amount.
-
-    Accepts either an Ed25519 JWT (verified via *authority_public_key*) or a
-    Schnorr-signed Nostr event (verified via *authority_npub*). At least one
-    authority key must be configured. Format is auto-detected.
     """
-    # Trust gate — at least one Authority key must be configured
-    if not authority_public_key and not authority_npub:
+    # Trust gate — authority_npub must be configured
+    if not authority_npub:
         return {
             "success": False,
-            "error": "Operator misconfigured: neither authority_public_key nor "
-            "authority_npub is set. "
+            "error": "Operator misconfigured: authority_npub is not set. "
             "A Tollbooth Operator cannot operate without a trusted Authority.",
         }
 
@@ -247,7 +241,7 @@ async def purchase_credits_tool(
 
     try:
         cert_claims = verify_certificate_auto(
-            certificate, authority_public_key, authority_npub,
+            certificate, authority_npub=authority_npub,
         )
     except CertificateError as e:
         return {"success": False, "error": f"Certificate rejected: {e}"}
@@ -817,26 +811,12 @@ async def btcpay_status_tool(
     result["credit_ttl_seconds"] = config.credit_ttl_seconds
 
     # Authority trust chain config
-    from tollbooth.certificate import normalize_public_key, key_fingerprint
     authority_config: dict[str, Any] = {
-        "public_key_configured": bool(config.authority_public_key),
         "npub_configured": bool(config.authority_npub),
-        "certificate_verification_enabled": False,
+        "certificate_verification_enabled": bool(config.authority_npub),
     }
-    if config.authority_public_key:
-        try:
-            from cryptography.hazmat.primitives.serialization import load_pem_public_key
-            pem = normalize_public_key(config.authority_public_key)
-            load_pem_public_key(pem.encode())
-            authority_config["public_key_fingerprint"] = key_fingerprint(config.authority_public_key)
-            authority_config["public_key_valid"] = True
-            authority_config["certificate_verification_enabled"] = True
-        except Exception as e:
-            authority_config["public_key_valid"] = False
-            authority_config["public_key_error"] = str(e)
     if config.authority_npub:
         authority_config["authority_npub"] = config.authority_npub
-        authority_config["certificate_verification_enabled"] = True
     result["authority_config"] = authority_config
 
     # Connectivity checks — only if all 3 connection vars present and client available

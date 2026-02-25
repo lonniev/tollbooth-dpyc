@@ -1,8 +1,7 @@
 """Authority certificate verification — Nostr event (Schnorr/BIP-340) validation with anti-replay.
 
 Verifies kind 30079 parameterized replaceable events signed by the Authority's
-Nostr key. The Schnorr-native replacement for the Ed25519 JWT path in
-``certificate.py``.
+Nostr key.
 
 Dependencies: ``pynostr`` (for event parsing and Schnorr verification).
 """
@@ -57,7 +56,7 @@ def verify_nostr_certificate(
 
     Returns:
         Dict with extracted claims: operator_id, amount_sats, tax_paid_sats,
-        net_sats, jti, dpyc_protocol. Same shape as ``verify_certificate()``.
+        net_sats, jti, dpyc_protocol.
 
     Raises:
         CertificateError: On invalid, expired, tampered, or replayed certificates.
@@ -126,8 +125,8 @@ def verify_nostr_certificate(
     if not jti:
         raise CertificateError("Certificate missing d-tag (JTI).")
 
-    # 6. Anti-replay check (shared store with JWT path — access via module
-    #    so reset_jti_store() is visible across both verification paths)
+    # 6. Anti-replay check (shared anti-replay store — access via module
+    #    so reset_jti_store() is visible)
     if not _cert_mod._jti_store.check_and_record(jti, float(expiration)):
         raise CertificateError(
             f"Certificate replay detected — jti {jti} already used."
