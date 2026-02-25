@@ -153,8 +153,8 @@ class TestPublishLedgerUpdate:
 
     @patch("tollbooth.nostr_audit._HAS_PYNOSTR", True)
     @patch("tollbooth.nostr_audit._HAS_WEBSOCKET", True)
-    def test_constructs_event_and_publishes(self) -> None:
-        """Test that a valid publisher constructs an event and fires a thread."""
+    def test_constructs_plaintext_event_for_non_npub(self) -> None:
+        """Non-npub user IDs produce plaintext content (legacy path)."""
         mock_pk = _mock_private_key()
 
         mock_event = MagicMock()
@@ -172,7 +172,7 @@ class TestPublishLedgerUpdate:
             assert pub.enabled
 
             pub.publish_ledger_update(
-                "npub1testuser", SAMPLE_LEDGER_JSON, "flush",
+                "user_01KGZY", SAMPLE_LEDGER_JSON, "flush",
             )
 
             # Event was constructed with kind 30078
@@ -180,22 +180,23 @@ class TestPublishLedgerUpdate:
             call_kwargs = MockEvent.call_args
             assert call_kwargs.kwargs["kind"] == 30078
 
-            # Content is valid JSON with expected fields
+            # Content is valid JSON with expected fields (plaintext)
             content = json.loads(call_kwargs.kwargs["content"])
-            assert content["user_id"] == "npub1testuser"
+            assert content["user_id"] == "user_01KGZY"
             assert content["balance"] == 5220
             assert content["deposited"] == 8000
             assert content["consumed"] == 2780
             assert content["event_type"] == "flush"
             assert "timestamp" in content
 
-            # Tags include d-tag, p-tag, t-tag, L-tag
+            # Tags include d-tag, p-tag, t-tag, L-tag — NO encrypted tag
             tags = call_kwargs.kwargs["tags"]
             tag_names = [t[0] for t in tags]
             assert "d" in tag_names
             assert "p" in tag_names
             assert "t" in tag_names
             assert "L" in tag_names
+            assert "encrypted" not in tag_names
 
             # d-tag starts with tollbooth-audit-
             d_tag = [t for t in tags if t[0] == "d"][0]
@@ -211,6 +212,77 @@ class TestPublishLedgerUpdate:
             # Thread was started for relay publishing
             mock_threading.Thread.assert_called_once()
             mock_threading.Thread.return_value.start.assert_called_once()
+
+    @patch("tollbooth.nostr_audit._HAS_PYNOSTR", True)
+    @patch("tollbooth.nostr_audit._HAS_WEBSOCKET", True)
+    def test_encrypts_content_for_npub_patron(self) -> None:
+        """npub user IDs get NIP-44 encrypted content + encrypted tag."""
+        mock_pk = _mock_private_key()
+
+        mock_event = MagicMock()
+        mock_event.to_message.return_value = '["EVENT", {}]'
+
+        with (
+            patch("tollbooth.nostr_audit.PrivateKey", create=True) as MockPK,
+            patch("tollbooth.nostr_audit.Event", create=True) as MockEvent,
+            patch("tollbooth.nostr_audit.threading") as mock_threading,
+            patch("tollbooth.nostr_audit._HAS_NIP44", True),
+            patch(
+                "tollbooth.nostr_audit._nip44_encrypt",
+                return_value="ENCRYPTED_BASE64_PAYLOAD",
+                create=True,
+            ) as mock_encrypt,
+        ):
+            MockPK.from_nsec.return_value = mock_pk
+            MockEvent.return_value = mock_event
+
+            pub = NostrAuditPublisher(FAKE_NSEC, FAKE_RELAYS, enabled=True)
+
+            pub.publish_ledger_update(
+                "npub1testuser", SAMPLE_LEDGER_JSON, "flush",
+            )
+
+            # NIP-44 encrypt was called with the plaintext JSON
+            mock_encrypt.assert_called_once()
+            encrypt_args = mock_encrypt.call_args
+            plaintext_arg = encrypt_args.args[0]
+            assert '"balance":5220' in plaintext_arg
+            assert '"user_id":"npub1testuser"' in plaintext_arg
+
+            # Event content is the encrypted payload, not plaintext
+            MockEvent.assert_called_once()
+            call_kwargs = MockEvent.call_args
+            assert call_kwargs.kwargs["content"] == "ENCRYPTED_BASE64_PAYLOAD"
+
+            # Tags include the encrypted marker
+            tags = call_kwargs.kwargs["tags"]
+            tag_names = [t[0] for t in tags]
+            assert "encrypted" in tag_names
+            enc_tag = [t for t in tags if t[0] == "encrypted"][0]
+            assert enc_tag[1] == "nip44"
+
+    @patch("tollbooth.nostr_audit._HAS_PYNOSTR", True)
+    @patch("tollbooth.nostr_audit._HAS_WEBSOCKET", True)
+    @patch("tollbooth.nostr_audit._HAS_NIP44", False)
+    def test_skips_publish_when_nip44_unavailable_for_npub(self) -> None:
+        """Refuse plaintext fallback — skip event entirely for npub patrons."""
+        mock_pk = _mock_private_key()
+
+        with (
+            patch("tollbooth.nostr_audit.PrivateKey", create=True) as MockPK,
+            patch("tollbooth.nostr_audit.Event", create=True) as MockEvent,
+            patch("tollbooth.nostr_audit.threading") as mock_threading,
+        ):
+            MockPK.from_nsec.return_value = mock_pk
+
+            pub = NostrAuditPublisher(FAKE_NSEC, FAKE_RELAYS, enabled=True)
+            pub.publish_ledger_update(
+                "npub1testuser", SAMPLE_LEDGER_JSON, "flush",
+            )
+
+            # Event should NOT be constructed — refused plaintext fallback
+            MockEvent.assert_not_called()
+            mock_threading.Thread.assert_not_called()
 
     @patch("tollbooth.nostr_audit._HAS_PYNOSTR", True)
     @patch("tollbooth.nostr_audit._HAS_WEBSOCKET", True)
@@ -369,6 +441,131 @@ class TestEventContent:
 
             content = json.loads(MockEvent.call_args.kwargs["content"])
             assert content["event_type"] == "snapshot"
+
+
+# ---------------------------------------------------------------------------
+# SSL certificate verification
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# NIP-44 encryption integration — real crypto, no mocks
+# ---------------------------------------------------------------------------
+
+
+class TestNIP44EncryptionIntegration:
+    """End-to-end tests: real NostrAuditPublisher with real NIP-44 encryption."""
+
+    def test_real_encrypted_event_decryptable_by_patron(self) -> None:
+        """Publish an encrypted event, verify patron can decrypt the content."""
+        from pynostr.key import PrivateKey as RealPrivateKey
+        from tollbooth.nip44 import decrypt as nip44_decrypt
+
+        operator_sk = RealPrivateKey.from_nsec(FAKE_NSEC)
+        patron_sk = RealPrivateKey()
+        patron_npub = patron_sk.public_key.bech32()
+
+        captured_events: list[dict] = []
+
+        # Patch Event to capture rather than sign
+        with (
+            patch("tollbooth.nostr_audit.Event") as MockEvent,
+            patch("tollbooth.nostr_audit.threading"),
+        ):
+            mock_event = MagicMock()
+            mock_event.to_message.return_value = '["EVENT", {}]'
+            MockEvent.return_value = mock_event
+
+            pub = NostrAuditPublisher(FAKE_NSEC, FAKE_RELAYS, enabled=True)
+            assert pub.enabled
+
+            pub.publish_ledger_update(
+                patron_npub, SAMPLE_LEDGER_JSON, "flush",
+            )
+
+            MockEvent.assert_called_once()
+            call_kwargs = MockEvent.call_args.kwargs
+            captured_events.append(call_kwargs)
+
+        event_kwargs = captured_events[0]
+
+        # Content should be NIP-44 encrypted (base64, not JSON)
+        content = event_kwargs["content"]
+        try:
+            json.loads(content)
+            pytest.fail("Content should be encrypted, not valid JSON")
+        except json.JSONDecodeError:
+            pass  # Expected — it's base64 ciphertext
+
+        # Patron decrypts with their nsec + operator's pubkey
+        decrypted = nip44_decrypt(
+            content, patron_sk.hex(), operator_sk.public_key.hex(),
+        )
+        payload = json.loads(decrypted)
+        assert payload["user_id"] == patron_npub
+        assert payload["balance"] == 5220
+        assert payload["deposited"] == 8000
+        assert payload["event_type"] == "flush"
+
+        # Encrypted tag present
+        tags = event_kwargs["tags"]
+        enc_tags = [t for t in tags if t[0] == "encrypted"]
+        assert len(enc_tags) == 1
+        assert enc_tags[0][1] == "nip44"
+
+    def test_observer_cannot_read_encrypted_content(self) -> None:
+        """A third party without the patron's nsec cannot decrypt."""
+        from pynostr.key import PrivateKey as RealPrivateKey
+        from tollbooth.nip44 import decrypt as nip44_decrypt
+
+        operator_sk = RealPrivateKey.from_nsec(FAKE_NSEC)
+        patron_sk = RealPrivateKey()
+        observer_sk = RealPrivateKey()
+
+        with (
+            patch("tollbooth.nostr_audit.Event") as MockEvent,
+            patch("tollbooth.nostr_audit.threading"),
+        ):
+            mock_event = MagicMock()
+            mock_event.to_message.return_value = '["EVENT", {}]'
+            MockEvent.return_value = mock_event
+
+            pub = NostrAuditPublisher(FAKE_NSEC, FAKE_RELAYS, enabled=True)
+            pub.publish_ledger_update(
+                patron_sk.public_key.bech32(), SAMPLE_LEDGER_JSON,
+            )
+
+            content = MockEvent.call_args.kwargs["content"]
+
+        # Observer tries to decrypt — should fail
+        with pytest.raises(ValueError, match="decryption failed"):
+            nip44_decrypt(
+                content, observer_sk.hex(), operator_sk.public_key.hex(),
+            )
+
+    def test_p_tag_contains_patron_hex_pubkey(self) -> None:
+        """The p-tag enables patron discovery on relays."""
+        from pynostr.key import PrivateKey as RealPrivateKey
+
+        patron_sk = RealPrivateKey()
+        patron_npub = patron_sk.public_key.bech32()
+        patron_hex = patron_sk.public_key.hex()
+
+        with (
+            patch("tollbooth.nostr_audit.Event") as MockEvent,
+            patch("tollbooth.nostr_audit.threading"),
+        ):
+            mock_event = MagicMock()
+            mock_event.to_message.return_value = '["EVENT", {}]'
+            MockEvent.return_value = mock_event
+
+            pub = NostrAuditPublisher(FAKE_NSEC, FAKE_RELAYS, enabled=True)
+            pub.publish_ledger_update(patron_npub, SAMPLE_LEDGER_JSON)
+
+            tags = MockEvent.call_args.kwargs["tags"]
+            p_tags = [t for t in tags if t[0] == "p"]
+            assert len(p_tags) == 1
+            assert p_tags[0][1] == patron_hex
 
 
 # ---------------------------------------------------------------------------
