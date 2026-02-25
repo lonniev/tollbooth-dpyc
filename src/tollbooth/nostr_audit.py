@@ -4,6 +4,11 @@ Publishes kind 30078 (NIP-78 parameterized replaceable) events to Nostr
 relays on every vault write, providing an independent, cryptographically
 signed audit trail for NeonVault cutover diagnostics.
 
+**Privacy**: When the patron's identity is an npub, the ``content`` field
+is encrypted via NIP-44v2 (ECDH + ChaCha20-Poly1305).  Only the patron's
+nsec can decrypt it.  Observers see the event metadata (kind, tags, pubkey)
+but not the balance data.
+
 Architecture:
 
     LedgerCache → AuditedVault → NeonVault (or TheBrainVault)
@@ -40,6 +45,13 @@ try:
     _HAS_WEBSOCKET = True
 except ImportError:
     _HAS_WEBSOCKET = False
+
+try:
+    from tollbooth.nip44 import encrypt as _nip44_encrypt
+
+    _HAS_NIP44 = True
+except ImportError:
+    _HAS_NIP44 = False
 
 
 def _extract_audit_fields(ledger_json: str) -> dict[str, Any]:
@@ -154,6 +166,11 @@ class NostrAuditPublisher:
     ) -> None:
         """Construct and publish a kind 30078 event with balance state.
 
+        When *user_id* is an npub and NIP-44 is available, the ``content``
+        field is encrypted to the patron's public key so only the patron's
+        nsec can read the balance data.  An ``["encrypted", "nip44"]`` tag
+        is added so clients know to decrypt.
+
         Fire-and-forget: relay publishing runs in a daemon thread so it
         never blocks the vault write path. All exceptions are caught.
         """
@@ -166,7 +183,7 @@ class NostrAuditPublisher:
             # Short npub prefix for d-tag (first 12 chars of hex pubkey)
             user_short = user_hex[:12] if len(user_hex) >= 12 else user_hex
 
-            content = json.dumps(
+            plaintext = json.dumps(
                 {
                     "user_id": user_id,
                     "balance": fields["balance"],
@@ -182,15 +199,39 @@ class NostrAuditPublisher:
                 separators=(",", ":"),
             )
 
+            tags = [
+                ["d", f"tollbooth-audit-{user_short}"],
+                ["p", user_hex],
+                ["t", "tollbooth-audit"],
+                ["L", "dpyc.tollbooth"],
+            ]
+
+            # Encrypt content to patron's npub via NIP-44v2
+            can_encrypt = (
+                _HAS_NIP44
+                and user_id.startswith("npub1")
+                and self._private_key is not None
+            )
+            if can_encrypt:
+                content = _nip44_encrypt(
+                    plaintext, self._private_key.hex(), user_hex,
+                )
+                tags.append(["encrypted", "nip44"])
+            else:
+                # Fallback: skip publishing entirely if encryption unavailable
+                # for npub patrons (never publish plaintext for npub users)
+                if user_id.startswith("npub1"):
+                    logger.warning(
+                        "NIP-44 encryption unavailable — skipping audit "
+                        "event for npub patron (refusing plaintext fallback)."
+                    )
+                    return
+                content = plaintext
+
             event = Event(
                 kind=30078,
                 content=content,
-                tags=[
-                    ["d", f"tollbooth-audit-{user_short}"],
-                    ["p", user_hex],
-                    ["t", "tollbooth-audit"],
-                    ["L", "dpyc.tollbooth"],
-                ],
+                tags=tags,
                 pubkey=self._pubkey_hex,
                 created_at=int(time.time()),
             )
