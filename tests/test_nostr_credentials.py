@@ -2,12 +2,13 @@
 
 import json
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pynostr.key import PrivateKey
 
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
+from tollbooth.credential_vault_backend import CredentialVaultBackend
 from tollbooth.nip44 import encrypt as nip44_encrypt
 from tollbooth.nip04 import _get_shared_secret
 from tollbooth.nostr_credentials import (
@@ -604,3 +605,260 @@ class TestTemplateMatching:
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(sender.public_key.bech32())
             assert result["service"] == "x"
+
+
+# ── Mock Credential Vault ────────────────────────────────────────────
+
+class MockCredentialVault:
+    """In-memory credential vault for testing."""
+
+    def __init__(self):
+        self._store: dict[str, str] = {}
+
+    def _key(self, service: str, npub: str) -> str:
+        return f"{service}:{npub}"
+
+    async def store_credentials(
+        self, service: str, npub: str, encrypted_blob: str,
+    ) -> None:
+        self._store[self._key(service, npub)] = encrypted_blob
+
+    async def fetch_credentials(
+        self, service: str, npub: str,
+    ) -> str | None:
+        return self._store.get(self._key(service, npub))
+
+    async def delete_credentials(
+        self, service: str, npub: str,
+    ) -> bool:
+        key = self._key(service, npub)
+        if key in self._store:
+            del self._store[key]
+            return True
+        return False
+
+
+# ── Credential Vault Tests ───────────────────────────────────────────
+
+class TestCredentialVault:
+    """Tests for vault-first credential lookup and storage."""
+
+    @pytest.mark.asyncio
+    async def test_vault_store_after_first_receive(self):
+        """Credentials are stored in vault after first relay pickup."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        vault = MockCredentialVault()
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=vault)
+
+        payload = {"api_key": "sk-first-123", "api_secret": "secret-456"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(sender.public_key.bech32())
+
+        assert result["success"] is True
+        assert result["encryption"] == "nip04"
+        assert result["credentials"]["api_key"] == "sk-first-123"
+        # Vault should have the blob
+        blob = await vault.fetch_credentials("x", sender.public_key.bech32())
+        assert blob is not None
+
+    @pytest.mark.asyncio
+    async def test_vault_hit_skips_relay(self):
+        """Second receive returns from vault without relay I/O."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        vault = MockCredentialVault()
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=vault)
+
+        payload = {"api_key": "sk-cached", "api_secret": "cached-secret"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        # First receive — from relay
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result1 = await ex.receive(sender.public_key.bech32())
+
+        assert result1["encryption"] == "nip04"
+
+        # Second receive — should come from vault
+        with patch.object(ex, "_fetch_dms_from_relays") as mock_fetch, \
+             patch.object(ex, "_find_dm_in_buffer") as mock_find:
+            result2 = await ex.receive(sender.public_key.bech32())
+
+        assert result2["success"] is True
+        assert result2["encryption"] == "vault"
+        assert result2["credentials"]["api_key"] == "sk-cached"
+        assert result2["credentials"]["api_secret"] == "cached-secret"
+        # Relay methods should NOT have been called
+        mock_fetch.assert_not_called()
+        mock_find.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_vault_blob_is_encrypted(self):
+        """Vault blob is not plaintext JSON — it's NIP-04 encrypted."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        vault = MockCredentialVault()
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=vault)
+
+        payload = {"api_key": "sk-secret", "api_secret": "top-secret"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            await ex.receive(sender.public_key.bech32())
+
+        blob = await vault.fetch_credentials("x", sender.public_key.bech32())
+        assert blob is not None
+        # Blob should be NIP-04 format, not plaintext
+        assert "?iv=" in blob
+        # Blob should NOT contain plaintext credentials
+        assert "sk-secret" not in blob
+        assert "top-secret" not in blob
+
+    @pytest.mark.asyncio
+    async def test_forget_clears_vault(self):
+        """forget() deletes credentials from vault."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        vault = MockCredentialVault()
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=vault)
+
+        payload = {"api_key": "key", "api_secret": "secret"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            await ex.receive(sender.public_key.bech32())
+
+        # Vault should have credentials
+        assert await vault.fetch_credentials("x", sender.public_key.bech32()) is not None
+
+        # Forget them
+        result = await ex.forget(sender.public_key.bech32())
+        assert result["success"] is True
+        assert result["deleted"] is True
+
+        # Vault should be empty
+        assert await vault.fetch_credentials("x", sender.public_key.bech32()) is None
+
+    @pytest.mark.asyncio
+    async def test_forget_nonexistent_returns_false(self):
+        """forget() returns deleted=False when no credentials exist."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        vault = MockCredentialVault()
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=vault)
+
+        result = await ex.forget(sender.public_key.bech32())
+        assert result["success"] is True
+        assert result["deleted"] is False
+
+    @pytest.mark.asyncio
+    async def test_forget_without_vault(self):
+        """forget() without vault returns failure message."""
+        ex = _make_exchange()
+        sender = PrivateKey()
+
+        result = await ex.forget(sender.public_key.bech32())
+        assert result["success"] is False
+        assert "No credential vault" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_no_vault_preserves_existing_behavior(self):
+        """Without a vault, receive() works identically to v0.1.30."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)  # No vault
+
+        payload = {"api_key": "key", "api_secret": "secret"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(sender.public_key.bech32())
+
+        assert result["success"] is True
+        assert result["encryption"] == "nip04"
+        # No vault mention in message
+        assert "vault" not in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_vault_miss_falls_through_to_relay(self):
+        """Empty vault falls through to relay DM flow."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        vault = MockCredentialVault()  # Empty vault
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=vault)
+
+        payload = {"api_key": "fresh-key", "api_secret": "fresh-secret"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(sender.public_key.bech32())
+
+        assert result["success"] is True
+        assert result["encryption"] == "nip04"  # Came from relay, not vault
+        assert result["credentials"]["api_key"] == "fresh-key"
+
+    @pytest.mark.asyncio
+    async def test_forget_then_receive_uses_relay(self):
+        """After forget(), receive() falls back to relay."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        vault = MockCredentialVault()
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=vault)
+
+        payload = {"api_key": "original", "api_secret": "secret"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        # First receive stores in vault
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            await ex.receive(sender.public_key.bech32())
+
+        # Forget
+        await ex.forget(sender.public_key.bech32())
+
+        # New DM with rotated credentials
+        new_payload = {"api_key": "rotated", "api_secret": "new-secret"}
+        new_event = _make_nip04_event(
+            sender, operator.public_key.hex(), new_payload,
+        )
+        new_event["id"] = "event_rotated"
+
+        with ex._lock:
+            ex._received_events.append(new_event)
+
+        # Second receive should use relay (vault is empty)
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(sender.public_key.bech32())
+
+        assert result["credentials"]["api_key"] == "rotated"
+        assert result["encryption"] == "nip04"

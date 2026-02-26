@@ -10,6 +10,7 @@ from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger, ToolUsage, InvoiceRecord, Tranche
 from tollbooth.btcpay_client import BTCPayClient, BTCPayError, BTCPayAuthError
 from tollbooth.vault_backend import VaultBackend
+from tollbooth.credential_vault_backend import CredentialVaultBackend
 from tollbooth.ledger_cache import LedgerCache
 from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_API_SATS
 from tollbooth.pricing import ToolPricing
@@ -57,6 +58,7 @@ __all__ = [
     "BTCPayError",
     "BTCPayAuthError",
     "VaultBackend",
+    "CredentialVaultBackend",
     "LedgerCache",
     "TheBrainVault",
     "NeonVault",

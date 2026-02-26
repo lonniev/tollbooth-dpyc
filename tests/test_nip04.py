@@ -6,7 +6,7 @@ import os
 import pytest
 from pynostr.key import PrivateKey
 
-from tollbooth.nip04 import decrypt, _get_shared_secret
+from tollbooth.nip04 import decrypt, encrypt, _get_shared_secret
 
 
 class TestNip04Decrypt:
@@ -96,4 +96,35 @@ class TestNip04Decrypt:
         decrypted = decrypt(
             encrypted, recipient.hex(), sender.public_key.hex(),
         )
+        assert decrypted == plaintext
+
+
+class TestNip04Encrypt:
+    """NIP-04 AES-256-CBC encryption tests."""
+
+    def test_encrypt_round_trip(self):
+        """encrypt() → decrypt() round-trip succeeds."""
+        sender = PrivateKey()
+        recipient = PrivateKey()
+
+        plaintext = '{"api_key": "sk-test", "api_secret": "secret"}'
+        encrypted = encrypt(plaintext, sender.hex(), recipient.public_key.hex())
+        decrypted = decrypt(encrypted, recipient.hex(), sender.public_key.hex())
+        assert decrypted == plaintext
+
+    def test_encrypt_produces_nip04_format(self):
+        """encrypt() output has NIP-04 format with ?iv= separator."""
+        sender = PrivateKey()
+        recipient = PrivateKey()
+
+        encrypted = encrypt("test", sender.hex(), recipient.public_key.hex())
+        assert "?iv=" in encrypted
+
+    def test_self_encryption(self):
+        """Self-encryption (same key as sender and recipient) works."""
+        key = PrivateKey()
+
+        plaintext = '{"credential": "value"}'
+        encrypted = encrypt(plaintext, key.hex(), key.public_key.hex())
+        decrypted = decrypt(encrypted, key.hex(), key.public_key.hex())
         assert decrypted == plaintext

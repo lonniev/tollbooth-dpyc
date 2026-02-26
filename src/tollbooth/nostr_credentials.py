@@ -37,6 +37,7 @@ from tollbooth.credential_templates import (
     render_template_instructions,
     validate_payload,
 )
+from tollbooth.credential_vault_backend import CredentialVaultBackend
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ class NostrCredentialExchange:
         *,
         freshness_window: int = _DEFAULT_FRESHNESS,
         nip44_only: bool = False,
+        credential_vault: CredentialVaultBackend | None = None,
     ) -> None:
         """Initialize the credential exchange.
 
@@ -141,11 +143,15 @@ class NostrCredentialExchange:
             templates: Map of service name → CredentialTemplate.
             freshness_window: Max age in seconds for accepted DMs.
             nip44_only: If True, reject NIP-04 DMs entirely.
+            credential_vault: Optional vault for persisting credentials
+                across sessions.  If provided, ``receive()`` checks the
+                vault first and stores credentials after successful pickup.
         """
         self._freshness_window = freshness_window
         self._nip44_only = nip44_only
         self._templates = templates
         self._relays = [r.strip() for r in relays if r.strip()]
+        self._credential_vault = credential_vault
 
         # Key material
         self._privkey_hex: str = ""
@@ -249,19 +255,22 @@ class NostrCredentialExchange:
             ),
         }
 
-    async def receive(self, sender_npub: str) -> dict[str, Any]:
+    async def receive(
+        self, sender_npub: str, *, service: str | None = None,
+    ) -> dict[str, Any]:
         """Pick up and validate credentials from a sender.
 
-        Checks the received DM buffer for messages from ``sender_npub``
-        within the freshness window.  If not found in the buffer, does
-        a one-shot relay fetch.
+        If a credential vault is configured, checks it first.  On a vault
+        hit the credentials are returned immediately without any relay I/O.
+        On a miss (or no vault), falls back to the relay DM flow.
 
-        On success, validates the payload against the matching template,
-        publishes a NIP-09 deletion request, and returns the validated
-        credentials (never echoing sensitive values).
+        After a successful relay pickup the validated credentials are
+        encrypted and stored in the vault for future sessions.
 
         Args:
             sender_npub: Patron's npub (bech32).
+            service: Optional service hint for vault lookup.  If omitted
+                and only one template is configured, that service is used.
 
         Returns:
             Dict with success, service name, and field count.
@@ -278,7 +287,32 @@ class NostrCredentialExchange:
         except Exception as exc:
             raise CourierValidationError(f"Invalid sender npub: {exc}") from exc
 
-        # Try buffer first, then one-shot fetch
+        # Resolve service for vault lookup
+        vault_service = self._resolve_service(service)
+
+        # ── Vault-first lookup ──────────────────────────────────────
+        if self._credential_vault is not None and vault_service:
+            vaulted = await self._vault_fetch(vault_service, sender_npub)
+            if vaulted is not None:
+                template = self._templates[vault_service]
+                sensitive_count = sum(
+                    1 for name in vaulted
+                    if template.fields.get(name, FieldSpec()).sensitive
+                )
+                return {
+                    "success": True,
+                    "service": vault_service,
+                    "fields_received": len(vaulted),
+                    "sensitive_fields": sensitive_count,
+                    "encryption": "vault",
+                    "credentials": vaulted,
+                    "message": (
+                        f"Credentials for {vault_service} restored from vault "
+                        f"({len(vaulted)} fields). No relay I/O needed."
+                    ),
+                }
+
+        # ── Relay DM flow (existing) ────────────────────────────────
         dm = self._find_dm_in_buffer(sender_hex)
         if dm is None:
             self._fetch_dms_from_relays()
@@ -310,8 +344,8 @@ class NostrCredentialExchange:
             )
 
         # Match template
-        service = payload.get("service")
-        template = self._match_template(service, payload)
+        payload_service = payload.get("service")
+        template = self._match_template(payload_service, payload)
 
         # Validate against template
         try:
@@ -327,6 +361,10 @@ class NostrCredentialExchange:
         # Publish NIP-09 deletion request (fire-and-forget)
         if event_id:
             self._request_deletion(event_id)
+
+        # Store in vault for next session
+        if self._credential_vault is not None:
+            await self._vault_store(template.service, sender_npub, validated)
 
         # Count sensitive vs non-sensitive fields
         sensitive_count = sum(
@@ -344,8 +382,119 @@ class NostrCredentialExchange:
                 f"Credentials received for {template.service} "
                 f"({len(validated)} fields). "
                 f"Relay copy deletion requested."
+                + (
+                    " Credentials stored in vault for future sessions."
+                    if self._credential_vault is not None else ""
+                )
             ),
         }
+
+    async def forget(
+        self, sender_npub: str, *, service: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete vaulted credentials for a patron.
+
+        Useful when a patron rotates API keys and needs to re-deliver
+        via the courier.
+
+        Args:
+            sender_npub: Patron's npub (bech32).
+            service: Service name to forget.  If omitted and only one
+                template is configured, that service is used.
+
+        Returns:
+            Dict with success and whether credentials were found.
+        """
+        if self._credential_vault is None:
+            return {
+                "success": False,
+                "message": "No credential vault configured.",
+            }
+
+        resolved = self._resolve_service(service)
+        if not resolved:
+            return {
+                "success": False,
+                "message": "Cannot determine service. Provide a service name.",
+            }
+
+        deleted = await self._credential_vault.delete_credentials(
+            resolved, sender_npub,
+        )
+        return {
+            "success": True,
+            "service": resolved,
+            "deleted": deleted,
+            "message": (
+                f"Credentials for {resolved} from {sender_npub} "
+                + ("deleted from vault." if deleted else "not found in vault.")
+            ),
+        }
+
+    def _resolve_service(self, service: str | None) -> str | None:
+        """Resolve service name, defaulting to the single template if only one."""
+        if service and service in self._templates:
+            return service
+        if len(self._templates) == 1:
+            return next(iter(self._templates.keys()))
+        return service
+
+    # ── Vault helpers ──────────────────────────────────────────────────
+
+    async def _vault_fetch(
+        self, service: str, sender_npub: str,
+    ) -> dict[str, str] | None:
+        """Fetch and decrypt credentials from the vault."""
+        assert self._credential_vault is not None
+        blob = await self._credential_vault.fetch_credentials(service, sender_npub)
+        if blob is None:
+            return None
+        try:
+            plaintext = self._vault_decrypt(blob)
+            creds = json.loads(plaintext)
+            if isinstance(creds, dict):
+                return creds
+            logger.warning("Vault blob decoded to non-dict, ignoring")
+            return None
+        except Exception as exc:
+            logger.warning("Vault credential decryption failed: %s", exc)
+            return None
+
+    async def _vault_store(
+        self, service: str, sender_npub: str, credentials: dict[str, str],
+    ) -> None:
+        """Encrypt and store credentials in the vault."""
+        assert self._credential_vault is not None
+        try:
+            plaintext = json.dumps(credentials)
+            blob = self._vault_encrypt(plaintext)
+            await self._credential_vault.store_credentials(
+                service, sender_npub, blob,
+            )
+            logger.info(
+                "Credentials for %s/%s stored in vault", service, sender_npub[:16],
+            )
+        except Exception as exc:
+            logger.warning("Vault credential storage failed: %s", exc)
+
+    def _vault_encrypt(self, plaintext: str) -> str:
+        """Encrypt plaintext for vault storage using operator's key.
+
+        Uses NIP-04 AES-256-CBC with the operator as both sender and
+        recipient (self-encryption).
+        """
+        if not _HAS_NIP04:
+            raise RuntimeError("NIP-04 module required for vault encryption")
+        from tollbooth.nip04 import encrypt as _nip04_encrypt
+        return _nip04_encrypt(plaintext, self._privkey_hex, self._pubkey_hex)
+
+    def _vault_decrypt(self, blob: str) -> str:
+        """Decrypt a vault blob using operator's key."""
+        if not _HAS_NIP04:
+            raise RuntimeError("NIP-04 module required for vault decryption")
+        return _nip04_decrypt(blob, self._privkey_hex, self._pubkey_hex)
+
+    # ── Template matching ───────────────────────────────────────────
 
     def _match_template(
         self, service: str | None, payload: dict,
