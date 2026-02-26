@@ -36,6 +36,38 @@ def _get_shared_secret(private_key_hex: str, public_key_hex: str) -> bytes:
     return shared_x
 
 
+def encrypt(
+    plaintext: str,
+    private_key_hex: str,
+    public_key_hex: str,
+) -> str:
+    """Encrypt a message using NIP-04 AES-256-CBC.
+
+    Args:
+        plaintext: UTF-8 string to encrypt.
+        private_key_hex: Sender's 32-byte private key as hex.
+        public_key_hex: Recipient's 32-byte x-only public key as hex.
+
+    Returns:
+        NIP-04 format ``<base64_ciphertext>?iv=<base64_iv>``.
+    """
+    import os
+
+    shared_secret = _get_shared_secret(private_key_hex, public_key_hex)
+    iv = os.urandom(16)
+
+    padder = PKCS7(128).padder()
+    padded = padder.update(plaintext.encode("utf-8")) + padder.finalize()
+
+    cipher = Cipher(algorithms.AES(shared_secret), modes.CBC(iv))
+    encryptor = cipher.encryptor()
+    ciphertext = encryptor.update(padded) + encryptor.finalize()
+
+    ct_b64 = base64.b64encode(ciphertext).decode()
+    iv_b64 = base64.b64encode(iv).decode()
+    return f"{ct_b64}?iv={iv_b64}"
+
+
 def decrypt(
     ciphertext_with_iv: str,
     private_key_hex: str,
