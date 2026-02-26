@@ -705,32 +705,49 @@ class NostrCredentialExchange:
         self._subscribe_to_relays()
 
     def _subscribe_to_relays(self) -> None:
-        """Subscribe to all relays for DMs addressed to us."""
-        since = int(time.time()) - self._freshness_window
-        # REQ filter: kind 4 (NIP-04) and kind 1059 (NIP-17 gift wrap)
-        kinds = [_KIND_ENCRYPTED_DM]
-        if not self._nip44_only:
-            kinds.append(_KIND_GIFT_WRAP)
-        else:
-            # For NIP-44-only, still listen for gift wraps
-            kinds = [_KIND_GIFT_WRAP]
-            # Also listen for kind 4 in case sender used NIP-04
-            # (we'll reject it during decrypt if nip44_only is set)
-            kinds.append(_KIND_ENCRYPTED_DM)
+        """Subscribe to all relays for DMs addressed to us.
 
-        # NIP-04 DMs are tagged with p-tag for recipient
-        # NIP-17 gift wraps are tagged with p-tag for recipient
-        req_filter = {
-            "kinds": kinds,
+        Uses multiple REQ filters to cover both NIP-04 (kind 4) and
+        NIP-17 (kind 1059) DMs.  NIP-17 gift wraps may use a random
+        ``p`` tag for metadata protection (per the NIP-17 spec), so we
+        include a broad filter without a ``#p`` constraint — tightly
+        limited — to catch those events too.
+        """
+        since = int(time.time()) - self._freshness_window
+
+        # Always subscribe to both NIP-04 and NIP-17 events.
+        # Even in nip44_only mode we listen for kind 4 so we can
+        # surface a clear rejection message during decrypt.
+
+        # Filter 1: NIP-04 DMs addressed to us (p-tag match)
+        filter_nip04: dict[str, Any] = {
+            "kinds": [_KIND_ENCRYPTED_DM],
             "#p": [self._pubkey_hex],
             "since": since,
             "limit": 50,
         }
+        # Filter 2: NIP-17 gift wraps addressed to us (p-tag match)
+        filter_giftwrap_tagged: dict[str, Any] = {
+            "kinds": [_KIND_GIFT_WRAP],
+            "#p": [self._pubkey_hex],
+            "since": since,
+            "limit": 50,
+        }
+        # Filter 3: NIP-17 gift wraps without our p-tag
+        # (metadata-protected per NIP-17 — outer p-tag may be random).
+        # Broader search — limit tightly to avoid noise.
+        filter_giftwrap_broad: dict[str, Any] = {
+            "kinds": [_KIND_GIFT_WRAP],
+            "since": since,
+            "limit": 20,
+        }
+
+        filters = [filter_nip04, filter_giftwrap_tagged, filter_giftwrap_broad]
         sub_id = f"courier-{int(time.time())}"
 
         for relay_url in self._relays:
             try:
-                self._subscribe_one_relay(relay_url, sub_id, req_filter)
+                self._subscribe_one_relay(relay_url, sub_id, filters)
             except Exception as exc:
                 logger.debug(
                     "Relay subscription %s failed (non-fatal): %s",
@@ -741,14 +758,25 @@ class NostrCredentialExchange:
         self,
         relay_url: str,
         sub_id: str,
-        req_filter: dict[str, Any],
+        filters: list[dict[str, Any]] | dict[str, Any],
     ) -> None:
-        """Subscribe to one relay and collect events."""
+        """Subscribe to one relay and collect events.
+
+        Args:
+            relay_url: WebSocket URL of the relay.
+            sub_id: Subscription identifier.
+            filters: One filter dict or a list of filter dicts.
+                The Nostr protocol supports multiple filters in a single
+                REQ — events matching ANY filter are returned.
+        """
+        if isinstance(filters, dict):
+            filters = [filters]
+
         sslopt: dict[str, Any] = {}
         ws = create_connection(relay_url, timeout=_DEFAULT_SUBSCRIBE_TIMEOUT, sslopt=sslopt)
         try:
-            # Send REQ
-            req_msg = json.dumps(["REQ", sub_id, req_filter])
+            # Send REQ with all filters: ["REQ", sub_id, filter1, filter2, ...]
+            req_msg = json.dumps(["REQ", sub_id, *filters])
             ws.send(req_msg)
 
             # Read events until EOSE or timeout
