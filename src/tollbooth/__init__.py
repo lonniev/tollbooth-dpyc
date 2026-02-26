@@ -3,7 +3,7 @@
 Bitcoin Lightning micropayments for MCP servers.
 """
 
-__version__ = "0.1.28"
+__version__ = "0.1.29"
 
 from tollbooth.certificate import CertificateError, verify_certificate_auto, UNDERSTOOD_PROTOCOLS
 from tollbooth.config import TollboothConfig
@@ -22,6 +22,29 @@ try:
 except ImportError:
     NostrAuditPublisher = None  # type: ignore[assignment,misc]
     AuditedVault = None  # type: ignore[assignment,misc]
+
+try:
+    from tollbooth.nostr_credentials import (
+        NostrCredentialExchange,
+        CourierError,
+        CourierNotReady,
+        CourierTimeout,
+        CourierValidationError,
+    )
+    from tollbooth.credential_templates import (
+        CredentialTemplate,
+        FieldSpec,
+        TemplateValidationError,
+    )
+except ImportError:
+    NostrCredentialExchange = None  # type: ignore[assignment,misc]
+    CourierError = None  # type: ignore[assignment,misc]
+    CourierNotReady = None  # type: ignore[assignment,misc]
+    CourierTimeout = None  # type: ignore[assignment,misc]
+    CourierValidationError = None  # type: ignore[assignment,misc]
+    CredentialTemplate = None  # type: ignore[assignment,misc]
+    FieldSpec = None  # type: ignore[assignment,misc]
+    TemplateValidationError = None  # type: ignore[assignment,misc]
 
 __all__ = [
     "CertificateError",
@@ -51,4 +74,12 @@ __all__ = [
     "MerkleTree",
     "InclusionProof",
     "OTSCalendarClient",
+    "NostrCredentialExchange",
+    "CourierError",
+    "CourierNotReady",
+    "CourierTimeout",
+    "CourierValidationError",
+    "CredentialTemplate",
+    "FieldSpec",
+    "TemplateValidationError",
 ]
