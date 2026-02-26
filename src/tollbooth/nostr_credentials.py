@@ -375,12 +375,12 @@ class NostrCredentialExchange:
         )
 
     def _start_subscription(self) -> None:
-        """Start a background relay subscription for incoming DMs."""
-        thread = threading.Thread(
-            target=self._subscribe_to_relays,
-            daemon=True,
-        )
-        thread.start()
+        """Start relay subscription and wait for it to complete.
+
+        Runs synchronously so that ``open_channel()`` returns with the
+        buffer already populated.  Relay timeouts keep this bounded.
+        """
+        self._subscribe_to_relays()
 
     def _subscribe_to_relays(self) -> None:
         """Subscribe to all relays for DMs addressed to us."""
