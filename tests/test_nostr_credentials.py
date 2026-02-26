@@ -16,8 +16,10 @@ from tollbooth.nostr_credentials import (
     CourierTimeout,
     CourierValidationError,
     NostrCredentialExchange,
+    NostrProfile,
     _KIND_ENCRYPTED_DM,
     _KIND_GIFT_WRAP,
+    _KIND_METADATA,
     _KIND_SEAL,
     _KIND_PRIVATE_DM,
 )
@@ -862,3 +864,179 @@ class TestCredentialVault:
 
         assert result["credentials"]["api_key"] == "rotated"
         assert result["encryption"] == "nip04"
+
+
+# ── NostrProfile tests ────────────────────────────────────────────────
+
+
+class TestNostrProfile:
+    def test_to_metadata_full(self):
+        profile = NostrProfile(
+            name="excalibur-mcp",
+            display_name="eXcalibur MCP",
+            about="Sword-swift tweets",
+            picture="https://example.com/avatar.png",
+            nip05="excalibur@dpyc.community",
+            website="https://github.com/lonniev/excalibur-mcp",
+        )
+        meta = profile.to_metadata()
+        assert meta["name"] == "excalibur-mcp"
+        assert meta["display_name"] == "eXcalibur MCP"
+        assert meta["about"] == "Sword-swift tweets"
+        assert meta["picture"] == "https://example.com/avatar.png"
+        assert meta["nip05"] == "excalibur@dpyc.community"
+        assert meta["website"] == "https://github.com/lonniev/excalibur-mcp"
+
+    def test_to_metadata_minimal(self):
+        profile = NostrProfile(name="test-mcp")
+        meta = profile.to_metadata()
+        assert meta == {"name": "test-mcp"}
+        assert "display_name" not in meta
+        assert "picture" not in meta
+
+    def test_extra_fields(self):
+        profile = NostrProfile(
+            name="test",
+            extra={"custom_field": "value"},
+        )
+        meta = profile.to_metadata()
+        assert meta["custom_field"] == "value"
+
+
+class TestPublishProfile:
+    def test_publishes_kind_0_event(self):
+        ex = _make_exchange()
+        profile = NostrProfile(name="test-mcp", about="Test service")
+
+        published = []
+        original_publish = ex._publish_to_relays
+
+        def capture_publish(message: str) -> None:
+            published.append(message)
+
+        with patch.object(ex, "_publish_to_relays", side_effect=capture_publish):
+            ex.publish_profile(profile)
+
+            # Wait for daemon thread
+            import time
+            time.sleep(0.2)
+
+        assert len(published) == 1
+        msg = json.loads(published[0])
+        assert msg[0] == "EVENT"
+        event = msg[1]
+        assert event["kind"] == _KIND_METADATA
+        content = json.loads(event["content"])
+        assert content["name"] == "test-mcp"
+        assert content["about"] == "Test service"
+
+    def test_publish_profile_disabled(self):
+        """No error when exchange is disabled."""
+        ex = _make_exchange(relays=[])
+        ex._enabled = False
+        ex.publish_profile(NostrProfile(name="test"))
+        # Should not raise
+
+
+class TestSendDm:
+    def test_sends_nip04_dm(self):
+        ex = _make_exchange()
+        patron = PrivateKey()
+
+        published = []
+
+        def capture_publish(message: str) -> None:
+            published.append(message)
+
+        with patch.object(ex, "_publish_to_relays", side_effect=capture_publish):
+            ex.send_dm(patron.public_key.bech32(), "Hello patron!")
+
+            import time
+            time.sleep(0.2)
+
+        assert len(published) == 1
+        msg = json.loads(published[0])
+        assert msg[0] == "EVENT"
+        event = msg[1]
+        assert event["kind"] == _KIND_ENCRYPTED_DM
+        # p-tag should reference the patron
+        p_tags = [t for t in event["tags"] if t[0] == "p"]
+        assert len(p_tags) == 1
+        assert p_tags[0][1] == patron.public_key.hex()
+        # Content should be NIP-04 encrypted (contains ?iv=)
+        assert "?iv=" in event["content"]
+
+    def test_send_dm_decryptable(self):
+        """Patron can decrypt the welcome DM."""
+        from tollbooth.nip04 import decrypt as nip04_decrypt
+
+        ex = _make_exchange()
+        patron = PrivateKey()
+
+        published = []
+
+        def capture_publish(message: str) -> None:
+            published.append(message)
+
+        with patch.object(ex, "_publish_to_relays", side_effect=capture_publish):
+            ex.send_dm(patron.public_key.bech32(), "Test message")
+
+            import time
+            time.sleep(0.2)
+
+        event = json.loads(published[0])[1]
+        plaintext = nip04_decrypt(
+            event["content"], patron.hex(), ex._pubkey_hex,
+        )
+        assert plaintext == "Test message"
+
+    def test_send_dm_invalid_npub(self):
+        ex = _make_exchange()
+        with pytest.raises(CourierValidationError, match="Invalid recipient"):
+            ex.send_dm("not-an-npub", "hello")
+
+
+class TestOpenChannelWithWelcomeDm:
+    @pytest.mark.asyncio
+    async def test_sends_welcome_dm_when_npub_provided(self):
+        ex = _make_exchange()
+        patron = PrivateKey()
+
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "send_dm") as mock_send:
+            result = await ex.open_channel("x", recipient_npub=patron.public_key.bech32())
+
+        assert result["success"] is True
+        assert result["welcome_dm_sent"] is True
+        mock_send.assert_called_once()
+        call_args = mock_send.call_args
+        assert call_args[0][0] == patron.public_key.bech32()
+        assert "credentials" in call_args[0][1].lower()
+
+    @pytest.mark.asyncio
+    async def test_no_welcome_dm_without_npub(self):
+        ex = _make_exchange()
+
+        with patch.object(ex, "_start_subscription"):
+            result = await ex.open_channel("x")
+
+        assert result["success"] is True
+        assert result["welcome_dm_sent"] is False
+        assert self._npub_in_message(result, ex.npub)
+
+    @pytest.mark.asyncio
+    async def test_fallback_on_dm_failure(self):
+        ex = _make_exchange()
+        patron = PrivateKey()
+
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "send_dm", side_effect=Exception("relay down")):
+            result = await ex.open_channel("x", recipient_npub=patron.public_key.bech32())
+
+        assert result["success"] is True
+        assert result["welcome_dm_sent"] is False
+        assert "could not send" in result["message"].lower()
+
+    @staticmethod
+    def _npub_in_message(result: dict, npub: str) -> bool:
+        return npub in result.get("message", "")

@@ -3,7 +3,7 @@
 Bitcoin Lightning micropayments for MCP servers.
 """
 
-__version__ = "0.1.31"
+__version__ = "0.1.32"
 
 from tollbooth.certificate import CertificateError, verify_certificate_auto, UNDERSTOOD_PROTOCOLS
 from tollbooth.config import TollboothConfig
@@ -27,6 +27,7 @@ except ImportError:
 try:
     from tollbooth.nostr_credentials import (
         NostrCredentialExchange,
+        NostrProfile,
         CourierError,
         CourierNotReady,
         CourierTimeout,
@@ -39,6 +40,7 @@ try:
     )
 except ImportError:
     NostrCredentialExchange = None  # type: ignore[assignment,misc]
+    NostrProfile = None  # type: ignore[assignment,misc]
     CourierError = None  # type: ignore[assignment,misc]
     CourierNotReady = None  # type: ignore[assignment,misc]
     CourierTimeout = None  # type: ignore[assignment,misc]
@@ -77,6 +79,7 @@ __all__ = [
     "InclusionProof",
     "OTSCalendarClient",
     "NostrCredentialExchange",
+    "NostrProfile",
     "CourierError",
     "CourierNotReady",
     "CourierTimeout",

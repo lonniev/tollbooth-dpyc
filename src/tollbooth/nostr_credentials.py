@@ -9,8 +9,8 @@ Two-tool operator interface:
 
     exchange = NostrCredentialExchange(nsec, relays, templates)
 
-    # Tool 1: Tell patron where to send
-    await exchange.open_channel("x")
+    # Tool 1: Send welcome DM to patron (they just reply)
+    await exchange.open_channel("x", recipient_npub="npub1user...")
 
     # Tool 2: Pick up the sealed pouch
     await exchange.receive("npub1user...")
@@ -20,6 +20,7 @@ Dependencies are optional — install with ``pip install tollbooth-dpyc[nostr]``
 Reference: https://github.com/nostr-protocol/nips/blob/master/44.md (NIP-44)
            https://github.com/nostr-protocol/nips/blob/master/04.md (NIP-04)
            https://github.com/nostr-protocol/nips/blob/master/09.md (NIP-09)
+           https://github.com/nostr-protocol/nips/blob/master/01.md (NIP-01 kind 0)
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import json
 import logging
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from tollbooth.credential_templates import (
@@ -73,11 +75,51 @@ except ImportError:
 
 
 # Nostr event kinds
+_KIND_METADATA = 0  # NIP-01 kind 0 (user metadata / profile)
 _KIND_ENCRYPTED_DM = 4  # NIP-04 legacy DMs
 _KIND_GIFT_WRAP = 1059  # NIP-17/NIP-59 gift-wrapped DMs
 _KIND_SEAL = 13  # NIP-59 seal (inner layer of gift wrap)
 _KIND_PRIVATE_DM = 14  # NIP-17 private DM (innermost content)
 _KIND_DELETION = 5  # NIP-09 event deletion
+
+
+@dataclass
+class NostrProfile:
+    """Nostr kind 0 profile metadata for the operator's npub.
+
+    Published so patrons see a friendly name and avatar in their
+    Nostr client instead of a raw npub string.
+    """
+
+    name: str
+    display_name: str | None = None
+    about: str | None = None
+    picture: str | None = None
+    nip05: str | None = None
+    banner: str | None = None
+    website: str | None = None
+    lud16: str | None = None  # Lightning address
+    extra: dict[str, str] = field(default_factory=dict)
+
+    def to_metadata(self) -> dict[str, str]:
+        """Serialize to the NIP-01 kind 0 content dict."""
+        meta: dict[str, str] = {"name": self.name}
+        if self.display_name:
+            meta["display_name"] = self.display_name
+        if self.about:
+            meta["about"] = self.about
+        if self.picture:
+            meta["picture"] = self.picture
+        if self.nip05:
+            meta["nip05"] = self.nip05
+        if self.banner:
+            meta["banner"] = self.banner
+        if self.website:
+            meta["website"] = self.website
+        if self.lud16:
+            meta["lud16"] = self.lud16
+        meta.update(self.extra)
+        return meta
 
 # Default freshness window (seconds)
 _DEFAULT_FRESHNESS = 600  # 10 minutes
@@ -210,15 +252,113 @@ class NostrCredentialExchange:
         """Configured relay URLs."""
         return list(self._relays)
 
-    async def open_channel(self, service: str) -> dict[str, Any]:
+    def publish_profile(self, profile: NostrProfile) -> None:
+        """Publish a NIP-01 kind 0 profile event for the operator's npub.
+
+        Sends the profile metadata to all configured relays so patrons
+        see a friendly name and avatar instead of a raw npub string.
+
+        Args:
+            profile: Operator profile metadata.
+        """
+        if not self._enabled:
+            logger.warning("Cannot publish profile — Secure Courier not enabled.")
+            return
+
+        metadata = profile.to_metadata()
+        content = json.dumps(metadata)
+
+        try:
+            event = Event(
+                kind=_KIND_METADATA,
+                content=content,
+                tags=[],
+                pubkey=self._pubkey_hex,
+                created_at=int(time.time()),
+            )
+            event.sign(self._privkey_hex)
+            message = event.to_message()
+
+            thread = threading.Thread(
+                target=self._publish_to_relays,
+                args=(message,),
+                daemon=True,
+            )
+            thread.start()
+            logger.info("Published kind 0 profile for %s", self._npub[:20])
+        except Exception as exc:
+            logger.warning("Failed to publish profile: %s", exc)
+
+    def send_dm(self, recipient_npub: str, message_text: str) -> None:
+        """Send a NIP-04 encrypted DM to a recipient.
+
+        Used to send welcome messages so patrons can reply in an existing
+        thread rather than composing a new DM to an unfamiliar npub.
+
+        Args:
+            recipient_npub: Patron's npub (bech32).
+            message_text: Plaintext message to encrypt and send.
+        """
+        if not self._enabled:
+            raise CourierNotReady("Secure Courier not enabled.")
+
+        if not _HAS_NIP04:
+            raise CourierNotReady("NIP-04 module required for outbound DMs.")
+
+        try:
+            recipient_hex = _npub_to_hex(recipient_npub)
+        except Exception as exc:
+            raise CourierValidationError(
+                f"Invalid recipient npub: {exc}"
+            ) from exc
+
+        from tollbooth.nip04 import encrypt as _nip04_encrypt
+
+        encrypted = _nip04_encrypt(message_text, self._privkey_hex, recipient_hex)
+
+        try:
+            event = Event(
+                kind=_KIND_ENCRYPTED_DM,
+                content=encrypted,
+                tags=[["p", recipient_hex]],
+                pubkey=self._pubkey_hex,
+                created_at=int(time.time()),
+            )
+            event.sign(self._privkey_hex)
+            message = event.to_message()
+
+            thread = threading.Thread(
+                target=self._publish_to_relays,
+                args=(message,),
+                daemon=True,
+            )
+            thread.start()
+            logger.info(
+                "Sent welcome DM to %s via %d relays",
+                recipient_npub[:20], len(self._relays),
+            )
+        except Exception as exc:
+            logger.warning("Failed to send welcome DM: %s", exc)
+            raise CourierError(f"Failed to send welcome DM: {exc}") from exc
+
+    async def open_channel(
+        self,
+        service: str,
+        *,
+        recipient_npub: str | None = None,
+    ) -> dict[str, Any]:
         """Open a credential delivery channel for a service.
 
-        Returns the operator's npub, relay list, and template instructions
-        so the patron knows where and what to send.  Also starts a
-        background relay subscription to listen for incoming DMs.
+        If ``recipient_npub`` is provided, sends a welcome DM to the
+        patron with template instructions.  The patron just replies
+        to the thread instead of composing a new DM to an unfamiliar npub.
+
+        If ``recipient_npub`` is omitted, falls back to returning the
+        operator's npub and instructions for manual DM initiation.
 
         Args:
             service: Template service name (e.g., "x", "openai").
+            recipient_npub: Optional patron npub to send welcome DM to.
 
         Returns:
             Dict with npub, relays, template instructions, and freshness window.
@@ -240,20 +380,53 @@ class NostrCredentialExchange:
         # Start background subscription
         self._start_subscription()
 
-        return {
+        # Build the welcome message for the patron
+        welcome_text = (
+            f"Hello from {self._npub}!\n\n"
+            f"Reply to this message with your {template.service} credentials "
+            f"as a JSON object:\n\n{instructions}\n\n"
+            f"Your reply is end-to-end encrypted — "
+            f"only this service can read it."
+        )
+
+        result: dict[str, Any] = {
             "success": True,
             "npub": self._npub,
             "relays": self._relays,
             "service": service,
             "freshness_window_seconds": self._freshness_window,
             "instructions": instructions,
-            "message": (
+        }
+
+        if recipient_npub:
+            try:
+                self.send_dm(recipient_npub, welcome_text)
+                result["welcome_dm_sent"] = True
+                result["message"] = (
+                    f"A welcome DM has been sent to {recipient_npub}. "
+                    f"Open your Nostr client, find the message, and reply "
+                    f"with your credentials as JSON. "
+                    f"Then call receive_credentials with your npub."
+                )
+            except Exception as exc:
+                logger.warning("Welcome DM failed, falling back to manual: %s", exc)
+                result["welcome_dm_sent"] = False
+                result["message"] = (
+                    f"Could not send welcome DM ({exc}). "
+                    f"Send your {template.service} credentials as a Nostr DM "
+                    f"to {self._npub} from your Nostr client. "
+                    f"Then call receive_credentials with your npub."
+                )
+        else:
+            result["welcome_dm_sent"] = False
+            result["message"] = (
                 f"Send your {template.service} credentials as a Nostr DM "
                 f"to {self._npub} from your Nostr client. "
                 f"The DM must contain a JSON object matching the template above. "
                 f"Then call receive_credentials with your npub."
-            ),
-        }
+            )
+
+        return result
 
     async def receive(
         self, sender_npub: str, *, service: str | None = None,
