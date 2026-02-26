@@ -382,11 +382,14 @@ class NostrCredentialExchange:
 
         # Build the welcome message for the patron
         welcome_text = (
-            f"Hello from {self._npub}!\n\n"
-            f"Reply to this message with your {template.service} credentials "
-            f"as a JSON object:\n\n{instructions}\n\n"
+            f"Hi — I'm {self._npub}, a Tollbooth MCP service.\n\n"
+            f"You're receiving this message because you (or your AI agent) "
+            f"requested a credential channel from a Claude session.\n\n"
+            f"If you'd like to proceed, reply to this message with your "
+            f"credentials as JSON:\n\n{instructions}\n\n"
             f"Your reply is end-to-end encrypted — "
-            f"only this service can read it."
+            f"only this service can read it.\n\n"
+            f"If you didn't request this, simply ignore this message."
         )
 
         result: dict[str, Any] = {
@@ -502,15 +505,20 @@ class NostrCredentialExchange:
         # Decrypt content
         plaintext = self._decrypt_dm(dm, sender_hex)
 
+        # Resolve template for error DM instructions
+        error_template = self._resolve_error_template(service)
+
         # Parse JSON payload
         try:
             payload = json.loads(plaintext)
         except json.JSONDecodeError as exc:
+            self._send_error_dm(sender_npub, error_template)
             raise CourierValidationError(
                 f"DM content is not valid JSON: {exc}"
             ) from exc
 
         if not isinstance(payload, dict):
+            self._send_error_dm(sender_npub, error_template)
             raise CourierValidationError(
                 "DM content must be a JSON object, "
                 f"got {type(payload).__name__}"
@@ -524,6 +532,7 @@ class NostrCredentialExchange:
         try:
             validated = validate_payload(payload, template)
         except TemplateValidationError as exc:
+            self._send_error_dm(sender_npub, template)
             raise CourierValidationError(str(exc)) from exc
 
         # Mark event as consumed
@@ -538,6 +547,9 @@ class NostrCredentialExchange:
         # Store in vault for next session
         if self._credential_vault is not None:
             await self._vault_store(template.service, sender_npub, validated)
+
+        # Send success DM back to patron (non-fatal on failure)
+        self._send_success_dm(sender_npub)
 
         # Count sensitive vs non-sensitive fields
         sensitive_count = sum(
@@ -603,6 +615,66 @@ class NostrCredentialExchange:
                 + ("deleted from vault." if deleted else "not found in vault.")
             ),
         }
+
+    # ── Conversational DM helpers ─────────────────────────────────────
+
+    def _send_success_dm(self, sender_npub: str) -> None:
+        """Send a success DM to the patron after credential pickup.
+
+        Non-fatal -- DM failure is logged but does not block the receive flow.
+        """
+        success_text = (
+            "\u2705 Your credentials have been securely stored. "
+            "Your AI agent can now use them on your behalf.\n\n"
+            "This message thread is no longer needed — "
+            "the relay copy of your credentials has been deleted."
+        )
+        try:
+            self.send_dm(sender_npub, success_text)
+        except Exception as exc:
+            logger.debug(
+                "Success DM to %s failed (non-fatal): %s",
+                sender_npub[:20], exc,
+            )
+
+    def _send_error_dm(
+        self,
+        sender_npub: str,
+        template: CredentialTemplate | None,
+    ) -> None:
+        """Send an error DM to the patron when credential parsing fails.
+
+        Non-fatal -- DM failure is logged but does not mask the real error.
+        """
+        if template is not None:
+            instructions = render_template_instructions(template)
+        else:
+            instructions = "(see the welcome message for the expected format)"
+
+        error_text = (
+            "\u26a0\ufe0f I couldn’t process your credentials. "
+            "The message didn’t match the expected format.\n\n"
+            "Please reply with exactly this structure (no extra text):\n\n"
+            f"{instructions}\n\n"
+            "Straight quotes only — some keyboards use "
+            "“smart quotes” that break JSON."
+        )
+        try:
+            self.send_dm(sender_npub, error_text)
+        except Exception as exc:
+            logger.debug(
+                "Error DM to %s failed (non-fatal): %s",
+                sender_npub[:20], exc,
+            )
+
+    def _resolve_error_template(
+        self, service: str | None,
+    ) -> CredentialTemplate | None:
+        """Resolve a template for error DM instructions (best-effort)."""
+        resolved = self._resolve_service(service)
+        if resolved and resolved in self._templates:
+            return self._templates[resolved]
+        return None
 
     def _resolve_service(self, service: str | None) -> str | None:
         """Resolve service name, defaulting to the single template if only one."""

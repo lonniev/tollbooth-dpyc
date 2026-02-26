@@ -1040,3 +1040,165 @@ class TestOpenChannelWithWelcomeDm:
     @staticmethod
     def _npub_in_message(result: dict, npub: str) -> bool:
         return npub in result.get("message", "")
+
+
+# ── Conversational DM Flow Tests ──────────────────────────────────────────
+
+
+class TestConversationalDmFlow:
+    """Tests for conversational welcome, success, and error DMs."""
+
+    @pytest.mark.asyncio
+    async def test_welcome_dm_is_conversational(self):
+        """Welcome message contains the new conversational text patterns."""
+        ex = _make_exchange()
+        patron = PrivateKey()
+
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "send_dm") as mock_send:
+            await ex.open_channel("x", recipient_npub=patron.public_key.bech32())
+
+        mock_send.assert_called_once()
+        welcome_text = mock_send.call_args[0][1]
+        assert "requested a credential channel" in welcome_text
+        assert "If you didn't request this" in welcome_text
+
+    @pytest.mark.asyncio
+    async def test_success_dm_sent_after_receive(self):
+        """After a successful receive, a success DM is sent to the patron."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        payload = {"api_key": "sk-test-123", "api_secret": "secret-456"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"), \
+             patch.object(ex, "send_dm") as mock_send:
+            result = await ex.receive(sender.public_key.bech32())
+
+        assert result["success"] is True
+        mock_send.assert_called_once()
+        success_text = mock_send.call_args[0][1]
+        assert "securely stored" in success_text
+
+    @pytest.mark.asyncio
+    async def test_error_dm_sent_on_validation_failure(self):
+        """When credential parsing fails, an error DM is sent before raising."""
+        import base64
+        import os
+
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.padding import PKCS7
+
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        plaintext = b"this is not json"
+        shared_secret = _get_shared_secret(
+            sender.hex(), operator.public_key.hex(),
+        )
+        iv = os.urandom(16)
+        padder = PKCS7(128).padder()
+        padded = padder.update(plaintext) + padder.finalize()
+        cipher = Cipher(algorithms.AES(shared_secret), modes.CBC(iv))
+        ct = cipher.encryptor().update(padded) + cipher.encryptor().finalize()
+        content = (
+            f"{base64.b64encode(ct).decode()}"
+            f"?iv={base64.b64encode(iv).decode()}"
+        )
+
+        event = {
+            "id": "bad_json_dm",
+            "kind": _KIND_ENCRYPTED_DM,
+            "pubkey": sender.public_key.hex(),
+            "content": content,
+            "tags": [["p", operator.public_key.hex()]],
+            "created_at": int(time.time()),
+            "sig": "fake",
+        }
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm") as mock_send:
+            with pytest.raises(CourierValidationError):
+                await ex.receive(sender.public_key.bech32())
+
+        mock_send.assert_called_once()
+        error_text = mock_send.call_args[0][1]
+        assert "couldn’t process" in error_text
+
+    @pytest.mark.asyncio
+    async def test_success_dm_failure_nonfatal(self):
+        """If the success DM fails to send, receive still succeeds."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        payload = {"api_key": "sk-test-123", "api_secret": "secret-456"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"), \
+             patch.object(ex, "send_dm", side_effect=Exception("relay down")):
+            result = await ex.receive(sender.public_key.bech32())
+
+        assert result["success"] is True
+        assert result["credentials"]["api_key"] == "sk-test-123"
+
+    @pytest.mark.asyncio
+    async def test_error_dm_failure_nonfatal(self):
+        """If the error DM fails to send, the original
+        CourierValidationError still propagates."""
+        import base64
+        import os
+
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.padding import PKCS7
+
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        plaintext = b"not json at all"
+        shared_secret = _get_shared_secret(
+            sender.hex(), operator.public_key.hex(),
+        )
+        iv = os.urandom(16)
+        padder = PKCS7(128).padder()
+        padded = padder.update(plaintext) + padder.finalize()
+        cipher = Cipher(algorithms.AES(shared_secret), modes.CBC(iv))
+        ct = cipher.encryptor().update(padded) + cipher.encryptor().finalize()
+        content = (
+            f"{base64.b64encode(ct).decode()}"
+            f"?iv={base64.b64encode(iv).decode()}"
+        )
+
+        event = {
+            "id": "bad_json_dm_2",
+            "kind": _KIND_ENCRYPTED_DM,
+            "pubkey": sender.public_key.hex(),
+            "content": content,
+            "tags": [["p", operator.public_key.hex()]],
+            "created_at": int(time.time()),
+            "sig": "fake",
+        }
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm", side_effect=Exception("relay down")):
+            with pytest.raises(CourierValidationError, match="not valid JSON"):
+                await ex.receive(sender.public_key.bech32())
+
