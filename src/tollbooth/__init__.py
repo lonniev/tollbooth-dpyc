@@ -66,6 +66,49 @@ except ImportError:
     NotificationManager = None  # type: ignore[assignment,misc]
     NotificationPreferences = None  # type: ignore[assignment,misc]
 
+try:
+    from tollbooth.constraints import (
+        ToolConstraint,
+        ConstraintContext,
+        ConstraintResult,
+        PriceModifier,
+        LedgerSnapshot,
+        PatronIdentity,
+        EnvironmentSnapshot,
+        ConstraintEngine,
+        TemporalWindowConstraint,
+        FiniteSupplyConstraint,
+        PeriodicRefreshConstraint,
+        CouponConstraint,
+        FreeTrialConstraint,
+        LoyaltyDiscountConstraint,
+        BulkBonusConstraint,
+        HappyHourConstraint,
+        JsonExpressionConstraint,
+        load_constraints,
+        validate_config,
+    )
+except ImportError:
+    ToolConstraint = None  # type: ignore[assignment,misc]
+    ConstraintContext = None  # type: ignore[assignment,misc]
+    ConstraintResult = None  # type: ignore[assignment,misc]
+    PriceModifier = None  # type: ignore[assignment,misc]
+    LedgerSnapshot = None  # type: ignore[assignment,misc]
+    PatronIdentity = None  # type: ignore[assignment,misc]
+    EnvironmentSnapshot = None  # type: ignore[assignment,misc]
+    ConstraintEngine = None  # type: ignore[assignment,misc]
+    TemporalWindowConstraint = None  # type: ignore[assignment,misc]
+    FiniteSupplyConstraint = None  # type: ignore[assignment,misc]
+    PeriodicRefreshConstraint = None  # type: ignore[assignment,misc]
+    CouponConstraint = None  # type: ignore[assignment,misc]
+    FreeTrialConstraint = None  # type: ignore[assignment,misc]
+    LoyaltyDiscountConstraint = None  # type: ignore[assignment,misc]
+    BulkBonusConstraint = None  # type: ignore[assignment,misc]
+    HappyHourConstraint = None  # type: ignore[assignment,misc]
+    JsonExpressionConstraint = None  # type: ignore[assignment,misc]
+    load_constraints = None  # type: ignore[assignment,misc]
+    validate_config = None  # type: ignore[assignment,misc]
+
 __all__ = [
     "CertificateError",
     "TollboothConfig",
@@ -109,4 +152,24 @@ __all__ = [
     "courier_ping",
     "NotificationManager",
     "NotificationPreferences",
+    # Constraint Engine
+    "ToolConstraint",
+    "ConstraintContext",
+    "ConstraintResult",
+    "PriceModifier",
+    "LedgerSnapshot",
+    "PatronIdentity",
+    "EnvironmentSnapshot",
+    "ConstraintEngine",
+    "TemporalWindowConstraint",
+    "FiniteSupplyConstraint",
+    "PeriodicRefreshConstraint",
+    "CouponConstraint",
+    "FreeTrialConstraint",
+    "LoyaltyDiscountConstraint",
+    "BulkBonusConstraint",
+    "HappyHourConstraint",
+    "JsonExpressionConstraint",
+    "load_constraints",
+    "validate_config",
 ]
