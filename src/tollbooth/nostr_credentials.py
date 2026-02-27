@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import threading
 import time
 from dataclasses import dataclass, field
@@ -61,6 +62,7 @@ except ImportError:
 
 try:
     from tollbooth.nip44 import decrypt as _nip44_decrypt
+    from tollbooth.nip44 import encrypt as _nip44_encrypt
 
     _HAS_NIP44 = True
 except ImportError:
@@ -81,6 +83,16 @@ _KIND_GIFT_WRAP = 1059  # NIP-17/NIP-59 gift-wrapped DMs
 _KIND_SEAL = 13  # NIP-59 seal (inner layer of gift wrap)
 _KIND_PRIVATE_DM = 14  # NIP-17 private DM (innermost content)
 _KIND_DELETION = 5  # NIP-09 event deletion
+
+# NIP-17 timestamp randomization window (±48 hours in seconds)
+_TIMESTAMP_FUZZ_SECONDS = 2 * 24 * 60 * 60
+
+
+def _randomize_timestamp() -> int:
+    """Return a timestamp fuzzed ±48 hours per NIP-17 timing protection."""
+    return int(time.time()) + random.randint(
+        -_TIMESTAMP_FUZZ_SECONDS, _TIMESTAMP_FUZZ_SECONDS,
+    )
 
 
 @dataclass
@@ -290,10 +302,15 @@ class NostrCredentialExchange:
             logger.warning("Failed to publish profile: %s", exc)
 
     def send_dm(self, recipient_npub: str, message_text: str) -> None:
-        """Send a NIP-04 encrypted DM to a recipient.
+        """Send a NIP-17 gift-wrapped DM to a recipient.
 
-        Used to send welcome messages so patrons can reply in an existing
-        thread rather than composing a new DM to an unfamiliar npub.
+        Builds a three-layer gift wrap per NIP-17/NIP-59:
+          Kind 1059 (gift wrap, ephemeral key) →
+            Kind 13 (seal, sender key, NIP-44 encrypted) →
+              Kind 14 (rumor, unsigned plaintext DM)
+
+        Publishing is synchronous so relay ACKs are verified before
+        returning.  Raises ``CourierError`` if no relay accepts the event.
 
         Args:
             recipient_npub: Patron's npub (bech32).
@@ -302,8 +319,8 @@ class NostrCredentialExchange:
         if not self._enabled:
             raise CourierNotReady("Secure Courier not enabled.")
 
-        if not _HAS_NIP04:
-            raise CourierNotReady("NIP-04 module required for outbound DMs.")
+        if not _HAS_NIP44:
+            raise CourierNotReady("NIP-44 module required for outbound DMs.")
 
         try:
             recipient_hex = _npub_to_hex(recipient_npub)
@@ -312,34 +329,74 @@ class NostrCredentialExchange:
                 f"Invalid recipient npub: {exc}"
             ) from exc
 
-        from tollbooth.nip04 import encrypt as _nip04_encrypt
-
-        encrypted = _nip04_encrypt(message_text, self._privkey_hex, recipient_hex)
-
         try:
-            event = Event(
-                kind=_KIND_ENCRYPTED_DM,
-                content=encrypted,
-                tags=[["p", recipient_hex]],
-                pubkey=self._pubkey_hex,
-                created_at=int(time.time()),
-            )
-            event.sign(self._privkey_hex)
-            message = event.to_message()
+            message = self._build_gift_wrap(recipient_hex, message_text)
+            results = self._publish_to_relays(message) or []
 
-            thread = threading.Thread(
-                target=self._publish_to_relays,
-                args=(message,),
-                daemon=True,
-            )
-            thread.start()
+            accepted = sum(1 for _, ok, _ in results if ok)
+            if accepted == 0 and results:
+                details = "; ".join(
+                    f"{url}: {err}" for url, ok, err in results if not ok
+                )
+                raise CourierError(
+                    f"All {len(results)} relays rejected the gift wrap: {details}"
+                )
+
             logger.info(
-                "Sent welcome DM to %s via %d relays",
-                recipient_npub[:20], len(self._relays),
+                "Sent NIP-17 gift-wrapped DM to %s (%d/%d relays accepted)",
+                recipient_npub[:20], accepted, len(results),
             )
+        except CourierError:
+            raise
         except Exception as exc:
-            logger.warning("Failed to send welcome DM: %s", exc)
-            raise CourierError(f"Failed to send welcome DM: {exc}") from exc
+            logger.warning("Failed to send gift-wrapped DM: %s", exc)
+            raise CourierError(f"Failed to send gift-wrapped DM: {exc}") from exc
+
+    def _build_gift_wrap(
+        self, recipient_hex: str, message_text: str,
+    ) -> str:
+        """Build a NIP-17 gift-wrapped DM (kind 1059 → 13 → 14).
+
+        Returns the Nostr protocol message (``["EVENT", {...}]``) ready
+        for relay publishing.
+        """
+        # Layer 3: Kind 14 rumor — unsigned private DM
+        rumor = {
+            "kind": _KIND_PRIVATE_DM,
+            "content": message_text,
+            "tags": [["p", recipient_hex]],
+            "pubkey": self._pubkey_hex,
+            "created_at": int(time.time()),
+        }
+
+        # Layer 2: Kind 13 seal — signed by sender, content NIP-44 encrypted
+        seal_content = _nip44_encrypt(
+            json.dumps(rumor), self._privkey_hex, recipient_hex,
+        )
+        seal = Event(
+            kind=_KIND_SEAL,
+            content=seal_content,
+            tags=[],  # No tags on seal (metadata protection)
+            pubkey=self._pubkey_hex,
+            created_at=_randomize_timestamp(),
+        )
+        seal.sign(self._privkey_hex)
+
+        # Layer 1: Kind 1059 gift wrap — random ephemeral key
+        ephemeral_sk = PrivateKey()
+        wrap_content = _nip44_encrypt(
+            json.dumps(seal.to_dict()), ephemeral_sk.hex(), recipient_hex,
+        )
+        wrap = Event(
+            kind=_KIND_GIFT_WRAP,
+            content=wrap_content,
+            tags=[["p", recipient_hex]],  # p-tag for relay routing
+            pubkey=ephemeral_sk.public_key.hex(),
+            created_at=_randomize_timestamp(),
+        )
+        wrap.sign(ephemeral_sk.hex())
+
+        return wrap.to_message()
 
     async def open_channel(
         self,
@@ -1081,8 +1138,16 @@ class NostrCredentialExchange:
         except Exception as exc:
             logger.debug("Failed to create deletion event: %s", exc)
 
-    def _publish_to_relays(self, message: str) -> None:
-        """Send an event to all configured relays."""
+    def _publish_to_relays(
+        self, message: str,
+    ) -> list[tuple[str, bool, str]]:
+        """Send an event to all configured relays.
+
+        Returns:
+            List of ``(relay_url, accepted, detail)`` tuples.
+            *accepted* is ``True`` when the relay returned ``["OK", id, true, ...]``.
+        """
+        results: list[tuple[str, bool, str]] = []
         sslopt: dict[str, Any] = {}
         for relay_url in self._relays:
             try:
@@ -1091,10 +1156,23 @@ class NostrCredentialExchange:
                 )
                 try:
                     ws.send(message)
-                    ws.recv()
+                    raw = ws.recv()
+                    try:
+                        ack = json.loads(raw)
+                        if isinstance(ack, list) and len(ack) >= 3 and ack[0] == "OK":
+                            ok = bool(ack[2])
+                            detail = ack[3] if len(ack) > 3 else ""
+                            results.append((relay_url, ok, detail))
+                        else:
+                            # Non-OK response (e.g., NOTICE) — treat as accepted
+                            results.append((relay_url, True, str(raw)))
+                    except (json.JSONDecodeError, IndexError):
+                        results.append((relay_url, True, str(raw)))
                 finally:
                     ws.close()
             except Exception as exc:
                 logger.debug(
                     "Relay publish %s failed (non-fatal): %s", relay_url, exc,
                 )
+                results.append((relay_url, False, str(exc)))
+        return results

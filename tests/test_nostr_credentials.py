@@ -12,6 +12,7 @@ from tollbooth.credential_vault_backend import CredentialVaultBackend
 from tollbooth.nip44 import encrypt as nip44_encrypt
 from tollbooth.nip04 import _get_shared_secret
 from tollbooth.nostr_credentials import (
+    CourierError,
     CourierNotReady,
     CourierTimeout,
     CourierValidationError,
@@ -939,61 +940,88 @@ class TestPublishProfile:
 
 
 class TestSendDm:
-    def test_sends_nip04_dm(self):
+    def test_sends_gift_wrapped_dm(self):
+        """send_dm publishes a kind 1059 gift wrap with ephemeral pubkey."""
         ex = _make_exchange()
         patron = PrivateKey()
 
         published = []
 
-        def capture_publish(message: str) -> None:
+        def capture_publish(message: str) -> list:
             published.append(message)
+            return [("wss://relay.test.com", True, "")]
 
         with patch.object(ex, "_publish_to_relays", side_effect=capture_publish):
             ex.send_dm(patron.public_key.bech32(), "Hello patron!")
-
-            import time
-            time.sleep(0.2)
 
         assert len(published) == 1
         msg = json.loads(published[0])
         assert msg[0] == "EVENT"
         event = msg[1]
-        assert event["kind"] == _KIND_ENCRYPTED_DM
-        # p-tag should reference the patron
+        # Gift wrap is kind 1059
+        assert event["kind"] == _KIND_GIFT_WRAP
+        # Pubkey should be ephemeral (NOT the operator's)
+        assert event["pubkey"] != ex._pubkey_hex
+        # p-tag should reference the patron (for relay routing)
         p_tags = [t for t in event["tags"] if t[0] == "p"]
         assert len(p_tags) == 1
         assert p_tags[0][1] == patron.public_key.hex()
-        # Content should be NIP-04 encrypted (contains ?iv=)
-        assert "?iv=" in event["content"]
+        # Content should NOT be NIP-04 format (no ?iv= separator)
+        assert "?iv=" not in event["content"]
 
-    def test_send_dm_decryptable(self):
-        """Patron can decrypt the welcome DM."""
-        from tollbooth.nip04 import decrypt as nip04_decrypt
+    def test_send_dm_unwrappable(self):
+        """Patron can unwrap the gift wrap to recover the plaintext."""
+        from tollbooth.nip44 import decrypt as nip44_decrypt
 
         ex = _make_exchange()
         patron = PrivateKey()
 
         published = []
 
-        def capture_publish(message: str) -> None:
+        def capture_publish(message: str) -> list:
             published.append(message)
+            return [("wss://relay.test.com", True, "")]
 
         with patch.object(ex, "_publish_to_relays", side_effect=capture_publish):
             ex.send_dm(patron.public_key.bech32(), "Test message")
 
-            import time
-            time.sleep(0.2)
+        wrap_event = json.loads(published[0])[1]
 
-        event = json.loads(published[0])[1]
-        plaintext = nip04_decrypt(
-            event["content"], patron.hex(), ex._pubkey_hex,
+        # Layer 1: Decrypt gift wrap → seal JSON
+        seal_json = nip44_decrypt(
+            wrap_event["content"], patron.hex(), wrap_event["pubkey"],
         )
-        assert plaintext == "Test message"
+        seal = json.loads(seal_json)
+        assert seal["kind"] == _KIND_SEAL
+        assert seal["pubkey"] == ex._pubkey_hex  # Seal is from the real sender
+
+        # Layer 2: Decrypt seal → rumor JSON
+        dm_json = nip44_decrypt(
+            seal["content"], patron.hex(), seal["pubkey"],
+        )
+        dm = json.loads(dm_json)
+        assert dm["kind"] == _KIND_PRIVATE_DM
+        assert dm["content"] == "Test message"
+        assert dm["pubkey"] == ex._pubkey_hex
 
     def test_send_dm_invalid_npub(self):
         ex = _make_exchange()
         with pytest.raises(CourierValidationError, match="Invalid recipient"):
             ex.send_dm("not-an-npub", "hello")
+
+    def test_send_dm_all_relays_reject(self):
+        """Raises CourierError when every relay rejects the event."""
+        from tollbooth.nostr_credentials import CourierError
+
+        ex = _make_exchange()
+        patron = PrivateKey()
+
+        def reject_all(message: str) -> list:
+            return [("wss://relay.test.com", False, "blocked: kind not allowed")]
+
+        with patch.object(ex, "_publish_to_relays", side_effect=reject_all):
+            with pytest.raises(CourierError, match="rejected"):
+                ex.send_dm(patron.public_key.bech32(), "Rejected")
 
 
 class TestOpenChannelWithWelcomeDm:
