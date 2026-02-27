@@ -940,8 +940,8 @@ class TestPublishProfile:
 
 
 class TestSendDm:
-    def test_sends_gift_wrapped_dm(self):
-        """send_dm publishes a kind 1059 gift wrap with ephemeral pubkey."""
+    def test_sends_dual_protocol_dm(self):
+        """send_dm publishes both a kind 1059 gift wrap and a kind 4 NIP-04 DM."""
         ex = _make_exchange()
         patron = PrivateKey()
 
@@ -954,20 +954,25 @@ class TestSendDm:
         with patch.object(ex, "_publish_to_relays", side_effect=capture_publish):
             ex.send_dm(patron.public_key.bech32(), "Hello patron!")
 
-        assert len(published) == 1
-        msg = json.loads(published[0])
-        assert msg[0] == "EVENT"
-        event = msg[1]
-        # Gift wrap is kind 1059
-        assert event["kind"] == _KIND_GIFT_WRAP
-        # Pubkey should be ephemeral (NOT the operator's)
-        assert event["pubkey"] != ex._pubkey_hex
-        # p-tag should reference the patron (for relay routing)
-        p_tags = [t for t in event["tags"] if t[0] == "p"]
-        assert len(p_tags) == 1
+        assert len(published) == 2
+        events = [json.loads(m)[1] for m in published]
+        kinds = {e["kind"] for e in events}
+        # Both protocols sent
+        assert _KIND_GIFT_WRAP in kinds
+        assert _KIND_ENCRYPTED_DM in kinds
+
+        # Gift wrap has ephemeral pubkey
+        wrap = next(e for e in events if e["kind"] == _KIND_GIFT_WRAP)
+        assert wrap["pubkey"] != ex._pubkey_hex
+        p_tags = [t for t in wrap["tags"] if t[0] == "p"]
         assert p_tags[0][1] == patron.public_key.hex()
-        # Content should NOT be NIP-04 format (no ?iv= separator)
-        assert "?iv=" not in event["content"]
+
+        # NIP-04 DM has operator pubkey and NIP-04 format
+        dm = next(e for e in events if e["kind"] == _KIND_ENCRYPTED_DM)
+        assert dm["pubkey"] == ex._pubkey_hex
+        assert "?iv=" in dm["content"]
+        p_tags = [t for t in dm["tags"] if t[0] == "p"]
+        assert p_tags[0][1] == patron.public_key.hex()
 
     def test_send_dm_unwrappable(self):
         """Patron can unwrap the gift wrap to recover the plaintext."""
@@ -985,7 +990,11 @@ class TestSendDm:
         with patch.object(ex, "_publish_to_relays", side_effect=capture_publish):
             ex.send_dm(patron.public_key.bech32(), "Test message")
 
-        wrap_event = json.loads(published[0])[1]
+        # Find the NIP-17 gift wrap (kind 1059) among published messages
+        wrap_event = next(
+            json.loads(m)[1] for m in published
+            if json.loads(m)[1]["kind"] == _KIND_GIFT_WRAP
+        )
 
         # Layer 1: Decrypt gift wrap → seal JSON
         seal_json = nip44_decrypt(
@@ -1010,7 +1019,7 @@ class TestSendDm:
             ex.send_dm("not-an-npub", "hello")
 
     def test_send_dm_all_relays_reject(self):
-        """Raises CourierError when every relay rejects the event."""
+        """Raises CourierError when every relay rejects both protocols."""
         from tollbooth.nostr_credentials import CourierError
 
         ex = _make_exchange()
@@ -1020,7 +1029,7 @@ class TestSendDm:
             return [("wss://relay.test.com", False, "blocked: kind not allowed")]
 
         with patch.object(ex, "_publish_to_relays", side_effect=reject_all):
-            with pytest.raises(CourierError, match="rejected"):
+            with pytest.raises(CourierError, match="All relay sends failed"):
                 ex.send_dm(patron.public_key.bech32(), "Rejected")
 
 
