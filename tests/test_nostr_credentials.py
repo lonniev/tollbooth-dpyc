@@ -1202,3 +1202,126 @@ class TestConversationalDmFlow:
             with pytest.raises(CourierValidationError, match="not valid JSON"):
                 await ex.receive(sender.public_key.bech32())
 
+
+# ── NIP-17 Subscription Tests ────────────────────────────────────────
+
+
+class TestNip17Subscription:
+    """Tests for NIP-17 gift-wrap subscription and filter handling."""
+
+    def test_subscription_includes_both_kinds(self):
+        """REQ message sent to relay includes both kind 4 and kind 1059."""
+        operator = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        sent_messages: list[str] = []
+        mock_ws = MagicMock()
+        mock_ws.recv = MagicMock(side_effect=[
+            json.dumps(["EOSE", "sub1"]),
+        ])
+        mock_ws.send = MagicMock(side_effect=lambda msg: sent_messages.append(msg))
+
+        with patch("tollbooth.nostr_credentials.create_connection", return_value=mock_ws):
+            ex._subscribe_to_relays()
+
+        # The first send call is the REQ message
+        req_msg = json.loads(sent_messages[0])
+        assert req_msg[0] == "REQ"
+        # Collect all kinds from all filters (elements after sub_id)
+        all_kinds: set[int] = set()
+        for filt in req_msg[2:]:
+            for k in filt.get("kinds", []):
+                all_kinds.add(k)
+        assert _KIND_ENCRYPTED_DM in all_kinds, "kind 4 (NIP-04) missing from REQ"
+        assert _KIND_GIFT_WRAP in all_kinds, "kind 1059 (NIP-17) missing from REQ"
+
+    def test_gift_wrap_without_ptag_collected(self):
+        """Gift wrap event without the operator’s p-tag is collected in the
+        buffer thanks to the broad filter (filter 3)."""
+        operator = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        random_ptag_pubkey = PrivateKey().public_key.hex()
+        gift_wrap_event = {
+            "id": "gw_no_ptag_test",
+            "kind": _KIND_GIFT_WRAP,
+            "pubkey": PrivateKey().public_key.hex(),
+            "content": "encrypted-content-placeholder",
+            "created_at": int(time.time()),
+            "tags": [["p", random_ptag_pubkey]],  # random p-tag, NOT the operator
+            "sig": "fake_sig",
+        }
+
+        mock_ws = MagicMock()
+        mock_ws.recv = MagicMock(side_effect=[
+            json.dumps(["EVENT", "sub1", gift_wrap_event]),
+            json.dumps(["EOSE", "sub1"]),
+        ])
+
+        with patch("tollbooth.nostr_credentials.create_connection", return_value=mock_ws):
+            ex._subscribe_to_relays()
+
+        with ex._lock:
+            assert len(ex._received_events) == 1
+            assert ex._received_events[0]["id"] == "gw_no_ptag_test"
+
+    def test_gift_wrap_events_in_buffer_included_as_candidates(self):
+        """Gift wrap events in the buffer are returned as candidates by
+        _find_dm_in_buffer regardless of their pubkey (sender is hidden)."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        gift_wrap_event = {
+            "id": "gw_candidate_test",
+            "kind": _KIND_GIFT_WRAP,
+            "pubkey": PrivateKey().public_key.hex(),  # random wrap pubkey
+            "content": "encrypted-gift-wrap",
+            "created_at": int(time.time()),
+            "tags": [["p", PrivateKey().public_key.hex()]],  # random p-tag
+            "sig": "fake_sig",
+        }
+
+        with ex._lock:
+            ex._received_events.append(gift_wrap_event)
+
+        # _find_dm_in_buffer should return the gift wrap as a candidate
+        # even though the sender_hex doesn’t match the event pubkey,
+        # because gift wrap sender identity is hidden until unwrap.
+        result = ex._find_dm_in_buffer(sender.public_key.hex())
+        assert result is not None
+        assert result["id"] == "gw_candidate_test"
+
+    def test_multiple_filters_in_req(self):
+        """REQ message contains multiple filter objects (not a single merged one)."""
+        operator = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        sent_messages: list[str] = []
+        mock_ws = MagicMock()
+        mock_ws.recv = MagicMock(side_effect=[
+            json.dumps(["EOSE", "sub1"]),
+        ])
+        mock_ws.send = MagicMock(side_effect=lambda msg: sent_messages.append(msg))
+
+        with patch("tollbooth.nostr_credentials.create_connection", return_value=mock_ws):
+            ex._subscribe_to_relays()
+
+        req_msg = json.loads(sent_messages[0])
+        assert req_msg[0] == "REQ"
+        # sub_id is req_msg[1], filters start at req_msg[2:]
+        filters = req_msg[2:]
+        assert len(filters) == 3, f"Expected 3 filters, got {len(filters)}"
+
+        # Filter 1: NIP-04 with p-tag
+        assert filters[0]["kinds"] == [_KIND_ENCRYPTED_DM]
+        assert "#p" in filters[0]
+
+        # Filter 2: NIP-17 gift wrap with p-tag
+        assert filters[1]["kinds"] == [_KIND_GIFT_WRAP]
+        assert "#p" in filters[1]
+
+        # Filter 3: NIP-17 gift wrap broad (no p-tag constraint)
+        assert filters[2]["kinds"] == [_KIND_GIFT_WRAP]
+        assert "#p" not in filters[2]
+        assert filters[2]["limit"] == 20
