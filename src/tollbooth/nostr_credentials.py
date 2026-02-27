@@ -84,15 +84,19 @@ _KIND_SEAL = 13  # NIP-59 seal (inner layer of gift wrap)
 _KIND_PRIVATE_DM = 14  # NIP-17 private DM (innermost content)
 _KIND_DELETION = 5  # NIP-09 event deletion
 
-# NIP-17 timestamp randomization window (±48 hours in seconds)
+# NIP-17 timestamp randomization window (0–48 hours into the past)
 _TIMESTAMP_FUZZ_SECONDS = 2 * 24 * 60 * 60
 
 
 def _randomize_timestamp() -> int:
-    """Return a timestamp fuzzed ±48 hours per NIP-17 timing protection."""
-    return int(time.time()) + random.randint(
-        -_TIMESTAMP_FUZZ_SECONDS, _TIMESTAMP_FUZZ_SECONDS,
-    )
+    """Return a timestamp fuzzed 0–48 hours into the past per NIP-17.
+
+    NIP-17 recommends randomizing ``created_at`` to thwart time-analysis.
+    We only fuzz *backwards* because Nostr relays reject events whose
+    ``created_at`` is in the future (anti-spam policy on Primal, Damus,
+    nos.lol, and most others).
+    """
+    return int(time.time()) - random.randint(0, _TIMESTAMP_FUZZ_SECONDS)
 
 
 @dataclass
