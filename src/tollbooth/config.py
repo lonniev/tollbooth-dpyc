@@ -25,3 +25,6 @@ class TollboothConfig:
     # OpenTimestamps Bitcoin anchoring
     ots_enabled: bool = False
     ots_calendars: str | None = None  # Comma-separated URLs; None = defaults
+    # Constraint Engine (opt-in)
+    constraints_enabled: bool = False
+    constraints_config: str | None = None  # JSON string of constraint config

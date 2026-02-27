@@ -25,6 +25,7 @@ from tollbooth.constraints.config import (
 )
 from tollbooth.constraints.engine import ConstraintEngine
 from tollbooth.constraints.expression import JsonExpressionConstraint
+from tollbooth.constraints.gate import ConstraintGate
 from tollbooth.constraints.periodic import PeriodicRefreshConstraint, parse_iso_duration
 from tollbooth.constraints.pricing import (
     BulkBonusConstraint,
@@ -57,6 +58,8 @@ __all__ = [
     "JsonExpressionConstraint",
     # Engine
     "ConstraintEngine",
+    # Gate
+    "ConstraintGate",
     # Config
     "CONSTRAINT_REGISTRY",
     "ConfigError",
