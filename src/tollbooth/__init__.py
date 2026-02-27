@@ -76,6 +76,7 @@ try:
         PatronIdentity,
         EnvironmentSnapshot,
         ConstraintEngine,
+        ConstraintGate,
         TemporalWindowConstraint,
         FiniteSupplyConstraint,
         PeriodicRefreshConstraint,
@@ -97,6 +98,7 @@ except ImportError:
     PatronIdentity = None  # type: ignore[assignment,misc]
     EnvironmentSnapshot = None  # type: ignore[assignment,misc]
     ConstraintEngine = None  # type: ignore[assignment,misc]
+    ConstraintGate = None  # type: ignore[assignment,misc]
     TemporalWindowConstraint = None  # type: ignore[assignment,misc]
     FiniteSupplyConstraint = None  # type: ignore[assignment,misc]
     PeriodicRefreshConstraint = None  # type: ignore[assignment,misc]
@@ -153,6 +155,7 @@ __all__ = [
     "NotificationManager",
     "NotificationPreferences",
     # Constraint Engine
+    "ConstraintGate",
     "ToolConstraint",
     "ConstraintContext",
     "ConstraintResult",
