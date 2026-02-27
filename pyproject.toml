@@ -33,6 +33,7 @@ nostr = [
     "websocket-client>=1.6.0",
 ]
 ots = []  # Reserved — no extra deps needed (uses stdlib hashlib + existing httpx)
+constraints = []  # No external deps — stdlib only (datetime, zoneinfo, re)
 dev = [
     "pytest==9.0.2",
     "pytest-asyncio==1.3.0",
