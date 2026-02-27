@@ -306,15 +306,15 @@ class NostrCredentialExchange:
             logger.warning("Failed to publish profile: %s", exc)
 
     def send_dm(self, recipient_npub: str, message_text: str) -> None:
-        """Send a NIP-17 gift-wrapped DM to a recipient.
+        """Send a DM via both NIP-17 gift wrap and NIP-04 legacy.
 
-        Builds a three-layer gift wrap per NIP-17/NIP-59:
-          Kind 1059 (gift wrap, ephemeral key) →
-            Kind 13 (seal, sender key, NIP-44 encrypted) →
-              Kind 14 (rumor, unsigned plaintext DM)
+        Sends the same message twice — once as a NIP-17 kind 1059 gift
+        wrap and once as a NIP-04 kind 4 encrypted DM — so the recipient
+        sees whichever their client supports.  The receive side already
+        handles both protocols.
 
-        Publishing is synchronous so relay ACKs are verified before
-        returning.  Raises ``CourierError`` if no relay accepts the event.
+        Raises ``CourierError`` only if *both* protocols fail to get at
+        least one relay acceptance.
 
         Args:
             recipient_npub: Patron's npub (bech32).
@@ -333,28 +333,55 @@ class NostrCredentialExchange:
                 f"Invalid recipient npub: {exc}"
             ) from exc
 
+        nip17_ok = False
+        nip04_ok = False
+        errors: list[str] = []
+
+        # ── NIP-17 gift wrap (kind 1059) ─────────────────────────────
         try:
             message = self._build_gift_wrap(recipient_hex, message_text)
             results = self._publish_to_relays(message) or []
-
             accepted = sum(1 for _, ok, _ in results if ok)
-            if accepted == 0 and results:
+            nip17_ok = accepted > 0
+            if nip17_ok:
+                logger.info(
+                    "Sent NIP-17 gift-wrapped DM to %s (%d/%d relays)",
+                    recipient_npub[:20], accepted, len(results),
+                )
+            else:
                 details = "; ".join(
                     f"{url}: {err}" for url, ok, err in results if not ok
                 )
-                raise CourierError(
-                    f"All {len(results)} relays rejected the gift wrap: {details}"
-                )
-
-            logger.info(
-                "Sent NIP-17 gift-wrapped DM to %s (%d/%d relays accepted)",
-                recipient_npub[:20], accepted, len(results),
-            )
-        except CourierError:
-            raise
+                errors.append(f"NIP-17: {details}")
         except Exception as exc:
-            logger.warning("Failed to send gift-wrapped DM: %s", exc)
-            raise CourierError(f"Failed to send gift-wrapped DM: {exc}") from exc
+            errors.append(f"NIP-17: {exc}")
+            logger.debug("NIP-17 send failed: %s", exc)
+
+        # ── NIP-04 legacy DM (kind 4) ───────────────────────────────
+        try:
+            message = self._build_nip04_dm(recipient_hex, message_text)
+            results = self._publish_to_relays(message) or []
+            accepted = sum(1 for _, ok, _ in results if ok)
+            nip04_ok = accepted > 0
+            if nip04_ok:
+                logger.info(
+                    "Sent NIP-04 DM to %s (%d/%d relays)",
+                    recipient_npub[:20], accepted, len(results),
+                )
+            else:
+                details = "; ".join(
+                    f"{url}: {err}" for url, ok, err in results if not ok
+                )
+                errors.append(f"NIP-04: {details}")
+        except Exception as exc:
+            errors.append(f"NIP-04: {exc}")
+            logger.debug("NIP-04 send failed: %s", exc)
+
+        if not nip17_ok and not nip04_ok:
+            raise CourierError(
+                f"All relay sends failed for both protocols: "
+                + "; ".join(errors)
+            )
 
     def _build_gift_wrap(
         self, recipient_hex: str, message_text: str,
@@ -401,6 +428,32 @@ class NostrCredentialExchange:
         wrap.sign(ephemeral_sk.hex())
 
         return wrap.to_message()
+
+    def _build_nip04_dm(
+        self, recipient_hex: str, message_text: str,
+    ) -> str:
+        """Build a NIP-04 kind 4 encrypted DM.
+
+        Returns the Nostr protocol message (``["EVENT", {...}]``) ready
+        for relay publishing.
+        """
+        if not _HAS_NIP04:
+            raise CourierNotReady("NIP-04 module required for legacy DMs.")
+
+        from tollbooth.nip04 import encrypt as _nip04_encrypt
+
+        encrypted = _nip04_encrypt(
+            message_text, self._privkey_hex, recipient_hex,
+        )
+        event = Event(
+            kind=_KIND_ENCRYPTED_DM,
+            content=encrypted,
+            tags=[["p", recipient_hex]],
+            pubkey=self._pubkey_hex,
+            created_at=int(time.time()),
+        )
+        event.sign(self._privkey_hex)
+        return event.to_message()
 
     async def open_channel(
         self,
