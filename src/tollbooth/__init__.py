@@ -3,7 +3,7 @@
 Bitcoin Lightning micropayments for MCP servers.
 """
 
-__version__ = "0.1.33"
+__version__ = "0.1.34"
 
 from tollbooth.certificate import CertificateError, verify_certificate_auto, UNDERSTOOD_PROTOCOLS
 from tollbooth.config import TollboothConfig
@@ -49,6 +49,18 @@ except ImportError:
     FieldSpec = None  # type: ignore[assignment,misc]
     TemplateValidationError = None  # type: ignore[assignment,misc]
 
+try:
+    from tollbooth.nostr_diagnostics import courier_health, courier_ping
+except ImportError:
+    courier_health = None  # type: ignore[assignment,misc]
+    courier_ping = None  # type: ignore[assignment,misc]
+
+try:
+    from tollbooth.nostr_notifications import NotificationManager, NotificationPreferences
+except ImportError:
+    NotificationManager = None  # type: ignore[assignment,misc]
+    NotificationPreferences = None  # type: ignore[assignment,misc]
+
 __all__ = [
     "CertificateError",
     "TollboothConfig",
@@ -87,4 +99,8 @@ __all__ = [
     "CredentialTemplate",
     "FieldSpec",
     "TemplateValidationError",
+    "courier_health",
+    "courier_ping",
+    "NotificationManager",
+    "NotificationPreferences",
 ]
