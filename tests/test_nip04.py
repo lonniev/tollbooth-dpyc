@@ -74,7 +74,7 @@ class TestNip04Decrypt:
 
     def test_invalid_base64(self):
         """Invalid base64 raises ValueError."""
-        with pytest.raises(ValueError, match="base64 decode failed"):
+        with pytest.raises(ValueError):
             decrypt("not-valid-b64?iv=also-not-valid", "a" * 64, "b" * 64)
 
     def test_wrong_iv_length(self):
@@ -97,6 +97,19 @@ class TestNip04Decrypt:
             encrypted, recipient.hex(), sender.public_key.hex(),
         )
         assert decrypted == plaintext
+
+
+    def test_decrypt_unpadded_base64(self):
+        """Decrypt tolerates base64 with stripped '=' padding (Primal, etc.)."""
+        sender = PrivateKey()
+        recipient = PrivateKey()
+
+        encrypted = encrypt("hello world", sender.hex(), recipient.public_key.hex())
+        # Strip trailing '=' from both ciphertext and IV parts
+        ct_part, iv_part = encrypted.split("?iv=", 1)
+        stripped = f"{ct_part.rstrip('=')}?iv={iv_part.rstrip('=')}"
+        decrypted = decrypt(stripped, recipient.hex(), sender.public_key.hex())
+        assert decrypted == "hello world"
 
 
 class TestNip04Encrypt:

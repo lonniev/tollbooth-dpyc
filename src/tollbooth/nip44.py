@@ -178,6 +178,8 @@ def decrypt(
     """
     import base64
 
+    # Normalize base64 padding — some Nostr clients (Primal) strip trailing '='
+    payload_b64 += "=" * (-len(payload_b64) % 4)
     payload = base64.b64decode(payload_b64)
     if len(payload) < 35:  # 1 version + 32 nonce + 2 min ciphertext
         raise ValueError("NIP-44 payload too short")

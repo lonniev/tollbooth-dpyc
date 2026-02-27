@@ -93,8 +93,11 @@ def decrypt(
 
     parts = ciphertext_with_iv.split("?iv=", 1)
     try:
-        ciphertext = base64.b64decode(parts[0])
-        iv = base64.b64decode(parts[1])
+        # Normalize base64 padding — some Nostr clients strip trailing '='
+        ct_b64 = parts[0] + "=" * (-len(parts[0]) % 4)
+        iv_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        ciphertext = base64.b64decode(ct_b64)
+        iv = base64.b64decode(iv_b64)
     except Exception as e:
         raise ValueError(f"NIP-04 base64 decode failed: {e}") from e
 

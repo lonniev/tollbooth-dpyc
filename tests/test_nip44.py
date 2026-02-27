@@ -215,6 +215,18 @@ class TestEncryptDecrypt:
         with pytest.raises(ValueError, match="too short"):
             decrypt(base64.b64encode(b"\x02" + b"\x00" * 10).decode(), "aa" * 32, "bb" * 32)
 
+    def test_decrypt_unpadded_base64(self) -> None:
+        """Decrypt tolerates base64 with stripped '=' padding (Primal, etc.)."""
+        sk1 = PrivateKey()
+        sk2 = PrivateKey()
+
+        ct = encrypt("hello world", sk1.hex(), sk2.public_key.hex())
+        # Strip trailing '=' to simulate what Primal sends
+        ct_stripped = ct.rstrip("=")
+        assert ct_stripped != ct  # sanity: we actually stripped something
+        pt = decrypt(ct_stripped, sk2.hex(), sk1.public_key.hex())
+        assert pt == "hello world"
+
     def test_each_encryption_differs(self) -> None:
         """Random nonce means same plaintext encrypts differently each time."""
         sk1 = PrivateKey()
