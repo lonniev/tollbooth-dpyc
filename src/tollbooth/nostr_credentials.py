@@ -495,6 +495,10 @@ class NostrCredentialExchange:
         self._start_subscription()
 
         # Build the welcome message for the patron
+        from datetime import datetime, timezone
+        from tollbooth import __version__ as _tb_version
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         welcome_text = (
             f"Hi — I'm {self._npub}, a Tollbooth MCP service.\n\n"
             f"You're receiving this message because you (or your AI agent) "
@@ -503,7 +507,8 @@ class NostrCredentialExchange:
             f"credentials as JSON:\n\n{instructions}\n\n"
             f"Your reply is end-to-end encrypted — "
             f"only this service can read it.\n\n"
-            f"If you didn't request this, simply ignore this message."
+            f"If you didn't request this, simply ignore this message.\n\n"
+            f"— tollbooth-dpyc v{_tb_version} | {timestamp}"
         )
 
         result: dict[str, Any] = {
