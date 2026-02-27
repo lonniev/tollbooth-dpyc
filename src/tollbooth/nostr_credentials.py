@@ -382,11 +382,14 @@ class NostrCredentialExchange:
 
         # Build the welcome message for the patron
         welcome_text = (
-            f"Hello from {self._npub}!\n\n"
-            f"Reply to this message with your {template.service} credentials "
-            f"as a JSON object:\n\n{instructions}\n\n"
+            f"Hi — I'm {self._npub}, a Tollbooth MCP service.\n\n"
+            f"You're receiving this message because you (or your AI agent) "
+            f"requested a credential channel from a Claude session.\n\n"
+            f"If you'd like to proceed, reply to this message with your "
+            f"credentials as JSON:\n\n{instructions}\n\n"
             f"Your reply is end-to-end encrypted — "
-            f"only this service can read it."
+            f"only this service can read it.\n\n"
+            f"If you didn't request this, simply ignore this message."
         )
 
         result: dict[str, Any] = {
@@ -502,15 +505,20 @@ class NostrCredentialExchange:
         # Decrypt content
         plaintext = self._decrypt_dm(dm, sender_hex)
 
+        # Resolve template for error DM instructions
+        error_template = self._resolve_error_template(service)
+
         # Parse JSON payload
         try:
             payload = json.loads(plaintext)
         except json.JSONDecodeError as exc:
+            self._send_error_dm(sender_npub, error_template)
             raise CourierValidationError(
                 f"DM content is not valid JSON: {exc}"
             ) from exc
 
         if not isinstance(payload, dict):
+            self._send_error_dm(sender_npub, error_template)
             raise CourierValidationError(
                 "DM content must be a JSON object, "
                 f"got {type(payload).__name__}"
@@ -524,6 +532,7 @@ class NostrCredentialExchange:
         try:
             validated = validate_payload(payload, template)
         except TemplateValidationError as exc:
+            self._send_error_dm(sender_npub, template)
             raise CourierValidationError(str(exc)) from exc
 
         # Mark event as consumed
@@ -538,6 +547,9 @@ class NostrCredentialExchange:
         # Store in vault for next session
         if self._credential_vault is not None:
             await self._vault_store(template.service, sender_npub, validated)
+
+        # Send success DM back to patron (non-fatal on failure)
+        self._send_success_dm(sender_npub)
 
         # Count sensitive vs non-sensitive fields
         sensitive_count = sum(
@@ -603,6 +615,66 @@ class NostrCredentialExchange:
                 + ("deleted from vault." if deleted else "not found in vault.")
             ),
         }
+
+    # ── Conversational DM helpers ─────────────────────────────────────
+
+    def _send_success_dm(self, sender_npub: str) -> None:
+        """Send a success DM to the patron after credential pickup.
+
+        Non-fatal -- DM failure is logged but does not block the receive flow.
+        """
+        success_text = (
+            "\u2705 Your credentials have been securely stored. "
+            "Your AI agent can now use them on your behalf.\n\n"
+            "This message thread is no longer needed — "
+            "the relay copy of your credentials has been deleted."
+        )
+        try:
+            self.send_dm(sender_npub, success_text)
+        except Exception as exc:
+            logger.debug(
+                "Success DM to %s failed (non-fatal): %s",
+                sender_npub[:20], exc,
+            )
+
+    def _send_error_dm(
+        self,
+        sender_npub: str,
+        template: CredentialTemplate | None,
+    ) -> None:
+        """Send an error DM to the patron when credential parsing fails.
+
+        Non-fatal -- DM failure is logged but does not mask the real error.
+        """
+        if template is not None:
+            instructions = render_template_instructions(template)
+        else:
+            instructions = "(see the welcome message for the expected format)"
+
+        error_text = (
+            "\u26a0\ufe0f I couldn’t process your credentials. "
+            "The message didn’t match the expected format.\n\n"
+            "Please reply with exactly this structure (no extra text):\n\n"
+            f"{instructions}\n\n"
+            "Straight quotes only — some keyboards use "
+            "“smart quotes” that break JSON."
+        )
+        try:
+            self.send_dm(sender_npub, error_text)
+        except Exception as exc:
+            logger.debug(
+                "Error DM to %s failed (non-fatal): %s",
+                sender_npub[:20], exc,
+            )
+
+    def _resolve_error_template(
+        self, service: str | None,
+    ) -> CredentialTemplate | None:
+        """Resolve a template for error DM instructions (best-effort)."""
+        resolved = self._resolve_service(service)
+        if resolved and resolved in self._templates:
+            return self._templates[resolved]
+        return None
 
     def _resolve_service(self, service: str | None) -> str | None:
         """Resolve service name, defaulting to the single template if only one."""
@@ -705,32 +777,49 @@ class NostrCredentialExchange:
         self._subscribe_to_relays()
 
     def _subscribe_to_relays(self) -> None:
-        """Subscribe to all relays for DMs addressed to us."""
-        since = int(time.time()) - self._freshness_window
-        # REQ filter: kind 4 (NIP-04) and kind 1059 (NIP-17 gift wrap)
-        kinds = [_KIND_ENCRYPTED_DM]
-        if not self._nip44_only:
-            kinds.append(_KIND_GIFT_WRAP)
-        else:
-            # For NIP-44-only, still listen for gift wraps
-            kinds = [_KIND_GIFT_WRAP]
-            # Also listen for kind 4 in case sender used NIP-04
-            # (we'll reject it during decrypt if nip44_only is set)
-            kinds.append(_KIND_ENCRYPTED_DM)
+        """Subscribe to all relays for DMs addressed to us.
 
-        # NIP-04 DMs are tagged with p-tag for recipient
-        # NIP-17 gift wraps are tagged with p-tag for recipient
-        req_filter = {
-            "kinds": kinds,
+        Uses multiple REQ filters to cover both NIP-04 (kind 4) and
+        NIP-17 (kind 1059) DMs.  NIP-17 gift wraps may use a random
+        ``p`` tag for metadata protection (per the NIP-17 spec), so we
+        include a broad filter without a ``#p`` constraint — tightly
+        limited — to catch those events too.
+        """
+        since = int(time.time()) - self._freshness_window
+
+        # Always subscribe to both NIP-04 and NIP-17 events.
+        # Even in nip44_only mode we listen for kind 4 so we can
+        # surface a clear rejection message during decrypt.
+
+        # Filter 1: NIP-04 DMs addressed to us (p-tag match)
+        filter_nip04: dict[str, Any] = {
+            "kinds": [_KIND_ENCRYPTED_DM],
             "#p": [self._pubkey_hex],
             "since": since,
             "limit": 50,
         }
+        # Filter 2: NIP-17 gift wraps addressed to us (p-tag match)
+        filter_giftwrap_tagged: dict[str, Any] = {
+            "kinds": [_KIND_GIFT_WRAP],
+            "#p": [self._pubkey_hex],
+            "since": since,
+            "limit": 50,
+        }
+        # Filter 3: NIP-17 gift wraps without our p-tag
+        # (metadata-protected per NIP-17 — outer p-tag may be random).
+        # Broader search — limit tightly to avoid noise.
+        filter_giftwrap_broad: dict[str, Any] = {
+            "kinds": [_KIND_GIFT_WRAP],
+            "since": since,
+            "limit": 20,
+        }
+
+        filters = [filter_nip04, filter_giftwrap_tagged, filter_giftwrap_broad]
         sub_id = f"courier-{int(time.time())}"
 
         for relay_url in self._relays:
             try:
-                self._subscribe_one_relay(relay_url, sub_id, req_filter)
+                self._subscribe_one_relay(relay_url, sub_id, filters)
             except Exception as exc:
                 logger.debug(
                     "Relay subscription %s failed (non-fatal): %s",
@@ -741,14 +830,25 @@ class NostrCredentialExchange:
         self,
         relay_url: str,
         sub_id: str,
-        req_filter: dict[str, Any],
+        filters: list[dict[str, Any]] | dict[str, Any],
     ) -> None:
-        """Subscribe to one relay and collect events."""
+        """Subscribe to one relay and collect events.
+
+        Args:
+            relay_url: WebSocket URL of the relay.
+            sub_id: Subscription identifier.
+            filters: One filter dict or a list of filter dicts.
+                The Nostr protocol supports multiple filters in a single
+                REQ — events matching ANY filter are returned.
+        """
+        if isinstance(filters, dict):
+            filters = [filters]
+
         sslopt: dict[str, Any] = {}
         ws = create_connection(relay_url, timeout=_DEFAULT_SUBSCRIBE_TIMEOUT, sslopt=sslopt)
         try:
-            # Send REQ
-            req_msg = json.dumps(["REQ", sub_id, req_filter])
+            # Send REQ with all filters: ["REQ", sub_id, filter1, filter2, ...]
+            req_msg = json.dumps(["REQ", sub_id, *filters])
             ws.send(req_msg)
 
             # Read events until EOSE or timeout
