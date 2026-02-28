@@ -23,6 +23,7 @@ from tollbooth.nostr_credentials import (
     _KIND_METADATA,
     _KIND_SEAL,
     _KIND_PRIVATE_DM,
+    _lenient_json_loads,
     _sanitize_smart_quotes,
 )
 
@@ -1498,6 +1499,58 @@ class TestSmartQuoteSanitization:
 
         # Build NIP-04 event with smart-quoted JSON payload
         raw = '{\u201capi_key\u201d: \u201csk-test\u201d, \u201capi_secret\u201d: \u201csecret\u201d}'
+        event = _make_nip04_event(sender, operator.public_key.hex(), raw)
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(sender.public_key.bech32())
+
+        assert result["success"] is True
+
+
+class TestLenientJsonParsing:
+    """Tests for _lenient_json_loads — tolerating human-typed dict syntax."""
+
+    def test_valid_json_passes_through(self):
+        assert _lenient_json_loads('{"a": "b"}') == {"a": "b"}
+
+    def test_single_quoted_dict(self):
+        """Python dict literal with single quotes."""
+        assert _lenient_json_loads("{'api_key': 'sk-123'}") == {"api_key": "sk-123"}
+
+    def test_single_quoted_with_trailing_comma(self):
+        assert _lenient_json_loads("{'a': '1', 'b': '2',}") == {"a": "1", "b": "2"}
+
+    def test_smart_quotes_then_valid_json(self):
+        mangled = '{\u201ckey\u201d: \u201cval\u201d}'
+        assert _lenient_json_loads(mangled) == {"key": "val"}
+
+    def test_smart_quotes_with_single_quotes(self):
+        """Smart singles around a Python dict."""
+        mangled = "{\u2018key\u2019: \u2018val\u2019}"
+        assert _lenient_json_loads(mangled) == {"key": "val"}
+
+    def test_unparseable_raises_json_error(self):
+        with pytest.raises(json.JSONDecodeError):
+            _lenient_json_loads("not json at all")
+
+    def test_realistic_human_payload(self):
+        """Exact pattern from live testing — single-quoted Python dict."""
+        raw = "{'access_token': 'tok-123', 'access_token_secret': 'sec-456', 'poison': 'bold-hawk-42'}"
+        result = _lenient_json_loads(raw)
+        assert result["access_token"] == "tok-123"
+        assert result["poison"] == "bold-hawk-42"
+
+    @pytest.mark.asyncio
+    async def test_receive_tolerates_single_quoted_dict(self):
+        """End-to-end: receive() parses single-quoted Python dict from DM."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        raw = "{'api_key': 'sk-test', 'api_secret': 'secret'}"
         event = _make_nip04_event(sender, operator.public_key.hex(), raw)
         with ex._lock:
             ex._received_events.append(event)

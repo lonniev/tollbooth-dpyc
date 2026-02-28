@@ -121,7 +121,7 @@ def _generate_poison() -> str:
     return f"{adj}-{noun}-{num}"
 
 
-# Postel's Law: normalize smart quotes that Nostr clients may inject
+# Postel's Law: normalize human-typed JSON that Nostr clients may mangle
 _SMART_DOUBLE = re.compile(r'[\u201c\u201d\u00ab\u00bb]')
 _SMART_SINGLE = re.compile(r'[\u2018\u2019]')
 
@@ -131,6 +131,42 @@ def _sanitize_smart_quotes(text: str) -> str:
     text = _SMART_DOUBLE.sub('"', text)
     text = _SMART_SINGLE.sub("'", text)
     return text
+
+
+def _lenient_json_loads(text: str) -> Any:
+    """Parse JSON leniently — tolerate human-typed Python dict syntax.
+
+    Strategy:
+    1. Try ``json.loads`` on the raw text.
+    2. If that fails, normalize smart quotes and retry.
+    3. If still failing, attempt ``ast.literal_eval`` (handles single-quoted
+       dicts, missing quotes, trailing commas) and verify the result is a dict.
+    """
+    import ast
+
+    # Fast path: valid JSON as-is
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Second pass: smart-quote normalization
+    cleaned = _sanitize_smart_quotes(text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Third pass: Python dict literal (single quotes, trailing commas, etc.)
+    try:
+        result = ast.literal_eval(cleaned)
+        if isinstance(result, dict):
+            return result
+    except (ValueError, SyntaxError):
+        pass
+
+    # Nothing worked — raise with the original error for diagnostics
+    return json.loads(text)  # will raise JSONDecodeError
 
 
 @dataclass
@@ -706,10 +742,9 @@ class NostrCredentialExchange:
         # Resolve template for error DM instructions
         error_template = self._resolve_error_template(service)
 
-        # Parse JSON payload — normalize smart quotes from Nostr clients
-        plaintext = _sanitize_smart_quotes(plaintext)
+        # Parse JSON payload — tolerate human-typed dict syntax
         try:
-            payload = json.loads(plaintext)
+            payload = _lenient_json_loads(plaintext)
         except json.JSONDecodeError as exc:
             self._send_error_dm(sender_npub, error_template)
             raise CourierValidationError(
