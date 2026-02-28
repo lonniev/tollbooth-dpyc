@@ -309,8 +309,8 @@ class TestReceiveNip17:
         assert result["credentials"]["api_key"] == "sk-wrapped-123"
 
     @pytest.mark.asyncio
-    async def test_gift_wrap_wrong_sender_rejected(self):
-        """Gift wrap from wrong sender is rejected."""
+    async def test_gift_wrap_wrong_sender_skipped(self):
+        """Gift wrap from wrong sender is skipped (not matching sender)."""
         operator = PrivateKey()
         sender = PrivateKey()
         impersonator = PrivateKey()
@@ -325,8 +325,10 @@ class TestReceiveNip17:
         with ex._lock:
             ex._received_events.append(event)
 
+        # The impersonator's gift wrap decrypts but the seal reveals
+        # a different sender — it gets skipped, resulting in timeout.
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             pytest.raises(CourierValidationError, match="does not match"):
+             pytest.raises(CourierTimeout, match="No decryptable DM found"):
             await ex.receive(sender.public_key.bech32())
 
 
@@ -694,7 +696,7 @@ class TestCredentialVault:
 
         # Second receive — should come from vault
         with patch.object(ex, "_fetch_dms_from_relays") as mock_fetch, \
-             patch.object(ex, "_find_dm_in_buffer") as mock_find:
+             patch.object(ex, "_find_dm_candidates") as mock_find:
             result2 = await ex.receive(sender.public_key.bech32())
 
         assert result2["success"] is True
@@ -1079,6 +1081,110 @@ class TestOpenChannelWithWelcomeDm:
         return npub in result.get("message", "")
 
 
+# ── Poison Slug (Anti-Replay) Tests ──────────────────────────────────────
+
+
+class TestPoisonSlug:
+    """Tests for the anti-replay poison token in the Secure Courier flow."""
+
+    @pytest.mark.asyncio
+    async def test_open_channel_returns_poison(self):
+        """open_channel includes a poison slug in the result."""
+        ex = _make_exchange()
+
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "send_dm"):
+            result = await ex.open_channel("x", recipient_npub="npub1test123")
+
+        assert "poison" in result
+        # Format: adjective-noun-number
+        parts = result["poison"].split("-")
+        assert len(parts) == 3
+        assert parts[2].isdigit()
+
+    @pytest.mark.asyncio
+    async def test_poison_validated_on_receive(self):
+        """Receive rejects payload with wrong poison."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        # Register a poison
+        sender_npub = sender.public_key.bech32()
+        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() + 600)
+
+        # Build a NIP-04 event with wrong poison
+        payload = {"api_key": "k", "api_secret": "s", "poison": "wrong-slug-99"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             pytest.raises(CourierValidationError, match="Anti-replay token mismatch"):
+            await ex.receive(sender_npub)
+
+    @pytest.mark.asyncio
+    async def test_poison_accepted_on_match(self):
+        """Receive accepts payload with correct poison."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        sender_npub = sender.public_key.bech32()
+        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() + 600)
+
+        payload = {"api_key": "k", "api_secret": "s", "poison": "bold-hawk-42"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(sender_npub)
+
+        assert result["success"] is True
+        # Poison should be consumed
+        assert sender_npub not in ex._pending_poisons
+
+    @pytest.mark.asyncio
+    async def test_poison_expired(self):
+        """Receive rejects payload when poison has expired."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        sender_npub = sender.public_key.bech32()
+        # Expired 10 seconds ago
+        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() - 10)
+
+        payload = {"api_key": "k", "api_secret": "s", "poison": "bold-hawk-42"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             pytest.raises(CourierValidationError, match="expired"):
+            await ex.receive(sender_npub)
+
+    @pytest.mark.asyncio
+    async def test_no_poison_required_without_open_channel(self):
+        """Receive works without poison when no open_channel was called."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        payload = {"api_key": "k", "api_secret": "s"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(sender.public_key.bech32())
+
+        assert result["success"] is True
+
+
 # ── Conversational DM Flow Tests ──────────────────────────────────────────
 
 
@@ -1272,20 +1378,18 @@ class TestNip17Subscription:
         assert _KIND_ENCRYPTED_DM in all_kinds, "kind 4 (NIP-04) missing from REQ"
         assert _KIND_GIFT_WRAP in all_kinds, "kind 1059 (NIP-17) missing from REQ"
 
-    def test_gift_wrap_without_ptag_collected(self):
-        """Gift wrap event without the operator’s p-tag is collected in the
-        buffer thanks to the broad filter (filter 3)."""
+    def test_gift_wrap_with_operator_ptag_collected(self):
+        """Gift wrap event with the operator’s p-tag is collected in the buffer."""
         operator = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
 
-        random_ptag_pubkey = PrivateKey().public_key.hex()
         gift_wrap_event = {
-            "id": "gw_no_ptag_test",
+            "id": "gw_ptag_test",
             "kind": _KIND_GIFT_WRAP,
             "pubkey": PrivateKey().public_key.hex(),
             "content": "encrypted-content-placeholder",
             "created_at": int(time.time()),
-            "tags": [["p", random_ptag_pubkey]],  # random p-tag, NOT the operator
+            "tags": [["p", operator.public_key.hex()]],  # operator p-tag
             "sig": "fake_sig",
         }
 
@@ -1300,11 +1404,11 @@ class TestNip17Subscription:
 
         with ex._lock:
             assert len(ex._received_events) == 1
-            assert ex._received_events[0]["id"] == "gw_no_ptag_test"
+            assert ex._received_events[0]["id"] == "gw_ptag_test"
 
     def test_gift_wrap_events_in_buffer_included_as_candidates(self):
         """Gift wrap events in the buffer are returned as candidates by
-        _find_dm_in_buffer regardless of their pubkey (sender is hidden)."""
+        _find_dm_candidates regardless of their pubkey (sender is hidden)."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -1322,15 +1426,15 @@ class TestNip17Subscription:
         with ex._lock:
             ex._received_events.append(gift_wrap_event)
 
-        # _find_dm_in_buffer should return the gift wrap as a candidate
+        # _find_dm_candidates should include the gift wrap
         # even though the sender_hex doesn’t match the event pubkey,
         # because gift wrap sender identity is hidden until unwrap.
-        result = ex._find_dm_in_buffer(sender.public_key.hex())
-        assert result is not None
-        assert result["id"] == "gw_candidate_test"
+        results = ex._find_dm_candidates(sender.public_key.hex())
+        assert len(results) == 1
+        assert results[0]["id"] == "gw_candidate_test"
 
     def test_multiple_filters_in_req(self):
-        """REQ message contains multiple filter objects (not a single merged one)."""
+        """REQ message contains two filter objects: NIP-04 and NIP-17 (p-tagged)."""
         operator = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
 
@@ -1348,7 +1452,7 @@ class TestNip17Subscription:
         assert req_msg[0] == "REQ"
         # sub_id is req_msg[1], filters start at req_msg[2:]
         filters = req_msg[2:]
-        assert len(filters) == 3, f"Expected 3 filters, got {len(filters)}"
+        assert len(filters) == 2, f"Expected 2 filters, got {len(filters)}"
 
         # Filter 1: NIP-04 with p-tag
         assert filters[0]["kinds"] == [_KIND_ENCRYPTED_DM]
@@ -1357,8 +1461,3 @@ class TestNip17Subscription:
         # Filter 2: NIP-17 gift wrap with p-tag
         assert filters[1]["kinds"] == [_KIND_GIFT_WRAP]
         assert "#p" in filters[1]
-
-        # Filter 3: NIP-17 gift wrap broad (no p-tag constraint)
-        assert filters[2]["kinds"] == [_KIND_GIFT_WRAP]
-        assert "#p" not in filters[2]
-        assert filters[2]["limit"] == 20
