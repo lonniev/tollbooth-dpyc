@@ -6,6 +6,7 @@ from tollbooth.credential_templates import (
     CredentialTemplate,
     FieldSpec,
     TemplateValidationError,
+    render_delimited_instructions,
     render_template_instructions,
     validate_payload,
 )
@@ -175,3 +176,51 @@ class TestRenderInstructions:
         text = render_template_instructions(tmpl)
         assert "test" in text
         assert "token" in text
+
+
+class TestRenderDelimitedInstructions:
+    """Tests for render_delimited_instructions()."""
+
+    def test_uses_aaa_markers(self):
+        """Output uses @@@ delimiters for each field."""
+        tmpl = _x_api_template()
+        text = render_delimited_instructions(tmpl)
+        assert "@@@PASTE_YOUR_API_KEY_HERE@@@" in text
+        assert "@@@PASTE_YOUR_API_SECRET_HERE@@@" in text
+
+    def test_includes_service_and_version(self):
+        """Header includes service name and version."""
+        tmpl = _x_api_template()
+        text = render_delimited_instructions(tmpl)
+        assert "x" in text
+        assert "v1" in text
+
+    def test_marks_required_and_optional(self):
+        """Required and optional labels present."""
+        tmpl = _x_api_template()
+        text = render_delimited_instructions(tmpl)
+        assert "REQUIRED" in text
+        assert "optional" in text
+
+    def test_includes_description(self):
+        """Template description is rendered."""
+        tmpl = _x_api_template()
+        text = render_delimited_instructions(tmpl)
+        assert "OAuth 1.0a" in text
+
+    def test_no_json_in_output(self):
+        """Delimited instructions contain no JSON syntax."""
+        tmpl = _x_api_template()
+        text = render_delimited_instructions(tmpl)
+        assert "{" not in text
+        assert "}" not in text
+
+    def test_minimal_template(self):
+        """Single-field template renders correctly."""
+        tmpl = CredentialTemplate(
+            service="test",
+            version=1,
+            fields={"token": FieldSpec(required=True)},
+        )
+        text = render_delimited_instructions(tmpl)
+        assert "token = @@@PASTE_YOUR_TOKEN_HERE@@@" in text

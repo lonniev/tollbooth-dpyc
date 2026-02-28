@@ -23,7 +23,9 @@ from tollbooth.nostr_credentials import (
     _KIND_METADATA,
     _KIND_SEAL,
     _KIND_PRIVATE_DM,
+    _TIMESTAMP_FUZZ_SECONDS,
     _lenient_json_loads,
+    _parse_delimited_credentials,
     _sanitize_smart_quotes,
 )
 
@@ -64,6 +66,11 @@ def _make_exchange(
     )
 
 
+def _to_delimited(payload: dict) -> str:
+    """Serialize a dict as @@@ delimited text for testing."""
+    return "\n".join(f"{k} = @@@{v}@@@" for k, v in payload.items())
+
+
 def _make_nip04_event(
     sender_privkey: PrivateKey,
     recipient_pubkey_hex: str,
@@ -76,7 +83,7 @@ def _make_nip04_event(
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     from cryptography.hazmat.primitives.padding import PKCS7
 
-    raw = payload if isinstance(payload, str) else json.dumps(payload)
+    raw = payload if isinstance(payload, str) else _to_delimited(payload)
     plaintext = raw.encode("utf-8")
 
     shared_secret = _get_shared_secret(sender_privkey.hex(), recipient_pubkey_hex)
@@ -121,7 +128,7 @@ def _make_gift_wrap_event(
     # Layer 3: The actual DM content
     dm_event = {
         "kind": _KIND_PRIVATE_DM,
-        "content": json.dumps(payload),
+        "content": _to_delimited(payload),
         "pubkey": sender_privkey.public_key.hex(),
         "created_at": now,
         "tags": [["p", recipient_pubkey_hex]],
@@ -1345,7 +1352,7 @@ class TestConversationalDmFlow:
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "send_dm", side_effect=Exception("relay down")):
-            with pytest.raises(CourierValidationError, match="not valid JSON"):
+            with pytest.raises(CourierValidationError, match="@@@"):
                 await ex.receive(sender.public_key.bech32())
 
 
@@ -1491,24 +1498,21 @@ class TestSmartQuoteSanitization:
         assert json.loads(_sanitize_smart_quotes(mangled)) == {"api_key": "sk-abc"}
 
     @pytest.mark.asyncio
-    async def test_receive_tolerates_smart_quotes(self):
-        """End-to-end: receive() parses credential JSON with smart quotes."""
+    async def test_receive_rejects_json_payload(self):
+        """End-to-end: receive() rejects raw JSON (@@@ format required)."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
 
-        # Build NIP-04 event with smart-quoted JSON payload
-        raw = '{\u201capi_key\u201d: \u201csk-test\u201d, \u201capi_secret\u201d: \u201csecret\u201d}'
+        raw = '{"api_key": "sk-test", "api_secret": "secret"}'
         event = _make_nip04_event(sender, operator.public_key.hex(), raw)
         with ex._lock:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender.public_key.bech32())
-
-        assert result["success"] is True
-
+             patch.object(ex, "send_dm"), \
+             pytest.raises(CourierValidationError, match="@@@"):
+            await ex.receive(sender.public_key.bech32())
 
 class TestLenientJsonParsing:
     """Tests for _lenient_json_loads — tolerating human-typed dict syntax."""
@@ -1552,13 +1556,13 @@ class TestLenientJsonParsing:
         assert result["poison"] == "bold-hawk-42"
 
     @pytest.mark.asyncio
-    async def test_receive_tolerates_single_quoted_dict(self):
-        """End-to-end: receive() parses single-quoted Python dict from DM."""
+    async def test_receive_delimited_payload(self):
+        """End-to-end: receive() parses @@@ delimited credentials."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
 
-        raw = "{'api_key': 'sk-test', 'api_secret': 'secret'}"
+        raw = "api_key = @@@sk-test@@@\napi_secret = @@@secret@@@"
         event = _make_nip04_event(sender, operator.public_key.hex(), raw)
         with ex._lock:
             ex._received_events.append(event)
@@ -1568,3 +1572,85 @@ class TestLenientJsonParsing:
             result = await ex.receive(sender.public_key.bech32())
 
         assert result["success"] is True
+        assert result["credentials"]["api_key"] == "sk-test"
+
+
+# ── @@@ Delimited Parsing Tests ──────────────────────────────────────
+
+
+class TestParseDelimitedCredentials:
+    """Tests for _parse_delimited_credentials()."""
+
+    def test_basic_single_field(self):
+        """Extract a single field."""
+        result = _parse_delimited_credentials("api_key = @@@sk-123@@@")
+        assert result == {"api_key": "sk-123"}
+
+    def test_multiline_fields(self):
+        """Extract multiple fields across lines."""
+        text = "api_key = @@@sk-123@@@\napi_secret = @@@sec-456@@@"
+        result = _parse_delimited_credentials(text)
+        assert result == {"api_key": "sk-123", "api_secret": "sec-456"}
+
+    def test_with_preamble(self):
+        """Surrounding text is ignored — only @@@ pairs extracted."""
+        text = "Here are my creds:\napi_key = @@@sk-123@@@\nThanks!"
+        result = _parse_delimited_credentials(text)
+        assert result == {"api_key": "sk-123"}
+
+    def test_with_poison(self):
+        """Poison field extracted alongside credentials."""
+        text = (
+            "api_key = @@@sk-123@@@\n"
+            "api_secret = @@@sec-456@@@\n"
+            "poison = @@@bold-hawk-42@@@"
+        )
+        result = _parse_delimited_credentials(text)
+        assert result is not None
+        assert result["poison"] == "bold-hawk-42"
+        assert result["api_key"] == "sk-123"
+
+    def test_whitespace_stripped(self):
+        """Whitespace around keys and values is stripped."""
+        text = "  api_key  =  @@@ sk-123 @@@  "
+        result = _parse_delimited_credentials(text)
+        assert result == {"api_key": "sk-123"}
+
+    def test_returns_none_without_markers(self):
+        """Returns None when no @@@ patterns found."""
+        assert _parse_delimited_credentials("just some text") is None
+        assert _parse_delimited_credentials('{"json": "data"}') is None
+
+    def test_no_spacing_around_equals(self):
+        """Works without spaces around =."""
+        text = "api_key=@@@sk-123@@@"
+        result = _parse_delimited_credentials(text)
+        assert result == {"api_key": "sk-123"}
+
+
+# ── NIP-17 Timestamp Hardening Tests ─────────────────────────────────
+
+
+class TestNip17TimestampHardening:
+    """Tests for gift wrap timestamp fuzz handling."""
+
+    def test_giftwrap_filter_includes_fuzz_window(self):
+        """Gift wrap filter uses wider since window for NIP-17 timestamp fuzz."""
+        ex = _make_exchange()
+        filters_sent = []
+
+        def capture_subscribe(relay_url, sub_id, filters):
+            filters_sent.append(filters)
+
+        with patch.object(ex, "_subscribe_one_relay", side_effect=capture_subscribe):
+            ex._subscribe_to_relays()
+
+        assert len(filters_sent) > 0
+        nip04_filter, giftwrap_filter = filters_sent[0]
+
+        # NIP-04 filter uses normal freshness window
+        nip04_since = nip04_filter["since"]
+        # Gift wrap filter has a wider window (48h wider for NIP-17 fuzz)
+        giftwrap_since = giftwrap_filter["since"]
+        assert giftwrap_since < nip04_since
+        assert nip04_since - giftwrap_since == _TIMESTAMP_FUZZ_SECONDS

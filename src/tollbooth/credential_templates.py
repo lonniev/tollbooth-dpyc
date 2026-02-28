@@ -92,6 +92,29 @@ def validate_payload(
     return payload_fields
 
 
+def render_delimited_instructions(template: CredentialTemplate) -> str:
+    """Render a credential template using @@@ delimiters (mobile-friendly).
+
+    Produces a text block where each field is a simple ``key = @@@value@@@``
+    line.  Much easier to fill in on a phone than composing JSON.
+    """
+    lines = [
+        f"Service: {template.service} (v{template.version})",
+    ]
+    if template.description:
+        lines.append(f"Description: {template.description}")
+    lines.append("")
+    lines.append("Reply with your credentials — paste each value between the @@@ markers:")
+    lines.append("")
+
+    for name, spec in template.fields.items():
+        req = "REQUIRED" if spec.required else "optional"
+        placeholder = f"PASTE_YOUR_{name.upper()}_HERE"
+        lines.append(f"  {name} = @@@{placeholder}@@@  ({req})")
+
+    return "\n".join(lines)
+
+
 def render_template_instructions(template: CredentialTemplate) -> str:
     """Render a credential template as human-readable DM instructions.
 
