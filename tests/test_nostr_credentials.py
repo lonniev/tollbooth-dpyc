@@ -24,9 +24,7 @@ from tollbooth.nostr_credentials import (
     _KIND_SEAL,
     _KIND_PRIVATE_DM,
     _TIMESTAMP_FUZZ_SECONDS,
-    _lenient_json_loads,
     _parse_delimited_credentials,
-    _sanitize_smart_quotes,
 )
 
 
@@ -1473,33 +1471,13 @@ class TestNip17Subscription:
         assert "#p" in filters[1]
 
 
-class TestSmartQuoteSanitization:
-    """Tests for Postel's Law smart-quote normalization."""
 
-    def test_double_smart_quotes_normalized(self):
-        text = '\u201chello\u201d'
-        assert _sanitize_smart_quotes(text) == '"hello"'
-
-    def test_single_smart_quotes_normalized(self):
-        text = "\u2018it\u2019s\u2019"
-        assert _sanitize_smart_quotes(text) == "'it's'"
-
-    def test_guillemets_normalized(self):
-        text = '\u00abbonjour\u00bb'
-        assert _sanitize_smart_quotes(text) == '"bonjour"'
-
-    def test_ascii_unchanged(self):
-        text = '{"key": "value"}'
-        assert _sanitize_smart_quotes(text) == text
-
-    def test_mixed_quotes_in_json(self):
-        """Realistic scenario: Primal injects smart quotes around values."""
-        mangled = '{\u201capi_key\u201d: \u201csk-abc\u201d}'
-        assert json.loads(_sanitize_smart_quotes(mangled)) == {"api_key": "sk-abc"}
+class TestReceiveFormatEnforcement:
+    """End-to-end tests verifying @@@ format is required."""
 
     @pytest.mark.asyncio
     async def test_receive_rejects_json_payload(self):
-        """End-to-end: receive() rejects raw JSON (@@@ format required)."""
+        """receive() rejects raw JSON (@@@ format required)."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -1514,50 +1492,9 @@ class TestSmartQuoteSanitization:
              pytest.raises(CourierValidationError, match="@@@"):
             await ex.receive(sender.public_key.bech32())
 
-class TestLenientJsonParsing:
-    """Tests for _lenient_json_loads — tolerating human-typed dict syntax."""
-
-    def test_valid_json_passes_through(self):
-        assert _lenient_json_loads('{"a": "b"}') == {"a": "b"}
-
-    def test_single_quoted_dict(self):
-        """Python dict literal with single quotes."""
-        assert _lenient_json_loads("{'api_key': 'sk-123'}") == {"api_key": "sk-123"}
-
-    def test_single_quoted_with_trailing_comma(self):
-        assert _lenient_json_loads("{'a': '1', 'b': '2',}") == {"a": "1", "b": "2"}
-
-    def test_smart_quotes_then_valid_json(self):
-        mangled = '{\u201ckey\u201d: \u201cval\u201d}'
-        assert _lenient_json_loads(mangled) == {"key": "val"}
-
-    def test_smart_quotes_with_single_quotes(self):
-        """Smart singles around a Python dict."""
-        mangled = "{\u2018key\u2019: \u2018val\u2019}"
-        assert _lenient_json_loads(mangled) == {"key": "val"}
-
-    def test_unparseable_raises_json_error(self):
-        with pytest.raises(json.JSONDecodeError):
-            _lenient_json_loads("not json at all")
-
-    def test_realistic_human_payload(self):
-        """Exact pattern from live testing — single-quoted Python dict."""
-        raw = "{'access_token': 'tok-123', 'access_token_secret': 'sec-456', 'poison': 'bold-hawk-42'}"
-        result = _lenient_json_loads(raw)
-        assert result["access_token"] == "tok-123"
-        assert result["poison"] == "bold-hawk-42"
-
-    def test_missing_opening_quote_on_key(self):
-        """Real user typo: access_token_secret' missing its opening quote."""
-        raw = "{'access_token': 'tok-123', access_token_secret': 'sec-456', 'poison': 'bold-hawk-42'}"
-        result = _lenient_json_loads(raw)
-        assert result["access_token"] == "tok-123"
-        assert result["access_token_secret"] == "sec-456"
-        assert result["poison"] == "bold-hawk-42"
-
     @pytest.mark.asyncio
     async def test_receive_delimited_payload(self):
-        """End-to-end: receive() parses @@@ delimited credentials."""
+        """receive() parses @@@ delimited credentials."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -1573,9 +1510,6 @@ class TestLenientJsonParsing:
 
         assert result["success"] is True
         assert result["credentials"]["api_key"] == "sk-test"
-
-
-# ── @@@ Delimited Parsing Tests ──────────────────────────────────────
 
 
 class TestParseDelimitedCredentials:
