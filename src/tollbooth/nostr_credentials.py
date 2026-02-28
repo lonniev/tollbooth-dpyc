@@ -99,6 +99,27 @@ def _randomize_timestamp() -> int:
     return int(time.time()) - random.randint(0, _TIMESTAMP_FUZZ_SECONDS)
 
 
+# Anti-replay poison slug — memorable adjective-noun-number phrases
+_ADJECTIVES = [
+    "amber", "bold", "calm", "dark", "eager", "faint", "glad", "hazy",
+    "iron", "jade", "keen", "live", "mild", "neat", "opal", "pale",
+    "quick", "rare", "soft", "true", "ultra", "vivid", "warm", "zinc",
+]
+_NOUNS = [
+    "arrow", "blade", "cloud", "dusk", "eagle", "flame", "grove", "hawk",
+    "iris", "jewel", "knot", "lake", "mesa", "nest", "orbit", "peak",
+    "quill", "reef", "spark", "tide", "vale", "wave", "yarn", "zero",
+]
+
+
+def _generate_poison() -> str:
+    """Generate a memorable anti-replay phrase like ``bold-hawk-42``."""
+    adj = random.choice(_ADJECTIVES)
+    noun = random.choice(_NOUNS)
+    num = random.randint(10, 99)
+    return f"{adj}-{noun}-{num}"
+
+
 @dataclass
 class NostrProfile:
     """Nostr kind 0 profile metadata for the operator's npub.
@@ -252,6 +273,8 @@ class NostrCredentialExchange:
         self._received_events: list[dict[str, Any]] = []
         # Track consumed event IDs (prevent double-pickup)
         self._consumed_ids: set[str] = set()
+        # Poison slugs: {recipient_npub: (phrase, expiry_timestamp)}
+        self._pending_poisons: dict[str, tuple[str, float]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -491,6 +514,9 @@ class NostrCredentialExchange:
         template = self._templates[service]
         instructions = render_template_instructions(template)
 
+        # Generate anti-replay poison slug
+        poison = _generate_poison()
+
         # Start background subscription
         self._start_subscription()
 
@@ -504,12 +530,20 @@ class NostrCredentialExchange:
             f"You're receiving this message because you (or your AI agent) "
             f"requested a credential channel from a Claude session.\n\n"
             f"If you'd like to proceed, reply to this message with your "
-            f"credentials as JSON:\n\n{instructions}\n\n"
+            f"credentials as JSON.  IMPORTANT: include the anti-replay "
+            f"token exactly as shown.\n\n"
+            f"{instructions}\n"
+            f'  "poison": "{poison}"\n\n'
             f"Your reply is end-to-end encrypted — "
             f"only this service can read it.\n\n"
             f"If you didn't request this, simply ignore this message.\n\n"
             f"— tollbooth-dpyc v{_tb_version} | {timestamp}"
         )
+
+        # Store poison for validation on receive
+        if recipient_npub:
+            expiry = time.time() + self._freshness_window
+            self._pending_poisons[recipient_npub] = (poison, expiry)
 
         result: dict[str, Any] = {
             "success": True,
@@ -518,6 +552,7 @@ class NostrCredentialExchange:
             "service": service,
             "freshness_window_seconds": self._freshness_window,
             "instructions": instructions,
+            "poison": poison,
         }
 
         if recipient_npub:
@@ -607,13 +642,13 @@ class NostrCredentialExchange:
                     ),
                 }
 
-        # ── Relay DM flow (existing) ────────────────────────────────
-        dm = self._find_dm_in_buffer(sender_hex)
-        if dm is None:
+        # ── Relay DM flow ─────────────────────────────────────────
+        candidates = self._find_dm_candidates(sender_hex)
+        if not candidates:
             self._fetch_dms_from_relays()
-            dm = self._find_dm_in_buffer(sender_hex)
+            candidates = self._find_dm_candidates(sender_hex)
 
-        if dm is None:
+        if not candidates:
             raise CourierTimeout(
                 f"No DM found from {sender_npub} within the "
                 f"{self._freshness_window}-second freshness window. "
@@ -621,8 +656,39 @@ class NostrCredentialExchange:
                 f"try again."
             )
 
-        # Decrypt content
-        plaintext = self._decrypt_dm(dm, sender_hex)
+        # Try each candidate.  NIP-04 events are already sender-filtered
+        # so errors propagate immediately.  Gift wraps may fail to decrypt
+        # (wrong ECDH shared secret) or reveal a different sender inside
+        # the seal — silently skip those and try the next candidate.
+        dm = None
+        plaintext = None
+        for candidate in candidates:
+            kind = candidate.get("kind", 0)
+            if kind == _KIND_GIFT_WRAP:
+                try:
+                    plaintext = self._decrypt_dm(candidate, sender_hex)
+                    dm = candidate
+                    break
+                except CourierValidationError:
+                    logger.debug(
+                        "Skipping gift wrap %s (decrypt/validate failed)",
+                        candidate.get("id", "?")[:16],
+                    )
+                    continue
+            else:
+                # NIP-04: already matched by sender — errors are real
+                plaintext = self._decrypt_dm(candidate, sender_hex)
+                dm = candidate
+                break
+
+        if dm is None or plaintext is None:
+            raise CourierTimeout(
+                f"No decryptable DM found from {sender_npub} within the "
+                f"{self._freshness_window}-second freshness window. "
+                f"Found {len(candidates)} candidate event(s) but none "
+                f"could be decrypted. Make sure you replied from the "
+                f"correct Nostr identity."
+            )
 
         # Resolve template for error DM instructions
         error_template = self._resolve_error_template(service)
@@ -642,6 +708,31 @@ class NostrCredentialExchange:
                 "DM content must be a JSON object, "
                 f"got {type(payload).__name__}"
             )
+
+        # Validate anti-replay poison slug
+        expected = self._pending_poisons.get(sender_npub)
+        if expected is not None:
+            expected_phrase, expiry = expected
+            received_poison = payload.pop("poison", None)
+            if time.time() > expiry:
+                del self._pending_poisons[sender_npub]
+                raise CourierValidationError(
+                    "Anti-replay token expired. Call request_credential_channel "
+                    "again to get a fresh token."
+                )
+            if received_poison != expected_phrase:
+                raise CourierValidationError(
+                    f'Anti-replay token mismatch. Expected "poison": '
+                    f'"{expected_phrase}" but got '
+                    f'"{received_poison}". Include the exact token from '
+                    f"the welcome message."
+                )
+            # Consume the poison — one-time use
+            del self._pending_poisons[sender_npub]
+        else:
+            # No poison pending — remove the field if present so it
+            # doesn't confuse template matching
+            payload.pop("poison", None)
 
         # Match template
         payload_service = payload.get("service")
@@ -918,22 +1009,18 @@ class NostrCredentialExchange:
             "limit": 50,
         }
         # Filter 2: NIP-17 gift wraps addressed to us (p-tag match)
+        # NIP-17 spec requires the outer gift wrap p-tag to be the real
+        # recipient (for relay routing).  A previous broad filter without
+        # a #p constraint pulled in wraps addressed to other users, causing
+        # ECDH/MAC failures on decrypt.
         filter_giftwrap_tagged: dict[str, Any] = {
             "kinds": [_KIND_GIFT_WRAP],
             "#p": [self._pubkey_hex],
             "since": since,
             "limit": 50,
         }
-        # Filter 3: NIP-17 gift wraps without our p-tag
-        # (metadata-protected per NIP-17 — outer p-tag may be random).
-        # Broader search — limit tightly to avoid noise.
-        filter_giftwrap_broad: dict[str, Any] = {
-            "kinds": [_KIND_GIFT_WRAP],
-            "since": since,
-            "limit": 20,
-        }
 
-        filters = [filter_nip04, filter_giftwrap_tagged, filter_giftwrap_broad]
+        filters = [filter_nip04, filter_giftwrap_tagged]
         sub_id = f"courier-{int(time.time())}"
 
         for relay_url in self._relays:
@@ -1011,8 +1098,13 @@ class NostrCredentialExchange:
         """One-shot fetch of recent DMs from all relays."""
         self._subscribe_to_relays()
 
-    def _find_dm_in_buffer(self, sender_hex: str) -> dict[str, Any] | None:
-        """Find the most recent unconsumed DM from a sender."""
+    def _find_dm_candidates(self, sender_hex: str) -> list[dict[str, Any]]:
+        """Find unconsumed DM candidates from a sender, newest first.
+
+        NIP-04 events are filtered by sender pubkey.  NIP-17 gift wraps
+        cannot be filtered by sender until decrypted (the real sender is
+        inside the encrypted seal), so all addressed wraps are included.
+        """
         now = int(time.time())
         cutoff = now - self._freshness_window
 
@@ -1037,15 +1129,12 @@ class NostrCredentialExchange:
                 elif kind == _KIND_GIFT_WRAP:
                     # NIP-17: sender is hidden inside the seal
                     # We can't filter by sender until we unwrap, so
-                    # include all gift wraps as candidates
+                    # include all gift wraps addressed to us
                     candidates.append(event)
 
-            if not candidates:
-                return None
-
-            # Return the most recent
+            # Newest first
             candidates.sort(key=lambda e: e.get("created_at", 0), reverse=True)
-            return candidates[0]
+            return candidates
 
     def _decrypt_dm(
         self, event: dict[str, Any], sender_hex: str,
