@@ -133,6 +133,22 @@ def _sanitize_smart_quotes(text: str) -> str:
     return text
 
 
+_BARE_KEY = re.compile(
+    r"""([{,]\s*)"""     # delimiter + optional whitespace (captured)
+    r"""(\w+)"""         # bare word — the key
+    r"""('?\s*:)""",     # optional dangling close-quote + colon
+    re.VERBOSE,
+)
+
+
+def _repair_bare_keys(text: str) -> str:
+    """Insert missing quotes around bare dict keys like ``access_token_secret':``."""
+    def _fix(m: re.Match) -> str:
+        prefix, key, suffix = m.group(1), m.group(2), m.group(3)
+        return f"{prefix}'{key}'{suffix.lstrip(chr(39))}"
+    return _BARE_KEY.sub(_fix, text)
+
+
 def _lenient_json_loads(text: str) -> Any:
     """Parse JSON leniently — tolerate human-typed Python dict syntax.
 
@@ -141,6 +157,8 @@ def _lenient_json_loads(text: str) -> Any:
     2. If that fails, normalize smart quotes and retry.
     3. If still failing, attempt ``ast.literal_eval`` (handles single-quoted
        dicts, missing quotes, trailing commas) and verify the result is a dict.
+    4. If still failing, repair bare/half-quoted keys and retry
+       ``ast.literal_eval``.
     """
     import ast
 
@@ -160,6 +178,15 @@ def _lenient_json_loads(text: str) -> Any:
     # Third pass: Python dict literal (single quotes, trailing commas, etc.)
     try:
         result = ast.literal_eval(cleaned)
+        if isinstance(result, dict):
+            return result
+    except (ValueError, SyntaxError):
+        pass
+
+    # Fourth pass: repair bare/half-quoted keys, then retry literal_eval
+    repaired = _repair_bare_keys(cleaned)
+    try:
+        result = ast.literal_eval(repaired)
         if isinstance(result, dict):
             return result
     except (ValueError, SyntaxError):

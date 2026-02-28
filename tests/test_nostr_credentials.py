@@ -1543,6 +1543,14 @@ class TestLenientJsonParsing:
         assert result["access_token"] == "tok-123"
         assert result["poison"] == "bold-hawk-42"
 
+    def test_missing_opening_quote_on_key(self):
+        """Real user typo: access_token_secret' missing its opening quote."""
+        raw = "{'access_token': 'tok-123', access_token_secret': 'sec-456', 'poison': 'bold-hawk-42'}"
+        result = _lenient_json_loads(raw)
+        assert result["access_token"] == "tok-123"
+        assert result["access_token_secret"] == "sec-456"
+        assert result["poison"] == "bold-hawk-42"
+
     @pytest.mark.asyncio
     async def test_receive_tolerates_single_quoted_dict(self):
         """End-to-end: receive() parses single-quoted Python dict from DM."""
