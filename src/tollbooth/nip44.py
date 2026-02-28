@@ -1,11 +1,13 @@
-"""NIP-44v2 encryption — ECDH + HKDF + ChaCha20-Poly1305 with padding.
+"""NIP-44v2 encryption — ECDH + HKDF + ChaCha20 stream cipher + HMAC-SHA256.
 
 Implements the NIP-44 version 2 payload encryption scheme for Nostr events.
 Used by the audit publisher to encrypt patron balance data so only the
 patron's nsec can decrypt it.
 
+Payload format: version(1) + nonce(32) + ciphertext(N) + hmac(32)
+
 Dependencies: ``coincurve`` (secp256k1 ECDH) and ``cryptography``
-(HKDF-SHA256, ChaCha20-Poly1305) — both already transitive deps of pynostr.
+(HKDF-SHA256, ChaCha20) — both already transitive deps of pynostr.
 
 Reference: https://github.com/nostr-protocol/nips/blob/master/44.md
 """
@@ -19,7 +21,7 @@ import struct
 
 from coincurve import PrivateKey as _CoinPrivateKey  # type: ignore[import-untyped]
 from coincurve import PublicKey as _CoinPublicKey  # type: ignore[import-untyped]
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 
@@ -106,14 +108,14 @@ def _get_conversation_key(
 
 def _get_message_keys(
     conversation_key: bytes, nonce: bytes,
-) -> tuple[bytes, bytes]:
-    """Derive per-message chacha_key and chacha_nonce via HKDF-expand.
+) -> tuple[bytes, bytes, bytes]:
+    """Derive per-message chacha_key, chacha_nonce, and hmac_key via HKDF-expand.
 
     HKDF-expand(PRK=conversation_key, info=nonce, L=76)
     → chacha_key(32) + chacha_nonce(12) + hmac_key(32)
 
     Returns:
-        (chacha_key: 32 bytes, chacha_nonce: 12 bytes)
+        (chacha_key: 32 bytes, chacha_nonce: 12 bytes, hmac_key: 32 bytes)
     """
     expanded = HKDFExpand(
         algorithm=SHA256(),
@@ -123,7 +125,8 @@ def _get_message_keys(
 
     chacha_key = expanded[:32]
     chacha_nonce = expanded[32:44]
-    return chacha_key, chacha_nonce
+    hmac_key = expanded[44:76]
+    return chacha_key, chacha_nonce, hmac_key
 
 
 def encrypt(
@@ -139,7 +142,7 @@ def encrypt(
         public_key_hex: Recipient's 32-byte x-only public key as hex.
 
     Returns:
-        Base64-encoded NIP-44v2 payload: version(1) + nonce(32) + ciphertext.
+        Base64-encoded NIP-44v2 payload: version(1) + nonce(32) + ciphertext + hmac(32).
     """
     import base64
 
@@ -148,13 +151,19 @@ def encrypt(
 
     conversation_key = _get_conversation_key(private_key_hex, public_key_hex)
     nonce = os.urandom(32)
-    chacha_key, chacha_nonce = _get_message_keys(conversation_key, nonce)
+    chacha_key, chacha_nonce, hmac_key = _get_message_keys(conversation_key, nonce)
 
-    cipher = ChaCha20Poly1305(chacha_key)
-    ciphertext = cipher.encrypt(chacha_nonce, padded, None)
+    # ChaCha20 stream cipher (NOT AEAD). NIP-44 uses a 16-byte nonce:
+    # 4 zero bytes (counter) + 12-byte chacha_nonce.
+    nonce16 = b"\x00" * 4 + chacha_nonce
+    cipher = Cipher(algorithms.ChaCha20(chacha_key, nonce16), mode=None)
+    ciphertext = cipher.encryptor().update(padded)
 
-    # NIP-44v2 payload: version byte + nonce + ciphertext (includes Poly1305 tag)
-    payload = bytes([_VERSION]) + nonce + ciphertext
+    # Separate HMAC-SHA256 over (nonce || ciphertext)
+    mac = hmac.new(hmac_key, nonce + ciphertext, hashlib.sha256).digest()
+
+    # NIP-44v2 payload: version(1) + nonce(32) + ciphertext(N) + mac(32)
+    payload = bytes([_VERSION]) + nonce + ciphertext + mac
     return base64.b64encode(payload).decode("ascii")
 
 
@@ -174,14 +183,15 @@ def decrypt(
         Decrypted UTF-8 plaintext string.
 
     Raises:
-        ValueError: On invalid version, decryption failure, or padding error.
+        ValueError: On invalid version, HMAC failure, or padding error.
     """
     import base64
 
     # Normalize base64 padding — some Nostr clients (Primal) strip trailing '='
     payload_b64 += "=" * (-len(payload_b64) % 4)
     payload = base64.b64decode(payload_b64)
-    if len(payload) < 35:  # 1 version + 32 nonce + 2 min ciphertext
+    # Minimum: 1 version + 32 nonce + 34 min ciphertext (2 pad-prefix + 32 padded) + 32 mac = 99
+    if len(payload) < 99:
         raise ValueError("NIP-44 payload too short")
 
     version = payload[0]
@@ -189,16 +199,21 @@ def decrypt(
         raise ValueError(f"Unsupported NIP-44 version: {version}")
 
     nonce = payload[1:33]
-    ciphertext = payload[33:]
+    ciphertext = payload[33:-32]
+    mac = payload[-32:]
 
     conversation_key = _get_conversation_key(private_key_hex, public_key_hex)
-    chacha_key, chacha_nonce = _get_message_keys(conversation_key, nonce)
+    chacha_key, chacha_nonce, hmac_key = _get_message_keys(conversation_key, nonce)
 
-    cipher = ChaCha20Poly1305(chacha_key)
-    try:
-        padded = cipher.decrypt(chacha_nonce, ciphertext, None)
-    except Exception as e:
-        raise ValueError(f"NIP-44 decryption failed: {e}") from e
+    # Verify HMAC-SHA256 (constant-time comparison)
+    expected_mac = hmac.new(hmac_key, nonce + ciphertext, hashlib.sha256).digest()
+    if not hmac.compare_digest(mac, expected_mac):
+        raise ValueError("NIP-44 decryption failed: HMAC verification failed")
+
+    # ChaCha20 stream cipher decrypt
+    nonce16 = b"\x00" * 4 + chacha_nonce
+    cipher = Cipher(algorithms.ChaCha20(chacha_key, nonce16), mode=None)
+    padded = cipher.decryptor().update(ciphertext)
 
     plaintext_bytes = _unpad(padded)
     return plaintext_bytes.decode("utf-8")
