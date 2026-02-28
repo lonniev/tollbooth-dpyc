@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -118,6 +119,18 @@ def _generate_poison() -> str:
     noun = random.choice(_NOUNS)
     num = random.randint(10, 99)
     return f"{adj}-{noun}-{num}"
+
+
+# Postel's Law: normalize smart quotes that Nostr clients may inject
+_SMART_DOUBLE = re.compile(r'[\u201c\u201d\u00ab\u00bb]')
+_SMART_SINGLE = re.compile(r'[\u2018\u2019]')
+
+
+def _sanitize_smart_quotes(text: str) -> str:
+    """Replace Unicode quotation marks with ASCII equivalents."""
+    text = _SMART_DOUBLE.sub('"', text)
+    text = _SMART_SINGLE.sub("'", text)
+    return text
 
 
 @dataclass
@@ -693,7 +706,8 @@ class NostrCredentialExchange:
         # Resolve template for error DM instructions
         error_template = self._resolve_error_template(service)
 
-        # Parse JSON payload
+        # Parse JSON payload — normalize smart quotes from Nostr clients
+        plaintext = _sanitize_smart_quotes(plaintext)
         try:
             payload = json.loads(plaintext)
         except json.JSONDecodeError as exc:

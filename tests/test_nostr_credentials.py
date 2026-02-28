@@ -23,6 +23,7 @@ from tollbooth.nostr_credentials import (
     _KIND_METADATA,
     _KIND_SEAL,
     _KIND_PRIVATE_DM,
+    _sanitize_smart_quotes,
 )
 
 
@@ -65,7 +66,7 @@ def _make_exchange(
 def _make_nip04_event(
     sender_privkey: PrivateKey,
     recipient_pubkey_hex: str,
-    payload: dict,
+    payload: dict | str,
     created_at: int | None = None,
 ) -> dict:
     """Build a kind 4 NIP-04 event dict for testing."""
@@ -74,7 +75,8 @@ def _make_nip04_event(
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     from cryptography.hazmat.primitives.padding import PKCS7
 
-    plaintext = json.dumps(payload).encode("utf-8")
+    raw = payload if isinstance(payload, str) else json.dumps(payload)
+    plaintext = raw.encode("utf-8")
 
     shared_secret = _get_shared_secret(sender_privkey.hex(), recipient_pubkey_hex)
     iv = os.urandom(16)
@@ -1461,3 +1463,47 @@ class TestNip17Subscription:
         # Filter 2: NIP-17 gift wrap with p-tag
         assert filters[1]["kinds"] == [_KIND_GIFT_WRAP]
         assert "#p" in filters[1]
+
+
+class TestSmartQuoteSanitization:
+    """Tests for Postel's Law smart-quote normalization."""
+
+    def test_double_smart_quotes_normalized(self):
+        text = '\u201chello\u201d'
+        assert _sanitize_smart_quotes(text) == '"hello"'
+
+    def test_single_smart_quotes_normalized(self):
+        text = "\u2018it\u2019s\u2019"
+        assert _sanitize_smart_quotes(text) == "'it's'"
+
+    def test_guillemets_normalized(self):
+        text = '\u00abbonjour\u00bb'
+        assert _sanitize_smart_quotes(text) == '"bonjour"'
+
+    def test_ascii_unchanged(self):
+        text = '{"key": "value"}'
+        assert _sanitize_smart_quotes(text) == text
+
+    def test_mixed_quotes_in_json(self):
+        """Realistic scenario: Primal injects smart quotes around values."""
+        mangled = '{\u201capi_key\u201d: \u201csk-abc\u201d}'
+        assert json.loads(_sanitize_smart_quotes(mangled)) == {"api_key": "sk-abc"}
+
+    @pytest.mark.asyncio
+    async def test_receive_tolerates_smart_quotes(self):
+        """End-to-end: receive() parses credential JSON with smart quotes."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        # Build NIP-04 event with smart-quoted JSON payload
+        raw = '{\u201capi_key\u201d: \u201csk-test\u201d, \u201capi_secret\u201d: \u201csecret\u201d}'
+        event = _make_nip04_event(sender, operator.public_key.hex(), raw)
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(sender.public_key.bech32())
+
+        assert result["success"] is True
