@@ -38,6 +38,7 @@ from tollbooth.credential_templates import (
     CredentialTemplate,
     FieldSpec,
     TemplateValidationError,
+    render_delimited_instructions,
     render_template_instructions,
     validate_payload,
 )
@@ -121,79 +122,20 @@ def _generate_poison() -> str:
     return f"{adj}-{noun}-{num}"
 
 
-# Postel's Law: normalize human-typed JSON that Nostr clients may mangle
-_SMART_DOUBLE = re.compile(r'[\u201c\u201d\u00ab\u00bb]')
-_SMART_SINGLE = re.compile(r'[\u2018\u2019]')
+# @@@ delimiter extraction — mobile-friendly credential format
+_DELIMITED_FIELD = re.compile(r"(\w+)\s*=\s*@@@(.+?)@@@")
 
 
-def _sanitize_smart_quotes(text: str) -> str:
-    """Replace Unicode quotation marks with ASCII equivalents."""
-    text = _SMART_DOUBLE.sub('"', text)
-    text = _SMART_SINGLE.sub("'", text)
-    return text
+def _parse_delimited_credentials(text: str) -> dict[str, str] | None:
+    """Extract ``key = @@@value@@@`` pairs from *text*.
 
-
-_BARE_KEY = re.compile(
-    r"""([{,]\s*)"""     # delimiter + optional whitespace (captured)
-    r"""(\w+)"""         # bare word — the key
-    r"""('?\s*:)""",     # optional dangling close-quote + colon
-    re.VERBOSE,
-)
-
-
-def _repair_bare_keys(text: str) -> str:
-    """Insert missing quotes around bare dict keys like ``access_token_secret':``."""
-    def _fix(m: re.Match) -> str:
-        prefix, key, suffix = m.group(1), m.group(2), m.group(3)
-        return f"{prefix}'{key}'{suffix.lstrip(chr(39))}"
-    return _BARE_KEY.sub(_fix, text)
-
-
-def _lenient_json_loads(text: str) -> Any:
-    """Parse JSON leniently — tolerate human-typed Python dict syntax.
-
-    Strategy:
-    1. Try ``json.loads`` on the raw text.
-    2. If that fails, normalize smart quotes and retry.
-    3. If still failing, attempt ``ast.literal_eval`` (handles single-quoted
-       dicts, missing quotes, trailing commas) and verify the result is a dict.
-    4. If still failing, repair bare/half-quoted keys and retry
-       ``ast.literal_eval``.
+    Returns a dict of field→value mappings, or ``None`` if no @@@ patterns
+    were found (so the caller can fall back to JSON parsing).
     """
-    import ast
-
-    # Fast path: valid JSON as-is
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Second pass: smart-quote normalization
-    cleaned = _sanitize_smart_quotes(text)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-
-    # Third pass: Python dict literal (single quotes, trailing commas, etc.)
-    try:
-        result = ast.literal_eval(cleaned)
-        if isinstance(result, dict):
-            return result
-    except (ValueError, SyntaxError):
-        pass
-
-    # Fourth pass: repair bare/half-quoted keys, then retry literal_eval
-    repaired = _repair_bare_keys(cleaned)
-    try:
-        result = ast.literal_eval(repaired)
-        if isinstance(result, dict):
-            return result
-    except (ValueError, SyntaxError):
-        pass
-
-    # Nothing worked — raise with the original error for diagnostics
-    return json.loads(text)  # will raise JSONDecodeError
+    matches = _DELIMITED_FIELD.findall(text)
+    if not matches:
+        return None
+    return {key.strip(): value.strip() for key, value in matches}
 
 
 @dataclass
@@ -235,7 +177,7 @@ class NostrProfile:
         return meta
 
 # Default freshness window (seconds)
-_DEFAULT_FRESHNESS = 600  # 10 minutes
+_DEFAULT_FRESHNESS = 900  # 15 minutes
 _DEFAULT_SUBSCRIBE_TIMEOUT = 10
 
 
@@ -588,7 +530,7 @@ class NostrCredentialExchange:
             )
 
         template = self._templates[service]
-        instructions = render_template_instructions(template)
+        instructions = render_delimited_instructions(template)
 
         # Generate anti-replay poison slug
         poison = _generate_poison()
@@ -606,10 +548,10 @@ class NostrCredentialExchange:
             f"You're receiving this message because you (or your AI agent) "
             f"requested a credential channel from a Claude session.\n\n"
             f"If you'd like to proceed, reply to this message with your "
-            f"credentials as JSON.  IMPORTANT: include the anti-replay "
-            f"token exactly as shown.\n\n"
+            f"credentials.  Paste each value between the @@@ markers.\n"
+            f"IMPORTANT: include the anti-replay token exactly as shown.\n\n"
             f"{instructions}\n"
-            f'  "poison": "{poison}"\n\n'
+            f"  poison = @@@{poison}@@@\n\n"
             f"Your reply is end-to-end encrypted — "
             f"only this service can read it.\n\n"
             f"If you didn't request this, simply ignore this message.\n\n"
@@ -769,20 +711,14 @@ class NostrCredentialExchange:
         # Resolve template for error DM instructions
         error_template = self._resolve_error_template(service)
 
-        # Parse JSON payload — tolerate human-typed dict syntax
-        try:
-            payload = _lenient_json_loads(plaintext)
-        except json.JSONDecodeError as exc:
+        # Parse credential payload — @@@ delimited format only
+        payload = _parse_delimited_credentials(plaintext)
+        if payload is None:
             self._send_error_dm(sender_npub, error_template)
             raise CourierValidationError(
-                f"DM content is not valid JSON: {exc}"
-            ) from exc
-
-        if not isinstance(payload, dict):
-            self._send_error_dm(sender_npub, error_template)
-            raise CourierValidationError(
-                "DM content must be a JSON object, "
-                f"got {type(payload).__name__}"
+                "Could not parse credentials from DM. "
+                "Use the @@@ format from the welcome message, e.g.: "
+                "field_name = @@@your_value@@@"
             )
 
         # Validate anti-replay poison slug
@@ -933,17 +869,18 @@ class NostrCredentialExchange:
         Non-fatal -- DM failure is logged but does not mask the real error.
         """
         if template is not None:
-            instructions = render_template_instructions(template)
+            instructions = render_delimited_instructions(template)
         else:
             instructions = "(see the welcome message for the expected format)"
 
         error_text = (
-            "\u26a0\ufe0f I couldn’t process your credentials. "
-            "The message didn’t match the expected format.\n\n"
-            "Please reply with exactly this structure (no extra text):\n\n"
+            "\u26a0\ufe0f I couldn\u2019t process your credentials. "
+            "The message didn\u2019t match the expected format.\n\n"
+            "Please reply using the @@@ format \u2014 paste each value "
+            "between the markers:\n\n"
             f"{instructions}\n\n"
-            "Straight quotes only — some keyboards use "
-            "“smart quotes” that break JSON."
+            "Copy the template above, paste your values between "
+            "the @@@ markers, and send it back."
         )
         try:
             self.send_dm(sender_npub, error_text)
@@ -1092,7 +1029,7 @@ class NostrCredentialExchange:
         filter_giftwrap_tagged: dict[str, Any] = {
             "kinds": [_KIND_GIFT_WRAP],
             "#p": [self._pubkey_hex],
-            "since": since,
+            "since": since - _TIMESTAMP_FUZZ_SECONDS,  # 48h wider for NIP-17 fuzz
             "limit": 50,
         }
 
