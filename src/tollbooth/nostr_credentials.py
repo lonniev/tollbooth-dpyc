@@ -130,7 +130,7 @@ def _parse_delimited_credentials(text: str) -> dict[str, str] | None:
     """Extract ``key = @@@value@@@`` pairs from *text*.
 
     Returns a dict of field→value mappings, or ``None`` if no @@@ patterns
-    were found (so the caller can fall back to JSON parsing).
+    were found (indicating the message doesn't contain credentials).
     """
     matches = _DELIMITED_FIELD.findall(text)
     if not matches:
@@ -580,7 +580,7 @@ class NostrCredentialExchange:
                 result["message"] = (
                     f"A welcome DM has been sent to {recipient_npub}. "
                     f"Open your Nostr client, find the message, and reply "
-                    f"with your credentials as JSON. "
+                    f"with your credentials using the @@@ format shown. "
                     f"Then call receive_credentials with your npub."
                 )
             except Exception as exc:
@@ -597,7 +597,7 @@ class NostrCredentialExchange:
             result["message"] = (
                 f"Send your {template.service} credentials as a Nostr DM "
                 f"to {self._npub} from your Nostr client. "
-                f"The DM must contain a JSON object matching the template above. "
+                f"Reply with your credentials using the @@@ format shown above. "
                 f"Then call receive_credentials with your npub."
             )
 
@@ -1128,11 +1128,17 @@ class NostrCredentialExchange:
                 if event_id in self._consumed_ids:
                     continue
 
-                created_at = event.get("created_at", 0)
-                if created_at < cutoff:
-                    continue
-
                 kind = event.get("kind", 0)
+                created_at = event.get("created_at", 0)
+
+                # NIP-17 created_at is deliberately fuzzed 0-48h into the past
+                if kind == _KIND_GIFT_WRAP:
+                    effective_cutoff = cutoff - _TIMESTAMP_FUZZ_SECONDS
+                else:
+                    effective_cutoff = cutoff
+
+                if created_at < effective_cutoff:
+                    continue
 
                 if kind == _KIND_ENCRYPTED_DM:
                     # NIP-04: sender is event.pubkey

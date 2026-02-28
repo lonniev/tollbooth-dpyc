@@ -1588,3 +1588,50 @@ class TestNip17TimestampHardening:
         giftwrap_since = giftwrap_filter["since"]
         assert giftwrap_since < nip04_since
         assert nip04_since - giftwrap_since == _TIMESTAMP_FUZZ_SECONDS
+
+    def test_nip17_fuzzed_timestamp_found_by_candidate_filter(self):
+        """Gift wrap with created_at fuzzed 3h into the past is still returned."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec, freshness_window=900)  # 15 min
+
+        three_hours_ago = int(time.time()) - 3 * 60 * 60
+
+        gift_wrap_event = {
+            "id": "gw_fuzzed_ts",
+            "kind": _KIND_GIFT_WRAP,
+            "pubkey": PrivateKey().public_key.hex(),
+            "content": "encrypted-gift-wrap",
+            "created_at": three_hours_ago,
+            "tags": [["p", operator.public_key.hex()]],
+            "sig": "fake_sig",
+        }
+
+        with ex._lock:
+            ex._received_events.append(gift_wrap_event)
+
+        results = ex._find_dm_candidates(sender.public_key.hex())
+        assert len(results) == 1
+        assert results[0]["id"] == "gw_fuzzed_ts"
+
+    def test_nip04_stale_event_still_filtered(self):
+        """NIP-04 events older than freshness window are still rejected."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec, freshness_window=60)
+
+        stale_event = {
+            "id": "nip04_stale",
+            "kind": _KIND_ENCRYPTED_DM,
+            "pubkey": sender.public_key.hex(),
+            "content": "encrypted-content",
+            "created_at": int(time.time()) - 120,  # 2 min ago, window is 1 min
+            "tags": [["p", operator.public_key.hex()]],
+            "sig": "fake_sig",
+        }
+
+        with ex._lock:
+            ex._received_events.append(stale_event)
+
+        results = ex._find_dm_candidates(sender.public_key.hex())
+        assert len(results) == 0
