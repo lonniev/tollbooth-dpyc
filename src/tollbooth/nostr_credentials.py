@@ -674,32 +674,33 @@ class NostrCredentialExchange:
                 f"try again."
             )
 
-        # Try each candidate.  NIP-04 events are already sender-filtered
-        # so errors propagate immediately.  Gift wraps may fail to decrypt
-        # (wrong ECDH shared secret) or reveal a different sender inside
-        # the seal — silently skip those and try the next candidate.
-        dm = None
-        plaintext = None
+        # Decrypt ALL candidates so we can pick the one with the correct
+        # anti-replay poison.  Previous code broke on first success, which
+        # meant stale DMs with old poisons could block the valid reply.
+        decrypted: list[tuple[dict[str, Any], str]] = []
         for candidate in candidates:
             kind = candidate.get("kind", 0)
-            if kind == _KIND_GIFT_WRAP:
-                try:
-                    plaintext = self._decrypt_dm(candidate, sender_hex)
-                    dm = candidate
-                    break
-                except CourierValidationError:
-                    logger.debug(
-                        "Skipping gift wrap %s (decrypt/validate failed)",
-                        candidate.get("id", "?")[:16],
-                    )
-                    continue
-            else:
-                # NIP-04: already matched by sender — errors are real
-                plaintext = self._decrypt_dm(candidate, sender_hex)
-                dm = candidate
-                break
 
-        if dm is None or plaintext is None:
+            # NIP-04 policy rejection must propagate immediately so the
+            # user gets a clear "upgrade your client" error, not a timeout.
+            if kind == _KIND_ENCRYPTED_DM and self._nip44_only:
+                raise CourierValidationError(
+                    "NIP-04 DMs rejected — this operator requires NIP-44 "
+                    "(NIP-17 gift wrap). Please use a modern Nostr client."
+                )
+
+            try:
+                pt = self._decrypt_dm(candidate, sender_hex)
+                decrypted.append((candidate, pt))
+            except CourierValidationError:
+                logger.debug(
+                    "Skipping %s %s (decrypt/validate failed)",
+                    "gift wrap" if kind == _KIND_GIFT_WRAP else "DM",
+                    candidate.get("id", "?")[:16],
+                )
+                continue
+
+        if not decrypted:
             raise CourierTimeout(
                 f"No decryptable DM found from {sender_npub} within the "
                 f"{self._freshness_window}-second freshness window. "
@@ -707,6 +708,64 @@ class NostrCredentialExchange:
                 f"could be decrypted. Make sure you replied from the "
                 f"correct Nostr identity."
             )
+
+        # ── Poison-aware DM selection ────────────────────────────────
+        expected = self._pending_poisons.get(sender_npub)
+
+        if expected is not None:
+            expected_phrase, expiry = expected
+            if time.time() > expiry:
+                del self._pending_poisons[sender_npub]
+                raise CourierValidationError(
+                    "Anti-replay token expired. Call request_credential_channel "
+                    "again to get a fresh token."
+                )
+
+            # Scan all decrypted DMs for the one with matching poison
+            dm = None
+            plaintext = None
+            stale_events: list[dict[str, Any]] = []
+
+            for event, pt in decrypted:
+                payload = _parse_delimited_credentials(pt)
+                if payload and payload.get("poison") == expected_phrase:
+                    dm = event
+                    plaintext = pt
+                else:
+                    stale_events.append(event)
+
+            if dm is None:
+                found = [
+                    _parse_delimited_credentials(pt).get("poison", "<unparseable>")
+                    for _, pt in decrypted
+                    if _parse_delimited_credentials(pt)
+                ]
+                raise CourierValidationError(
+                    f'Anti-replay token mismatch. Expected "{expected_phrase}" '
+                    f"but none of {len(decrypted)} DM(s) matched. "
+                    f"Found poisons: {found}. "
+                    f"Call request_credential_channel again for a fresh token."
+                )
+
+            # Consume the poison — one-time use
+            del self._pending_poisons[sender_npub]
+
+            # Clean up stale DMs from relays
+            for stale in stale_events:
+                stale_id = stale.get("id", "")
+                if stale_id:
+                    self._request_deletion(stale_id)
+                    with self._lock:
+                        self._consumed_ids.add(stale_id)
+
+            if stale_events:
+                logger.info(
+                    "Cleaned up %d stale DM(s) from relays",
+                    len(stale_events),
+                )
+        else:
+            # No poison expected — use newest (first in list)
+            dm, plaintext = decrypted[0]
 
         # Resolve template for error DM instructions
         error_template = self._resolve_error_template(service)
@@ -721,30 +780,8 @@ class NostrCredentialExchange:
                 "field_name = @@@your_value@@@"
             )
 
-        # Validate anti-replay poison slug
-        expected = self._pending_poisons.get(sender_npub)
-        if expected is not None:
-            expected_phrase, expiry = expected
-            received_poison = payload.pop("poison", None)
-            if time.time() > expiry:
-                del self._pending_poisons[sender_npub]
-                raise CourierValidationError(
-                    "Anti-replay token expired. Call request_credential_channel "
-                    "again to get a fresh token."
-                )
-            if received_poison != expected_phrase:
-                raise CourierValidationError(
-                    f'Anti-replay token mismatch. Expected "poison": '
-                    f'"{expected_phrase}" but got '
-                    f'"{received_poison}". Include the exact token from '
-                    f"the welcome message."
-                )
-            # Consume the poison — one-time use
-            del self._pending_poisons[sender_npub]
-        else:
-            # No poison pending — remove the field if present so it
-            # doesn't confuse template matching
-            payload.pop("poison", None)
+        # Remove poison from payload so it doesn't confuse template matching
+        payload.pop("poison", None)
 
         # Match template
         payload_service = payload.get("service")
