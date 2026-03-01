@@ -375,3 +375,65 @@ class NeonVault:
             return sum(t.get("remaining_sats", 0) for t in obj.get("tranches", []))
         except (json.JSONDecodeError, TypeError, AttributeError):
             return 0
+
+
+class NeonCredentialVault:
+    """CredentialVaultBackend backed by Neon serverless Postgres.
+
+    Implements the ``CredentialVaultBackend`` protocol for encrypted
+    credential persistence.  Shares the httpx client and ``_execute()``
+    helper from a ``NeonVault`` instance — no new connections or config.
+
+    Schema: ``credentials`` table with composite PK ``(service, npub)``.
+    Call ``ensure_schema()`` at startup alongside ``NeonVault.ensure_schema()``.
+    """
+
+    def __init__(self, *, neon_vault: NeonVault) -> None:
+        self._neon = neon_vault
+
+    async def ensure_schema(self) -> None:
+        """Create the ``credentials`` table if it doesn't exist."""
+        await self._neon._execute(
+            "CREATE TABLE IF NOT EXISTS credentials ("
+            "    service TEXT NOT NULL,"
+            "    npub TEXT NOT NULL,"
+            "    encrypted_blob TEXT NOT NULL,"
+            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    PRIMARY KEY (service, npub)"
+            ")"
+        )
+
+    async def store_credentials(
+        self, service: str, npub: str, encrypted_blob: str,
+    ) -> None:
+        """Store an encrypted credential blob. Overwrites existing."""
+        await self._neon._execute(
+            "INSERT INTO credentials (service, npub, encrypted_blob, updated_at) "
+            "VALUES ($1, $2, $3, now()) "
+            "ON CONFLICT (service, npub) DO UPDATE "
+            "SET encrypted_blob = EXCLUDED.encrypted_blob, "
+            "    updated_at = now()",
+            [service, npub, encrypted_blob],
+        )
+
+    async def fetch_credentials(
+        self, service: str, npub: str,
+    ) -> str | None:
+        """Fetch an encrypted credential blob. Returns None if not found."""
+        result = await self._neon._execute(
+            "SELECT encrypted_blob FROM credentials "
+            "WHERE service = $1 AND npub = $2",
+            [service, npub],
+        )
+        rows = result.get("rows", [])
+        return rows[0]["encrypted_blob"] if rows else None
+
+    async def delete_credentials(
+        self, service: str, npub: str,
+    ) -> bool:
+        """Delete stored credentials. Returns True if found and deleted."""
+        result = await self._neon._execute(
+            "DELETE FROM credentials WHERE service = $1 AND npub = $2",
+            [service, npub],
+        )
+        return (result.get("rowCount", 0) or 0) > 0
