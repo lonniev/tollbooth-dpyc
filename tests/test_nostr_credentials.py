@@ -1192,6 +1192,118 @@ class TestPoisonSlug:
 
         assert result["success"] is True
 
+    @pytest.mark.asyncio
+    async def test_poison_picks_correct_dm_from_multiple(self):
+        """When multiple DMs exist, receive picks the one with matching poison."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        sender_npub = sender.public_key.bech32()
+        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() + 600)
+
+        # Stale DM with old/wrong poison (injected first)
+        stale_payload = {"api_key": "old_k", "api_secret": "old_s", "poison": "true-quill-26"}
+        stale_event = _make_nip04_event(sender, operator.public_key.hex(), stale_payload)
+        stale_event["id"] = "stale_event_001"
+
+        # Valid DM with correct poison (injected second)
+        valid_payload = {"api_key": "correct_k", "api_secret": "correct_s", "poison": "bold-hawk-42"}
+        valid_event = _make_nip04_event(sender, operator.public_key.hex(), valid_payload)
+        valid_event["id"] = "valid_event_002"
+
+        with ex._lock:
+            ex._received_events.append(stale_event)
+            ex._received_events.append(valid_event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion") as mock_delete:
+            result = await ex.receive(sender_npub)
+
+        assert result["success"] is True
+        assert result["credentials"]["api_key"] == "correct_k"
+        # Poison should be consumed
+        assert sender_npub not in ex._pending_poisons
+
+    @pytest.mark.asyncio
+    async def test_stale_dms_get_deletion_requests(self):
+        """Stale DMs (wrong poison) get NIP-09 deletion requests."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        sender_npub = sender.public_key.bech32()
+        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() + 600)
+
+        # Two stale DMs
+        stale1 = _make_nip04_event(
+            sender, operator.public_key.hex(),
+            {"api_key": "k", "api_secret": "s", "poison": "old-slug-01"},
+        )
+        stale1["id"] = "stale_001"
+        stale2 = _make_nip04_event(
+            sender, operator.public_key.hex(),
+            {"api_key": "k", "api_secret": "s", "poison": "old-slug-02"},
+        )
+        stale2["id"] = "stale_002"
+
+        # Valid DM
+        valid = _make_nip04_event(
+            sender, operator.public_key.hex(),
+            {"api_key": "k", "api_secret": "s", "poison": "bold-hawk-42"},
+        )
+        valid["id"] = "valid_003"
+
+        with ex._lock:
+            ex._received_events.extend([stale1, stale2, valid])
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion") as mock_delete:
+            result = await ex.receive(sender_npub)
+
+        assert result["success"] is True
+        # Should have deletion calls for stale events + the valid event
+        deleted_ids = [call.args[0] for call in mock_delete.call_args_list]
+        assert "stale_001" in deleted_ids
+        assert "stale_002" in deleted_ids
+        # Stale events should be in consumed set
+        assert "stale_001" in ex._consumed_ids
+        assert "stale_002" in ex._consumed_ids
+
+    @pytest.mark.asyncio
+    async def test_no_poison_match_reports_found_poisons(self):
+        """When no DM matches the expected poison, error lists found poisons."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        sender_npub = sender.public_key.bech32()
+        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() + 600)
+
+        # Two DMs, neither with the correct poison
+        dm1 = _make_nip04_event(
+            sender, operator.public_key.hex(),
+            {"api_key": "k", "api_secret": "s", "poison": "true-quill-26"},
+        )
+        dm1["id"] = "dm_001"
+        dm2 = _make_nip04_event(
+            sender, operator.public_key.hex(),
+            {"api_key": "k", "api_secret": "s", "poison": "lazy-fox-99"},
+        )
+        dm2["id"] = "dm_002"
+
+        with ex._lock:
+            ex._received_events.extend([dm1, dm2])
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             pytest.raises(CourierValidationError, match="none of 2 DM") as exc_info:
+            await ex.receive(sender_npub)
+
+        err = str(exc_info.value)
+        assert "true-quill-26" in err
+        assert "lazy-fox-99" in err
+        assert "request_credential_channel" in err
+
 
 # ── Conversational DM Flow Tests ──────────────────────────────────────────
 
