@@ -195,12 +195,12 @@ class TestRenderDelimitedInstructions:
         assert "x" in text
         assert "v1" in text
 
-    def test_marks_required_and_optional(self):
-        """Required and optional labels present."""
+    def test_no_required_or_optional_labels(self):
+        """Field lines should not include (REQUIRED) or (optional) labels."""
         tmpl = _x_api_template()
         text = render_delimited_instructions(tmpl)
-        assert "REQUIRED" in text
-        assert "optional" in text
+        assert "REQUIRED" not in text
+        assert "(optional)" not in text
 
     def test_includes_description(self):
         """Template description is rendered."""
