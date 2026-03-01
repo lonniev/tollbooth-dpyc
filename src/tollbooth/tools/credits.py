@@ -14,6 +14,7 @@ from tollbooth.certificate import CertificateError, verify_certificate_auto
 from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
+from tollbooth.lnurl import LnurlResolutionError, resolve_lightning_address
 from tollbooth.constants import LOW_BALANCE_FLOOR_API_SATS, MAX_INVOICE_SATS
 
 logger = logging.getLogger(__name__)
@@ -58,11 +59,31 @@ async def _attempt_royalty_payout(
             ),
         }
 
+    # Resolve Lightning address to BOLT11 invoice (skip if already BOLT11)
+    destination = royalty_address
+    if not royalty_address.startswith("lnbc"):
+        try:
+            destination = await resolve_lightning_address(
+                royalty_address, royalty_sats,
+            )
+            logger.info(
+                "Resolved %s to BOLT11 invoice (%s…) for %d sats.",
+                royalty_address, destination[:20], royalty_sats,
+            )
+        except LnurlResolutionError as e:
+            logger.warning("LNURL resolution failed for %s: %s", royalty_address, e)
+            return {
+                "royalty_sats": royalty_sats,
+                "royalty_address": royalty_address,
+                "royalty_error": f"Lightning address resolution failed: {e}",
+            }
+
     try:
-        payout = await btcpay.create_payout(royalty_address, royalty_sats)
+        payout = await btcpay.create_payout(destination, royalty_sats)
         result = {
             "royalty_sats": royalty_sats,
             "royalty_address": royalty_address,
+            "payout_destination": destination[:30] + "…" if len(destination) > 30 else destination,
             "payout_id": payout.get("id", ""),
             "payout_state": payout.get("state", "Unknown"),
         }

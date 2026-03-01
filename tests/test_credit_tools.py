@@ -3,7 +3,7 @@
 import json
 import time
 from datetime import date, datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pynostr.event import Event  # type: ignore[import-untyped]
@@ -35,6 +35,7 @@ from tollbooth.tools.credits import (
     reconcile_pending_invoices,
 )
 from tollbooth.constants import MAX_INVOICE_SATS
+from tollbooth.lnurl import LnurlResolutionError
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +44,10 @@ from tollbooth.constants import MAX_INVOICE_SATS
 
 _TEST_NOSTR_PRIVKEY = PrivateKey()
 _TEST_AUTHORITY_NPUB = _TEST_NOSTR_PRIVKEY.public_key.bech32()
+
+_MOCK_BOLT11 = "lnbc200n1pjmockinvoice"
+
+_RESOLVE_PATCH = "tollbooth.tools.credits.resolve_lightning_address"
 
 _jti_counter = 0
 
@@ -743,7 +748,8 @@ class TestPurchaseCap:
 
 class TestAttemptRoyaltyPayout:
     @pytest.mark.asyncio
-    async def test_success(self) -> None:
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock, return_value=_MOCK_BOLT11)
+    async def test_success(self, mock_resolve: AsyncMock) -> None:
         btcpay = AsyncMock(spec=BTCPayClient)
         btcpay.create_payout = AsyncMock(
             return_value={"id": "payout-1", "state": "AwaitingApproval"}
@@ -754,7 +760,9 @@ class TestAttemptRoyaltyPayout:
         assert result["royalty_address"] == "addr@ln"
         assert result["payout_id"] == "payout-1"
         assert result["payout_state"] == "AwaitingApproval"
-        btcpay.create_payout.assert_called_once_with("addr@ln", 20)
+        assert "payout_destination" in result
+        mock_resolve.assert_called_once_with("addr@ln", 20)
+        btcpay.create_payout.assert_called_once_with(_MOCK_BOLT11, 20)
 
     @pytest.mark.asyncio
     async def test_below_minimum_returns_none(self) -> None:
@@ -765,7 +773,8 @@ class TestAttemptRoyaltyPayout:
         btcpay.create_payout.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_at_minimum(self) -> None:
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock, return_value=_MOCK_BOLT11)
+    async def test_at_minimum(self, mock_resolve: AsyncMock) -> None:
         btcpay = AsyncMock(spec=BTCPayClient)
         btcpay.create_payout = AsyncMock(return_value={"id": "p-2", "state": "OK"})
         result = await _attempt_royalty_payout(btcpay, 500, "addr@ln", 0.02, 10)
@@ -774,7 +783,8 @@ class TestAttemptRoyaltyPayout:
         assert result["royalty_sats"] == 10
 
     @pytest.mark.asyncio
-    async def test_btcpay_error_returns_dict_never_raises(self) -> None:
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock, return_value=_MOCK_BOLT11)
+    async def test_btcpay_error_returns_dict_never_raises(self, mock_resolve: AsyncMock) -> None:
         btcpay = AsyncMock(spec=BTCPayClient)
         btcpay.create_payout = AsyncMock(
             side_effect=BTCPayServerError("500 oops", status_code=500)
@@ -786,7 +796,8 @@ class TestAttemptRoyaltyPayout:
         assert "500 oops" in result["royalty_error"]
 
     @pytest.mark.asyncio
-    async def test_percentage_math(self) -> None:
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock, return_value=_MOCK_BOLT11)
+    async def test_percentage_math(self, mock_resolve: AsyncMock) -> None:
         btcpay = AsyncMock(spec=BTCPayClient)
         btcpay.create_payout = AsyncMock(return_value={"id": "p", "state": "OK"})
         result = await _attempt_royalty_payout(btcpay, 5000, "a@b", 0.05, 10)
@@ -794,13 +805,40 @@ class TestAttemptRoyaltyPayout:
         assert result["royalty_sats"] == 250  # 5000 * 0.05
 
     @pytest.mark.asyncio
-    async def test_int_truncation_rounding(self) -> None:
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock, return_value=_MOCK_BOLT11)
+    async def test_int_truncation_rounding(self, mock_resolve: AsyncMock) -> None:
         btcpay = AsyncMock(spec=BTCPayClient)
         btcpay.create_payout = AsyncMock(return_value={"id": "p", "state": "OK"})
         # 999 * 0.02 = 19.98, int() truncates to 19
         result = await _attempt_royalty_payout(btcpay, 999, "a@b", 0.02, 10)
         assert result is not None
         assert result["royalty_sats"] == 19
+
+    @pytest.mark.asyncio
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock,
+           side_effect=LnurlResolutionError("DNS resolution failed"))
+    async def test_lnurl_failure_returns_error_dict(self, mock_resolve: AsyncMock) -> None:
+        """LNURL resolution failure returns error dict, never raises."""
+        btcpay = AsyncMock(spec=BTCPayClient)
+        result = await _attempt_royalty_payout(btcpay, 1000, "addr@ln", 0.02, 10)
+        assert result is not None
+        assert result["royalty_sats"] == 20
+        assert result["royalty_address"] == "addr@ln"
+        assert "royalty_error" in result
+        assert "Lightning address resolution failed" in result["royalty_error"]
+        btcpay.create_payout.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bolt11_destination_skips_resolution(self) -> None:
+        """BOLT11 invoice destinations skip LNURL resolution entirely."""
+        btcpay = AsyncMock(spec=BTCPayClient)
+        btcpay.create_payout = AsyncMock(return_value={"id": "p", "state": "OK"})
+        bolt11 = "lnbc200n1pjdirectinvoice"
+        with patch(_RESOLVE_PATCH) as mock_resolve:
+            result = await _attempt_royalty_payout(btcpay, 1000, bolt11, 0.02, 10)
+        mock_resolve.assert_not_called()
+        assert result is not None
+        btcpay.create_payout.assert_called_once_with(bolt11, 20)
 
 
 # ---------------------------------------------------------------------------
@@ -822,7 +860,8 @@ class TestRoyaltyPayoutCeiling:
         btcpay.create_payout.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_at_ceiling_allowed(self) -> None:
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock, return_value=_MOCK_BOLT11)
+    async def test_at_ceiling_allowed(self, mock_resolve: AsyncMock) -> None:
         """Royalty exactly at ROYALTY_PAYOUT_MAX_SATS is allowed."""
         btcpay = AsyncMock(spec=BTCPayClient)
         btcpay.create_payout = AsyncMock(return_value={"id": "p-1", "state": "OK"})
@@ -834,7 +873,8 @@ class TestRoyaltyPayoutCeiling:
         btcpay.create_payout.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_just_below_ceiling_allowed(self) -> None:
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock, return_value=_MOCK_BOLT11)
+    async def test_just_below_ceiling_allowed(self, mock_resolve: AsyncMock) -> None:
         """Royalty just below ceiling is allowed."""
         btcpay = AsyncMock(spec=BTCPayClient)
         btcpay.create_payout = AsyncMock(return_value={"id": "p-2", "state": "OK"})
@@ -863,7 +903,8 @@ class TestRoyaltyPayoutCeiling:
 
 class TestCheckPaymentWithRoyalty:
     @pytest.mark.asyncio
-    async def test_settled_triggers_payout(self) -> None:
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock, return_value=_MOCK_BOLT11)
+    async def test_settled_triggers_payout(self, mock_resolve: AsyncMock) -> None:
         btcpay = _mock_btcpay({
             "id": "inv-1", "status": "Settled", "amount": "1000",
         })
@@ -880,6 +921,7 @@ class TestCheckPaymentWithRoyalty:
         assert "royalty_payout" in result
         assert result["royalty_payout"]["royalty_sats"] == 20
         assert result["royalty_payout"]["payout_id"] == "payout-1"
+        btcpay.create_payout.assert_called_once_with(_MOCK_BOLT11, 20)
 
     @pytest.mark.asyncio
     async def test_no_payout_when_address_none(self) -> None:
@@ -896,7 +938,8 @@ class TestCheckPaymentWithRoyalty:
         assert "royalty_payout" not in result
 
     @pytest.mark.asyncio
-    async def test_payout_failure_doesnt_block_credits(self) -> None:
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock, return_value=_MOCK_BOLT11)
+    async def test_payout_failure_doesnt_block_credits(self, mock_resolve: AsyncMock) -> None:
         btcpay = _mock_btcpay({
             "id": "inv-1", "status": "Settled", "amount": "1000",
         })
@@ -947,7 +990,8 @@ class TestCheckPaymentWithRoyalty:
         btcpay.create_payout.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_payout_awaiting_approval_includes_hint(self) -> None:
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock, return_value=_MOCK_BOLT11)
+    async def test_payout_awaiting_approval_includes_hint(self, mock_resolve: AsyncMock) -> None:
         """AwaitingApproval payout state includes a payout_hint for operators."""
         btcpay = _mock_btcpay({
             "id": "inv-1", "status": "Settled", "amount": "1000",
@@ -966,6 +1010,27 @@ class TestCheckPaymentWithRoyalty:
         assert rp["payout_state"] == "AwaitingApproval"
         assert "payout_hint" in rp
         assert "Payout Processors" in rp["payout_hint"]
+
+    @pytest.mark.asyncio
+    @patch(_RESOLVE_PATCH, new_callable=AsyncMock,
+           side_effect=LnurlResolutionError("DNS timeout"))
+    async def test_lnurl_failure_doesnt_block_credits(self, mock_resolve: AsyncMock) -> None:
+        """LNURL resolution failure returns error but never blocks credit settlement."""
+        btcpay = _mock_btcpay({
+            "id": "inv-1", "status": "Settled", "amount": "1000",
+        })
+        ledger = UserLedger()
+        cache = _mock_cache(ledger)
+        result = await check_payment_tool(
+            btcpay, cache, "user1", "inv-1",
+            royalty_address="addr@ln", royalty_percent=0.02, royalty_min_sats=10,
+        )
+        assert result["success"] is True
+        assert result["credits_granted"] == 1000
+        rp = result["royalty_payout"]
+        assert "royalty_error" in rp
+        assert "Lightning address resolution failed" in rp["royalty_error"]
+        btcpay.create_payout.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
