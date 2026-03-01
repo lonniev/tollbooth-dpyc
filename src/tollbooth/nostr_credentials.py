@@ -123,7 +123,7 @@ def _generate_poison() -> str:
 
 
 # @@@ delimiter extraction — mobile-friendly credential format
-_DELIMITED_FIELD = re.compile(r"(\w+)\s*=\s*@@@(.+?)@@@")
+_DELIMITED_FIELD = re.compile(r"(\w+)\s*=\s*@@@(.+?)@@@", re.DOTALL)
 
 
 def _parse_delimited_credentials(text: str) -> dict[str, str] | None:
@@ -135,7 +135,8 @@ def _parse_delimited_credentials(text: str) -> dict[str, str] | None:
     matches = _DELIMITED_FIELD.findall(text)
     if not matches:
         return None
-    return {key.strip(): value.strip() for key, value in matches}
+    # Strip newlines that mobile clients may inject; preserve intentional spaces
+    return {key.strip(): re.sub(r"\r?\n", "", value).strip() for key, value in matches}
 
 
 @dataclass

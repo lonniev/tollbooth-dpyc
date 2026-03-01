@@ -108,9 +108,8 @@ def render_delimited_instructions(template: CredentialTemplate) -> str:
     lines.append("")
 
     for name, spec in template.fields.items():
-        req = "REQUIRED" if spec.required else "optional"
         placeholder = f"PASTE_YOUR_{name.upper()}_HERE"
-        lines.append(f"  {name} = @@@{placeholder}@@@  ({req})")
+        lines.append(f"  {name} = @@@{placeholder}@@@")
 
     return "\n".join(lines)
 
