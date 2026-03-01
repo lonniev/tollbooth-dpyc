@@ -291,8 +291,8 @@ class NostrCredentialExchange:
         self._received_events: list[dict[str, Any]] = []
         # Track consumed event IDs (prevent double-pickup)
         self._consumed_ids: set[str] = set()
-        # Poison slugs: {recipient_npub: (phrase, expiry_timestamp)}
-        self._pending_poisons: dict[str, tuple[str, float]] = {}
+        # Poison slugs: {(recipient_npub, service): (phrase, expiry_timestamp)}
+        self._pending_poisons: dict[tuple[str, str], tuple[str, float]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -500,6 +500,7 @@ class NostrCredentialExchange:
         self,
         service: str,
         *,
+        greeting: str,
         recipient_npub: str | None = None,
     ) -> dict[str, Any]:
         """Open a credential delivery channel for a service.
@@ -513,6 +514,8 @@ class NostrCredentialExchange:
 
         Args:
             service: Template service name (e.g., "x", "openai").
+            greeting: Operator-provided banner shown at the top of the
+                welcome DM.
             recipient_npub: Optional patron npub to send welcome DM to.
 
         Returns:
@@ -544,24 +547,20 @@ class NostrCredentialExchange:
 
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         welcome_text = (
-            f"Hi — I'm {self._npub}, a Tollbooth MCP service.\n\n"
-            f"You're receiving this message because you (or your AI agent) "
-            f"requested a credential channel from a Claude session.\n\n"
-            f"If you'd like to proceed, reply to this message with your "
-            f"credentials.  Paste each value between the @@@ markers.\n"
-            f"IMPORTANT: include the anti-replay token exactly as shown.\n\n"
+            f"{greeting}\n\n"
             f"{instructions}\n"
             f"  poison = @@@{poison}@@@\n\n"
+            f"IMPORTANT: include the anti-replay token exactly as shown.\n\n"
+            f"— tollbooth-dpyc v{_tb_version} | {timestamp}\n\n"
             f"Your reply is end-to-end encrypted — "
-            f"only this service can read it.\n\n"
-            f"If you didn't request this, simply ignore this message.\n\n"
-            f"— tollbooth-dpyc v{_tb_version} | {timestamp}"
+            f"only this service can read it.\n"
+            f"If you didn't request this, simply ignore this message."
         )
 
         # Store poison for validation on receive
         if recipient_npub:
             expiry = time.time() + self._freshness_window
-            self._pending_poisons[recipient_npub] = (poison, expiry)
+            self._pending_poisons[(recipient_npub, service)] = (poison, expiry)
 
         result: dict[str, Any] = {
             "success": True,
@@ -710,12 +709,14 @@ class NostrCredentialExchange:
             )
 
         # ── Poison-aware DM selection ────────────────────────────────
-        expected = self._pending_poisons.get(sender_npub)
+        poison_service = self._resolve_service(service)
+        poison_key = (sender_npub, poison_service) if poison_service else None
+        expected = self._pending_poisons.get(poison_key) if poison_key else None
 
         if expected is not None:
             expected_phrase, expiry = expected
             if time.time() > expiry:
-                del self._pending_poisons[sender_npub]
+                del self._pending_poisons[poison_key]
                 raise CourierValidationError(
                     "Anti-replay token expired. Call request_credential_channel "
                     "again to get a fresh token."
@@ -748,7 +749,7 @@ class NostrCredentialExchange:
                 )
 
             # Consume the poison — one-time use
-            del self._pending_poisons[sender_npub]
+            del self._pending_poisons[poison_key]
 
             # Clean up stale DMs from relays
             for stale in stale_events:

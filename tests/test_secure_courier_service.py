@@ -173,9 +173,11 @@ class TestOpenChannel:
             new_callable=AsyncMock,
             return_value=expected,
         ) as mock_open:
-            result = await service.open_channel("x")
+            result = await service.open_channel("x", greeting="Test greeting")
 
-        mock_open.assert_called_once_with("x", recipient_npub=None)
+        mock_open.assert_called_once_with(
+            "x", greeting="Test greeting", recipient_npub=None,
+        )
         assert result == expected
 
     @pytest.mark.asyncio
@@ -194,9 +196,13 @@ class TestOpenChannel:
             new_callable=AsyncMock,
             return_value={"success": True},
         ) as mock_open:
-            await service.open_channel("x", recipient_npub=npub)
+            await service.open_channel(
+                "x", greeting="Test greeting", recipient_npub=npub,
+            )
 
-        mock_open.assert_called_once_with("x", recipient_npub=npub)
+        mock_open.assert_called_once_with(
+            "x", greeting="Test greeting", recipient_npub=npub,
+        )
 
 
 # ── receive tests ─────────────────────────────────────────────────────

@@ -138,6 +138,8 @@ class SecureCourierService:
     async def open_channel(
         self,
         service: str = "x",
+        *,
+        greeting: str,
         recipient_npub: str | None = None,
     ) -> dict[str, Any]:
         """Open a Secure Courier channel.  Sends welcome DM if *recipient_npub* provided.
@@ -146,13 +148,15 @@ class SecureCourierService:
 
         Args:
             service: Template service name (e.g. ``"x"``).
+            greeting: Operator-provided banner shown at the top of the
+                welcome DM.
             recipient_npub: Optional patron npub to send welcome DM to.
 
         Returns:
             Dict with npub, relays, template instructions, and freshness window.
         """
         return await self._exchange.open_channel(
-            service, recipient_npub=recipient_npub,
+            service, greeting=greeting, recipient_npub=recipient_npub,
         )
 
     async def receive(
