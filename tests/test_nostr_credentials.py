@@ -215,7 +215,7 @@ class TestOpenChannel:
         ex = _make_exchange()
         # Mock the subscription to avoid real WebSocket
         with patch.object(ex, "_start_subscription"):
-            result = await ex.open_channel("x")
+            result = await ex.open_channel("x", greeting="Test greeting")
 
         assert result["success"] is True
         assert result["npub"] == ex.npub
@@ -229,14 +229,14 @@ class TestOpenChannel:
         """open_channel with unknown service raises CourierValidationError."""
         ex = _make_exchange()
         with pytest.raises(CourierValidationError, match="Unknown service"):
-            await ex.open_channel("nonexistent")
+            await ex.open_channel("nonexistent", greeting="Test greeting")
 
     @pytest.mark.asyncio
     async def test_disabled_exchange_raises(self):
         """open_channel on disabled exchange raises CourierNotReady."""
         ex = _make_exchange(nsec="nsec1invalid")
         with pytest.raises(CourierNotReady):
-            await ex.open_channel("x")
+            await ex.open_channel("x", greeting="Test greeting")
 
 
 # ── receive Tests — NIP-04 ───────────────────────────────────────────
@@ -1051,7 +1051,9 @@ class TestOpenChannelWithWelcomeDm:
 
         with patch.object(ex, "_start_subscription"), \
              patch.object(ex, "send_dm") as mock_send:
-            result = await ex.open_channel("x", recipient_npub=patron.public_key.bech32())
+            result = await ex.open_channel(
+                "x", greeting="Test greeting", recipient_npub=patron.public_key.bech32(),
+            )
 
         assert result["success"] is True
         assert result["welcome_dm_sent"] is True
@@ -1065,7 +1067,7 @@ class TestOpenChannelWithWelcomeDm:
         ex = _make_exchange()
 
         with patch.object(ex, "_start_subscription"):
-            result = await ex.open_channel("x")
+            result = await ex.open_channel("x", greeting="Test greeting")
 
         assert result["success"] is True
         assert result["welcome_dm_sent"] is False
@@ -1078,7 +1080,9 @@ class TestOpenChannelWithWelcomeDm:
 
         with patch.object(ex, "_start_subscription"), \
              patch.object(ex, "send_dm", side_effect=Exception("relay down")):
-            result = await ex.open_channel("x", recipient_npub=patron.public_key.bech32())
+            result = await ex.open_channel(
+                "x", greeting="Test greeting", recipient_npub=patron.public_key.bech32(),
+            )
 
         assert result["success"] is True
         assert result["welcome_dm_sent"] is False
@@ -1102,7 +1106,9 @@ class TestPoisonSlug:
 
         with patch.object(ex, "_start_subscription"), \
              patch.object(ex, "send_dm"):
-            result = await ex.open_channel("x", recipient_npub="npub1test123")
+            result = await ex.open_channel(
+                "x", greeting="Test greeting", recipient_npub="npub1test123",
+            )
 
         assert "poison" in result
         # Format: adjective-noun-number
@@ -1119,7 +1125,7 @@ class TestPoisonSlug:
 
         # Register a poison
         sender_npub = sender.public_key.bech32()
-        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() + 600)
+        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
 
         # Build a NIP-04 event with wrong poison
         payload = {"api_key": "k", "api_secret": "s", "poison": "wrong-slug-99"}
@@ -1139,7 +1145,7 @@ class TestPoisonSlug:
         ex = _make_exchange(nsec=operator.nsec)
 
         sender_npub = sender.public_key.bech32()
-        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() + 600)
+        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
 
         payload = {"api_key": "k", "api_secret": "s", "poison": "bold-hawk-42"}
         event = _make_nip04_event(sender, operator.public_key.hex(), payload)
@@ -1152,7 +1158,7 @@ class TestPoisonSlug:
 
         assert result["success"] is True
         # Poison should be consumed
-        assert sender_npub not in ex._pending_poisons
+        assert (sender_npub, "x") not in ex._pending_poisons
 
     @pytest.mark.asyncio
     async def test_poison_expired(self):
@@ -1163,7 +1169,7 @@ class TestPoisonSlug:
 
         sender_npub = sender.public_key.bech32()
         # Expired 10 seconds ago
-        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() - 10)
+        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() - 10)
 
         payload = {"api_key": "k", "api_secret": "s", "poison": "bold-hawk-42"}
         event = _make_nip04_event(sender, operator.public_key.hex(), payload)
@@ -1200,7 +1206,7 @@ class TestPoisonSlug:
         ex = _make_exchange(nsec=operator.nsec)
 
         sender_npub = sender.public_key.bech32()
-        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() + 600)
+        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
 
         # Stale DM with old/wrong poison (injected first)
         stale_payload = {"api_key": "old_k", "api_secret": "old_s", "poison": "true-quill-26"}
@@ -1223,7 +1229,7 @@ class TestPoisonSlug:
         assert result["success"] is True
         assert result["credentials"]["api_key"] == "correct_k"
         # Poison should be consumed
-        assert sender_npub not in ex._pending_poisons
+        assert (sender_npub, "x") not in ex._pending_poisons
 
     @pytest.mark.asyncio
     async def test_stale_dms_get_deletion_requests(self):
@@ -1233,7 +1239,7 @@ class TestPoisonSlug:
         ex = _make_exchange(nsec=operator.nsec)
 
         sender_npub = sender.public_key.bech32()
-        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() + 600)
+        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
 
         # Two stale DMs
         stale1 = _make_nip04_event(
@@ -1278,7 +1284,7 @@ class TestPoisonSlug:
         ex = _make_exchange(nsec=operator.nsec)
 
         sender_npub = sender.public_key.bech32()
-        ex._pending_poisons[sender_npub] = ("bold-hawk-42", time.time() + 600)
+        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
 
         # Two DMs, neither with the correct poison
         dm1 = _make_nip04_event(
@@ -1305,6 +1311,103 @@ class TestPoisonSlug:
         assert "request_credential_channel" in err
 
 
+# ── Concurrent Multi-Service Exchange Tests ──────────────────────────────
+
+
+class TestConcurrentExchanges:
+    """Tests for multi-service poison independence."""
+
+    @staticmethod
+    def _two_service_templates() -> dict[str, CredentialTemplate]:
+        return {
+            "x": CredentialTemplate(
+                service="x",
+                version=1,
+                fields={
+                    "api_key": FieldSpec(required=True, sensitive=True),
+                    "api_secret": FieldSpec(required=True, sensitive=True),
+                },
+                description="X API credentials",
+            ),
+            "openai": CredentialTemplate(
+                service="openai",
+                version=1,
+                fields={
+                    "api_key": FieldSpec(required=True, sensitive=True),
+                },
+                description="OpenAI API credentials",
+            ),
+        }
+
+    @pytest.mark.asyncio
+    async def test_two_services_independent_poisons(self):
+        """Two open_channel calls for different services store separate poisons."""
+        ex = _make_exchange(templates=self._two_service_templates())
+        npub = "npub1test123"
+
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "send_dm"):
+            r1 = await ex.open_channel(
+                "x", greeting="X greeting", recipient_npub=npub,
+            )
+            r2 = await ex.open_channel(
+                "openai", greeting="OpenAI greeting", recipient_npub=npub,
+            )
+
+        assert r1["poison"] != r2["poison"]
+        assert (npub, "x") in ex._pending_poisons
+        assert (npub, "openai") in ex._pending_poisons
+        assert ex._pending_poisons[(npub, "x")][0] == r1["poison"]
+        assert ex._pending_poisons[(npub, "openai")][0] == r2["poison"]
+
+    @pytest.mark.asyncio
+    async def test_receive_matches_correct_service_poison(self):
+        """Receive for service X uses X's poison, leaving OpenAI's intact."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(
+            nsec=operator.nsec, templates=self._two_service_templates(),
+        )
+
+        sender_npub = sender.public_key.bech32()
+        ex._pending_poisons[(sender_npub, "x")] = ("x-hawk-42", time.time() + 600)
+        ex._pending_poisons[(sender_npub, "openai")] = ("ai-fox-99", time.time() + 600)
+
+        payload = {"api_key": "k", "api_secret": "s", "poison": "x-hawk-42"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(sender_npub, service="x")
+
+        assert result["success"] is True
+        # X poison consumed
+        assert (sender_npub, "x") not in ex._pending_poisons
+        # OpenAI poison still intact
+        assert (sender_npub, "openai") in ex._pending_poisons
+
+    @pytest.mark.asyncio
+    async def test_second_open_channel_same_service_replaces_poison(self):
+        """Re-opening a channel for the same service overwrites the old poison."""
+        ex = _make_exchange(templates=self._two_service_templates())
+        npub = "npub1test123"
+
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "send_dm"):
+            r1 = await ex.open_channel(
+                "x", greeting="First attempt", recipient_npub=npub,
+            )
+            r2 = await ex.open_channel(
+                "x", greeting="Second attempt", recipient_npub=npub,
+            )
+
+        # Only the second poison should be stored
+        assert ex._pending_poisons[(npub, "x")][0] == r2["poison"]
+        assert ex._pending_poisons[(npub, "x")][0] != r1["poison"]
+
+
 # ── Conversational DM Flow Tests ──────────────────────────────────────────
 
 
@@ -1313,18 +1416,22 @@ class TestConversationalDmFlow:
 
     @pytest.mark.asyncio
     async def test_welcome_dm_is_conversational(self):
-        """Welcome message contains the new conversational text patterns."""
+        """Welcome message contains the operator greeting and standard elements."""
         ex = _make_exchange()
         patron = PrivateKey()
+        greeting = "Hi — I'm eXcalibur, a Tollbooth MCP service."
 
         with patch.object(ex, "_start_subscription"), \
              patch.object(ex, "send_dm") as mock_send:
-            await ex.open_channel("x", recipient_npub=patron.public_key.bech32())
+            await ex.open_channel(
+                "x", greeting=greeting, recipient_npub=patron.public_key.bech32(),
+            )
 
         mock_send.assert_called_once()
         welcome_text = mock_send.call_args[0][1]
-        assert "requested a credential channel" in welcome_text
+        assert greeting in welcome_text
         assert "If you didn't request this" in welcome_text
+        assert "tollbooth-dpyc v" in welcome_text
 
     @pytest.mark.asyncio
     async def test_success_dm_sent_after_receive(self):
