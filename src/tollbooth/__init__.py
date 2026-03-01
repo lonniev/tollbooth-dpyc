@@ -8,6 +8,7 @@ from importlib.metadata import version as _meta_version
 __version__ = _meta_version("tollbooth-dpyc")
 
 from tollbooth.certificate import CertificateError, verify_certificate_auto, UNDERSTOOD_PROTOCOLS
+from tollbooth.registry import DPYCRegistry, RegistryError, resolve_authority_npub, DEFAULT_REGISTRY_URL
 from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger, ToolUsage, InvoiceRecord, Tranche
 from tollbooth.btcpay_client import BTCPayClient, BTCPayError, BTCPayAuthError
@@ -137,6 +138,11 @@ __all__ = [
     "verify_nostr_certificate",
     "NOSTR_CERT_KIND",
     "UNDERSTOOD_PROTOCOLS",
+    # Registry
+    "DPYCRegistry",
+    "RegistryError",
+    "resolve_authority_npub",
+    "DEFAULT_REGISTRY_URL",
     "NostrAuditPublisher",
     "AuditedVault",
     "MerkleTree",
