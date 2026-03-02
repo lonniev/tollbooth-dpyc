@@ -281,6 +281,28 @@ async def purchase_credits_tool(
     return result
 
 
+async def direct_purchase_tool(
+    btcpay: BTCPayClient,
+    cache: LedgerCache,
+    user_id: str,
+    amount_sats: int,
+    tier_config_json: str | None = None,
+    user_tiers_json: str | None = None,
+    default_credit_ttl_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Create a BTCPay invoice for a direct credit purchase (no certificate).
+
+    For AUTHORITY use: the Authority is the trust anchor, so it purchases
+    credits directly without an upstream certificate.
+    """
+    return await _create_purchase_invoice(
+        btcpay, cache, user_id, amount_sats,
+        tier_config_json, user_tiers_json,
+        extra_metadata={"purpose": "direct_credit_purchase"},
+        default_credit_ttl_seconds=default_credit_ttl_seconds,
+    )
+
+
 async def check_payment_tool(
     btcpay: BTCPayClient,
     cache: LedgerCache,
