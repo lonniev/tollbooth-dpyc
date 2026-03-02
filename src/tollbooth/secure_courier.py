@@ -48,6 +48,17 @@ try:
 except ImportError:
     _HAS_COURIER = False
 
+try:
+    from tollbooth.credential_card import (
+        CredentialCardError,
+        encode_credential_card,
+        render_qr,
+    )
+
+    _HAS_CREDENTIAL_CARD = True
+except ImportError:
+    _HAS_CREDENTIAL_CARD = False
+
 
 class SecureCourierService:
     """Reusable Secure Courier -- operators import and wire 3 MCP tools.
@@ -96,6 +107,8 @@ class SecureCourierService:
                 "Secure Courier dependencies not installed. "
                 "Install with: pip install tollbooth-dpyc[nostr]"
             )
+
+        self._operator_nsec = operator_nsec
 
         self._exchange = NostrCredentialExchange(
             nsec=operator_nsec,
@@ -199,6 +212,22 @@ class SecureCourierService:
                     )
                     result["callback_error"] = str(exc)
 
+            # Generate credential card for scan-and-paste reuse
+            if _HAS_CREDENTIAL_CARD:
+                try:
+                    ncred, qr_png = self.generate_credential_card(
+                        sender_npub, matched_service, credentials,
+                    )
+                    result["credential_card"] = ncred
+                    if qr_png is not None:
+                        import base64
+
+                        result["credential_card_qr_base64"] = base64.b64encode(
+                            qr_png
+                        ).decode()
+                except Exception as exc:
+                    logger.warning("Credential card generation failed: %s", exc)
+
             # NEVER echo credential values
             result.pop("credentials", None)
 
@@ -219,3 +248,87 @@ class SecureCourierService:
             Dict with success and whether credentials were found.
         """
         return await self._exchange.forget(sender_npub, service=service)
+
+    def generate_credential_card(
+        self,
+        sender_npub: str,
+        service: str,
+        credentials: dict[str, str],
+        *,
+        expiry_days: int = 90,
+    ) -> tuple[str, bytes | None]:
+        """Generate an ``ncred1...`` credential card with optional QR PNG.
+
+        Args:
+            sender_npub: Patron's npub (bech32).
+            service: Service name for the card.
+            credentials: Validated credential dict.
+            expiry_days: Card validity in days.
+
+        Returns:
+            Tuple of (ncred_string, qr_png_bytes_or_None).
+        """
+        if not _HAS_CREDENTIAL_CARD:
+            raise RuntimeError("credential_card module not available")
+
+        ncred = encode_credential_card(
+            credentials, service, self._operator_nsec, sender_npub,
+            expiry_days=expiry_days,
+        )
+
+        qr_png: bytes | None = None
+        try:
+            qr_png = render_qr(ncred)
+        except Exception as exc:
+            logger.debug("QR rendering skipped: %s", exc)
+
+        return ncred, qr_png
+
+    async def redeem_card(
+        self,
+        ncred: str,
+        service: str | None = None,
+    ) -> dict[str, Any]:
+        """Redeem an ``ncred1...`` credential card — bypasses relay DM flow.
+
+        1. Delegates to the exchange for decode/verify/decrypt.
+        2. On success, calls ``on_credentials_received`` if set.
+        3. Merges callback result into the response.
+        4. **Always** strips credential values before returning.
+
+        Args:
+            ncred: The ``ncred1...`` bech32 credential card string.
+            service: Optional service hint for template matching.
+
+        Returns:
+            Dict with success, service, field count, and any callback-added
+            metadata.  **NEVER** returns credential values.
+        """
+        result = await self._exchange.redeem_credential_card(
+            ncred, service=service,
+        )
+
+        if result.get("success") and result.get("credentials"):
+            credentials: dict[str, str] = result["credentials"]
+            matched_service: str = result.get("service", service or "")
+
+            # Invoke operator callback (same pattern as receive())
+            if self._on_received is not None:
+                try:
+                    extra = await self._on_received(
+                        result.get("user_npub", ""),
+                        credentials,
+                        matched_service,
+                    )
+                    if extra and isinstance(extra, dict):
+                        result.update(extra)
+                except Exception as exc:
+                    logger.warning(
+                        "on_credentials_received callback failed: %s", exc,
+                    )
+                    result["callback_error"] = str(exc)
+
+            # NEVER echo credential values
+            result.pop("credentials", None)
+
+        return result
