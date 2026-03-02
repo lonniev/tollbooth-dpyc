@@ -399,8 +399,8 @@ class TestReceiveValidation:
                 await ex.receive(sender.public_key.bech32())
 
     @pytest.mark.asyncio
-    async def test_unknown_fields_rejected(self):
-        """Payload with unknown fields is rejected."""
+    async def test_unknown_fields_silently_dropped(self):
+        """Payload with unknown fields has them stripped silently."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -416,8 +416,12 @@ class TestReceiveValidation:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"):
-            with pytest.raises(CourierValidationError, match="Unknown fields"):
-                await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(sender.public_key.bech32())
+        assert result["success"] is True
+        creds = result["credentials"]
+        assert "rogue_field" not in creds
+        assert creds["api_key"] == "key"
+        assert creds["api_secret"] == "secret"
 
     @pytest.mark.asyncio
     async def test_missing_required_fields_rejected(self):
