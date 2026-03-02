@@ -123,7 +123,11 @@ def _generate_poison() -> str:
 
 
 # @@@ delimiter extraction — mobile-friendly credential format
-_DELIMITED_FIELD = re.compile(r"(\w+)\s*=\s*@@@(.+?)@@@", re.DOTALL)
+# Tempered greedy: match any non-@ char, or @ not followed by @@.
+# [^@] matches newlines naturally (no DOTALL needed), so this handles
+# line-wrapped values from mobile Nostr clients without bleeding across
+# adjacent @@@ delimiters.
+_DELIMITED_FIELD = re.compile(r"(\w+)\s*=\s*@@@((?:[^@]|@(?!@@))*)@@@")
 
 
 def _parse_delimited_credentials(text: str) -> dict[str, str] | None:
