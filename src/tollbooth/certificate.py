@@ -58,7 +58,7 @@ def verify_certificate_auto(
         understood_protocols: Protocol identifiers this Operator accepts.
 
     Returns:
-        Claims dict: operator_id, amount_sats, tax_paid_sats,
+        Claims dict: operator_id, amount_sats, fee_sats,
         net_sats, jti, dpyc_protocol.
 
     Raises:

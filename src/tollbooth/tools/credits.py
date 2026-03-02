@@ -243,7 +243,7 @@ async def purchase_credits_tool(
 
     For OPERATOR use: the certified purchase flow. Every credit purchase
     requires a valid Authority-signed Nostr event certificate.
-    The certificate's net_sats (amount after tax) determines the invoice amount.
+    The certificate's net_sats (amount after certification fee) determines the invoice amount.
     """
     # Trust gate — authority_npub must be configured
     if not authority_npub:
@@ -281,7 +281,7 @@ async def purchase_credits_tool(
     return result
 
 
-async def purchase_tax_credits_tool(
+async def direct_purchase_tool(
     btcpay: BTCPayClient,
     cache: LedgerCache,
     user_id: str,
@@ -290,15 +290,15 @@ async def purchase_tax_credits_tool(
     user_tiers_json: str | None = None,
     default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
-    """Create a BTCPay invoice for a direct tax credit purchase.
+    """Create a BTCPay invoice for a direct credit purchase (no certificate).
 
-    For AUTHORITY use: operators buy tax credits directly from the Authority.
-    No certificate needed — the Authority IS the trust anchor.
+    For AUTHORITY use: the Authority is the trust anchor, so it purchases
+    credits directly without an upstream certificate.
     """
     return await _create_purchase_invoice(
         btcpay, cache, user_id, amount_sats,
         tier_config_json, user_tiers_json,
-        extra_metadata={"purpose": "tax_credit_purchase"},
+        extra_metadata={"purpose": "direct_credit_purchase"},
         default_credit_ttl_seconds=default_credit_ttl_seconds,
     )
 

@@ -55,7 +55,7 @@ def _sign_nostr_certificate(
     *,
     operator_id: str = "npub1operator",
     amount_sats: int = 1000,
-    tax_paid_sats: int = 20,
+    fee_sats: int = 20,
     net_sats: int = 980,
     jti: str | None = None,
     exp_offset: int = 600,
@@ -74,7 +74,7 @@ def _sign_nostr_certificate(
     claims = {
         "sub": operator_id,
         "amount_sats": amount_sats,
-        "tax_paid_sats": tax_paid_sats,
+        "fee_sats": fee_sats,
         "net_sats": net_sats,
         "dpyc_protocol": "dpyp-01-base-certificate",
     }
@@ -131,7 +131,7 @@ class TestVerifyNostrCertificateValid:
         result = verify_nostr_certificate(event_json, npub)
         assert result["operator_id"] == "npub1operator"
         assert result["amount_sats"] == 1000
-        assert result["tax_paid_sats"] == 20
+        assert result["fee_sats"] == 20
         assert result["net_sats"] == 980
         assert result["jti"] == "jti-valid-1"
         assert result["dpyc_protocol"] == "dpyp-01-base-certificate"
@@ -142,7 +142,7 @@ class TestVerifyNostrCertificateValid:
             private_key,
             operator_id="npub1custom",
             amount_sats=5000,
-            tax_paid_sats=100,
+            fee_sats=100,
             net_sats=4900,
             jti="jti-custom-1",
         )

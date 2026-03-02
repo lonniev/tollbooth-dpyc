@@ -51,7 +51,7 @@ def _sign_nostr_certificate(
     *,
     operator_id: str = "npub1operator",
     amount_sats: int = 1000,
-    tax_paid_sats: int = 20,
+    fee_sats: int = 20,
     net_sats: int = 980,
     jti: str | None = None,
     exp_offset: int = 600,
@@ -65,7 +65,7 @@ def _sign_nostr_certificate(
     claims = {
         "sub": operator_id,
         "amount_sats": amount_sats,
-        "tax_paid_sats": tax_paid_sats,
+        "fee_sats": fee_sats,
         "net_sats": net_sats,
         "dpyc_protocol": "dpyp-01-base-certificate",
     }
