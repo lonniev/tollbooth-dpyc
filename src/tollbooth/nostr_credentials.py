@@ -756,17 +756,25 @@ class NostrCredentialExchange:
             # Consume the poison — one-time use
             del self._pending_poisons[poison_key]
 
-            # Clean up stale DMs from relays
-            for stale in stale_events:
-                stale_id = stale.get("id", "")
-                if stale_id:
-                    self._request_deletion(stale_id)
-                    with self._lock:
-                        self._consumed_ids.add(stale_id)
-
+            # Clean up stale DMs — delete from relays AND purge from
+            # in-memory queue so they never re-enter the candidate pool.
             if stale_events:
+                stale_ids = set()
+                for stale in stale_events:
+                    stale_id = stale.get("id", "")
+                    if stale_id:
+                        self._request_deletion(stale_id)
+                        stale_ids.add(stale_id)
+
+                with self._lock:
+                    self._consumed_ids.update(stale_ids)
+                    self._received_events = [
+                        e for e in self._received_events
+                        if e.get("id", "") not in stale_ids
+                    ]
+
                 logger.info(
-                    "Cleaned up %d stale DM(s) from relays",
+                    "Purged %d stale DM(s) from relays and local queue",
                     len(stale_events),
                 )
         else:
@@ -800,10 +808,15 @@ class NostrCredentialExchange:
             self._send_error_dm(sender_npub, template)
             raise CourierValidationError(str(exc)) from exc
 
-        # Mark event as consumed
+        # Mark event as consumed and purge from local queue
         event_id = dm.get("id", "")
         with self._lock:
             self._consumed_ids.add(event_id)
+            if event_id:
+                self._received_events = [
+                    e for e in self._received_events
+                    if e.get("id", "") != event_id
+                ]
 
         # Publish NIP-09 deletion request (fire-and-forget)
         if event_id:
