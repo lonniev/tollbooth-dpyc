@@ -584,26 +584,30 @@ class NostrCredentialExchange:
                 result["welcome_dm_sent"] = True
                 result["message"] = (
                     f"A welcome DM has been sent to {recipient_npub}. "
-                    f"Open your Nostr client, find the message, and reply "
-                    f"with your credentials using the @@@ format shown. "
-                    f"Then call receive_credentials with your npub."
+                    f"Tell the user to look for a DM containing the session phrase "
+                    f"\"{poison}\" — share this phrase in chat so they can identify "
+                    f"the correct message. It is not sensitive. "
+                    f"They should reply with their credentials using the @@@ format shown. "
+                    f"Then call receive_credentials with their npub."
                 )
             except Exception as exc:
                 logger.warning("Welcome DM failed, falling back to manual: %s", exc)
                 result["welcome_dm_sent"] = False
                 result["message"] = (
                     f"Could not send welcome DM ({exc}). "
-                    f"Send your {template.service} credentials as a Nostr DM "
-                    f"to {self._npub} from your Nostr client. "
-                    f"Then call receive_credentials with your npub."
+                    f"The user should send their {template.service} credentials as a Nostr DM "
+                    f"to {self._npub} from their Nostr client, including the session phrase "
+                    f"\"{poison}\" — share this phrase in chat so they can include it. "
+                    f"Then call receive_credentials with their npub."
                 )
         else:
             result["welcome_dm_sent"] = False
             result["message"] = (
-                f"Send your {template.service} credentials as a Nostr DM "
-                f"to {self._npub} from your Nostr client. "
-                f"Reply with your credentials using the @@@ format shown above. "
-                f"Then call receive_credentials with your npub."
+                f"The user should send their {template.service} credentials as a Nostr DM "
+                f"to {self._npub} from their Nostr client, including the session phrase "
+                f"\"{poison}\" — share this phrase in chat so they can include it. "
+                f"Reply with credentials using the @@@ format shown above. "
+                f"Then call receive_credentials with their npub."
             )
 
         return result
