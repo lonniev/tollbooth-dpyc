@@ -271,7 +271,7 @@ class TestReceiveNip04:
 
     @pytest.mark.asyncio
     async def test_nip04_rejected_when_nip44_only(self):
-        """NIP-04 DM rejected when nip44_only=True."""
+        """NIP-04 DM popped and rejected when nip44_only=True."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec, nip44_only=True)
@@ -283,8 +283,13 @@ class TestReceiveNip04:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             pytest.raises(CourierValidationError, match="NIP-04 DMs rejected"):
+             patch.object(ex, "send_dm"), \
+             patch.object(ex, "_request_deletion"), \
+             pytest.raises(CourierValidationError, match="Scanned 1 DM"):
             await ex.receive(sender.public_key.bech32())
+
+        # Event should be purged from the queue
+        assert len(ex._received_events) == 0
 
 
 # ── receive Tests — NIP-17 Gift Wrap ─────────────────────────────────
@@ -318,7 +323,7 @@ class TestReceiveNip17:
 
     @pytest.mark.asyncio
     async def test_gift_wrap_wrong_sender_skipped(self):
-        """Gift wrap from wrong sender is skipped (not matching sender)."""
+        """Gift wrap from wrong sender is popped and acknowledged."""
         operator = PrivateKey()
         sender = PrivateKey()
         impersonator = PrivateKey()
@@ -334,10 +339,17 @@ class TestReceiveNip17:
             ex._received_events.append(event)
 
         # The impersonator's gift wrap decrypts but the seal reveals
-        # a different sender — it gets skipped, resulting in timeout.
+        # a different sender — it gets popped (undecryptable from the
+        # expected sender's perspective) and the queue is drained.
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             pytest.raises(CourierTimeout, match="No decryptable DM found"):
+             patch.object(ex, "_pop_event") as mock_pop, \
+             pytest.raises(CourierValidationError, match="Scanned 1 DM"):
             await ex.receive(sender.public_key.bech32())
+
+        # The wrong-sender gift wrap was popped silently (no reply npub
+        # since we can't trust the sender identity from a failed decrypt)
+        mock_pop.assert_called_once()
+        assert mock_pop.call_args[0][0] == event["id"]
 
 
 # ── receive Tests — Validation ────────────────────────────────────────
@@ -1118,7 +1130,7 @@ class TestPoisonSlug:
 
     @pytest.mark.asyncio
     async def test_poison_validated_on_receive(self):
-        """Receive rejects payload with wrong poison."""
+        """Receive rejects payload with wrong poison (popped and acknowledged)."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -1133,9 +1145,16 @@ class TestPoisonSlug:
         with ex._lock:
             ex._received_events.append(event)
 
+        # Wrong poison DM is popped with ack, then aggregate error raised
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             pytest.raises(CourierValidationError, match="Anti-replay token mismatch"):
+             patch.object(ex, "_pop_event") as mock_pop, \
+             pytest.raises(CourierValidationError, match="Scanned 1 DM"):
             await ex.receive(sender_npub)
+
+        # Verify the DM was popped with a rejection reason
+        mock_pop.assert_called_once()
+        call_args = mock_pop.call_args[0]
+        assert "wrong anti-replay token" in (call_args[2] if len(call_args) > 2 else "")
 
     @pytest.mark.asyncio
     async def test_poison_accepted_on_match(self):
@@ -1278,7 +1297,7 @@ class TestPoisonSlug:
 
     @pytest.mark.asyncio
     async def test_no_poison_match_reports_found_poisons(self):
-        """When no DM matches the expected poison, error lists found poisons."""
+        """When no DM matches the expected poison, all are popped with ack."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -1302,13 +1321,18 @@ class TestPoisonSlug:
             ex._received_events.extend([dm1, dm2])
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             pytest.raises(CourierValidationError, match="none of 2 DM") as exc_info:
+             patch.object(ex, "_pop_event") as mock_pop, \
+             pytest.raises(CourierValidationError, match="Scanned 2 DM") as exc_info:
             await ex.receive(sender_npub)
 
         err = str(exc_info.value)
-        assert "true-quill-26" in err
-        assert "lazy-fox-99" in err
         assert "request_credential_channel" in err
+
+        # Both DMs were popped with rejection reasons
+        assert mock_pop.call_count == 2
+        reasons = [c[0][2] for c in mock_pop.call_args_list if len(c[0]) > 2]
+        assert any("true-quill-26" in r for r in reasons)
+        assert any("lazy-fox-99" in r for r in reasons)
 
 
 # ── Concurrent Multi-Service Exchange Tests ──────────────────────────────
@@ -1458,7 +1482,7 @@ class TestConversationalDmFlow:
 
     @pytest.mark.asyncio
     async def test_error_dm_sent_on_validation_failure(self):
-        """When credential parsing fails, an error DM is sent before raising."""
+        """When credential parsing fails, a rejection DM is sent via pop."""
         import base64
         import os
 
@@ -1496,14 +1520,16 @@ class TestConversationalDmFlow:
         with ex._lock:
             ex._received_events.append(event)
 
+        # Pop-and-ack: _pop_event sends rejection via send_dm
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             patch.object(ex, "send_dm") as mock_send:
-            with pytest.raises(CourierValidationError):
+             patch.object(ex, "send_dm") as mock_send, \
+             patch.object(ex, "_request_deletion"):
+            with pytest.raises(CourierValidationError, match="Scanned 1 DM"):
                 await ex.receive(sender.public_key.bech32())
 
         mock_send.assert_called_once()
         error_text = mock_send.call_args[0][1]
-        assert "couldn’t process" in error_text
+        assert "@@@" in error_text
 
     @pytest.mark.asyncio
     async def test_success_dm_failure_nonfatal(self):
@@ -1528,8 +1554,7 @@ class TestConversationalDmFlow:
 
     @pytest.mark.asyncio
     async def test_error_dm_failure_nonfatal(self):
-        """If the error DM fails to send, the original
-        CourierValidationError still propagates."""
+        """If the ack DM fails to send, the aggregate error still propagates."""
         import base64
         import os
 
@@ -1567,9 +1592,11 @@ class TestConversationalDmFlow:
         with ex._lock:
             ex._received_events.append(event)
 
+        # _pop_event catches send_dm failure internally; aggregate error still raised
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"), \
              patch.object(ex, "send_dm", side_effect=Exception("relay down")):
-            with pytest.raises(CourierValidationError, match="@@@"):
+            with pytest.raises(CourierValidationError, match="Scanned 1 DM"):
                 await ex.receive(sender.public_key.bech32())
 
 
@@ -1696,7 +1723,7 @@ class TestReceiveFormatEnforcement:
 
     @pytest.mark.asyncio
     async def test_receive_rejects_json_payload(self):
-        """receive() rejects raw JSON (@@@ format required)."""
+        """receive() rejects raw JSON (@@@ format required), popped with ack."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -1707,9 +1734,14 @@ class TestReceiveFormatEnforcement:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             patch.object(ex, "send_dm"), \
-             pytest.raises(CourierValidationError, match="@@@"):
+             patch.object(ex, "_pop_event") as mock_pop, \
+             pytest.raises(CourierValidationError, match="Scanned 1 DM"):
             await ex.receive(sender.public_key.bech32())
+
+        # JSON payload popped with @@@ hint in rejection reason
+        mock_pop.assert_called_once()
+        reason = mock_pop.call_args[0][2] if len(mock_pop.call_args[0]) > 2 else ""
+        assert "@@@" in reason
 
     @pytest.mark.asyncio
     async def test_receive_delimited_payload(self):
