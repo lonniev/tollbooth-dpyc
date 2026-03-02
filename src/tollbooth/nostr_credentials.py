@@ -284,6 +284,7 @@ class NostrCredentialExchange:
 
         try:
             pk = PrivateKey.from_nsec(nsec)
+            self._nsec = nsec
             self._privkey_hex = pk.hex()
             self._pubkey_hex = pk.public_key.hex()
             self._npub = pk.public_key.bech32()
@@ -870,6 +871,102 @@ class NostrCredentialExchange:
             "message": (
                 f"Credentials for {resolved} from {sender_npub} "
                 + ("deleted from vault." if deleted else "not found in vault.")
+            ),
+        }
+
+    async def redeem_credential_card(
+        self, ncred: str, *, service: str | None = None,
+    ) -> dict[str, Any]:
+        """Redeem an ``ncred1...`` credential card — bypass relay DM flow.
+
+        Decodes the card, verifies signature and expiration, validates
+        against the matching template, and stores in vault if configured.
+
+        Args:
+            ncred: The ``ncred1...`` bech32 credential card string.
+            service: Optional service hint for template matching.
+                If omitted, uses the service from the card.
+
+        Returns:
+            Dict with same shape as ``receive()`` — success, service,
+            field counts, and credentials.
+
+        Raises:
+            CourierNotReady: If dependencies are missing.
+            CourierValidationError: If card fails validation.
+        """
+        if not self._enabled:
+            raise CourierNotReady(
+                "Secure Courier not available. Check logs for missing dependencies."
+            )
+
+        try:
+            from tollbooth.credential_card import (
+                CredentialCardError,
+                CredentialCardExpired,
+                CredentialCardInvalid,
+                decode_credential_card,
+            )
+        except ImportError:
+            raise CourierNotReady(
+                "credential_card module not available"
+            )
+
+        try:
+            decoded = decode_credential_card(ncred, self._nsec)
+        except CredentialCardExpired as exc:
+            raise CourierValidationError(f"Credential card expired: {exc}") from exc
+        except (CredentialCardInvalid, CredentialCardError) as exc:
+            raise CourierValidationError(f"Invalid credential card: {exc}") from exc
+
+        card_service = decoded["service"]
+        credentials = decoded["credentials"]
+        user_npub = decoded["user_npub"]
+
+        # Resolve service: prefer explicit param, fall back to card's service
+        resolved = self._resolve_service(service) or card_service
+
+        # Validate against template
+        if resolved in self._templates:
+            template = self._templates[resolved]
+            try:
+                credentials = validate_payload(credentials, template)
+            except TemplateValidationError as exc:
+                raise CourierValidationError(str(exc)) from exc
+        elif service is not None:
+            # Explicit service requested but no template found
+            raise CourierValidationError(
+                f"No template found for service '{service}'"
+            )
+
+        # Store in vault
+        if self._credential_vault is not None and resolved:
+            await self._vault_store(resolved, user_npub, credentials)
+
+        # Count sensitive fields
+        sensitive_count = 0
+        if resolved and resolved in self._templates:
+            template = self._templates[resolved]
+            sensitive_count = sum(
+                1 for name in credentials
+                if template.fields.get(name, FieldSpec()).sensitive
+            )
+
+        return {
+            "success": True,
+            "service": resolved or card_service,
+            "fields_received": len(credentials),
+            "sensitive_fields": sensitive_count,
+            "encryption": "credential_card",
+            "credentials": credentials,
+            "user_npub": user_npub,
+            "message": (
+                f"Credentials for {resolved or card_service} redeemed from "
+                f"credential card ({len(credentials)} fields)."
+                + (
+                    " Credentials stored in vault for future sessions."
+                    if self._credential_vault is not None else ""
+                )
             ),
         }
 

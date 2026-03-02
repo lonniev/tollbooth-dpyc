@@ -58,6 +58,25 @@ except ImportError:
     SecureCourierService = None  # type: ignore[assignment,misc]
 
 try:
+    from tollbooth.credential_card import (
+        CREDENTIAL_CARD_KIND,
+        CredentialCardError,
+        CredentialCardExpired,
+        CredentialCardInvalid,
+        decode_credential_card,
+        encode_credential_card,
+        render_qr,
+    )
+except ImportError:
+    CREDENTIAL_CARD_KIND = None  # type: ignore[assignment,misc]
+    CredentialCardError = None  # type: ignore[assignment,misc]
+    CredentialCardExpired = None  # type: ignore[assignment,misc]
+    CredentialCardInvalid = None  # type: ignore[assignment,misc]
+    decode_credential_card = None  # type: ignore[assignment,misc]
+    encode_credential_card = None  # type: ignore[assignment,misc]
+    render_qr = None  # type: ignore[assignment,misc]
+
+try:
     from tollbooth.nostr_diagnostics import courier_health, courier_ping
 except ImportError:
     courier_health = None  # type: ignore[assignment,misc]
@@ -158,6 +177,14 @@ __all__ = [
     "FieldSpec",
     "TemplateValidationError",
     "SecureCourierService",
+    # Credential Card
+    "CREDENTIAL_CARD_KIND",
+    "CredentialCardError",
+    "CredentialCardExpired",
+    "CredentialCardInvalid",
+    "encode_credential_card",
+    "decode_credential_card",
+    "render_qr",
     "courier_health",
     "courier_ping",
     "NotificationManager",
