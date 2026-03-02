@@ -72,8 +72,8 @@ class TestValidatePayload:
         assert "version" not in result
         assert len(result) == 4
 
-    def test_unknown_fields_rejected(self):
-        """Fields not in template are rejected."""
+    def test_unknown_fields_silently_dropped(self):
+        """Fields not in template are silently stripped, known fields pass through."""
         tmpl = _x_api_template()
         payload = {
             "api_key": "key1",
@@ -81,8 +81,23 @@ class TestValidatePayload:
             "access_token": "token1",
             "access_secret": "asecret1",
             "rogue_field": "evil",
+            "notes": "sent from my phone",
         }
-        with pytest.raises(TemplateValidationError, match="Unknown fields.*rogue_field"):
+        result = validate_payload(payload, tmpl)
+        assert "rogue_field" not in result
+        assert "notes" not in result
+        assert result["api_key"] == "key1"
+        assert len(result) == 4
+
+    def test_unknown_fields_do_not_affect_required_check(self):
+        """Extra fields don't mask missing required fields."""
+        tmpl = _x_api_template()
+        payload = {
+            "api_key": "key1",
+            "rogue_field": "evil",
+            "notes": "extra stuff",
+        }
+        with pytest.raises(TemplateValidationError, match="Missing required fields"):
             validate_payload(payload, tmpl)
 
     def test_missing_required_fields(self):

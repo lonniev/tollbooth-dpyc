@@ -23,8 +23,8 @@ class CredentialTemplate:
     """Schema for a service's credential payload.
 
     Operators declare expected fields; incoming payloads are validated
-    against this schema.  Unknown fields are rejected, required fields
-    enforced, and the ``description`` is rendered for the end user.
+    against this schema.  Unknown fields are silently ignored, required
+    fields enforced, and the ``description`` is rendered for the end user.
     """
 
     service: str
@@ -59,14 +59,9 @@ def validate_payload(
     metadata_keys = {"service", "version"}
     payload_fields = {k: v for k, v in payload.items() if k not in metadata_keys}
 
-    # Check for unknown fields
+    # Silently drop fields not declared in the template
     known = set(template.fields.keys())
-    unknown = set(payload_fields.keys()) - known
-    if unknown:
-        raise TemplateValidationError(
-            f"Unknown fields: {', '.join(sorted(unknown))}. "
-            f"Expected: {', '.join(sorted(known))}"
-        )
+    payload_fields = {k: v for k, v in payload_fields.items() if k in known}
 
     # Check required fields
     missing = []
