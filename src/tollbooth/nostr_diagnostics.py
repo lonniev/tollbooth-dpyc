@@ -134,31 +134,41 @@ def _extract_nip_support(nip11: dict[str, Any]) -> dict[str, bool]:
     }
 
 
-def _test_ws_connectivity(
+def test_ws_connectivity(
     relay_url: str,
+    *,
+    timeout: int | None = None,
 ) -> dict[str, Any]:
     """Test WebSocket connectivity to a single relay.
 
+    Args:
+        relay_url: WebSocket URL of the relay (e.g. ``wss://nostr.wine``).
+        timeout: Connection timeout in seconds. Defaults to module-level
+            ``_WS_CONNECT_TIMEOUT`` (10s).
+
     Returns:
-        Dict with ``connected`` (bool), ``latency_ms`` (float or None),
-        and ``error`` (str or None).
+        Dict with ``relay`` (str), ``connected`` (bool),
+        ``latency_ms`` (float or None), and ``error`` (str or None).
     """
     if not _HAS_WEBSOCKET:
         return {
+            "relay": relay_url,
             "connected": False,
             "latency_ms": None,
             "error": "websocket-client not installed",
         }
 
+    effective_timeout = timeout if timeout is not None else _WS_CONNECT_TIMEOUT
     t0 = time.monotonic()
     try:
-        ws = create_connection(relay_url, timeout=_WS_CONNECT_TIMEOUT)
+        ws = create_connection(relay_url, timeout=effective_timeout)
         latency = (time.monotonic() - t0) * 1000
         try:
             ws.close()
         except Exception:
             pass
         return {
+            "relay": relay_url,
             "connected": True,
             "latency_ms": round(latency, 1),
             "error": None,
@@ -166,10 +176,35 @@ def _test_ws_connectivity(
     except Exception as exc:
         latency = (time.monotonic() - t0) * 1000
         return {
+            "relay": relay_url,
             "connected": False,
             "latency_ms": round(latency, 1),
             "error": str(exc),
         }
+
+
+# Backward-compat alias (used internally in this module)
+_test_ws_connectivity = test_ws_connectivity
+
+
+def probe_relay_liveness(
+    relay_urls: list[str],
+    *,
+    timeout: int = 5,
+) -> list[dict[str, Any]]:
+    """Probe WebSocket connectivity for a list of relays.
+
+    Returns a list of dicts: ``{relay, connected, latency_ms, error}``.
+    Sorted: connected relays first (by latency), then disconnected.
+
+    Args:
+        relay_urls: Relay WebSocket URLs to probe.
+        timeout: Per-relay connection timeout in seconds (default 5).
+    """
+    results = [test_ws_connectivity(url, timeout=timeout) for url in relay_urls]
+    # Sort: connected first (by latency), then disconnected
+    results.sort(key=lambda r: (not r["connected"], r["latency_ms"] or float("inf")))
+    return results
 
 
 def _test_subscription_filter(

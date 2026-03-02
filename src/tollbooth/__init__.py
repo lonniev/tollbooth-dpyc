@@ -77,10 +77,11 @@ except ImportError:
     render_qr = None  # type: ignore[assignment,misc]
 
 try:
-    from tollbooth.nostr_diagnostics import courier_health, courier_ping
+    from tollbooth.nostr_diagnostics import courier_health, courier_ping, probe_relay_liveness
 except ImportError:
     courier_health = None  # type: ignore[assignment,misc]
     courier_ping = None  # type: ignore[assignment,misc]
+    probe_relay_liveness = None  # type: ignore[assignment,misc]
 
 try:
     from tollbooth.nostr_notifications import NotificationManager, NotificationPreferences
@@ -187,6 +188,7 @@ __all__ = [
     "render_qr",
     "courier_health",
     "courier_ping",
+    "probe_relay_liveness",
     "NotificationManager",
     "NotificationPreferences",
     # Constraint Engine
