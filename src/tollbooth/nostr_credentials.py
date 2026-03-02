@@ -664,7 +664,12 @@ class NostrCredentialExchange:
                     ),
                 }
 
-        # ── Relay DM flow ─────────────────────────────────────────
+        # ── Relay DM flow (pop-and-acknowledge) ────────────────────
+        #
+        # Treat the relay like a message queue: pop every DM from the
+        # candidate pool, delete it from the relay, and send the sender
+        # an acknowledgement explaining why it was accepted or rejected.
+        # Stop on the first valid match, or exhaust the queue.
         candidates = self._find_dm_candidates(sender_hex)
         if not candidates:
             self._fetch_dms_from_relays()
@@ -678,42 +683,7 @@ class NostrCredentialExchange:
                 f"try again."
             )
 
-        # Decrypt ALL candidates so we can pick the one with the correct
-        # anti-replay poison.  Previous code broke on first success, which
-        # meant stale DMs with old poisons could block the valid reply.
-        decrypted: list[tuple[dict[str, Any], str]] = []
-        for candidate in candidates:
-            kind = candidate.get("kind", 0)
-
-            # NIP-04 policy rejection must propagate immediately so the
-            # user gets a clear "upgrade your client" error, not a timeout.
-            if kind == _KIND_ENCRYPTED_DM and self._nip44_only:
-                raise CourierValidationError(
-                    "NIP-04 DMs rejected — this operator requires NIP-44 "
-                    "(NIP-17 gift wrap). Please use a modern Nostr client."
-                )
-
-            try:
-                pt = self._decrypt_dm(candidate, sender_hex)
-                decrypted.append((candidate, pt))
-            except CourierValidationError:
-                logger.debug(
-                    "Skipping %s %s (decrypt/validate failed)",
-                    "gift wrap" if kind == _KIND_GIFT_WRAP else "DM",
-                    candidate.get("id", "?")[:16],
-                )
-                continue
-
-        if not decrypted:
-            raise CourierTimeout(
-                f"No decryptable DM found from {sender_npub} within the "
-                f"{self._freshness_window}-second freshness window. "
-                f"Found {len(candidates)} candidate event(s) but none "
-                f"could be decrypted. Make sure you replied from the "
-                f"correct Nostr identity."
-            )
-
-        # ── Poison-aware DM selection ────────────────────────────────
+        # Resolve poison expectation up front
         poison_service = self._resolve_service(service)
         poison_key = (sender_npub, poison_service) if poison_service else None
         expected = self._pending_poisons.get(poison_key) if poison_key else None
@@ -726,65 +696,88 @@ class NostrCredentialExchange:
                     "Anti-replay token expired. Call request_credential_channel "
                     "again to get a fresh token."
                 )
-
-            # Scan all decrypted DMs for the one with matching poison
-            dm = None
-            plaintext = None
-            stale_events: list[dict[str, Any]] = []
-
-            for event, pt in decrypted:
-                payload = _parse_delimited_credentials(pt)
-                if payload and payload.get("poison") == expected_phrase:
-                    dm = event
-                    plaintext = pt
-                else:
-                    stale_events.append(event)
-
-            if dm is None:
-                found = [
-                    _parse_delimited_credentials(pt).get("poison", "<unparseable>")
-                    for _, pt in decrypted
-                    if _parse_delimited_credentials(pt)
-                ]
-                raise CourierValidationError(
-                    f'Anti-replay token mismatch. Expected "{expected_phrase}" '
-                    f"but none of {len(decrypted)} DM(s) matched. "
-                    f"Found poisons: {found}. "
-                    f"Call request_credential_channel again for a fresh token."
-                )
-
-            # Consume the poison — one-time use
-            del self._pending_poisons[poison_key]
-
-            # Clean up stale DMs — delete from relays AND purge from
-            # in-memory queue so they never re-enter the candidate pool.
-            if stale_events:
-                stale_ids = set()
-                for stale in stale_events:
-                    stale_id = stale.get("id", "")
-                    if stale_id:
-                        self._request_deletion(stale_id)
-                        stale_ids.add(stale_id)
-
-                with self._lock:
-                    self._consumed_ids.update(stale_ids)
-                    self._received_events = [
-                        e for e in self._received_events
-                        if e.get("id", "") not in stale_ids
-                    ]
-
-                logger.info(
-                    "Purged %d stale DM(s) from relays and local queue",
-                    len(stale_events),
-                )
         else:
-            # No poison expected — use newest (first in list)
-            dm, plaintext = decrypted[0]
+            expected_phrase = None
 
-        # Resolve template for error DM instructions
         error_template = self._resolve_error_template(service)
 
-        # Parse credential payload — @@@ delimited format only
+        # Pop-and-acknowledge: decrypt each candidate, consume it from
+        # the queue regardless of validity, and reply with the outcome.
+        dm = None
+        plaintext = None
+        pop_count = 0
+        undecryptable = 0
+
+        for candidate in candidates:
+            event_id = candidate.get("id", "")
+            kind = candidate.get("kind", 0)
+
+            # NIP-04 policy check
+            if kind == _KIND_ENCRYPTED_DM and self._nip44_only:
+                self._pop_event(event_id, sender_npub,
+                    "Rejected: NIP-04 DMs not accepted. "
+                    "Please use a modern Nostr client with NIP-44 support.")
+                pop_count += 1
+                continue
+
+            # Decrypt
+            try:
+                pt = self._decrypt_dm(candidate, sender_hex)
+            except CourierValidationError:
+                self._pop_event(event_id)
+                undecryptable += 1
+                pop_count += 1
+                continue
+
+            # Parse @@@ fields
+            payload = _parse_delimited_credentials(pt)
+            if payload is None:
+                self._pop_event(event_id, sender_npub,
+                    "Rejected: could not find @@@ field markers in your message. "
+                    "Please use the format: field_name = @@@value@@@")
+                pop_count += 1
+                continue
+
+            # Poison check (if expected)
+            if expected_phrase is not None:
+                msg_poison = payload.get("poison", "")
+                if msg_poison != expected_phrase:
+                    reason = (
+                        f"Rejected: wrong anti-replay token "
+                        f"(got \"{msg_poison or '<missing>'}\")"
+                    ) if msg_poison else (
+                        "Rejected: anti-replay token missing from your message."
+                    )
+                    self._pop_event(event_id, sender_npub, reason)
+                    pop_count += 1
+                    continue
+
+            # This DM is the valid match — pop it and stop scanning
+            dm = candidate
+            plaintext = pt
+            self._pop_event(event_id)  # no reply yet — success DM sent later
+            pop_count += 1
+            break
+
+        logger.info(
+            "Popped %d DM(s) (%d undecryptable), match=%s",
+            pop_count, undecryptable, "found" if dm else "none",
+        )
+
+        if dm is None:
+            raise CourierValidationError(
+                f"Scanned {pop_count} DM(s) but none contained valid "
+                f"credentials with the expected anti-replay token. "
+                f"All have been acknowledged and deleted. "
+                f"Call request_credential_channel again for a fresh token."
+            )
+
+        # Consume the poison — one-time use
+        if poison_key and poison_key in self._pending_poisons:
+            del self._pending_poisons[poison_key]
+
+        # Parse credential payload (already parsed above, but re-parse
+        # cleanly for the validation path below)
         payload = _parse_delimited_credentials(plaintext)
         if payload is None:
             self._send_error_dm(sender_npub, error_template)
@@ -807,20 +800,6 @@ class NostrCredentialExchange:
         except TemplateValidationError as exc:
             self._send_error_dm(sender_npub, template)
             raise CourierValidationError(str(exc)) from exc
-
-        # Mark event as consumed and purge from local queue
-        event_id = dm.get("id", "")
-        with self._lock:
-            self._consumed_ids.add(event_id)
-            if event_id:
-                self._received_events = [
-                    e for e in self._received_events
-                    if e.get("id", "") != event_id
-                ]
-
-        # Publish NIP-09 deletion request (fire-and-forget)
-        if event_id:
-            self._request_deletion(event_id)
 
         # Store in vault for next session
         if self._credential_vault is not None:
@@ -914,6 +893,43 @@ class NostrCredentialExchange:
                 "Success DM to %s failed (non-fatal): %s",
                 sender_npub[:20], exc,
             )
+
+    def _pop_event(
+        self,
+        event_id: str,
+        reply_npub: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Pop a DM from the local queue and relay.
+
+        Unconditionally consumes the event: adds to ``_consumed_ids``,
+        removes from ``_received_events``, and sends a NIP-09 deletion
+        request to all relays.
+
+        If *reply_npub* and *reason* are provided, sends an acknowledgement
+        DM to the sender explaining why the message was rejected.
+        Acknowledgement failures are non-fatal.
+        """
+        if not event_id:
+            return
+
+        with self._lock:
+            self._consumed_ids.add(event_id)
+            self._received_events = [
+                e for e in self._received_events
+                if e.get("id", "") != event_id
+            ]
+
+        self._request_deletion(event_id)
+
+        if reply_npub and reason:
+            try:
+                self.send_dm(reply_npub, reason)
+            except Exception as exc:
+                logger.debug(
+                    "Ack DM to %s failed (non-fatal): %s",
+                    reply_npub[:20], exc,
+                )
 
     def _send_error_dm(
         self,
