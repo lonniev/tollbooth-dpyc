@@ -60,7 +60,7 @@ def _test_certificate(net_sats: int = 980, amount_sats: int = 1000) -> str:
     claims = {
         "sub": "test-op",
         "amount_sats": amount_sats,
-        "tax_paid_sats": amount_sats - net_sats,
+        "fee_sats": amount_sats - net_sats,
         "net_sats": net_sats,
         "dpyc_protocol": "dpyp-01-base-certificate",
     }

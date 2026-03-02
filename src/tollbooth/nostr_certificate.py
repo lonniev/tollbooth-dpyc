@@ -55,7 +55,7 @@ def verify_nostr_certificate(
             Defaults to ``UNDERSTOOD_PROTOCOLS``.
 
     Returns:
-        Dict with extracted claims: operator_id, amount_sats, tax_paid_sats,
+        Dict with extracted claims: operator_id, amount_sats, fee_sats,
         net_sats, jti, dpyc_protocol.
 
     Raises:
@@ -155,7 +155,7 @@ def verify_nostr_certificate(
     return {
         "operator_id": claims.get("sub", ""),
         "amount_sats": claims.get("amount_sats", 0),
-        "tax_paid_sats": claims.get("tax_paid_sats", 0),
+        "fee_sats": claims.get("fee_sats", claims.get("tax_paid_sats", 0)),
         "net_sats": claims.get("net_sats", 0),
         "jti": jti,
         "dpyc_protocol": proto,
