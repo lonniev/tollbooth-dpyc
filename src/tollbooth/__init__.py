@@ -14,6 +14,10 @@ from tollbooth.ledger import UserLedger, ToolUsage, InvoiceRecord, Tranche
 from tollbooth.btcpay_client import BTCPayClient, BTCPayError, BTCPayAuthError
 from tollbooth.vault_backend import VaultBackend
 from tollbooth.credential_vault_backend import CredentialVaultBackend
+from tollbooth.actor_types import ActorRole, ToolPath, ToolPathInfo
+from tollbooth.operator_protocol import OperatorProtocol
+from tollbooth.authority_protocol import AuthorityProtocol
+from tollbooth.oracle_protocol import OracleProtocol
 from tollbooth.ledger_cache import LedgerCache
 from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_API_SATS
 from tollbooth.pricing import ToolPricing
@@ -146,6 +150,13 @@ __all__ = [
     "BTCPayAuthError",
     "VaultBackend",
     "CredentialVaultBackend",
+    # Actor Protocols
+    "ActorRole",
+    "ToolPath",
+    "ToolPathInfo",
+    "OperatorProtocol",
+    "AuthorityProtocol",
+    "OracleProtocol",
     "LedgerCache",
     "TheBrainVault",
     "NeonVault",
