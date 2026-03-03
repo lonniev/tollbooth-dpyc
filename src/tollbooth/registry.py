@@ -63,6 +63,28 @@ class DPYCRegistry:
             )
         return upstream
 
+    async def resolve_authority_service(self, operator_npub: str) -> dict[str, str]:
+        """Look up *operator_npub*'s upstream authority and return its service URL.
+
+        Returns ``{"npub": authority_npub, "url": service_url, "name": service_name}``.
+        Raises ``RegistryError`` if the authority has no services registered.
+        """
+        authority_npub = await self.resolve_authority_npub(operator_npub)
+        authority_member = await self.check_membership(authority_npub)
+
+        services = authority_member.get("services") or []
+        if not services:
+            raise RegistryError(
+                f"Authority {authority_npub} has no services registered in the registry."
+            )
+
+        svc = services[0]
+        return {
+            "npub": authority_npub,
+            "url": svc["url"],
+            "name": svc.get("name", "unknown"),
+        }
+
     async def _fetch(self) -> list[dict[str, Any]]:
         """Return the cached member list, refreshing if stale."""
         now = time.monotonic()
@@ -117,5 +139,22 @@ async def resolve_authority_npub(
     registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
     try:
         return await registry.resolve_authority_npub(operator_npub)
+    finally:
+        await registry.close()
+
+
+async def resolve_authority_service(
+    operator_npub: str,
+    registry_url: str = DEFAULT_REGISTRY_URL,
+    cache_ttl_seconds: int = 300,
+) -> dict[str, str]:
+    """Convenience function: resolve an operator's upstream authority service.
+
+    Returns ``{"npub": authority_npub, "url": service_url, "name": service_name}``.
+    Creates a one-shot ``DPYCRegistry``, performs the lookup, and closes.
+    """
+    registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
+    try:
+        return await registry.resolve_authority_service(operator_npub)
     finally:
         await registry.close()
