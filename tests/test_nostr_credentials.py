@@ -1890,3 +1890,43 @@ class TestNip17TimestampHardening:
 
         results = ex._find_dm_candidates(sender.public_key.hex())
         assert len(results) == 0
+
+
+# ── _npub_to_hex validation ──────────────────────────────────────────
+
+
+class TestNpubToHex:
+    """Tests for _npub_to_hex hardening against pynostr TypeError."""
+
+    def test_valid_npub(self):
+        from tollbooth.nostr_credentials import _npub_to_hex
+
+        pk = PrivateKey()
+        npub = pk.public_key.bech32()
+        result = _npub_to_hex(npub)
+        assert result == pk.public_key.hex()
+
+    def test_empty_string_raises_valueerror(self):
+        from tollbooth.nostr_credentials import _npub_to_hex
+
+        with pytest.raises(ValueError, match="Expected an npub"):
+            _npub_to_hex("")
+
+    def test_non_npub_prefix_raises_valueerror(self):
+        from tollbooth.nostr_credentials import _npub_to_hex
+
+        with pytest.raises(ValueError, match="Expected an npub"):
+            _npub_to_hex("nsec1abc123")
+
+    def test_bad_checksum_raises_valueerror(self):
+        from tollbooth.nostr_credentials import _npub_to_hex
+
+        # Valid format but corrupted checksum (last char changed)
+        pk = PrivateKey()
+        npub = pk.public_key.bech32()
+        # Flip the last character to corrupt checksum
+        last = npub[-1]
+        flipped = "q" if last != "q" else "p"
+        bad_npub = npub[:-1] + flipped
+        with pytest.raises(ValueError, match="bech32 checksum failed"):
+            _npub_to_hex(bad_npub)

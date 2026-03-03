@@ -190,7 +190,19 @@ def _npub_to_hex(npub: str) -> str:
     """Convert npub bech32 to 32-byte hex pubkey."""
     if not _HAS_PYNOSTR:
         raise RuntimeError("pynostr required for npub conversion")
-    return PublicKey.from_npub(npub).hex()
+    if not npub or not npub.startswith("npub1"):
+        raise ValueError(
+            f"Expected an npub (npub1...), got: {npub!r}"
+        )
+    try:
+        return PublicKey.from_npub(npub).hex()
+    except TypeError:
+        # pynostr raises TypeError when bech32 checksum fails
+        # (bech32_decode returns None, which convertbits iterates)
+        raise ValueError(
+            f"Invalid npub — bech32 checksum failed for "
+            f"'{npub[:16]}...'. Verify the npub is correct."
+        )
 
 
 def _hex_to_npub(hex_pubkey: str) -> str:
