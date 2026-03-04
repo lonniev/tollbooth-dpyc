@@ -1,4 +1,4 @@
-# Tollbooth DPYC
+# Tollbooth DPYC™
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![PyPI version](https://img.shields.io/pypi/v/tollbooth-dpyc)](https://pypi.org/project/tollbooth-dpyc/)
@@ -8,7 +8,7 @@
   <img src="https://raw.githubusercontent.com/lonniev/tollbooth-dpyc/main/docs/tollbooth-hero.png" alt="Milo drives the Lightning Turnpike — Don't Pester Your Customer" width="800">
 </p>
 
-**Don't Pester Your Customer** — Bitcoin Lightning micropayments for MCP servers.
+**Don't Pester Your Customer™** — Bitcoin Lightning micropayments for MCP servers.
 
 > *The metaphors in this project are drawn with admiration from* The Phantom Tollbooth *by Norton Juster, illustrated by Jules Feiffer (1961). Milo, Tock, the Tollbooth, Dictionopolis, and Digitopolis are creations of Mr. Juster's extraordinary imagination. We just built the payment infrastructure.*
 
@@ -396,6 +396,10 @@ pytest tests/ -q
 ## Further Reading
 
 [The Phantom Tollbooth on the Lightning Turnpike](https://stablecoin.myshopify.com/blogs/our-value/the-phantom-tollbooth-on-the-lightning-turnpike) — the full story of how we're monetizing the monetization of AI APIs, and then fading to the background.
+
+## Trademarks
+
+DPYC, Tollbooth DPYC, and Don't Pester Your Customer are trademarks of Lonnie VanZandt. See the [TRADEMARKS.md](https://github.com/lonniev/dpyc-community/blob/main/TRADEMARKS.md) in the dpyc-community repository for usage guidelines.
 
 ## License
 
