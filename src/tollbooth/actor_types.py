@@ -61,3 +61,30 @@ class ToolPathInfo:
     cost_tier: str = "FREE"
     agent_hint: str = ""
     supersedes: str = ""
+
+
+@dataclass(frozen=True)
+class ObsoletePractice:
+    """A pattern that agents should stop attempting.
+
+    MCP operators should surface these in ``session_status`` or a
+    dedicated ``get_practices`` tool so that AI agents receive a
+    proactive "unlearn this" signal at session start, rather than
+    discovering deprecated patterns through trial-and-error.
+
+    Parameters
+    ----------
+    pattern : str
+        The obsolete tool call or workflow (e.g. ``"activate_session(passphrase)"``).
+    replaced_by : str
+        The current correct approach.
+    reason : str
+        Why the old pattern was removed.
+    deprecated_since : str
+        ISO date when the pattern became obsolete.
+    """
+
+    pattern: str
+    replaced_by: str
+    reason: str
+    deprecated_since: str
