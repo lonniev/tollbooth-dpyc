@@ -65,8 +65,10 @@ Three protocol interfaces define the DPYC ecosystem roles. Each declares the too
 
 | Module | Purpose |
 |--------|---------|
-| `OperatorProtocol` | Operator tool surface — balance, statements, debit/error, delegation to Authority/Oracle. |
+| `OperatorProtocol` | Operator tool surface — balance, statements, Secure Courier, delegation to Authority/Oracle. |
+| `OPERATOR_BASE_CATALOG` | Canonical `list[ToolPathInfo]` for all 19 Operator protocol tools. Single source of truth — operators inherit and extend. |
 | `AuthorityProtocol` | Authority tool surface — certification, operator registration, tax collection. |
+| `AUTHORITY_BASE_CATALOG` | Canonical `list[ToolPathInfo]` for all 11 Authority protocol tools. |
 | `OracleProtocol` | Oracle tool surface — community concierge (tax rates, membership, onboarding). |
 | `ActorRole` | Enum: OPERATOR, AUTHORITY, ORACLE. |
 | `ToolPath` / `ToolPathInfo` | HOT/COLD/DELEGATION path metadata for tool routing. |
@@ -135,7 +137,7 @@ Implement the `VaultBackend` Protocol to add your own (Redis, S3, SQLite, etc.).
 
 | Module | Purpose |
 |--------|---------|
-| `SecureCourierService` | High-level wrapper for 3 MCP tools: open channel, receive credentials, forget credentials. |
+| `SecureCourierService` | High-level wrapper for 3 MCP tools: open channel, receive credentials, forget credentials. On first-time relay receipt, sends the `ncred1...` credential card back to the patron via Nostr DM for scan-and-paste reuse. |
 | `NostrCredentialExchange` | NIP-44/NIP-04 encrypted DM credential delivery with vault-first lookup. Relay copies deleted via NIP-09 after pickup. |
 | `CredentialTemplate` / `FieldSpec` | Schema and validation for credential payloads. |
 | `NostrAuditPublisher` | Publishes kind-30078 NIP-78 events on every vault write for tamper-evident audit trail. NIP-44v2 encrypted. |
@@ -336,7 +338,9 @@ Configure via JSON:
 
 ## Secure Courier
 
-Credentials delivered via encrypted Nostr DMs — they never appear in the chat window. `SecureCourierService` wraps three MCP tools (open channel, receive, forget) with NIP-44 encryption, template validation, and vault-first lookup.
+Credentials delivered via encrypted Nostr DMs — they never appear in the chat window. `SecureCourierService` wraps four MCP tools (session status, open channel, receive, forget) with NIP-44 encryption, template validation, and vault-first lookup.
+
+On first-time relay receipt, the service automatically sends the `ncred1...` credential card back to the patron via Nostr DM. Patrons can scan or paste this card to reactivate their session later — no Courier exchange needed. Vault restores skip the DM (no spam on reconnect). Delivery is fire-and-forget; failures never block the credential flow.
 
 `CredentialVaultBackend` is a Protocol for pluggable credential storage. After first delivery, `receive()` checks the vault before touching relays. Relay copies are deleted via NIP-09 after pickup.
 
