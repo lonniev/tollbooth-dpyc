@@ -3,6 +3,9 @@
 The Authority is the institutional backbone of the Tollbooth ecosystem.
 It registers MCP operators, collects a certification fee via Bitcoin
 Lightning, and issues signed certificates proving an operator has paid.
+
+``AUTHORITY_BASE_CATALOG`` is the library-level default tool catalog.
+Authority implementations inherit it and extend with custom tools.
 """
 
 from __future__ import annotations
@@ -10,6 +13,99 @@ from __future__ import annotations
 from typing import Any, Protocol, runtime_checkable
 
 from tollbooth.actor_types import ActorRole, ToolPath, ToolPathInfo
+
+
+# ── Library-level base catalog ────────────────────────────────────────
+
+AUTHORITY_BASE_CATALOG: list[ToolPathInfo] = [
+    # ── Hot-path (local ledger) ────────────────────────────────────
+    ToolPathInfo(
+        tool_name="certify_credits",
+        path=ToolPath.HOT,
+        requires_auth=True,
+        cost_tier="FREE",
+        agent_hint=(
+            "Core product — certify a credit purchase for an operator. "
+            "Deducts certification fee and returns a Schnorr-signed "
+            "Nostr event certificate."
+        ),
+    ),
+    ToolPathInfo(
+        tool_name="register_operator",
+        path=ToolPath.HOT,
+        requires_auth=True,
+        cost_tier="FREE",
+        agent_hint="Register a new operator in the Authority ledger.",
+    ),
+    ToolPathInfo(
+        tool_name="operator_status",
+        path=ToolPath.HOT,
+        requires_auth=True,
+        cost_tier="FREE",
+        agent_hint=(
+            "Return the calling operator's registration info and "
+            "the Authority's Nostr npub for certificate verification."
+        ),
+    ),
+    ToolPathInfo(
+        tool_name="check_balance",
+        path=ToolPath.HOT,
+        requires_auth=True,
+        cost_tier="FREE",
+        agent_hint="Return the calling operator's credit balance.",
+    ),
+    ToolPathInfo(
+        tool_name="account_statement",
+        path=ToolPath.HOT,
+        requires_auth=True,
+        cost_tier="FREE",
+        agent_hint="Return the calling operator's transaction history.",
+    ),
+    ToolPathInfo(
+        tool_name="account_statement_infographic",
+        path=ToolPath.HOT,
+        requires_auth=True,
+        cost_tier="FREE",
+        agent_hint="Return a visual summary of the operator's account.",
+    ),
+    ToolPathInfo(
+        tool_name="service_status",
+        path=ToolPath.HOT,
+        requires_auth=False,
+        cost_tier="FREE",
+        agent_hint="Return the Authority's health and version info.",
+    ),
+    ToolPathInfo(
+        tool_name="report_upstream_purchase",
+        path=ToolPath.HOT,
+        requires_auth=True,
+        cost_tier="FREE",
+        agent_hint="Admin-only: record an upstream credit purchase.",
+    ),
+    # ── Cold-path (BTCPay) ─────────────────────────────────────────
+    ToolPathInfo(
+        tool_name="purchase_credits",
+        path=ToolPath.COLD,
+        requires_auth=True,
+        cost_tier="FREE",
+        agent_hint="Create a Lightning invoice for credit purchase.",
+    ),
+    ToolPathInfo(
+        tool_name="check_payment",
+        path=ToolPath.COLD,
+        requires_auth=True,
+        cost_tier="FREE",
+        agent_hint="Poll a Lightning invoice for settlement status.",
+    ),
+    # ── Cold-path (registry) ───────────────────────────────────────
+    ToolPathInfo(
+        tool_name="check_dpyc_membership",
+        path=ToolPath.COLD,
+        requires_auth=True,
+        cost_tier="FREE",
+        agent_hint="Check whether an npub is a registered DPYC member.",
+    ),
+]
 
 
 @runtime_checkable

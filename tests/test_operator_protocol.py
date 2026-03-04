@@ -74,6 +74,24 @@ class StubOperator:
     async def network_advisory(self) -> str:
         return "No advisories"
 
+    async def session_status(self) -> dict[str, Any]:
+        return {"hasPersonalSession": False}
+
+    async def request_credential_channel(
+        self, service: str, greeting: str, recipient_npub: str | None,
+    ) -> dict[str, Any]:
+        return {"success": True}
+
+    async def receive_credentials(
+        self, sender_npub: str, service: str, credential_card: str,
+    ) -> dict[str, Any]:
+        return {"success": True}
+
+    async def forget_credentials(
+        self, sender_npub: str, service: str,
+    ) -> dict[str, Any]:
+        return {"success": True}
+
 
 class TestOperatorProtocol:
     """Protocol compliance tests."""

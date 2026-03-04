@@ -16,8 +16,8 @@ from tollbooth.vault_backend import VaultBackend
 from tollbooth.credential_vault_backend import CredentialVaultBackend
 from tollbooth.actor_types import ActorRole, ToolPath, ToolPathInfo
 from tollbooth.slug_tools import make_slug_tool
-from tollbooth.operator_protocol import OperatorProtocol
-from tollbooth.authority_protocol import AuthorityProtocol
+from tollbooth.operator_protocol import OperatorProtocol, OPERATOR_BASE_CATALOG
+from tollbooth.authority_protocol import AuthorityProtocol, AUTHORITY_BASE_CATALOG
 from tollbooth.oracle_protocol import OracleProtocol
 from tollbooth.ledger_cache import LedgerCache
 from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_API_SATS
@@ -168,7 +168,9 @@ __all__ = [
     "ToolPath",
     "ToolPathInfo",
     "OperatorProtocol",
+    "OPERATOR_BASE_CATALOG",
     "AuthorityProtocol",
+    "AUTHORITY_BASE_CATALOG",
     "OracleProtocol",
     "make_slug_tool",
     "LedgerCache",
