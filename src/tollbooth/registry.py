@@ -63,6 +63,38 @@ class DPYCRegistry:
             )
         return upstream
 
+    async def resolve_oracle_service(self, operator_npub: str) -> dict[str, str]:
+        """Walk *operator_npub*'s authority chain to Prime Authority and return Oracle service.
+
+        The Oracle is a community service operated by the Prime Authority.
+        Resolution: operator → upstream authority → ... → Prime Authority (no
+        ``upstream_authority_npub``) → find service named ``dpyc-oracle``.
+
+        Returns ``{"npub": prime_npub, "url": service_url, "name": service_name}``.
+        Raises ``RegistryError`` if no Oracle service is found.
+        """
+        # Walk upstream to Prime Authority
+        current_npub = operator_npub
+        for _ in range(10):  # guard against cycles
+            member = await self.check_membership(current_npub)
+            upstream = member.get("upstream_authority_npub")
+            if not upstream:
+                # This is the Prime Authority — look for Oracle service
+                services = member.get("services") or []
+                for svc in services:
+                    if svc.get("name") == "dpyc-oracle":
+                        return {
+                            "npub": current_npub,
+                            "url": svc["url"],
+                            "name": svc.get("name", "dpyc-oracle"),
+                        }
+                raise RegistryError(
+                    f"Prime Authority {current_npub} has no dpyc-oracle service registered."
+                )
+            current_npub = upstream
+
+        raise RegistryError("Authority chain too deep (possible cycle).")
+
     async def resolve_authority_service(self, operator_npub: str) -> dict[str, str]:
         """Look up *operator_npub*'s upstream authority and return its service URL.
 
@@ -156,5 +188,22 @@ async def resolve_authority_service(
     registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
     try:
         return await registry.resolve_authority_service(operator_npub)
+    finally:
+        await registry.close()
+
+
+async def resolve_oracle_service(
+    operator_npub: str,
+    registry_url: str = DEFAULT_REGISTRY_URL,
+    cache_ttl_seconds: int = 300,
+) -> dict[str, str]:
+    """Convenience function: resolve the Oracle service via authority chain.
+
+    Returns ``{"npub": prime_npub, "url": service_url, "name": service_name}``.
+    Creates a one-shot ``DPYCRegistry``, performs the lookup, and closes.
+    """
+    registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
+    try:
+        return await registry.resolve_oracle_service(operator_npub)
     finally:
         await registry.close()
