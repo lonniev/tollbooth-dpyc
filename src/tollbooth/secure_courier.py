@@ -253,7 +253,9 @@ class SecureCourierService:
                     # Send credential card via Nostr DM on fresh relay receipt
                     is_vault_restore = result.get("encryption") == "vault"
                     if self._send_card_dm and not is_vault_restore:
-                        self._deliver_card_dm(sender_npub, matched_service, ncred)
+                        await self._deliver_card_dm(
+                            sender_npub, matched_service, ncred, qr_png=qr_png,
+                        )
                         result["credential_card_dm_sent"] = True
 
                 except Exception as exc:
@@ -428,34 +430,57 @@ class SecureCourierService:
 
         return ncred, qr_png
 
-    def _deliver_card_dm(
+    async def _deliver_card_dm(
         self,
         recipient_npub: str,
         service: str,
         ncred: str,
+        *,
+        qr_png: bytes | None = None,
     ) -> None:
         """Send the credential card string to the patron via Nostr DM.
 
         Runs in a fire-and-forget manner — DM delivery failures are
         logged but never propagated to the caller.
 
-        The DM contains the ``ncred1...`` string and brief usage
-        instructions.  QR rendering happens client-side when the patron
-        scans from their saved image; the DM provides the text fallback
-        for copy-paste.
+        When *qr_png* is provided, the QR image is uploaded to
+        nostr.build (NIP-96) and the resulting URL is included in the
+        DM so Nostr clients auto-render the image inline.
 
         Args:
             recipient_npub: Patron's npub (bech32).
             service: Service name (for the human-readable header).
             ncred: The ``ncred1...`` credential card string.
+            qr_png: Optional PNG bytes of the credential card QR code.
         """
-        dm_text = (
-            f"Your credential card for {service}:\n\n"
-            f"{ncred}\n\n"
-            "Save this string. To reactivate your session later, "
-            "paste it into the credential_card parameter — "
-            "no Courier exchange needed."
-        )
+        image_url: str | None = None
+        if qr_png is not None:
+            try:
+                from tollbooth.media_upload import upload_to_nostr_build
+
+                image_url = await upload_to_nostr_build(qr_png)
+            except Exception as exc:
+                logger.warning(
+                    "QR upload to nostr.build failed (non-fatal): %s", exc,
+                )
+
+        if image_url:
+            dm_text = (
+                f"Your credential card for {service}:\n\n"
+                f"{image_url}\n\n"
+                f"{ncred}\n\n"
+                "Save this string. To reactivate your session later, "
+                "paste it into the credential_card parameter — "
+                "no Courier exchange needed."
+            )
+        else:
+            dm_text = (
+                f"Your credential card for {service}:\n\n"
+                f"{ncred}\n\n"
+                "Save this string. To reactivate your session later, "
+                "paste it into the credential_card parameter — "
+                "no Courier exchange needed."
+            )
 
         try:
             self._exchange.send_dm(recipient_npub, dm_text)
