@@ -86,6 +86,7 @@ class SecureCourierService:
             Callable[[str, dict[str, str], str], Awaitable[dict[str, Any] | None]]
             | None
         ) = None,
+        send_card_dm: bool = True,
     ) -> None:
         """Initialise the Secure Courier Service.
 
@@ -101,6 +102,11 @@ class SecureCourierService:
                 result.  ``credentials`` contains the validated fields.
                 The callback handles operator-specific actions like session
                 activation and identity mapping.
+            send_card_dm: If True (default), send the credential card as a
+                Nostr DM to the patron after first-time credential receipt.
+                The DM contains the ``ncred1...`` string so the patron can
+                save it for scan-and-paste reuse.  Only sent on fresh relay
+                delivery, not on vault restores.
         """
         if not _HAS_COURIER:
             raise RuntimeError(
@@ -109,6 +115,7 @@ class SecureCourierService:
             )
 
         self._operator_nsec = operator_nsec
+        self._send_card_dm = send_card_dm
 
         self._exchange = NostrCredentialExchange(
             nsec=operator_nsec,
@@ -225,6 +232,13 @@ class SecureCourierService:
                         result["credential_card_qr_base64"] = base64.b64encode(
                             qr_png
                         ).decode()
+
+                    # Send credential card via Nostr DM on fresh relay receipt
+                    is_vault_restore = result.get("encryption") == "vault"
+                    if self._send_card_dm and not is_vault_restore:
+                        self._deliver_card_dm(sender_npub, matched_service, ncred)
+                        result["credential_card_dm_sent"] = True
+
                 except Exception as exc:
                     logger.warning("Credential card generation failed: %s", exc)
 
@@ -283,6 +297,47 @@ class SecureCourierService:
             logger.debug("QR rendering skipped: %s", exc)
 
         return ncred, qr_png
+
+    def _deliver_card_dm(
+        self,
+        recipient_npub: str,
+        service: str,
+        ncred: str,
+    ) -> None:
+        """Send the credential card string to the patron via Nostr DM.
+
+        Runs in a fire-and-forget manner — DM delivery failures are
+        logged but never propagated to the caller.
+
+        The DM contains the ``ncred1...`` string and brief usage
+        instructions.  QR rendering happens client-side when the patron
+        scans from their saved image; the DM provides the text fallback
+        for copy-paste.
+
+        Args:
+            recipient_npub: Patron's npub (bech32).
+            service: Service name (for the human-readable header).
+            ncred: The ``ncred1...`` credential card string.
+        """
+        dm_text = (
+            f"Your credential card for {service}:\n\n"
+            f"{ncred}\n\n"
+            "Save this string. To reactivate your session later, "
+            "paste it into the credential_card parameter — "
+            "no Courier exchange needed."
+        )
+
+        try:
+            self._exchange.send_dm(recipient_npub, dm_text)
+            logger.info(
+                "Credential card DM sent to %s for service %s",
+                recipient_npub[:16] + "...",
+                service,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Credential card DM delivery failed (non-fatal): %s", exc,
+            )
 
     async def redeem_card(
         self,
