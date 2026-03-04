@@ -84,9 +84,12 @@ class OracleClient:
                     try:
                         data = json.loads(block.text)
                     except (json.JSONDecodeError, TypeError):
-                        continue
+                        # Plain text response (e.g. markdown from how_to_join, about)
+                        return {"text": block.text}
                     if isinstance(data, dict):
                         return data
+                    # JSON-parsed but not a dict (e.g. a list or scalar)
+                    return {"text": block.text}
             raise OracleClientError(
                 f"Oracle returned unexpected response format: {result}"
             )
