@@ -117,7 +117,7 @@ class Tranche:
         if self.expires_at is None:
             return False
         try:
-            exp = datetime.fromisoformat(self.expires_at)
+            exp = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
             return now >= exp
         except (ValueError, TypeError):
             return False  # Malformed → treat as never-expiring
@@ -361,7 +361,7 @@ class UserLedger:
                 continue
             if t.expires_at is not None:
                 try:
-                    exp = datetime.fromisoformat(t.expires_at)
+                    exp = datetime.fromisoformat(t.expires_at.replace("Z", "+00:00"))
                     if exp <= cutoff:
                         total += t.remaining_sats
                 except (ValueError, TypeError):
@@ -377,7 +377,7 @@ class UserLedger:
                 continue
             if t.expires_at is not None:
                 try:
-                    exp = datetime.fromisoformat(t.expires_at)
+                    exp = datetime.fromisoformat(t.expires_at.replace("Z", "+00:00"))
                     if earliest is None or exp < earliest:
                         earliest = exp
                 except (ValueError, TypeError):

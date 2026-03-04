@@ -95,7 +95,7 @@ class PeriodicRefreshConstraint(ToolConstraint):
 
         # Determine effective window start / count
         if self.window_start is not None:
-            ws = datetime.fromisoformat(self.window_start)
+            ws = datetime.fromisoformat(self.window_start.replace("Z", "+00:00"))
             if ws.tzinfo is None:
                 ws = ws.replace(tzinfo=timezone.utc)
             window_end = ws + self._delta

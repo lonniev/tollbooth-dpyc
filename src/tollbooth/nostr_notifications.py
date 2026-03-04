@@ -450,7 +450,7 @@ class NotificationManager:
             if t.expires_at is None:
                 continue
             try:
-                exp = datetime.fromisoformat(t.expires_at)
+                exp = datetime.fromisoformat(t.expires_at.replace("Z", "+00:00"))
                 if exp <= cutoff:
                     expiring_sats += t.remaining_sats
                     if earliest_expiry is None or exp < earliest_expiry:
@@ -469,7 +469,8 @@ class NotificationManager:
             )
             mono_now = time.monotonic()
             # Don't re-send if we notified within the last 24 hours
-            if mono_now - state.last_expiration_notified_at < 86400:
+            # (skip dedup on first-ever check: sentinel 0.0)
+            if state.last_expiration_notified_at > 0 and mono_now - state.last_expiration_notified_at < 86400:
                 return
             state.last_expiration_notified_at = mono_now
 

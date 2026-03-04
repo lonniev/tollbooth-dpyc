@@ -75,7 +75,7 @@ class CouponConstraint(ToolConstraint):
 
         # Check expiry
         if self.expires_at is not None:
-            exp = datetime.fromisoformat(self.expires_at)
+            exp = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
             if exp.tzinfo is None:
                 exp = exp.replace(tzinfo=timezone.utc)
             if now >= exp:
