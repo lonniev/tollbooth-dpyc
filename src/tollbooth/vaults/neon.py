@@ -392,7 +392,7 @@ class NeonCredentialVault:
         self._neon = neon_vault
 
     async def ensure_schema(self) -> None:
-        """Create the ``credentials`` table if it doesn't exist."""
+        """Create the ``credentials`` and ``session_bindings`` tables if they don't exist."""
         await self._neon._execute(
             "CREATE TABLE IF NOT EXISTS credentials ("
             "    service TEXT NOT NULL,"
@@ -402,6 +402,7 @@ class NeonCredentialVault:
             "    PRIMARY KEY (service, npub)"
             ")"
         )
+        await self.ensure_session_bindings_schema()
 
     async def store_credentials(
         self, service: str, npub: str, encrypted_blob: str,
@@ -435,5 +436,55 @@ class NeonCredentialVault:
         result = await self._neon._execute(
             "DELETE FROM credentials WHERE service = $1 AND npub = $2",
             [service, npub],
+        )
+        return (result.get("rowCount", 0) or 0) > 0
+
+    # -- SessionBindingBackend implementation --------------------------------
+
+    async def ensure_session_bindings_schema(self) -> None:
+        """Create the ``session_bindings`` table if it doesn't exist."""
+        await self._neon._execute(
+            "CREATE TABLE IF NOT EXISTS session_bindings ("
+            "    caller_id TEXT NOT NULL,"
+            "    service TEXT NOT NULL,"
+            "    npub TEXT NOT NULL,"
+            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    PRIMARY KEY (caller_id, service)"
+            ")"
+        )
+
+    async def store_session_binding(
+        self, caller_id: str, service: str, npub: str,
+    ) -> None:
+        """Persist a session binding (upserts on conflict)."""
+        await self._neon._execute(
+            "INSERT INTO session_bindings (caller_id, service, npub, updated_at) "
+            "VALUES ($1, $2, $3, now()) "
+            "ON CONFLICT (caller_id, service) DO UPDATE "
+            "SET npub = EXCLUDED.npub, "
+            "    updated_at = now()",
+            [caller_id, service, npub],
+        )
+
+    async def fetch_session_binding(
+        self, caller_id: str, service: str,
+    ) -> str | None:
+        """Look up the npub for a caller+service pair."""
+        result = await self._neon._execute(
+            "SELECT npub FROM session_bindings "
+            "WHERE caller_id = $1 AND service = $2",
+            [caller_id, service],
+        )
+        rows = result.get("rows", [])
+        return rows[0]["npub"] if rows else None
+
+    async def delete_session_binding(
+        self, caller_id: str, service: str,
+    ) -> bool:
+        """Remove a session binding. Returns True if found and deleted."""
+        result = await self._neon._execute(
+            "DELETE FROM session_bindings "
+            "WHERE caller_id = $1 AND service = $2",
+            [caller_id, service],
         )
         return (result.get("rowCount", 0) or 0) > 0

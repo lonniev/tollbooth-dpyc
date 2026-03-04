@@ -36,7 +36,10 @@ logger = logging.getLogger(__name__)
 # Optional imports — graceful degradation mirrors nostr_credentials.py
 try:
     from tollbooth.credential_templates import CredentialTemplate
-    from tollbooth.credential_vault_backend import CredentialVaultBackend
+    from tollbooth.credential_vault_backend import (
+        CredentialVaultBackend,
+        SessionBindingBackend,
+    )
     from tollbooth.nostr_credentials import (
         CourierError,
         CourierNotReady,
@@ -183,17 +186,25 @@ class SecureCourierService:
         self,
         sender_npub: str,
         service: str = "x",
+        *,
+        caller_id: str | None = None,
     ) -> dict[str, Any]:
         """Receive credentials from Secure Courier.
 
         1. Delegates to the exchange for relay polling / vault lookup.
         2. On success, calls ``on_credentials_received`` if set.
         3. Merges callback result into the response.
-        4. **Always** strips credential values before returning.
+        4. If *caller_id* provided, persists a session binding for cold-start
+           restoration.
+        5. **Always** strips credential values before returning.
 
         Args:
             sender_npub: Patron's npub (bech32).
             service: Credential template service name.
+            caller_id: Optional transport-layer caller ID (e.g. Horizon
+                user_id).  When provided and the vault supports session
+                bindings, the ``(caller_id, service) → npub`` mapping is
+                persisted for silent cold-start restoration.
 
         Returns:
             Dict with success, service, field count, and any callback-added
@@ -218,6 +229,10 @@ class SecureCourierService:
                         "on_credentials_received callback failed: %s", exc,
                     )
                     result["callback_error"] = str(exc)
+
+            # Persist session binding for cold-start restoration
+            if caller_id is not None:
+                await self._store_binding(caller_id, matched_service, sender_npub)
 
             # Generate credential card for scan-and-paste reuse
             if _HAS_CREDENTIAL_CARD:
@@ -251,17 +266,94 @@ class SecureCourierService:
         self,
         sender_npub: str,
         service: str = "x",
+        *,
+        caller_id: str | None = None,
     ) -> dict[str, Any]:
         """Delete vaulted credentials for key rotation.
 
         Args:
             sender_npub: Patron's npub (bech32).
             service: Service name whose credentials to forget.
+            caller_id: Optional transport-layer caller ID.  When provided,
+                also deletes the session binding so cold-start restoration
+                won't revive a forgotten identity.
 
         Returns:
             Dict with success and whether credentials were found.
         """
-        return await self._exchange.forget(sender_npub, service=service)
+        result = await self._exchange.forget(sender_npub, service=service)
+
+        if caller_id is not None:
+            await self._delete_binding(caller_id, service)
+
+        return result
+
+    async def restore_session(
+        self,
+        caller_id: str,
+        service: str = "x",
+    ) -> str | None:
+        """Attempt silent session restoration from a persisted binding.
+
+        On serverless cold starts the in-memory session dict is lost.
+        This method:
+
+        1. Looks up the persisted ``(caller_id, service) → npub`` binding.
+        2. Calls ``self.receive(npub, service, caller_id=caller_id)`` which
+           hits the vault-first fast path (no relay I/O).
+        3. The ``on_credentials_received`` callback fires, repopulating
+           the in-memory session.
+
+        Returns:
+            The restored npub on success, ``None`` on any failure.
+        """
+        vault = self._exchange._credential_vault
+        if vault is None or not isinstance(vault, SessionBindingBackend):
+            return None
+
+        try:
+            npub = await vault.fetch_session_binding(caller_id, service)
+        except Exception as exc:
+            logger.debug("Session binding lookup failed: %s", exc)
+            return None
+
+        if npub is None:
+            return None
+
+        try:
+            result = await self.receive(npub, service, caller_id=caller_id)
+            if result.get("success"):
+                return npub
+        except Exception as exc:
+            logger.debug("Session restoration failed: %s", exc)
+
+        return None
+
+    # -- Private helpers -----------------------------------------------------
+
+    async def _store_binding(
+        self, caller_id: str, service: str, npub: str,
+    ) -> None:
+        """Persist a session binding if the vault supports it."""
+        vault = self._exchange._credential_vault
+        if vault is not None and isinstance(vault, SessionBindingBackend):
+            try:
+                await vault.store_session_binding(caller_id, service, npub)
+            except Exception as exc:
+                logger.warning("Failed to store session binding: %s", exc)
+
+    async def _delete_binding(
+        self, caller_id: str, service: str,
+    ) -> None:
+        """Delete a session binding if the vault supports it."""
+        vault = self._exchange._credential_vault
+        if vault is not None and isinstance(vault, SessionBindingBackend):
+            try:
+                await vault.delete_session_binding(caller_id, service)
+            except Exception as exc:
+                logger.warning("Failed to delete session binding: %s", exc)
+
+    # -- Credential card -----------------------------------------------------
 
     def generate_credential_card(
         self,
