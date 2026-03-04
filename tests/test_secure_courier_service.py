@@ -497,6 +497,213 @@ class TestReceive:
         callback.assert_called_once_with(self._SENDER, {"api_key": "sk-xxx"}, "openai")
 
 
+# ── credential card DM tests ──────────────────────────────────────────
+
+
+class TestCredentialCardDM:
+    _SENDER = "npub1" + "d" * 58
+    _FAKE_NCRED = "ncred1fakecard"
+
+    def _mock_card_gen(self, service_obj):
+        """Patch generate_credential_card to avoid needing real npub decoding."""
+        return patch.object(
+            service_obj, "generate_credential_card",
+            return_value=(self._FAKE_NCRED, b"\x89PNG-fake"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_card_dm_sent_on_fresh_relay_receipt(
+        self, operator_nsec, relays, templates,
+    ):
+        """Credential card DM is sent when credentials come from relay (not vault)."""
+        service = SecureCourierService(
+            operator_nsec=operator_nsec,
+            relays=relays,
+            templates=templates,
+            send_card_dm=True,
+        )
+
+        exchange_result = {
+            "success": True,
+            "service": "x",
+            "fields_received": 2,
+            "sensitive_fields": 2,
+            "encryption": "nip44",
+            "credentials": {
+                "access_token": "tok",
+                "access_token_secret": "ts",
+            },
+            "message": "Credentials received.",
+        }
+
+        with patch.object(
+            service.exchange, "receive",
+            new_callable=AsyncMock,
+            return_value=exchange_result,
+        ), self._mock_card_gen(service), patch.object(
+            service.exchange, "send_dm",
+        ) as mock_send_dm:
+            result = await service.receive(self._SENDER, service="x")
+
+        # DM should have been sent
+        mock_send_dm.assert_called_once()
+        call_args = mock_send_dm.call_args
+        assert call_args[0][0] == self._SENDER
+        assert "credential card for x" in call_args[0][1]
+        assert self._FAKE_NCRED in call_args[0][1]
+
+        assert result.get("credential_card_dm_sent") is True
+        assert result["credential_card"] == self._FAKE_NCRED
+
+    @pytest.mark.asyncio
+    async def test_card_dm_not_sent_on_vault_restore(
+        self, operator_nsec, relays, templates,
+    ):
+        """Credential card DM is NOT sent on vault restore."""
+        service = SecureCourierService(
+            operator_nsec=operator_nsec,
+            relays=relays,
+            templates=templates,
+            send_card_dm=True,
+        )
+
+        exchange_result = {
+            "success": True,
+            "service": "x",
+            "fields_received": 2,
+            "sensitive_fields": 2,
+            "encryption": "vault",
+            "credentials": {
+                "access_token": "tok",
+                "access_token_secret": "ts",
+            },
+            "message": "Credentials restored from vault.",
+        }
+
+        with patch.object(
+            service.exchange, "receive",
+            new_callable=AsyncMock,
+            return_value=exchange_result,
+        ), self._mock_card_gen(service), patch.object(
+            service.exchange, "send_dm",
+        ) as mock_send_dm:
+            result = await service.receive(self._SENDER, service="x")
+
+        mock_send_dm.assert_not_called()
+        assert "credential_card_dm_sent" not in result
+
+    @pytest.mark.asyncio
+    async def test_card_dm_not_sent_when_disabled(
+        self, operator_nsec, relays, templates,
+    ):
+        """Credential card DM is NOT sent when send_card_dm=False."""
+        service = SecureCourierService(
+            operator_nsec=operator_nsec,
+            relays=relays,
+            templates=templates,
+            send_card_dm=False,
+        )
+
+        exchange_result = {
+            "success": True,
+            "service": "x",
+            "fields_received": 2,
+            "sensitive_fields": 2,
+            "encryption": "nip44",
+            "credentials": {
+                "access_token": "tok",
+                "access_token_secret": "ts",
+            },
+            "message": "Credentials received.",
+        }
+
+        with patch.object(
+            service.exchange, "receive",
+            new_callable=AsyncMock,
+            return_value=exchange_result,
+        ), self._mock_card_gen(service), patch.object(
+            service.exchange, "send_dm",
+        ) as mock_send_dm:
+            result = await service.receive(self._SENDER, service="x")
+
+        mock_send_dm.assert_not_called()
+        assert "credential_card_dm_sent" not in result
+
+    @pytest.mark.asyncio
+    async def test_card_dm_failure_does_not_break_receive(
+        self, operator_nsec, relays, templates,
+    ):
+        """DM delivery failure is swallowed — receive still succeeds."""
+        service = SecureCourierService(
+            operator_nsec=operator_nsec,
+            relays=relays,
+            templates=templates,
+            send_card_dm=True,
+        )
+
+        exchange_result = {
+            "success": True,
+            "service": "x",
+            "fields_received": 2,
+            "sensitive_fields": 2,
+            "encryption": "nip04",
+            "credentials": {
+                "access_token": "tok",
+                "access_token_secret": "ts",
+            },
+            "message": "Credentials received.",
+        }
+
+        with patch.object(
+            service.exchange, "receive",
+            new_callable=AsyncMock,
+            return_value=exchange_result,
+        ), self._mock_card_gen(service), patch.object(
+            service.exchange, "send_dm",
+            side_effect=RuntimeError("relay unreachable"),
+        ):
+            result = await service.receive(self._SENDER, service="x")
+
+        # receive() should still succeed despite DM failure
+        assert result["success"] is True
+        assert result["credential_card"] == self._FAKE_NCRED
+        assert "credentials" not in result
+
+    @pytest.mark.asyncio
+    async def test_card_dm_not_sent_on_redeem(
+        self, operator_nsec, relays, templates,
+    ):
+        """Credential card DM is NOT sent on card redemption (user already has it)."""
+        service = SecureCourierService(
+            operator_nsec=operator_nsec,
+            relays=relays,
+            templates=templates,
+            send_card_dm=True,
+        )
+
+        redeem_result = {
+            "success": True,
+            "service": "x",
+            "credentials": {
+                "access_token": "tok",
+                "access_token_secret": "ts",
+            },
+            "user_npub": self._SENDER,
+        }
+
+        with patch.object(
+            service.exchange, "redeem_credential_card",
+            new_callable=AsyncMock,
+            return_value=redeem_result,
+        ), patch.object(
+            service.exchange, "send_dm",
+        ) as mock_send_dm:
+            result = await service.redeem_card("ncred1test")
+
+        mock_send_dm.assert_not_called()
+        assert result["success"] is True
+
+
 # ── forget tests ──────────────────────────────────────────────────────
 
 
