@@ -146,6 +146,80 @@ async def test_certify_custom_tool_name():
 
 
 # ---------------------------------------------------------------------------
+# certify() — CallToolResult unwrapping (structured data path)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_certify_calltoolresult_data():
+    """certify() unwraps CallToolResult-like objects with .data dict."""
+    cert_response = {
+        "success": True,
+        "certificate": "eyJhbGciOi...",
+        "jti": "ctr-456",
+        "amount_sats": 100,
+        "fee_sats": 10,
+        "net_sats": 90,
+        "expires_at": "2026-03-03T12:00:00Z",
+    }
+
+    # Simulate CallToolResult with .data attribute (structured output)
+    call_tool_result = MagicMock()
+    call_tool_result.data = cert_response
+    call_tool_result.content = None  # data takes priority
+
+    mock_client = AsyncMock()
+    mock_client.call_tool = AsyncMock(return_value=call_tool_result)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+        certifier = AuthorityCertifier(
+            authority_url="https://authority.example.com/mcp",
+            operator_npub="npub1operator",
+        )
+        result = await certifier.certify(100)
+
+    assert result["certificate"] == "eyJhbGciOi..."
+    assert result["jti"] == "ctr-456"
+    assert result["net_sats"] == 90
+
+
+@pytest.mark.asyncio
+async def test_certify_calltoolresult_content():
+    """certify() unwraps CallToolResult-like objects with .content list."""
+    cert_response = {
+        "success": True,
+        "certificate": "eyJhbGciOi...",
+        "jti": "ctr-789",
+        "amount_sats": 50,
+        "fee_sats": 5,
+        "net_sats": 45,
+        "expires_at": "2026-03-03T12:00:00Z",
+    }
+
+    # Simulate CallToolResult with .content attribute (text blocks)
+    call_tool_result = MagicMock(spec=[])  # no .data attribute
+    call_tool_result.content = [_text_block(cert_response)]
+
+    mock_client = AsyncMock()
+    mock_client.call_tool = AsyncMock(return_value=call_tool_result)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+        certifier = AuthorityCertifier(
+            authority_url="https://authority.example.com/mcp",
+            operator_npub="npub1operator",
+        )
+        result = await certifier.certify(50)
+
+    assert result["certificate"] == "eyJhbGciOi..."
+    assert result["jti"] == "ctr-789"
+    assert result["net_sats"] == 45
+
+
+# ---------------------------------------------------------------------------
 # certify() — unexpected response format
 # ---------------------------------------------------------------------------
 
