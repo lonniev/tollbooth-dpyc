@@ -138,6 +138,7 @@ def _make_courier_service(
     svc = object.__new__(SecureCourierService)
     svc._operator_nsec = "nsec1fake"
     svc._send_card_dm = False
+    svc._sessions = {}
     svc._on_received = on_received
 
     exchange = MagicMock()
@@ -269,3 +270,76 @@ class TestBindingOnReceiveForget:
         await svc.forget("npub1abc", "thebrain")
 
         vault.delete_session_binding.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_receive_populates_in_memory_sessions(self):
+        """receive() with caller_id populates _sessions dict."""
+        vault = MagicMock(spec=SessionBindingBackend)
+        vault.store_session_binding = AsyncMock()
+
+        svc, _ = _make_courier_service(vault=vault)
+        assert "user_01" not in svc._sessions
+        await svc.receive("npub1abc", "thebrain", caller_id="user_01")
+        assert svc._sessions["user_01"] == "npub1abc"
+
+    @pytest.mark.asyncio
+    async def test_forget_clears_in_memory_sessions(self):
+        """forget() with caller_id clears _sessions dict."""
+        vault = MagicMock(spec=SessionBindingBackend)
+        vault.delete_session_binding = AsyncMock()
+
+        svc, _ = _make_courier_service(vault=vault)
+        svc._sessions["user_01"] = "npub1abc"
+        await svc.forget("npub1abc", "thebrain", caller_id="user_01")
+        assert "user_01" not in svc._sessions
+
+
+# ---------------------------------------------------------------------------
+# SecureCourierService — ensure_identity (operator-facing API)
+# ---------------------------------------------------------------------------
+
+class TestEnsureIdentity:
+
+    @pytest.mark.asyncio
+    async def test_fast_path_from_memory(self):
+        """In-memory _sessions hit → returns npub immediately, no vault I/O."""
+        svc, exchange = _make_courier_service(vault=None)
+        svc._sessions["user_01"] = "npub1abc"
+
+        result = await svc.ensure_identity("user_01", service="thebrain")
+        assert result == "npub1abc"
+        exchange.receive.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cold_start_restore(self):
+        """No in-memory session → vault restore → returns npub."""
+        vault = MagicMock(spec=SessionBindingBackend)
+        vault.fetch_session_binding = AsyncMock(return_value="npub1abc")
+        vault.store_session_binding = AsyncMock()
+
+        callback = AsyncMock(return_value={"session": "active"})
+        svc, exchange = _make_courier_service(vault=vault, on_received=callback)
+
+        result = await svc.ensure_identity("user_01", service="thebrain")
+        assert result == "npub1abc"
+        # _sessions populated by receive() via restore_session()
+        assert svc._sessions["user_01"] == "npub1abc"
+
+    @pytest.mark.asyncio
+    async def test_no_binding_raises(self):
+        """No binding and no in-memory session → ValueError."""
+        vault = MagicMock(spec=SessionBindingBackend)
+        vault.fetch_session_binding = AsyncMock(return_value=None)
+
+        svc, _ = _make_courier_service(vault=vault)
+
+        with pytest.raises(ValueError, match="No DPYC identity active"):
+            await svc.ensure_identity("user_01", service="thebrain")
+
+    @pytest.mark.asyncio
+    async def test_no_vault_raises(self):
+        """No vault at all → ValueError."""
+        svc, _ = _make_courier_service(vault=None)
+
+        with pytest.raises(ValueError, match="No DPYC identity active"):
+            await svc.ensure_identity("user_01", service="thebrain")

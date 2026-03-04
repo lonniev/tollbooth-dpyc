@@ -119,6 +119,7 @@ class SecureCourierService:
 
         self._operator_nsec = operator_nsec
         self._send_card_dm = send_card_dm
+        self._sessions: dict[str, str] = {}  # caller_id → npub (in-memory)
 
         self._exchange = NostrCredentialExchange(
             nsec=operator_nsec,
@@ -232,6 +233,7 @@ class SecureCourierService:
 
             # Persist session binding for cold-start restoration
             if caller_id is not None:
+                self._sessions[caller_id] = sender_npub
                 await self._store_binding(caller_id, matched_service, sender_npub)
 
             # Generate credential card for scan-and-paste reuse
@@ -284,6 +286,7 @@ class SecureCourierService:
         result = await self._exchange.forget(sender_npub, service=service)
 
         if caller_id is not None:
+            self._sessions.pop(caller_id, None)
             await self._delete_binding(caller_id, service)
 
         return result
@@ -328,6 +331,41 @@ class SecureCourierService:
             logger.debug("Session restoration failed: %s", exc)
 
         return None
+
+    async def ensure_identity(
+        self,
+        caller_id: str,
+        service: str = "x",
+    ) -> str:
+        """Return the npub for *caller_id*, auto-restoring on cold start.
+
+        Every operator MCP server should call this instead of maintaining
+        its own in-memory session dict.
+
+        Fast path: in-memory ``_sessions`` cache hit → return immediately.
+        Cold-start path: ``restore_session()`` → vault binding lookup →
+        vault-first ``receive()`` → ``on_credentials_received`` callback →
+        operator session re-established.
+
+        Raises:
+            ValueError: No identity could be established (first-time user
+                or credentials were forgotten).
+        """
+        npub = self._sessions.get(caller_id)
+        if npub:
+            return npub
+
+        restored = await self.restore_session(caller_id, service)
+        if restored:
+            return restored
+
+        raise ValueError(
+            "No DPYC identity active. Credit operations require an npub. "
+            "Follow the Secure Courier onboarding flow: call "
+            "request_credential_channel(recipient_npub=<npub>), reply via Nostr DM, "
+            "then call receive_credentials(sender_npub=<npub>). "
+            "Get your npub from the dpyc-oracle's how_to_join() tool."
+        )
 
     # -- Private helpers -----------------------------------------------------
 
