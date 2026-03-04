@@ -104,6 +104,13 @@ The `tollbooth.tools` package provides functions your MCP server wraps as tools.
 | `AuthorityCertifier` | Server-to-server MCP client for auto-certifying credit purchases. Opens a short-lived `fastmcp.Client` SSE connection with Horizon OAuth auto-negotiation. |
 | `AuthorityCertifyError` | Raised when Authority certification fails (connection, auth, or tool error). |
 
+### Oracle Client
+
+| Module | Purpose |
+|--------|---------|
+| `OracleClient` | Server-to-server MCP client for delegating Oracle tool calls. Opens a short-lived `fastmcp.Client` SSE connection per call. Oracle tools are free and unauthenticated. |
+| `OracleClientError` | Raised when an Oracle delegation call fails (connection or parse error). |
+
 ### DPYC Registry
 
 | Module | Purpose |
@@ -111,6 +118,7 @@ The `tollbooth.tools` package provides functions your MCP server wraps as tools.
 | `DPYCRegistry` | Cached HTTPS fetch of the [dpyc-community](https://github.com/lonniev/dpyc-community) `members.json` registry. Resolves membership, upstream authorities, and service URLs. |
 | `resolve_authority_service` | Convenience: finds an operator's upstream Authority service URL in one call. |
 | `resolve_authority_npub` | Finds an operator's upstream Authority npub from the registry. |
+| `resolve_oracle_service` | Walks the authority chain to the Prime Authority and returns the Oracle service URL. |
 
 ### Vault Backends
 
@@ -249,6 +257,7 @@ Tollbooth is a three-party ecosystem built on the [DPYC Honor Chain](https://git
 | [tollbooth-authority](https://github.com/lonniev/tollbooth-authority) | The institution — tax collection, Schnorr signing, purchase order certification |
 | **tollbooth-dpyc** (this package) | The booth — operator-side credit ledger, BTCPay client, tool gating, auto-certification |
 | [dpyc-community](https://github.com/lonniev/dpyc-community) | The registry — membership, governance, and service discovery |
+| [dpyc-oracle](https://github.com/lonniev/dpyc-oracle) | The concierge — community onboarding, tax rates, membership lookup |
 | [thebrain-mcp](https://github.com/lonniev/thebrain-mcp) | Reference operator — PersonalBrain knowledge graph, 40+ metered tools |
 | [excalibur-mcp](https://github.com/lonniev/excalibur-mcp) | Reference operator — social media posting via Tollbooth credits |
 
@@ -287,6 +296,23 @@ from tollbooth import resolve_authority_service
 
 service = await resolve_authority_service("npub1operator...")
 # service["url"] → "https://authority.fastmcp.app/mcp"
+```
+
+## Oracle Delegation
+
+`OracleClient` lets operator servers delegate community queries to the DPYC Oracle — no separate MCP connection from the AI agent needed. Oracle tools are free and unauthenticated.
+
+```python
+from tollbooth import OracleClient, resolve_oracle_service
+
+# Resolve Oracle URL via registry (walks authority chain to Prime Authority)
+service = await resolve_oracle_service("npub1operator...")
+# service["url"] → "https://dpyc-oracle.fastmcp.app/mcp"
+
+# Call any Oracle tool
+client = OracleClient(service["url"])
+result = await client.call_tool("get_tax_rate")
+# result → {"rate_percent": 2, "min_sats": 10, ...}
 ```
 
 ## Constraint Engine
