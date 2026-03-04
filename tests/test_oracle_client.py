@@ -146,18 +146,83 @@ async def test_call_tool_calltoolresult_content():
 
 
 # ---------------------------------------------------------------------------
-# call_tool() — unexpected response format
+# call_tool() — plain text responses (non-JSON)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_call_tool_plain_text():
+    """call_tool() wraps plain-text responses in {"text": ...}."""
+    markdown = "## How to Join\n\nStep 1: Generate a Nostr keypair..."
+
+    text_block = MagicMock()
+    text_block.text = markdown
+
+    mock_client = AsyncMock()
+    mock_client.call_tool = AsyncMock(return_value=[text_block])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+        client = OracleClient(oracle_url="https://oracle.example.com/mcp")
+        result = await client.call_tool("how_to_join")
+
+    assert result == {"text": markdown}
+
+
+@pytest.mark.asyncio
+async def test_call_tool_plain_text_calltoolresult():
+    """call_tool() handles TextContent inside CallToolResult for plain text."""
+    markdown = "# DPYC\n\nDon't Pester Your Customer..."
+
+    text_block = MagicMock()
+    text_block.text = markdown
+
+    call_tool_result = MagicMock(spec=[])  # no .data attribute
+    call_tool_result.content = [text_block]
+
+    mock_client = AsyncMock()
+    mock_client.call_tool = AsyncMock(return_value=call_tool_result)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+        client = OracleClient(oracle_url="https://oracle.example.com/mcp")
+        result = await client.call_tool("about")
+
+    assert result == {"text": markdown}
+
+
+@pytest.mark.asyncio
+async def test_call_tool_json_non_dict():
+    """call_tool() wraps JSON arrays/scalars as {"text": ...}."""
+    text_block = MagicMock()
+    text_block.text = '["item1", "item2"]'
+
+    mock_client = AsyncMock()
+    mock_client.call_tool = AsyncMock(return_value=[text_block])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+        client = OracleClient(oracle_url="https://oracle.example.com/mcp")
+        result = await client.call_tool("some_tool")
+
+    assert result == {"text": '["item1", "item2"]'}
+
+
+# ---------------------------------------------------------------------------
+# call_tool() — unexpected response format (no text blocks at all)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_call_tool_unexpected_format():
-    """call_tool() raises on unexpected response (no parseable dict)."""
-    bad_block = MagicMock()
-    bad_block.text = "not json"
+    """call_tool() raises on empty list with no text blocks."""
+    empty_block = MagicMock(spec=[])  # no .text attribute
 
     mock_client = AsyncMock()
-    mock_client.call_tool = AsyncMock(return_value=[bad_block])
+    mock_client.call_tool = AsyncMock(return_value=[empty_block])
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
