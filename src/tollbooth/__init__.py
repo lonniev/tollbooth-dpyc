@@ -14,9 +14,9 @@ from tollbooth.ledger import UserLedger, ToolUsage, InvoiceRecord, Tranche
 from tollbooth.btcpay_client import BTCPayClient, BTCPayError, BTCPayAuthError
 from tollbooth.vault_backend import VaultBackend
 from tollbooth.credential_vault_backend import CredentialVaultBackend, SessionBindingBackend
-from tollbooth.actor_types import ActorRole, ToolPath, ToolPathInfo
+from tollbooth.actor_types import ActorRole, ObsoletePractice, ToolPath, ToolPathInfo
 from tollbooth.slug_tools import make_slug_tool
-from tollbooth.operator_protocol import OperatorProtocol, OPERATOR_BASE_CATALOG
+from tollbooth.operator_protocol import OperatorProtocol, OPERATOR_BASE_CATALOG, OPERATOR_OBSOLETE_PRACTICES
 from tollbooth.authority_protocol import AuthorityProtocol, AUTHORITY_BASE_CATALOG
 from tollbooth.oracle_protocol import OracleProtocol
 from tollbooth.ledger_cache import LedgerCache
@@ -166,10 +166,12 @@ __all__ = [
     "SessionBindingBackend",
     # Actor Protocols
     "ActorRole",
+    "ObsoletePractice",
     "ToolPath",
     "ToolPathInfo",
     "OperatorProtocol",
     "OPERATOR_BASE_CATALOG",
+    "OPERATOR_OBSOLETE_PRACTICES",
     "AuthorityProtocol",
     "AUTHORITY_BASE_CATALOG",
     "OracleProtocol",

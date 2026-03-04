@@ -15,13 +15,30 @@ Operators inherit it and extend with domain-specific tools::
             return OPERATOR_BASE_CATALOG + [
                 ToolPathInfo(tool_name="my_tool", path=ToolPath.HOT, ...),
             ]
+
+``OPERATOR_OBSOLETE_PRACTICES`` lists patterns that agents should stop
+attempting.  Operators should surface these in ``session_status``
+responses or a dedicated ``get_practices`` tool so that AI agents get
+a proactive "unlearn this" signal at session start.  Operators may
+extend with their own entries::
+
+    from tollbooth.operator_protocol import OPERATOR_OBSOLETE_PRACTICES
+
+    my_obsolete = OPERATOR_OBSOLETE_PRACTICES + [
+        ObsoletePractice(
+            pattern="my_old_tool()",
+            replaced_by="my_new_tool()",
+            reason="Replaced in v2.0.",
+            deprecated_since="2026-04-01",
+        ),
+    ]
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from tollbooth.actor_types import ActorRole, ToolPath, ToolPathInfo
+from tollbooth.actor_types import ActorRole, ObsoletePractice, ToolPath, ToolPathInfo
 
 
 # ── Library-level base catalog ────────────────────────────────────────
@@ -74,7 +91,13 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
         cost_tier="FREE",
         agent_hint=(
             "Check the patron's current session state. Shows whether "
-            "credentials are active or onboarding is needed."
+            "credentials are active or onboarding is needed. "
+            "See OPERATOR_OBSOLETE_PRACTICES for patterns to avoid."
+        ),
+        supersedes=(
+            "Replaces activate_session(passphrase). Passphrase-based "
+            "session activation has been removed. Use the Secure "
+            "Courier flow: request_credential_channel + receive_credentials."
         ),
     ),
     ToolPathInfo(
@@ -84,7 +107,18 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
         cost_tier="FREE",
         agent_hint=(
             "Open a Secure Courier channel. Sends a welcome DM with "
-            "credential template instructions to the patron's Nostr client."
+            "credential template instructions to the patron's Nostr "
+            "client. IMPORTANT: Always ask the patron which npub they "
+            "want to use for THIS specific service and role. Do NOT "
+            "reuse an npub from earlier in the conversation or from "
+            "a different service — a patron may hold different npubs "
+            "for different roles (patron vs operator vs authority) and "
+            "different services."
+        ),
+        supersedes=(
+            "Replaces register_credentials(api_key, brain_id, passphrase). "
+            "Credentials must never appear in the chat window. The "
+            "Secure Courier delivers them via encrypted Nostr DMs."
         ),
     ),
     ToolPathInfo(
@@ -97,7 +131,12 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
             "first (instant), then polls Nostr relays. On first-time "
             "receipt, sends the credential card (ncred1...) back to the "
             "patron via Nostr DM for scan-and-paste reuse. Accepts an "
-            "optional credential_card parameter to bypass the relay flow."
+            "optional credential_card parameter to bypass the relay flow. "
+            "IMPORTANT: The sender_npub must be the patron's chosen "
+            "npub for this service. Do NOT substitute an npub from a "
+            "different service or conversation context — each npub is "
+            "a key on the patron's keyring, and the wrong key won't "
+            "open this door."
         ),
     ),
     ToolPathInfo(
@@ -192,6 +231,64 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
         requires_auth=False,
         cost_tier="FREE",
         agent_hint="Get active network advisories from the Oracle.",
+    ),
+]
+
+
+# ── Obsolete practices ────────────────────────────────────────────
+#
+# Patterns that agents should stop attempting.  Surface these in
+# session_status responses or a dedicated get_practices tool so
+# agents get a proactive "unlearn this" signal at session start.
+#
+# Operators: extend with your own entries for service-specific
+# deprecated patterns.
+
+OPERATOR_OBSOLETE_PRACTICES: list[ObsoletePractice] = [
+    ObsoletePractice(
+        pattern="activate_session(passphrase)",
+        replaced_by=(
+            "receive_credentials(sender_npub) via the Secure Courier flow. "
+            "Call session_status to check state, then "
+            "request_credential_channel + receive_credentials if needed."
+        ),
+        reason=(
+            "Passphrase-based session activation has been removed. "
+            "Credentials are now delivered via encrypted Nostr DMs "
+            "(Secure Courier) and never appear in the chat window."
+        ),
+        deprecated_since="2026-03-01",
+    ),
+    ObsoletePractice(
+        pattern="register_credentials(api_key, brain_id, passphrase)",
+        replaced_by=(
+            "request_credential_channel(recipient_npub) to open a Secure "
+            "Courier channel, then receive_credentials(sender_npub) to "
+            "pick up the encrypted credentials from the Nostr relay."
+        ),
+        reason=(
+            "Typing credentials into the chat window is a security risk. "
+            "The Secure Courier delivers them via NIP-44 encrypted Nostr "
+            "DMs so they never appear in conversation history."
+        ),
+        deprecated_since="2026-03-01",
+    ),
+    ObsoletePractice(
+        pattern="Reusing an npub from a different service or conversation context",
+        replaced_by=(
+            "Always ask the patron which npub they want to use for THIS "
+            "specific service and role. A patron may hold different npubs "
+            "for different roles (patron, operator, authority) and "
+            "different services. Each npub is a key on the patron's "
+            "keyring — do not borrow keys from other doors."
+        ),
+        reason=(
+            "One human may be a patron to several MCPs, each with "
+            "different API credentials associated to unique npubs. "
+            "Sometimes one npub may be reused across credentials, but "
+            "this is the patron's choice, not the agent's assumption."
+        ),
+        deprecated_since="2026-03-04",
     ),
 ]
 
