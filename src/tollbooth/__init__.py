@@ -13,7 +13,7 @@ from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger, ToolUsage, InvoiceRecord, Tranche
 from tollbooth.btcpay_client import BTCPayClient, BTCPayError, BTCPayAuthError
 from tollbooth.vault_backend import VaultBackend
-from tollbooth.credential_vault_backend import CredentialVaultBackend
+from tollbooth.credential_vault_backend import CredentialVaultBackend, SessionBindingBackend
 from tollbooth.actor_types import ActorRole, ToolPath, ToolPathInfo
 from tollbooth.slug_tools import make_slug_tool
 from tollbooth.operator_protocol import OperatorProtocol, OPERATOR_BASE_CATALOG
@@ -163,6 +163,7 @@ __all__ = [
     "BTCPayAuthError",
     "VaultBackend",
     "CredentialVaultBackend",
+    "SessionBindingBackend",
     # Actor Protocols
     "ActorRole",
     "ToolPath",

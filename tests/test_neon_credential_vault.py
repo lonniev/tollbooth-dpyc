@@ -61,12 +61,13 @@ class TestEnsureSchema:
         )
         vault = _cred_vault(neon)
         await vault.ensure_schema()
-        neon._client.post.assert_called_once()
-        body = neon._client.post.call_args.kwargs.get(
-            "json", neon._client.post.call_args[1] if len(neon._client.post.call_args.args) > 1 else None
-        )
-        assert "credentials" in body["query"]
-        assert "IF NOT EXISTS" in body["query"]
+        # ensure_schema creates both credentials and session_bindings tables
+        assert neon._client.post.call_count == 2
+        first_body = neon._client.post.call_args_list[0].kwargs.get("json")
+        assert "credentials" in first_body["query"]
+        assert "IF NOT EXISTS" in first_body["query"]
+        second_body = neon._client.post.call_args_list[1].kwargs.get("json")
+        assert "session_bindings" in second_body["query"]
 
     @pytest.mark.asyncio
     async def test_schema_idempotent(self) -> None:
@@ -78,7 +79,8 @@ class TestEnsureSchema:
         vault = _cred_vault(neon)
         await vault.ensure_schema()
         await vault.ensure_schema()
-        assert neon._client.post.call_count == 2
+        # 2 tables per call × 2 calls = 4
+        assert neon._client.post.call_count == 4
 
 
 # ---------------------------------------------------------------------------

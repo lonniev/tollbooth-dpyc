@@ -48,3 +48,34 @@ class CredentialVaultBackend(Protocol):
         no credentials existed for this pair.
         """
         ...
+
+
+@runtime_checkable
+class SessionBindingBackend(Protocol):
+    """Async persistence for caller_id → npub session bindings.
+
+    Allows silent session restoration on serverless cold starts.
+    The binding maps a transport-layer caller ID (e.g. Horizon user_id)
+    to the DPYC npub that was last used for credential receipt.
+
+    Separate from CredentialVaultBackend so existing vault implementations
+    remain compatible without changes.
+    """
+
+    async def store_session_binding(
+        self, caller_id: str, service: str, npub: str,
+    ) -> None:
+        """Persist a session binding (upserts on conflict)."""
+        ...
+
+    async def fetch_session_binding(
+        self, caller_id: str, service: str,
+    ) -> str | None:
+        """Look up the npub for a caller+service pair.  Returns None if missing."""
+        ...
+
+    async def delete_session_binding(
+        self, caller_id: str, service: str,
+    ) -> bool:
+        """Remove a session binding.  Returns True if found and deleted."""
+        ...
