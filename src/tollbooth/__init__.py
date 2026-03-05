@@ -20,7 +20,7 @@ from tollbooth.operator_protocol import OperatorProtocol, OPERATOR_BASE_CATALOG,
 from tollbooth.authority_protocol import AuthorityProtocol, AUTHORITY_BASE_CATALOG
 from tollbooth.oracle_protocol import OracleProtocol
 from tollbooth.ledger_cache import LedgerCache
-from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_API_SATS
+from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_API_SATS, ECOSYSTEM_LINKS
 from tollbooth.pricing import ToolPricing
 from tollbooth.vaults import TheBrainVault, NeonVault, NeonQueryError
 from tollbooth.ots import MerkleTree, InclusionProof, OTSCalendarClient
@@ -184,6 +184,7 @@ __all__ = [
     "ToolTier",
     "MAX_INVOICE_SATS",
     "LOW_BALANCE_FLOOR_API_SATS",
+    "ECOSYSTEM_LINKS",
     "verify_certificate_auto",
     "verify_nostr_certificate",
     "NOSTR_CERT_KIND",
