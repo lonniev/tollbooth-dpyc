@@ -51,6 +51,7 @@ class TestConstraintRegistry:
             "bulk_bonus",
             "happy_hour",
             "json_expression",
+            "surge_pricing",
         }
         assert set(CONSTRAINT_REGISTRY.keys()) == expected
 

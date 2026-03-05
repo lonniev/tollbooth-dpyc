@@ -94,7 +94,7 @@ class LedgerCache:
             if user_id in self._entries:
                 entry = self._entries[user_id]
                 if self._flush_due_entry(entry):
-                    await self._flush_entry(user_id, entry)
+                    self._fire_and_forget_flush(user_id, entry)
                 self._entries.move_to_end(user_id)
                 return entry.ledger
 
@@ -103,7 +103,7 @@ class LedgerCache:
 
             # Evict LRU if at capacity
             while len(self._entries) >= self._maxsize:
-                await self._evict_lru()
+                self._fire_and_forget_evict()
 
             self._entries[user_id] = _CacheEntry(ledger=ledger)
             self._entries.move_to_end(user_id)
@@ -157,8 +157,41 @@ class LedgerCache:
             return UserLedger()
         return UserLedger.from_json(ledger_json)
 
+    def _fire_and_forget_flush(
+        self, user_id: str, entry: _CacheEntry,
+    ) -> None:
+        """Schedule a flush as a background task — never blocks the hot path.
+
+        Idempotent: if the task fails or two tasks race, the worst outcome is
+        a duplicate Neon write (full ledger overwrite, not an increment).
+        """
+        asyncio.create_task(self._safe_flush(user_id, entry))
+
+    def _fire_and_forget_evict(self) -> None:
+        """Evict the LRU entry, flushing dirty state in the background."""
+        if not self._entries:
+            return
+        user_id, entry = next(iter(self._entries.items()))
+        if entry.dirty:
+            asyncio.create_task(self._safe_flush(user_id, entry))
+        del self._entries[user_id]
+        self._locks.pop(user_id, None)
+
+    async def _safe_flush(self, user_id: str, entry: _CacheEntry) -> None:
+        """Flush wrapper that swallows exceptions — safe for create_task."""
+        try:
+            await self._flush_entry(user_id, entry)
+        except Exception:
+            logger.warning(
+                "Background flush failed for %s (swallowed).", user_id,
+            )
+
     async def _evict_lru(self) -> None:
-        """Evict the least-recently-used entry, flushing if dirty."""
+        """Evict the least-recently-used entry, flushing if dirty.
+
+        Retained for callers that need awaited eviction (e.g. shutdown).
+        The hot path uses ``_fire_and_forget_evict()`` instead.
+        """
         if not self._entries:
             return
         user_id, entry = next(iter(self._entries.items()))

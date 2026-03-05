@@ -26,3 +26,11 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 CREATE INDEX IF NOT EXISTS idx_transactions_npub ON transactions(npub);
 CREATE INDEX IF NOT EXISTS idx_transactions_created ON transactions(created_at);
+
+-- Global demand counters for surge pricing (one row per tool per time window)
+CREATE TABLE IF NOT EXISTS tool_demand (
+    tool_name TEXT NOT NULL,
+    window_key TEXT NOT NULL,         -- Truncated timestamp, e.g. "2026-03-05T14:00"
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tool_name, window_key)
+);

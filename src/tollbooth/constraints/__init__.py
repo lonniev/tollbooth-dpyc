@@ -35,6 +35,7 @@ from tollbooth.constraints.pricing import (
     LoyaltyDiscountConstraint,
 )
 from tollbooth.constraints.supply import FiniteSupplyConstraint
+from tollbooth.constraints.surge import SurgePricingConstraint
 from tollbooth.constraints.temporal import TemporalWindowConstraint
 
 __all__ = [
@@ -56,6 +57,7 @@ __all__ = [
     "BulkBonusConstraint",
     "HappyHourConstraint",
     "JsonExpressionConstraint",
+    "SurgePricingConstraint",
     # Engine
     "ConstraintEngine",
     # Gate
