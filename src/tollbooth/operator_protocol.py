@@ -181,7 +181,24 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
         delegates_to=ActorRole.AUTHORITY,
         requires_auth=True,
         cost_tier="FREE",
-        agent_hint="Register as an operator via the Authority.",
+        agent_hint=(
+            "Request operator registration under a specific Authority. "
+            "Sends a delegation request via Nostr DM to the specified "
+            "Authority npub. This tool does NOT call the Oracle — the "
+            "Authority receives and approves the request, then provisions "
+            "the new Operator itself. Requires both authority_npub (who "
+            "you are asking) and requester_npub (who wants to become an "
+            "Operator). Not to be confused with citizen registration, "
+            "which the Operator handles directly via the Oracle's "
+            "request_citizenship / confirm_citizenship flow."
+        ),
+        # NOTE: DM-send logic — the Nostr DM to the Authority should
+        # live in tollbooth-dpyc as a shared utility alongside the
+        # existing Secure Courier infrastructure (NIP-44 encryption,
+        # relay publishing).  A candidate location is a new
+        # `operator_registration.py` module or an extension of
+        # `nostr_courier.py`.  Until implemented, agents should
+        # describe the intended DM but cannot send it programmatically.
     ),
     ToolPathInfo(
         tool_name="operator_status",
@@ -387,7 +404,12 @@ class OperatorProtocol(Protocol):
         ...
 
     async def register_operator(self, npub: str) -> dict[str, Any]:
-        """(cold, delegates to Authority) Register as an operator."""
+        """(cold, delegates to Authority) Request operator registration.
+
+        Sends a delegation request via Nostr DM to the Authority npub.
+        The Authority provisions the new Operator upon approval.  This
+        tool does NOT invoke the Oracle directly — the Authority does.
+        """
         ...
 
     async def operator_status(self) -> dict[str, Any]:

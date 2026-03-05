@@ -113,7 +113,6 @@ def decrypt(
 
         unpadder = PKCS7(128).unpadder()
         plaintext_bytes = unpadder.update(padded) + unpadder.finalize()
+        return plaintext_bytes.decode("utf-8")
     except Exception as e:
         raise ValueError(f"NIP-04 decryption failed: {e}") from e
-
-    return plaintext_bytes.decode("utf-8")
