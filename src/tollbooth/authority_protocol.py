@@ -35,7 +35,14 @@ AUTHORITY_BASE_CATALOG: list[ToolPathInfo] = [
         path=ToolPath.HOT,
         requires_auth=True,
         cost_tier="FREE",
-        agent_hint="Register a new operator in the Authority ledger.",
+        agent_hint=(
+            "Provision a new operator in the Authority ledger. Called by "
+            "the Authority itself after receiving and approving a Nostr "
+            "DM delegation request from a requester npub. Creates the "
+            "operator's ledger entry with a zero balance. This is the "
+            "Authority-side counterpart of the Operator's "
+            "register_operator delegation tool."
+        ),
     ),
     ToolPathInfo(
         tool_name="operator_status",
@@ -135,7 +142,11 @@ class AuthorityProtocol(Protocol):
         ...
 
     async def register_operator(self, npub: str) -> dict[str, Any]:
-        """(hot) Register a new operator in the ledger."""
+        """(hot) Provision a new operator in the ledger.
+
+        Called after the Authority receives and approves a Nostr DM
+        delegation request from a requester npub.
+        """
         ...
 
     async def operator_status(self) -> dict[str, Any]:
