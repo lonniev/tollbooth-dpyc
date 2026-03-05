@@ -81,15 +81,22 @@ class PriceModifier:
     def apply_to(self, base_price: int) -> int:
         """Apply this modifier to *base_price* and return the adjusted price.
 
-        Order: free → surge markup → percent discount → absolute discount.
-        Surge increases the base before discounts are applied, so a 2x surge
-        with a 50% happy-hour discount nets out to 1x base price.
+        Order: free → surge markup → bonus reduction → percent discount → absolute discount.
+
+        Each step is independent and composable:
+        - **surge_multiplier** increases the price (demand-driven markup).
+        - **bonus_multiplier** decreases the price (loyalty/bulk reward — you
+          get more value per sat, so the effective cost drops).
+        - **discount_percent** takes a percentage off the post-adjustment price.
+        - **discount_sats** takes a flat amount off last.
         """
         if self.free:
             return 0
         price = base_price
         if self.surge_multiplier != 1.0:
             price = int(price * self.surge_multiplier)
+        if self.bonus_multiplier != 1.0:
+            price = max(1, int(price / self.bonus_multiplier))
         if self.discount_percent > 0:
             price = max(0, price - int(price * self.discount_percent / 100))
         if self.discount_sats > 0:
