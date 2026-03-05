@@ -258,6 +258,54 @@ class NeonVault:
             "CREATE INDEX IF NOT EXISTS idx_anchors_status "
             "ON anchors(status)"
         )
+        # -- Global demand counters (surge pricing) --
+        await self._execute(
+            "CREATE TABLE IF NOT EXISTS tool_demand ("
+            "    tool_name TEXT NOT NULL,"
+            "    window_key TEXT NOT NULL,"
+            "    count INTEGER NOT NULL DEFAULT 0,"
+            "    PRIMARY KEY (tool_name, window_key)"
+            ")"
+        )
+
+    # -- Global demand counters (surge pricing) --------------------------------
+
+    async def get_demand(self, tool_name: str, window_key: str) -> int:
+        """Read the global demand count for a tool in a time window.
+
+        Returns 0 on miss or any error — callers get base pricing
+        when demand data is unavailable.
+        """
+        try:
+            result = await self._execute(
+                "SELECT count FROM tool_demand "
+                "WHERE tool_name = $1 AND window_key = $2",
+                [tool_name, window_key],
+            )
+            rows = result.get("rows", [])
+            return int(rows[0]["count"]) if rows else 0
+        except Exception:
+            logger.debug("get_demand failed for %s/%s", tool_name, window_key)
+            return 0
+
+    async def increment_demand(self, tool_name: str, window_key: str) -> None:
+        """Atomically increment the demand counter (fire-and-forget safe).
+
+        Designed to be called via ``asyncio.create_task()`` — errors are
+        logged but never propagated.
+        """
+        try:
+            await self._execute(
+                "INSERT INTO tool_demand (tool_name, window_key, count) "
+                "VALUES ($1, $2, 1) "
+                "ON CONFLICT (tool_name, window_key) "
+                "DO UPDATE SET count = tool_demand.count + 1",
+                [tool_name, window_key],
+            )
+        except Exception:
+            logger.debug(
+                "increment_demand failed for %s/%s", tool_name, window_key,
+            )
 
     # -- Anchor operations ---------------------------------------------------
 

@@ -44,6 +44,14 @@ class EnvironmentSnapshot:
     utc_now: datetime  # Current UTC time
     tool_name: str = ""
     invocation_count: int = 0  # Per-patron total invocations for this tool
+    global_demand: tuple[tuple[str, int], ...] = ()  # (tool_name, count) pairs
+
+    def demand_for(self, tool_name: str) -> int:
+        """Return the global demand count for *tool_name*, or 0 if unknown."""
+        for name, count in self.global_demand:
+            if name == tool_name:
+                return count
+        return 0
 
 
 @dataclass(frozen=True)
@@ -68,12 +76,27 @@ class PriceModifier:
     discount_sats: int = 0  # absolute discount in api-sats
     free: bool = False  # override to zero cost
     bonus_multiplier: float = 1.0  # e.g. 1.25 for 25% more value
+    surge_multiplier: float = 1.0  # e.g. 1.5 for 50% surge markup
 
     def apply_to(self, base_price: int) -> int:
-        """Apply this modifier to *base_price* and return the adjusted price."""
+        """Apply this modifier to *base_price* and return the adjusted price.
+
+        Order: free → surge markup → bonus reduction → percent discount → absolute discount.
+
+        Each step is independent and composable:
+        - **surge_multiplier** increases the price (demand-driven markup).
+        - **bonus_multiplier** decreases the price (loyalty/bulk reward — you
+          get more value per sat, so the effective cost drops).
+        - **discount_percent** takes a percentage off the post-adjustment price.
+        - **discount_sats** takes a flat amount off last.
+        """
         if self.free:
             return 0
         price = base_price
+        if self.surge_multiplier != 1.0:
+            price = int(price * self.surge_multiplier)
+        if self.bonus_multiplier != 1.0:
+            price = max(1, int(price / self.bonus_multiplier))
         if self.discount_percent > 0:
             price = max(0, price - int(price * self.discount_percent / 100))
         if self.discount_sats > 0:
@@ -90,6 +113,8 @@ class PriceModifier:
             d["free"] = True
         if self.bonus_multiplier != 1.0:
             d["bonus_multiplier"] = self.bonus_multiplier
+        if self.surge_multiplier != 1.0:
+            d["surge_multiplier"] = self.surge_multiplier
         return d
 
     @classmethod
@@ -99,6 +124,7 @@ class PriceModifier:
             discount_sats=int(data.get("discount_sats", 0)),
             free=bool(data.get("free", False)),
             bonus_multiplier=float(data.get("bonus_multiplier", 1.0)),
+            surge_multiplier=float(data.get("surge_multiplier", 1.0)),
         )
 
 

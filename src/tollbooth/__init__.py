@@ -126,6 +126,7 @@ try:
         BulkBonusConstraint,
         HappyHourConstraint,
         JsonExpressionConstraint,
+        SurgePricingConstraint,
         load_constraints,
         validate_config,
     )
@@ -148,6 +149,7 @@ except ImportError:
     BulkBonusConstraint = None  # type: ignore[assignment,misc]
     HappyHourConstraint = None  # type: ignore[assignment,misc]
     JsonExpressionConstraint = None  # type: ignore[assignment,misc]
+    SurgePricingConstraint = None  # type: ignore[assignment,misc]
     load_constraints = None  # type: ignore[assignment,misc]
     validate_config = None  # type: ignore[assignment,misc]
 
@@ -249,6 +251,7 @@ __all__ = [
     "BulkBonusConstraint",
     "HappyHourConstraint",
     "JsonExpressionConstraint",
+    "SurgePricingConstraint",
     "load_constraints",
     "validate_config",
 ]

@@ -114,7 +114,8 @@ class TestLedgerCacheEviction:
         ledger1.credit_deposit(42, "test")
         cache.mark_dirty("user1")
         await cache.get("user2")
-        await cache.get("user3")  # evicts user1
+        await cache.get("user3")  # evicts user1 (fire-and-forget flush)
+        await asyncio.sleep(0)  # let background task run
         vault.store_ledger.assert_called_once()
         args = vault.store_ledger.call_args[0]
         assert args[0] == "user1"
@@ -531,8 +532,9 @@ class TestFlushDue:
         cache.mark_dirty("user1")
         cache.mark_dirty("user1")  # dirty_count = 3 = batch_size
         vault.store_ledger.assert_not_called()
-        # Next get() should trigger the flush
+        # Next get() should trigger the fire-and-forget flush
         await cache.get("user1")
+        await asyncio.sleep(0)  # let background task run
         vault.store_ledger.assert_called_once()
         assert cache._entries["user1"].dirty_count == 0
 
@@ -547,6 +549,7 @@ class TestFlushDue:
         cache._entries["user1"].last_flush_time = time.monotonic() - 0.1
         vault.store_ledger.assert_not_called()
         await cache.get("user1")
+        await asyncio.sleep(0)  # let fire-and-forget flush run
         vault.store_ledger.assert_called_once()
 
 
@@ -586,8 +589,9 @@ class TestDebitMethod:
         await cache.debit("user1", "tool_b", 1)
         await cache.debit("user1", "tool_c", 1)  # dirty_count = 3
         vault.store_ledger.assert_not_called()
-        # Next get() triggers the flush
+        # Next get() triggers the fire-and-forget flush
         await cache.get("user1")
+        await asyncio.sleep(0)  # let background task run
         vault.store_ledger.assert_called_once()
 
     @pytest.mark.asyncio

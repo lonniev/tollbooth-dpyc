@@ -21,6 +21,7 @@ from tollbooth.constraints.pricing import (
     LoyaltyDiscountConstraint,
 )
 from tollbooth.constraints.supply import FiniteSupplyConstraint
+from tollbooth.constraints.surge import SurgePricingConstraint
 from tollbooth.constraints.temporal import TemporalWindowConstraint
 
 
@@ -38,6 +39,7 @@ CONSTRAINT_REGISTRY: dict[str, type[ToolConstraint]] = {
     "bulk_bonus": BulkBonusConstraint,
     "happy_hour": HappyHourConstraint,
     "json_expression": JsonExpressionConstraint,
+    "surge_pricing": SurgePricingConstraint,
 }
 
 

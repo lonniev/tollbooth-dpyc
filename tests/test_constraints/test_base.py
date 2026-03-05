@@ -175,6 +175,35 @@ class TestPriceModifier:
         assert restored.discount_percent == pm.discount_percent
         assert restored.bonus_multiplier == pm.bonus_multiplier
 
+    def test_apply_bonus_multiplier(self):
+        # 1.25x bonus means 25% more value per sat → effective cost drops
+        pm = PriceModifier(bonus_multiplier=1.25)
+        assert pm.apply_to(100) == 80  # 100 / 1.25 = 80
+
+    def test_apply_bonus_floors_to_one(self):
+        # Even huge bonus can't make cost < 1 (avoids free-by-accident)
+        pm = PriceModifier(bonus_multiplier=100.0)
+        assert pm.apply_to(5) == 1
+
+    def test_apply_surge_then_bonus(self):
+        # 2x surge, 2x bonus → they cancel out
+        pm = PriceModifier(surge_multiplier=2.0, bonus_multiplier=2.0)
+        assert pm.apply_to(100) == 100
+
+    def test_apply_all_modifiers(self):
+        # surge 2x, bonus 1.25x, 20% discount, 10 sats off
+        pm = PriceModifier(
+            surge_multiplier=2.0,
+            bonus_multiplier=1.25,
+            discount_percent=20.0,
+            discount_sats=10,
+        )
+        # 100 * 2.0 = 200 surge
+        # 200 / 1.25 = 160 bonus
+        # 160 * 0.8 = 128 pct discount
+        # 128 - 10 = 118 sats discount
+        assert pm.apply_to(100) == 118
+
     def test_from_dict_defaults(self):
         pm = PriceModifier.from_dict({})
         assert pm.discount_percent == 0.0

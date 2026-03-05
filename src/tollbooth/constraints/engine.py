@@ -159,10 +159,12 @@ def _stack_modifiers(
 
     # Multipliers multiply
     combined_mult = base.bonus_multiplier * addition.bonus_multiplier
+    combined_surge = base.surge_multiplier * addition.surge_multiplier
 
     return PriceModifier(
         discount_percent=combined_pct,
         discount_sats=combined_sats,
         free=free,
         bonus_multiplier=combined_mult,
+        surge_multiplier=combined_surge,
     )

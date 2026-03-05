@@ -78,6 +78,7 @@ class ConstraintGate:
         npub: str = "",
         membership_tier: str = "default",
         invocation_count: int = 0,
+        global_demand: dict[str, int] | None = None,
     ) -> tuple[dict[str, Any] | None, int]:
         """Evaluate constraints for a tool call.
 
@@ -109,6 +110,9 @@ class ConstraintGate:
                 utc_now=datetime.now(timezone.utc),
                 tool_name=tool_name,
                 invocation_count=invocation_count,
+                global_demand=tuple(
+                    (global_demand or {}).items()
+                ),
             ),
         )
 
