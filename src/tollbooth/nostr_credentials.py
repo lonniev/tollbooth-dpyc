@@ -602,6 +602,11 @@ class NostrCredentialExchange:
                     f"They should reply with their credentials using the @@@ format shown. "
                     f"Then call receive_credentials with their npub."
                 )
+                result["relay_propagation_note"] = (
+                    "Nostr relay propagation may take 30-60 seconds. "
+                    "If the welcome DM doesn't appear immediately in "
+                    "Primal or your client, wait a moment and refresh."
+                )
             except Exception as exc:
                 logger.warning("Welcome DM failed, falling back to manual: %s", exc)
                 result["welcome_dm_sent"] = False
@@ -696,8 +701,10 @@ class NostrCredentialExchange:
             raise CourierTimeout(
                 f"No DM found from {sender_npub} within the "
                 f"{self._freshness_window}-second freshness window. "
-                f"Make sure you sent the DM from your Nostr client and "
-                f"try again."
+                f"If you just sent your reply, Nostr relay propagation "
+                f"may take 10-30 seconds — wait a moment and try again. "
+                f"Otherwise, make sure you sent the DM from your Nostr "
+                f"client to the correct npub."
             )
 
         # Resolve poison expectation up front
