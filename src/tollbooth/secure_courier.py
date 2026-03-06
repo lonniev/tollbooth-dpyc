@@ -62,6 +62,13 @@ try:
 except ImportError:
     _HAS_CREDENTIAL_CARD = False
 
+try:
+    from tollbooth.identity_credential import sign_identity_credential
+
+    _HAS_IDENTITY_CREDENTIAL = True
+except ImportError:
+    _HAS_IDENTITY_CREDENTIAL = False
+
 
 class SecureCourierService:
     """Reusable Secure Courier -- operators import and wire 3 MCP tools.
@@ -90,6 +97,7 @@ class SecureCourierService:
             | None
         ) = None,
         send_card_dm: bool = True,
+        credential_ttl_seconds: int = 30 * 24 * 3600,
     ) -> None:
         """Initialise the Secure Courier Service.
 
@@ -110,6 +118,8 @@ class SecureCourierService:
                 The DM contains the ``ncred1...`` string so the patron can
                 save it for scan-and-paste reuse.  Only sent on fresh relay
                 delivery, not on vault restores.
+            credential_ttl_seconds: TTL for issued identity credentials
+                (default 30 days).
         """
         if not _HAS_COURIER:
             raise RuntimeError(
@@ -119,7 +129,9 @@ class SecureCourierService:
 
         self._operator_nsec = operator_nsec
         self._send_card_dm = send_card_dm
+        self._credential_ttl = credential_ttl_seconds
         self._sessions: dict[str, str] = {}  # caller_id → npub (in-memory)
+        self._credentials: dict[str, str] = {}  # npub → signed credential JSON
 
         self._exchange = NostrCredentialExchange(
             nsec=operator_nsec,
@@ -156,6 +168,10 @@ class SecureCourierService:
     def relays(self) -> list[str]:
         """Configured relay URLs."""
         return self._exchange.relays
+
+    def get_identity_credential(self, npub: str) -> str | None:
+        """Return the signed identity credential for *npub*, or None."""
+        return self._credentials.get(npub)
 
     # -- Tool-level methods -------------------------------------------------
 
@@ -230,6 +246,21 @@ class SecureCourierService:
                         "on_credentials_received callback failed: %s", exc,
                     )
                     result["callback_error"] = str(exc)
+
+            # Issue identity credential (kind 30080) for this citizen
+            if _HAS_IDENTITY_CREDENTIAL:
+                try:
+                    credential = sign_identity_credential(
+                        citizen_npub=sender_npub,
+                        operator_nsec=self._operator_nsec,
+                        ttl_seconds=self._credential_ttl,
+                    )
+                    self._credentials[sender_npub] = credential
+                    result["identity_credential_issued"] = True
+                except Exception as exc:
+                    logger.warning(
+                        "Identity credential issuance failed: %s", exc,
+                    )
 
             # Persist session binding for cold-start restoration
             if caller_id is not None:

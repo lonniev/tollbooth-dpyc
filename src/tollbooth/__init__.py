@@ -25,6 +25,15 @@ from tollbooth.pricing import ToolPricing
 from tollbooth.vaults import TheBrainVault, NeonVault, NeonQueryError
 from tollbooth.ots import MerkleTree, InclusionProof, OTSCalendarClient
 from tollbooth.nostr_certificate import verify_nostr_certificate, NOSTR_CERT_KIND
+from tollbooth.identity_credential import (
+    sign_identity_credential,
+    verify_identity_credential,
+    verify_credential_chain,
+    IdentityCredentialError,
+    IDENTITY_CREDENTIAL_KIND,
+    IDENTITY_CREDENTIAL_TAG,
+    IDENTITY_CREDENTIAL_LABEL,
+)
 
 try:
     from tollbooth.authority_client import AuthorityCertifier, AuthorityCertifyError
@@ -191,6 +200,14 @@ __all__ = [
     "verify_nostr_certificate",
     "NOSTR_CERT_KIND",
     "UNDERSTOOD_PROTOCOLS",
+    # Identity Credential
+    "sign_identity_credential",
+    "verify_identity_credential",
+    "verify_credential_chain",
+    "IdentityCredentialError",
+    "IDENTITY_CREDENTIAL_KIND",
+    "IDENTITY_CREDENTIAL_TAG",
+    "IDENTITY_CREDENTIAL_LABEL",
     # Registry
     "DPYCRegistry",
     "RegistryError",

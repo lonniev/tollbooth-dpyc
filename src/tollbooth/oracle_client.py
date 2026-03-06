@@ -100,3 +100,11 @@ class OracleClient:
         raise OracleClientError(
             f"Oracle returned unexpected response format: {result}"
         )
+
+    async def check_ban_status(self, npub: str) -> dict[str, Any]:
+        """Check whether *npub* is banned via the Oracle.
+
+        Returns ``{"banned": bool, "reason": str | None}``.
+        Raises ``OracleClientError`` on connection/parse failure.
+        """
+        return await self.call_tool("check_ban_status", {"npub": npub})
