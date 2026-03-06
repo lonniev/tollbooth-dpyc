@@ -238,13 +238,44 @@ async def purchase_credits_tool(
     tier_config_json: str | None = None,
     user_tiers_json: str | None = None,
     default_credit_ttl_seconds: int | None = None,
+    ban_check_oracle_url: str | None = None,
 ) -> dict[str, Any]:
     """Create a BTCPay invoice after verifying an Authority certificate.
 
     For OPERATOR use: the certified purchase flow. Every credit purchase
     requires a valid Authority-signed Nostr event certificate.
     The certificate's net_sats (amount after certification fee) determines the invoice amount.
+
+    If *ban_check_oracle_url* is provided, checks the Oracle for ban status
+    before proceeding.  Fail-closed: if the Oracle is unreachable, the
+    purchase is denied — never grant free access.
     """
+    # Ban check (fail-closed — Oracle unreachable = deny purchase)
+    if ban_check_oracle_url:
+        try:
+            from tollbooth.oracle_client import OracleClient
+
+            oracle = OracleClient(ban_check_oracle_url)
+            ban_result = await oracle.check_ban_status(user_id)
+            if ban_result.get("banned"):
+                reason = ban_result.get("reason", "banned")
+                return {
+                    "success": False,
+                    "error": f"Account suspended: {reason}. "
+                    "Credit purchases are not available for banned members.",
+                }
+        except Exception as exc:
+            logger.warning(
+                "Ban check failed for %s — denying purchase (fail-closed): %s",
+                user_id,
+                exc,
+            )
+            return {
+                "success": False,
+                "error": "Unable to verify account standing — purchase denied. "
+                "The Oracle may be temporarily unavailable. Try again later.",
+            }
+
     # Trust gate — authority_npub must be configured
     if not authority_npub:
         return {
