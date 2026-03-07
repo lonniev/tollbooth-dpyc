@@ -267,6 +267,14 @@ class NeonVault:
             "    PRIMARY KEY (tool_name, window_key)"
             ")"
         )
+        # -- Authority configuration (curator npub, onboarding state) --
+        await self._execute(
+            "CREATE TABLE IF NOT EXISTS authority_config ("
+            "    key TEXT PRIMARY KEY,"
+            "    value TEXT NOT NULL,"
+            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()"
+            ")"
+        )
 
     # -- Global demand counters (surge pricing) --------------------------------
 
@@ -408,6 +416,32 @@ class NeonVault:
         await self._execute(
             "UPDATE anchors SET ots_receipts_json = $1 WHERE id = $2",
             [ots_receipts_json, int(anchor_id)],
+        )
+
+    # -- Authority configuration -----------------------------------------------
+
+    async def get_config(self, key: str) -> str | None:
+        """Read a value from the ``authority_config`` table.
+
+        Returns ``None`` if the key does not exist.
+        """
+        try:
+            result = await self._execute(
+                "SELECT value FROM authority_config WHERE key = $1",
+                [key],
+            )
+            rows = result.get("rows", [])
+            return rows[0]["value"] if rows else None
+        except Exception:
+            return None
+
+    async def set_config(self, key: str, value: str) -> None:
+        """Upsert a value into the ``authority_config`` table."""
+        await self._execute(
+            "INSERT INTO authority_config (key, value, updated_at) "
+            "VALUES ($1, $2, now()) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()",
+            [key, value],
         )
 
     # -- Helpers -------------------------------------------------------------
