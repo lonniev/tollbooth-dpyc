@@ -81,11 +81,11 @@ The `tollbooth.tools` package provides functions your MCP server wraps as tools.
 |----------|---------|
 | `purchase_credits_tool` | Creates a BTCPay invoice, records it as pending, returns a checkout link. Validates Authority certificate when `authority_public_key` is configured. |
 | `direct_purchase_tool` | Invoice without certificate — for Authority self-purchases (trust anchor has no upstream). |
-| `check_payment_tool` | Polls an invoice, credits the balance on settlement, fires the royalty payout. Idempotent. |
+| `check_payment_tool` | Polls an invoice, credits the balance on settlement. Idempotent. |
 | `check_balance_tool` | Returns current balance, usage summary, tier info, and invoice history. Read-only. |
 | `restore_credits_tool` | Recovers credits from a paid invoice lost to cache/vault issues. Checks vault first, falls back to BTCPay. |
 | `account_statement_tool` | 30-day purchase and usage history for a user. |
-| `btcpay_status_tool` | Diagnostics: BTCPay connectivity, store name, API key permissions, royalty config. |
+| `btcpay_status_tool` | Diagnostics: BTCPay connectivity, store name, API key permissions. |
 | `compute_low_balance_warning` | Pure function — returns a warning dict if balance is below threshold, `None` if healthy. |
 | `anchor_ledger_tool` | Creates a Merkle tree of all ledgers and submits root hash to OTS calendar servers. |
 | `get_anchor_proof_tool` | Retrieves a Merkle inclusion proof for a specific user's ledger entry. |
@@ -194,7 +194,6 @@ config = TollboothConfig(
     btcpay_host="https://your-btcpay.example.com",
     btcpay_store_id="your-store-id",
     btcpay_api_key="your-api-key",
-    tollbooth_royalty_address="tollbooth@btcpay.digitalthread.link",
 )
 
 # Create a BTCPay client
@@ -216,39 +215,31 @@ async with BTCPayClient(config.btcpay_host, config.btcpay_api_key, config.btcpay
 | `btcpay_tier_config` | `str \| None` | `None` | JSON string mapping tier names to credit multipliers |
 | `btcpay_user_tiers` | `str \| None` | `None` | JSON string mapping user IDs to tier names |
 | `seed_balance_sats` | `int` | `0` | Free starter balance granted to new users (0 to disable) |
-| `tollbooth_royalty_address` | `str \| None` | `None` | Lightning Address for the 2% royalty payout to the Tollbooth originator |
-| `tollbooth_royalty_percent` | `float` | `0.02` | Royalty percentage (0.02 = 2%) |
-| `tollbooth_royalty_min_sats` | `int` | `10` | Minimum royalty payout in sats (below this, no payout fires) |
 | `authority_public_key` | `str \| None` | `None` | Authority's Nostr npub (Schnorr certificates) or Ed25519 public key (legacy JWT). Required for `purchase_credits`. |
 | `credit_ttl_seconds` | `int \| None` | `None` | Credit expiration in seconds. `None` = no expiration. |
 | `constraints_enabled` | `bool` | `False` | Enable constraint engine evaluation on tool calls. |
 | `constraints_config` | `str \| None` | `None` | JSON constraint configuration (see Constraint Engine section). |
 
-## The Three-Party Settlement
+## The Certification Fee Cascade
 
-Here's where the story takes a turn that even Milo wouldn't expect.
+We didn't build Tollbooth to sell. We built it to **give away** — like the Massachusetts Turnpike Authority. The Authority doesn't operate every toll plaza. Independent operators run the booths. What the Authority does is simpler: it certifies purchase orders and collects a small fee for each certification.
 
-We didn't build Tollbooth to sell. We built it to **give away** — like the Massachusetts Turnpike Authority. The Authority doesn't operate every toll plaza. Independent operators run the booths. What the Authority does is simpler: it collects a small percentage of every fare that flows through infrastructure it designed.
+When a user purchases credits, the settlement involves a certification cascade:
 
-When a user purchases credits, the settlement is three-party:
+1. **Milo** pays the operator's Lightning invoice for the full requested amount
+2. **The operator** holds a pre-funded cert-sat balance at their Authority
+3. **The Authority** deducts a 2% certification fee from the operator's reserve when signing the purchase certificate
+4. **Each Authority** is itself an operator of its upstream Authority — the same 2% fee cascades up through the chain to the Prime Authority
 
-1. **Milo** pays the operator's Lightning invoice
-2. **The operator's** BTCPay Server credits Milo's balance
-3. **Automatically, in the background** — BTCPay creates a small payout to the Tollbooth originator's Lightning Address
-
-A royalty. Two percent of the fare. The operator sees it transparently in their BTCPay dashboard. Milo never knows it happened.
-
-The enforcement is both technical and social. At startup, Tollbooth inspects the operator's BTCPay API key permissions. If the key lacks payout capability, **Tollbooth refuses to start**. Not a warning. A hard stop. The social contract, made executable.
+The certification fee is the operator's cost of doing business — Milo always receives exactly the credits they paid for. The operator pre-funds their Authority reserve and treats the fee as overhead, just like payment processing costs.
 
 ## The Economics
 
-**For Milo (the user):** Nothing changes. Buy credits, use tools, drive the turnpike.
+**For Milo (the user):** Nothing changes. Buy credits, use tools, drive the turnpike. The invoice is always for the full amount requested.
 
-**For the operator:** A free, production-tested monetization framework. No license fee. The 2% royalty is a rounding error compared to the revenue you couldn't collect before. The tollbooth pays for itself on the first transaction.
+**For the operator:** A free, production-tested monetization framework. No license fee. The 2% certification fee is a cost of doing business — pre-fund your Authority reserve and forget about it.
 
-**For the ecosystem:** Revenue scales with adoption, not effort. Every new MCP server that installs Tollbooth becomes a node in the Lightning economy. The infrastructure hums along — collecting its modest fare, maintaining the roads, and making sure the turnpike stays open for everyone.
-
-*It's the transition from mining fees to transaction fees. You stop competing on compute and start collecting on flow.*
+**For the ecosystem:** Revenue scales with adoption, not effort. Every new MCP server that installs Tollbooth becomes a node in the Lightning economy. The fee cascade flows naturally through the Authority chain — no direct payouts, no separate settlement channels.
 
 ## Architecture
 

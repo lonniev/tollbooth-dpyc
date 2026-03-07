@@ -14,92 +14,12 @@ from tollbooth.certificate import CertificateError, verify_certificate_auto
 from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
-from tollbooth.lnurl import LnurlResolutionError, resolve_lightning_address
 from tollbooth.constants import LOW_BALANCE_FLOOR_API_SATS, MAX_INVOICE_SATS
 
 logger = logging.getLogger(__name__)
 
 # Default credit multiplier for users not in tier config
 _DEFAULT_MULTIPLIER = 1
-
-# Sanity ceiling for royalty payouts (independent of sats_to_btc_string ceiling).
-# 2% of a 5M-sat purchase = 100,000 sats — anything above is suspect.
-ROYALTY_PAYOUT_MAX_SATS = 100_000
-
-
-async def _attempt_royalty_payout(
-    btcpay: BTCPayClient,
-    invoice_amount_sats: int,
-    royalty_address: str,
-    royalty_percent: float,
-    royalty_min_sats: int,
-) -> dict[str, Any] | None:
-    """Attempt a royalty payout to the originator's Lightning Address.
-
-    Returns a result dict on success or partial failure, None if below minimum.
-    Never raises — catches all BTCPayError exceptions.
-    """
-    royalty_sats = int(invoice_amount_sats * royalty_percent)
-    if royalty_sats < royalty_min_sats:
-        return None
-
-    if royalty_sats > ROYALTY_PAYOUT_MAX_SATS:
-        logger.error(
-            "Royalty payout %d sats exceeds ceiling of %d — refusing payout. "
-            "Check royalty_percent (%.4f) or invoice amount (%d).",
-            royalty_sats, ROYALTY_PAYOUT_MAX_SATS,
-            royalty_percent, invoice_amount_sats,
-        )
-        return {
-            "royalty_sats": royalty_sats,
-            "royalty_address": royalty_address,
-            "royalty_error": (
-                f"Royalty amount ({royalty_sats:,} sats) exceeds safety ceiling "
-                f"({ROYALTY_PAYOUT_MAX_SATS:,} sats). Payout refused."
-            ),
-        }
-
-    # Resolve Lightning address to BOLT11 invoice (skip if already BOLT11)
-    destination = royalty_address
-    if not royalty_address.startswith("lnbc"):
-        try:
-            destination = await resolve_lightning_address(
-                royalty_address, royalty_sats,
-            )
-            logger.info(
-                "Resolved %s to BOLT11 invoice (%s…) for %d sats.",
-                royalty_address, destination[:20], royalty_sats,
-            )
-        except LnurlResolutionError as e:
-            logger.warning("LNURL resolution failed for %s: %s", royalty_address, e)
-            return {
-                "royalty_sats": royalty_sats,
-                "royalty_address": royalty_address,
-                "royalty_error": f"Lightning address resolution failed: {e}",
-            }
-
-    try:
-        payout = await btcpay.create_payout(destination, royalty_sats)
-        result = {
-            "royalty_sats": royalty_sats,
-            "royalty_address": royalty_address,
-            "payout_destination": destination[:30] + "…" if len(destination) > 30 else destination,
-            "payout_id": payout.get("id", ""),
-            "payout_state": payout.get("state", "Unknown"),
-        }
-        if result["payout_state"] == "AwaitingApproval":
-            result["payout_hint"] = (
-                "Payout is awaiting approval. If payouts never settle, "
-                "check Store Settings > Payout Processors > Automated Lightning Sender."
-            )
-        return result
-    except BTCPayError as e:
-        logger.warning("Royalty payout failed: %s", e)
-        return {
-            "royalty_sats": royalty_sats,
-            "royalty_address": royalty_address,
-            "royalty_error": str(e),
-        }
 
 
 def _get_tier_info(
@@ -244,7 +164,9 @@ async def purchase_credits_tool(
 
     For OPERATOR use: the certified purchase flow. Every credit purchase
     requires a valid Authority-signed Nostr event certificate.
-    The certificate's net_sats (amount after certification fee) determines the invoice amount.
+    The invoice is for the full amount_sats the patron requested — the
+    certification fee is the operator's cost of doing business, not a
+    patron-visible deduction.
 
     If *ban_check_oracle_url* is provided, checks the Oracle for ban status
     before proceeding.  Fail-closed: if the Oracle is unreachable, the
@@ -298,11 +220,12 @@ async def purchase_credits_tool(
     except CertificateError as e:
         return {"success": False, "error": f"Certificate rejected: {e}"}
 
-    # Use net_sats from the certificate as the invoice amount
-    net_sats = cert_claims["net_sats"]
+    # Invoice the patron for the full amount they requested — the
+    # certification fee is absorbed by the operator, not the patron.
+    invoice_sats = cert_claims["amount_sats"]
 
     result = await _create_purchase_invoice(
-        btcpay, cache, user_id, net_sats,
+        btcpay, cache, user_id, invoice_sats,
         tier_config_json, user_tiers_json,
         extra_metadata={"certificate_jti": cert_claims["jti"]},
         default_credit_ttl_seconds=default_credit_ttl_seconds,
@@ -342,16 +265,12 @@ async def check_payment_tool(
     tier_config_json: str | None = None,
     user_tiers_json: str | None = None,
     default_credit_ttl_seconds: int | None = None,
-    royalty_address: str | None = None,
-    royalty_percent: float = 0.02,
-    royalty_min_sats: int = 10,
 ) -> dict[str, Any]:
     """Poll a BTCPay invoice and credit the user's balance on settlement.
 
     Call this after the user pays an invoice from purchase_credits_tool. Safe
     to call multiple times — credits are only granted once per invoice
-    (idempotent via credited_invoices). On settlement, also fires a royalty
-    payout to the Tollbooth originator if royalty_address is configured.
+    (idempotent via credited_invoices).
     """
     try:
         invoice = await btcpay.get_invoice(invoice_id)
@@ -406,15 +325,6 @@ async def check_payment_tool(
             result["credits_granted"] = credited
             result["multiplier"] = multiplier
             result["message"] = f"Payment settled! {credited:,} credits added to your balance."
-
-            # Attempt royalty payout (never blocks credit settlement)
-            if royalty_address:
-                royalty_result = await _attempt_royalty_payout(
-                    btcpay, amount_sats, royalty_address,
-                    royalty_percent, royalty_min_sats,
-                )
-                if royalty_result is not None:
-                    result["royalty_payout"] = royalty_result
 
     elif status == "Expired":
         if invoice_id in ledger.pending_invoices:
@@ -876,15 +786,6 @@ async def btcpay_status_tool(
         config.btcpay_host and config.btcpay_store_id and config.btcpay_api_key
     )
 
-    # Royalty config
-    royalty_enabled = bool(config.tollbooth_royalty_address)
-    result["royalty_config"] = {
-        "enabled": royalty_enabled,
-        "address": config.tollbooth_royalty_address,
-        "percent": config.tollbooth_royalty_percent,
-        "min_sats": config.tollbooth_royalty_min_sats,
-    }
-
     if connection_vars_present and btcpay is not None:
         # Health check
         try:
@@ -911,9 +812,6 @@ async def btcpay_status_tool(
             key_info = await btcpay.get_api_key_info()
             permissions = key_info.get("permissions", [])
             required = ["btcpay.store.cancreateinvoice", "btcpay.store.canviewinvoices"]
-            if royalty_enabled:
-                required.append("btcpay.store.cancreatenonapprovedpullpayments")
-                required.append("btcpay.store.canviewstoresettings")
             present = [p for p in required if p in permissions]
             missing = [p for p in required if p not in permissions]
             result["api_key_permissions"] = {
@@ -926,29 +824,6 @@ async def btcpay_status_tool(
             result["api_key_permissions"] = {"error": str(e)}
         except Exception as e:
             result["api_key_permissions"] = {"error": str(e)}
-
-        # Payout processor check (only if royalties enabled)
-        if royalty_enabled:
-            try:
-                processors = await btcpay.get_payout_processors()
-                lightning_processor = any(
-                    "Lightning" in p.get("name", "") or "Lightning" in p.get("friendlyName", "")
-                    for p in processors
-                )
-                result["payout_processor"] = {
-                    "configured_count": len(processors),
-                    "lightning_automated": lightning_processor,
-                }
-                if not lightning_processor:
-                    result["payout_processor"]["warning"] = (
-                        "No Lightning Payout Processor configured. "
-                        "Royalty payouts will be created but never settle automatically. "
-                        "Go to: Store Settings > Payout Processors > Automated Lightning Sender"
-                    )
-            except BTCPayError as e:
-                result["payout_processor"] = {"error": str(e)}
-            except Exception as e:
-                result["payout_processor"] = {"error": str(e)}
     else:
         result["server_reachable"] = None
         result["store_name"] = None

@@ -316,7 +316,7 @@ class TestPurchaseWithNostrCertificate:
             authority_npub=npub,
         )
         assert result["success"] is True
-        assert result["amount_sats"] == 980  # from certificate net_sats
+        assert result["amount_sats"] == 1000  # full amount_sats, not net_sats
 
     @pytest.mark.asyncio
     async def test_npub_only_config_works(self, nostr_keypair):
@@ -332,7 +332,7 @@ class TestPurchaseWithNostrCertificate:
             authority_npub=npub,
         )
         assert result["success"] is True
-        assert result["amount_sats"] == 500
+        assert result["amount_sats"] == 1000  # full amount_sats, not net_sats
 
     @pytest.mark.asyncio
     async def test_invalid_nostr_certificate_rejected(self, nostr_keypair):

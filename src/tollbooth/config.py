@@ -15,9 +15,6 @@ class TollboothConfig:
     btcpay_tier_config: str | None = None
     btcpay_user_tiers: str | None = None
     seed_balance_sats: int = 0
-    tollbooth_royalty_address: str | None = None
-    tollbooth_royalty_percent: float = 0.02
-    tollbooth_royalty_min_sats: int = 10
     authority_npub: str | None = None  # Nostr npub (Schnorr verification)
     credit_ttl_seconds: int | None = 604800  # 7 days default, None = never
     flush_batch_size: int = 10
