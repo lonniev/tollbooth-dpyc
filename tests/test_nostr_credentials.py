@@ -1458,8 +1458,10 @@ class TestConversationalDmFlow:
         mock_send.assert_called_once()
         welcome_text = mock_send.call_args[0][1]
         assert greeting in welcome_text
+        assert "--- Credential Payload ---" in welcome_text
+        assert "--- Message Provenance ---" in welcome_text
+        assert "DPYC Secure Courier v" in welcome_text
         assert "If you didn't request this" in welcome_text
-        assert "tollbooth-dpyc v" in welcome_text
 
     @pytest.mark.asyncio
     async def test_success_dm_sent_after_receive(self):

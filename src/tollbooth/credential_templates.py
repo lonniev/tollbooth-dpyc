@@ -87,6 +87,20 @@ def validate_payload(
     return payload_fields
 
 
+def render_credential_payload_lines(template: CredentialTemplate) -> list[str]:
+    """Return only the ``key = @@@placeholder@@@`` lines for a template.
+
+    Used by the welcome DM builder to embed the payload section inside a
+    larger structured message without duplicating the Service/Description
+    header that :func:`render_delimited_instructions` includes.
+    """
+    lines: list[str] = []
+    for name in template.fields:
+        placeholder = f"PASTE_YOUR_{name.upper()}_HERE"
+        lines.append(f"  {name} = @@@{placeholder}@@@")
+    return lines
+
+
 def render_delimited_instructions(template: CredentialTemplate) -> str:
     """Render a credential template using @@@ delimiters (mobile-friendly).
 
