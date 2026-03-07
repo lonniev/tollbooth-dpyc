@@ -353,6 +353,69 @@ class TestPurchaseCredits:
         assert result["expected_credits"] == 50000
 
 
+class TestInvoiceDmCallback:
+    """Tests for the invoice_dm_callback parameter on purchase_credits_tool."""
+
+    @pytest.mark.asyncio
+    async def test_dm_callback_fires_on_success(self) -> None:
+        btcpay = _mock_btcpay({
+            "id": "inv-dm-1",
+            "checkoutLink": "https://pay.example.com/inv-dm-1",
+            "expirationTime": "2026-03-08T00:00:00Z",
+        })
+        cache = _mock_cache()
+        dm_cb = AsyncMock()
+
+        result = await purchase_credits_tool(
+            btcpay, cache, "user1", 1000,
+            certificate=_test_certificate(net_sats=1000),
+            authority_npub=_TEST_AUTHORITY_NPUB,
+            invoice_dm_callback=dm_cb,
+        )
+        assert result["success"] is True
+        assert result["invoice_dm_sent"] is True
+        dm_cb.assert_awaited_once()
+        dm_text = dm_cb.call_args[0][0]
+        assert "1,000 sats" in dm_text
+        assert "https://pay.example.com/inv-dm-1" in dm_text
+
+    @pytest.mark.asyncio
+    async def test_dm_callback_failure_does_not_block_purchase(self) -> None:
+        btcpay = _mock_btcpay({
+            "id": "inv-dm-2",
+            "checkoutLink": "https://pay.example.com/inv-dm-2",
+            "expirationTime": "2026-03-08T00:00:00Z",
+        })
+        cache = _mock_cache()
+        dm_cb = AsyncMock(side_effect=Exception("relay down"))
+
+        result = await purchase_credits_tool(
+            btcpay, cache, "user1", 1000,
+            certificate=_test_certificate(net_sats=1000),
+            authority_npub=_TEST_AUTHORITY_NPUB,
+            invoice_dm_callback=dm_cb,
+        )
+        assert result["success"] is True
+        assert result["invoice_dm_sent"] is False
+        assert result["invoice_id"] == "inv-dm-2"
+
+    @pytest.mark.asyncio
+    async def test_no_callback_means_no_dm_key(self) -> None:
+        btcpay = _mock_btcpay({
+            "id": "inv-dm-3",
+            "checkoutLink": "https://pay.example.com/inv-dm-3",
+        })
+        cache = _mock_cache()
+
+        result = await purchase_credits_tool(
+            btcpay, cache, "user1", 1000,
+            certificate=_test_certificate(net_sats=1000),
+            authority_npub=_TEST_AUTHORITY_NPUB,
+        )
+        assert result["success"] is True
+        assert "invoice_dm_sent" not in result
+
+
 # ---------------------------------------------------------------------------
 # check_payment
 # ---------------------------------------------------------------------------

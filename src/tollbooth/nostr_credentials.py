@@ -562,14 +562,21 @@ class NostrCredentialExchange:
         # Build the welcome message for the patron
         from datetime import datetime, timezone
         from tollbooth import __version__ as _tb_version
+        from tollbooth.credential_templates import render_credential_payload_lines
 
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        payload_lines = render_credential_payload_lines(template)
         welcome_text = (
             f"{greeting}\n\n"
-            f"{instructions}\n"
+            f"--- Credential Payload ---\n"
+            + "\n".join(payload_lines) + "\n"
             f"  poison = @@@{poison}@@@\n\n"
             f"IMPORTANT: include the anti-replay token exactly as shown.\n\n"
-            f"— tollbooth-dpyc v{_tb_version} | {timestamp}\n\n"
+            f"--- Message Provenance ---\n"
+            f"Service: {template.description or template.service}\n"
+            f"Operator: {self._npub}\n"
+            f"Sent: {timestamp}\n"
+            f"Protocol: DPYC Secure Courier v{_tb_version}\n\n"
             f"Your reply is end-to-end encrypted — "
             f"only this service can read it.\n"
             f"If you didn't request this, simply ignore this message."

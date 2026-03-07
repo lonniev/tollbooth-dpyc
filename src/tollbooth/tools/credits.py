@@ -7,6 +7,7 @@ import json
 import logging
 import platform
 from datetime import date, datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from tollbooth.btcpay_client import BTCPayClient, BTCPayAuthError, BTCPayError
@@ -74,6 +75,7 @@ async def _create_purchase_invoice(
     user_tiers_json: str | None,
     extra_metadata: dict[str, Any] | None = None,
     default_credit_ttl_seconds: int | None = None,
+    invoice_dm_callback: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Shared logic: validate amount, create BTCPay invoice, record in ledger.
 
@@ -145,6 +147,23 @@ async def _create_purchase_invoice(
     }
     if ttl is not None:
         result["credit_ttl_seconds"] = ttl
+
+    # Fire-and-forget invoice DM — failure never blocks the purchase
+    if invoice_dm_callback is not None:
+        dm_text = (
+            f"Lightning Invoice -- {amount_sats:,} sats\n\n"
+            f"Pay here: {checkout_link}\n\n"
+            f"Invoice: {invoice_id}\n"
+            f"Expires: {expiry}\n\n"
+            f"After paying, your credits appear automatically."
+        )
+        try:
+            await invoice_dm_callback(dm_text)
+            result["invoice_dm_sent"] = True
+        except Exception:
+            logger.warning("Invoice DM delivery failed for %s.", user_id)
+            result["invoice_dm_sent"] = False
+
     return result
 
 
@@ -159,6 +178,7 @@ async def purchase_credits_tool(
     user_tiers_json: str | None = None,
     default_credit_ttl_seconds: int | None = None,
     ban_check_oracle_url: str | None = None,
+    invoice_dm_callback: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Create a BTCPay invoice after verifying an Authority certificate.
 
@@ -229,6 +249,7 @@ async def purchase_credits_tool(
         tier_config_json, user_tiers_json,
         extra_metadata={"certificate_jti": cert_claims["jti"]},
         default_credit_ttl_seconds=default_credit_ttl_seconds,
+        invoice_dm_callback=invoice_dm_callback,
     )
     if result.get("success"):
         result["certificate_jti"] = cert_claims["jti"]
