@@ -35,9 +35,6 @@ class TestConfigBackwardsCompatibility:
         assert config.btcpay_tier_config is None
         assert config.btcpay_user_tiers is None
         assert config.seed_balance_sats == 0
-        assert config.tollbooth_royalty_address is None
-        assert config.tollbooth_royalty_percent == 0.02
-        assert config.tollbooth_royalty_min_sats == 10
         assert config.authority_npub is None
         assert config.credit_ttl_seconds == 604800
         assert config.flush_batch_size == 10
@@ -54,9 +51,6 @@ class TestConfigBackwardsCompatibility:
             btcpay_tier_config='{"tiers":{}}',
             btcpay_user_tiers='{"users":{}}',
             seed_balance_sats=500,
-            tollbooth_royalty_address="bc1q...",
-            tollbooth_royalty_percent=0.05,
-            tollbooth_royalty_min_sats=20,
             authority_npub="npub1xxx",
             credit_ttl_seconds=3600,
             flush_batch_size=5,
@@ -70,9 +64,6 @@ class TestConfigBackwardsCompatibility:
         assert config.btcpay_tier_config == '{"tiers":{}}'
         assert config.btcpay_user_tiers == '{"users":{}}'
         assert config.seed_balance_sats == 500
-        assert config.tollbooth_royalty_address == "bc1q..."
-        assert config.tollbooth_royalty_percent == 0.05
-        assert config.tollbooth_royalty_min_sats == 20
         assert config.authority_npub == "npub1xxx"
         assert config.credit_ttl_seconds == 3600
         assert config.flush_batch_size == 5
