@@ -11,7 +11,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 DEFAULT_REGISTRY_URL = (
-    "https://raw.githubusercontent.com/lonniev/dpyc-community/main/members.json"
+    "https://raw.githubusercontent.com/lonniev/dpyc-community/main/members/read-only-lookup-cache.json"
 )
 
 
@@ -22,7 +22,7 @@ class RegistryError(Exception):
 class DPYCRegistry:
     """Cached DPYC community membership lookup via HTTP.
 
-    Fetches the community members.json from the registry URL and caches it
+    Fetches the community lookup cache from the registry URL and caches it
     with a monotonic-clock TTL. Any HTTP, parse, or structure error raises
     ``RegistryError`` (fail closed — no silent pass-through).
     """

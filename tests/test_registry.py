@@ -227,4 +227,4 @@ async def test_convenience_function():
 def test_default_registry_url():
     """DEFAULT_REGISTRY_URL points to dpyc-community on GitHub."""
     assert "dpyc-community" in DEFAULT_REGISTRY_URL
-    assert "members.json" in DEFAULT_REGISTRY_URL
+    assert "read-only-lookup-cache.json" in DEFAULT_REGISTRY_URL
