@@ -1417,6 +1417,39 @@ class TestConcurrentExchanges:
         assert (sender_npub, "openai") in ex._pending_poisons
 
     @pytest.mark.asyncio
+    async def test_receive_uses_service_hint_for_template_matching(self):
+        """receive(service=...) selects the correct template even when payload has no service field.
+
+        Both templates share an 'api_key' field. Without the service hint,
+        field-subset matching would pick whichever template comes first.
+        The resolved_service from the service arg must drive selection.
+        """
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(
+            nsec=operator.nsec, templates=self._two_service_templates(),
+        )
+
+        sender_npub = sender.public_key.bech32()
+        # Only set OpenAI poison — we're testing service="openai"
+        ex._pending_poisons[(sender_npub, "openai")] = ("ai-fox-99", time.time() + 600)
+
+        # Payload has only api_key — valid for openai, also subset of x
+        # No "service" field in payload
+        payload = {"api_key": "sk-test-key", "poison": "ai-fox-99"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(sender_npub, service="openai")
+
+        assert result["success"] is True
+        # Template matched should be openai (validated field is api_key)
+        assert result["service"] == "openai"
+
+    @pytest.mark.asyncio
     async def test_second_open_channel_same_service_replaces_poison(self):
         """Re-opening a channel for the same service overwrites the old poison."""
         ex = _make_exchange(templates=self._two_service_templates())
