@@ -311,6 +311,9 @@ class NostrCredentialExchange:
         self._consumed_ids: set[str] = set()
         # Poison slugs: {(recipient_npub, service): (phrase, expiry_timestamp)}
         self._pending_poisons: dict[tuple[str, str], tuple[str, float]] = {}
+        # Ephemeral agent keys for self-DM avoidance:
+        # {(recipient_npub, service): PrivateKey}
+        self._ephemeral_agents: dict[tuple[str, str], PrivateKey] = {}
 
     @property
     def enabled(self) -> bool:
@@ -442,10 +445,115 @@ class NostrCredentialExchange:
                 + "; ".join(errors)
             )
 
+    def _send_dm_as(
+        self,
+        sender_key: PrivateKey,
+        recipient_npub: str,
+        message_text: str,
+    ) -> None:
+        """Send a DM using an explicit sender key instead of the operator key.
+
+        Same dual-protocol logic as ``send_dm()`` but signs and encrypts
+        with the provided ``sender_key``.  Used for ephemeral agent DMs
+        when the operator is self-onboarding (recipient == operator npub).
+
+        Args:
+            sender_key: The PrivateKey to use for signing/encrypting.
+            recipient_npub: Recipient's npub (bech32).
+            message_text: Plaintext message to encrypt and send.
+        """
+        if not self._enabled:
+            raise CourierNotReady("Secure Courier not enabled.")
+
+        if not _HAS_NIP44:
+            raise CourierNotReady("NIP-44 module required for outbound DMs.")
+
+        try:
+            recipient_hex = _npub_to_hex(recipient_npub)
+        except Exception as exc:
+            raise CourierValidationError(
+                f"Invalid recipient npub: {exc}"
+            ) from exc
+
+        sender_privkey_hex = sender_key.hex()
+        sender_pubkey_hex = sender_key.public_key.hex()
+
+        nip17_ok = False
+        nip04_ok = False
+        errors: list[str] = []
+
+        # ── NIP-17 gift wrap (kind 1059) ─────────────────────────────
+        try:
+            message = self._build_gift_wrap_with(
+                sender_privkey_hex, sender_pubkey_hex,
+                recipient_hex, message_text,
+            )
+            results = self._publish_to_relays(message) or []
+            accepted = sum(1 for _, ok, _ in results if ok)
+            nip17_ok = accepted > 0
+            if nip17_ok:
+                logger.info(
+                    "Sent NIP-17 agent DM to %s (%d/%d relays)",
+                    recipient_npub[:20], accepted, len(results),
+                )
+            else:
+                details = "; ".join(
+                    f"{url}: {err}" for url, ok, err in results if not ok
+                )
+                errors.append(f"NIP-17: {details}")
+        except Exception as exc:
+            errors.append(f"NIP-17: {exc}")
+            logger.debug("NIP-17 agent send failed: %s", exc)
+
+        # ── NIP-04 legacy DM (kind 4) ───────────────────────────────
+        try:
+            message = self._build_nip04_dm_with(
+                sender_privkey_hex, sender_pubkey_hex,
+                recipient_hex, message_text,
+            )
+            results = self._publish_to_relays(message) or []
+            accepted = sum(1 for _, ok, _ in results if ok)
+            nip04_ok = accepted > 0
+            if nip04_ok:
+                logger.info(
+                    "Sent NIP-04 agent DM to %s (%d/%d relays)",
+                    recipient_npub[:20], accepted, len(results),
+                )
+            else:
+                details = "; ".join(
+                    f"{url}: {err}" for url, ok, err in results if not ok
+                )
+                errors.append(f"NIP-04: {details}")
+        except Exception as exc:
+            errors.append(f"NIP-04: {exc}")
+            logger.debug("NIP-04 agent send failed: %s", exc)
+
+        if not nip17_ok and not nip04_ok:
+            raise CourierError(
+                f"All relay sends failed for both protocols: "
+                + "; ".join(errors)
+            )
+
     def _build_gift_wrap(
         self, recipient_hex: str, message_text: str,
     ) -> str:
         """Build a NIP-17 gift-wrapped DM (kind 1059 → 13 → 14).
+
+        Returns the Nostr protocol message (``["EVENT", {...}]``) ready
+        for relay publishing.
+        """
+        return self._build_gift_wrap_with(
+            self._privkey_hex, self._pubkey_hex, recipient_hex, message_text,
+        )
+
+    def _build_gift_wrap_with(
+        self,
+        sender_privkey_hex: str,
+        sender_pubkey_hex: str,
+        recipient_hex: str,
+        message_text: str,
+    ) -> str:
+        """Build a NIP-17 gift-wrapped DM with explicit sender keys.
 
         Returns the Nostr protocol message (``["EVENT", {...}]``) ready
         for relay publishing.
@@ -455,22 +563,22 @@ class NostrCredentialExchange:
             "kind": _KIND_PRIVATE_DM,
             "content": message_text,
             "tags": [["p", recipient_hex]],
-            "pubkey": self._pubkey_hex,
+            "pubkey": sender_pubkey_hex,
             "created_at": int(time.time()),
         }
 
         # Layer 2: Kind 13 seal — signed by sender, content NIP-44 encrypted
         seal_content = _nip44_encrypt(
-            json.dumps(rumor), self._privkey_hex, recipient_hex,
+            json.dumps(rumor), sender_privkey_hex, recipient_hex,
         )
         seal = Event(
             kind=_KIND_SEAL,
             content=seal_content,
             tags=[],  # No tags on seal (metadata protection)
-            pubkey=self._pubkey_hex,
+            pubkey=sender_pubkey_hex,
             created_at=_randomize_timestamp(),
         )
-        seal.sign(self._privkey_hex)
+        seal.sign(sender_privkey_hex)
 
         # Layer 1: Kind 1059 gift wrap — random ephemeral key
         ephemeral_sk = PrivateKey()
@@ -496,22 +604,38 @@ class NostrCredentialExchange:
         Returns the Nostr protocol message (``["EVENT", {...}]``) ready
         for relay publishing.
         """
+        return self._build_nip04_dm_with(
+            self._privkey_hex, self._pubkey_hex, recipient_hex, message_text,
+        )
+
+    def _build_nip04_dm_with(
+        self,
+        sender_privkey_hex: str,
+        sender_pubkey_hex: str,
+        recipient_hex: str,
+        message_text: str,
+    ) -> str:
+        """Build a NIP-04 kind 4 encrypted DM with explicit sender keys.
+
+        Returns the Nostr protocol message (``["EVENT", {...}]``) ready
+        for relay publishing.
+        """
         if not _HAS_NIP04:
             raise CourierNotReady("NIP-04 module required for legacy DMs.")
 
         from tollbooth.nip04 import encrypt as _nip04_encrypt
 
         encrypted = _nip04_encrypt(
-            message_text, self._privkey_hex, recipient_hex,
+            message_text, sender_privkey_hex, recipient_hex,
         )
         event = Event(
             kind=_KIND_ENCRYPTED_DM,
             content=encrypted,
             tags=[["p", recipient_hex]],
-            pubkey=self._pubkey_hex,
+            pubkey=sender_pubkey_hex,
             created_at=int(time.time()),
         )
-        event.sign(self._privkey_hex)
+        event.sign(sender_privkey_hex)
         return event.to_message()
 
     async def open_channel(
@@ -582,6 +706,25 @@ class NostrCredentialExchange:
             f"If you didn't request this, simply ignore this message."
         )
 
+        # Detect self-DM (operator onboarding themselves)
+        is_self_dm = recipient_npub == self._npub
+        agent_key: PrivateKey | None = None
+
+        if is_self_dm:
+            agent_key = PrivateKey()
+            self._ephemeral_agents[(recipient_npub, service)] = agent_key
+            # Replace operator npub in welcome text so patron replies
+            # to the ephemeral agent (not the operator's own npub)
+            agent_npub = agent_key.public_key.bech32()
+            welcome_text = welcome_text.replace(
+                f"Operator: {self._npub}",
+                f"Operator: {agent_npub}",
+            )
+            logger.info(
+                "Self-DM detected — using ephemeral agent %s for %s/%s",
+                agent_npub[:20], recipient_npub[:20], service,
+            )
+
         # Store poison for validation on receive
         if recipient_npub:
             expiry = time.time() + self._freshness_window
@@ -597,9 +740,15 @@ class NostrCredentialExchange:
             "poison": poison,
         }
 
+        if agent_key is not None:
+            result["agent_npub"] = agent_key.public_key.bech32()
+
         if recipient_npub:
             try:
-                self.send_dm(recipient_npub, welcome_text)
+                if agent_key is not None:
+                    self._send_dm_as(agent_key, recipient_npub, welcome_text)
+                else:
+                    self.send_dm(recipient_npub, welcome_text)
                 result["welcome_dm_sent"] = True
                 result["message"] = (
                     f"A welcome DM has been sent to {recipient_npub}. "
@@ -732,6 +881,12 @@ class NostrCredentialExchange:
 
         error_template = self._resolve_error_template(service)
 
+        # Resolve ephemeral agent key for self-DM decryption
+        agent_key = self._ephemeral_agents.get(
+            (sender_npub, poison_service),
+        ) if poison_service else None
+        decrypt_privkey = agent_key.hex() if agent_key else None
+
         # Pop-and-acknowledge: decrypt each candidate, consume it from
         # the queue regardless of validity, and reply with the outcome.
         dm = None
@@ -753,7 +908,10 @@ class NostrCredentialExchange:
 
             # Decrypt
             try:
-                pt = self._decrypt_dm(candidate, sender_hex)
+                pt = self._decrypt_dm(
+                    candidate, sender_hex,
+                    decrypt_privkey_hex=decrypt_privkey,
+                )
             except CourierValidationError:
                 self._pop_event(event_id)
                 undecryptable += 1
@@ -806,6 +964,10 @@ class NostrCredentialExchange:
         # Consume the poison — one-time use
         if poison_key and poison_key in self._pending_poisons:
             del self._pending_poisons[poison_key]
+
+        # Discard ephemeral agent key — one-time use
+        if poison_key and poison_key in self._ephemeral_agents:
+            del self._ephemeral_agents[poison_key]
 
         # Parse credential payload (already parsed above, but re-parse
         # cleanly for the validation path below)
@@ -1213,10 +1375,15 @@ class NostrCredentialExchange:
         # Even in nip44_only mode we listen for kind 4 so we can
         # surface a clear rejection message during decrypt.
 
+        # Collect pubkeys to listen for: operator + any active ephemeral agents
+        listen_pubkeys = [self._pubkey_hex]
+        for agent_key in self._ephemeral_agents.values():
+            listen_pubkeys.append(agent_key.public_key.hex())
+
         # Filter 1: NIP-04 DMs addressed to us (p-tag match)
         filter_nip04: dict[str, Any] = {
             "kinds": [_KIND_ENCRYPTED_DM],
-            "#p": [self._pubkey_hex],
+            "#p": listen_pubkeys,
             "since": since,
             "limit": 50,
         }
@@ -1227,7 +1394,7 @@ class NostrCredentialExchange:
         # ECDH/MAC failures on decrypt.
         filter_giftwrap_tagged: dict[str, Any] = {
             "kinds": [_KIND_GIFT_WRAP],
-            "#p": [self._pubkey_hex],
+            "#p": listen_pubkeys,
             "since": since - _TIMESTAMP_FUZZ_SECONDS,  # 48h wider for NIP-17 fuzz
             "limit": 50,
         }
@@ -1355,24 +1522,45 @@ class NostrCredentialExchange:
             return candidates
 
     def _decrypt_dm(
-        self, event: dict[str, Any], sender_hex: str,
+        self,
+        event: dict[str, Any],
+        sender_hex: str,
+        *,
+        decrypt_privkey_hex: str | None = None,
     ) -> str:
         """Decrypt a DM event (NIP-04 or NIP-17 gift wrap).
+
+        Args:
+            event: The raw Nostr event dict.
+            sender_hex: Expected sender pubkey (hex).
+            decrypt_privkey_hex: If provided, use this private key for
+                decryption instead of the operator's key.  Used when an
+                ephemeral agent key was used for the channel.
 
         Returns the plaintext content string.
         """
         kind = event.get("kind", 0)
 
         if kind == _KIND_GIFT_WRAP:
-            return self._unwrap_gift_wrap(event, sender_hex)
+            return self._unwrap_gift_wrap(
+                event, sender_hex,
+                decrypt_privkey_hex=decrypt_privkey_hex,
+            )
 
         if kind == _KIND_ENCRYPTED_DM:
-            return self._decrypt_nip04_dm(event, sender_hex)
+            return self._decrypt_nip04_dm(
+                event, sender_hex,
+                decrypt_privkey_hex=decrypt_privkey_hex,
+            )
 
         raise CourierValidationError(f"Unexpected event kind: {kind}")
 
     def _decrypt_nip04_dm(
-        self, event: dict[str, Any], sender_hex: str,
+        self,
+        event: dict[str, Any],
+        sender_hex: str,
+        *,
+        decrypt_privkey_hex: str | None = None,
     ) -> str:
         """Decrypt a NIP-04 kind 4 DM."""
         if self._nip44_only:
@@ -1386,9 +1574,10 @@ class NostrCredentialExchange:
                 "NIP-04 decryption not available. Install cryptography."
             )
 
+        privkey_hex = decrypt_privkey_hex or self._privkey_hex
         content = event.get("content", "")
         try:
-            plaintext = _nip04_decrypt(content, self._privkey_hex, sender_hex)
+            plaintext = _nip04_decrypt(content, privkey_hex, sender_hex)
         except Exception as exc:
             raise CourierValidationError(
                 f"NIP-04 decryption failed: {exc}"
@@ -1402,7 +1591,11 @@ class NostrCredentialExchange:
         return plaintext
 
     def _unwrap_gift_wrap(
-        self, event: dict[str, Any], sender_hex: str,
+        self,
+        event: dict[str, Any],
+        sender_hex: str,
+        *,
+        decrypt_privkey_hex: str | None = None,
     ) -> str:
         """Unwrap a NIP-17 gift wrap (kind 1059 → kind 13 → kind 14).
 
@@ -1413,11 +1606,19 @@ class NostrCredentialExchange:
 
         The gift wrap is encrypted with NIP-44 using a random one-time key,
         so we decrypt with our privkey + the gift wrap's pubkey.
+
+        Args:
+            event: The raw gift wrap event dict.
+            sender_hex: Expected sender pubkey (hex).
+            decrypt_privkey_hex: If provided, use this private key for
+                decryption instead of the operator's key.
         """
         if not _HAS_NIP44:
             raise CourierValidationError(
                 "NIP-44 decryption not available for gift wrap unwrapping."
             )
+
+        privkey_hex = decrypt_privkey_hex or self._privkey_hex
 
         # Layer 1: Decrypt gift wrap content with our privkey + wrap pubkey
         wrap_pubkey = event.get("pubkey", "")
@@ -1425,7 +1626,7 @@ class NostrCredentialExchange:
 
         try:
             seal_json = _nip44_decrypt(
-                wrap_content, self._privkey_hex, wrap_pubkey,
+                wrap_content, privkey_hex, wrap_pubkey,
             )
         except Exception as exc:
             raise CourierValidationError(
@@ -1457,7 +1658,7 @@ class NostrCredentialExchange:
         # Layer 3: Decrypt seal content with our privkey + sender pubkey
         try:
             dm_json = _nip44_decrypt(
-                seal.get("content", ""), self._privkey_hex, seal_pubkey,
+                seal.get("content", ""), privkey_hex, seal_pubkey,
             )
         except Exception as exc:
             raise CourierValidationError(

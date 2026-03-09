@@ -1932,3 +1932,268 @@ class TestNpubToHex:
         bad_npub = npub[:-1] + flipped
         with pytest.raises(ValueError, match="bech32 checksum failed"):
             _npub_to_hex(bad_npub)
+
+
+# ── Ephemeral Agent (Self-DM Avoidance) Tests ───────────────────────
+
+
+class TestEphemeralAgentSelfDm:
+    """Tests for ephemeral agent keypair when operator self-onboards."""
+
+    @pytest.mark.asyncio
+    async def test_self_dm_generates_ephemeral_agent(self):
+        """open_channel with recipient == operator npub populates _ephemeral_agents."""
+        ex = _make_exchange()
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "_send_dm_as"), \
+             patch.object(ex, "send_dm"):
+            result = await ex.open_channel(
+                "x", greeting="Self-onboard", recipient_npub=ex.npub,
+            )
+
+        assert ("x" in result["service"])
+        assert "agent_npub" in result
+        agent_npub = result["agent_npub"]
+        assert agent_npub.startswith("npub1")
+        assert agent_npub != ex.npub
+
+        # Ephemeral agent stored internally
+        key = (ex.npub, "x")
+        assert key in ex._ephemeral_agents
+        assert ex._ephemeral_agents[key].public_key.bech32() == agent_npub
+
+    @pytest.mark.asyncio
+    async def test_self_dm_welcome_uses_ephemeral_key(self):
+        """Self-DM calls _send_dm_as (not send_dm) with the ephemeral key."""
+        ex = _make_exchange()
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "_send_dm_as") as mock_agent_send, \
+             patch.object(ex, "send_dm") as mock_normal_send:
+            await ex.open_channel(
+                "x", greeting="Self-onboard", recipient_npub=ex.npub,
+            )
+
+        mock_agent_send.assert_called_once()
+        mock_normal_send.assert_not_called()
+
+        # Verify the agent key was passed as first arg
+        agent_key_arg = mock_agent_send.call_args[0][0]
+        assert isinstance(agent_key_arg, PrivateKey)
+        # Verify recipient is operator's npub
+        assert mock_agent_send.call_args[0][1] == ex.npub
+
+    @pytest.mark.asyncio
+    async def test_non_self_dm_unchanged(self):
+        """Normal (non-self) DM uses send_dm, not _send_dm_as."""
+        ex = _make_exchange()
+        other = PrivateKey()
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "_send_dm_as") as mock_agent_send, \
+             patch.object(ex, "send_dm") as mock_normal_send:
+            result = await ex.open_channel(
+                "x", greeting="Hello", recipient_npub=other.public_key.bech32(),
+            )
+
+        mock_normal_send.assert_called_once()
+        mock_agent_send.assert_not_called()
+        assert "agent_npub" not in result
+        assert (other.public_key.bech32(), "x") not in ex._ephemeral_agents
+
+    def test_subscription_includes_ephemeral_pubkeys(self):
+        """Relay subscription #p filter includes ephemeral agent pubkeys."""
+        ex = _make_exchange()
+
+        # Inject an ephemeral agent
+        agent_key = PrivateKey()
+        ex._ephemeral_agents[(ex.npub, "x")] = agent_key
+
+        # Capture the filters sent to the relay
+        mock_ws = MagicMock()
+        mock_ws.recv = MagicMock(side_effect=[
+            json.dumps(["EOSE", "sub1"]),
+        ])
+
+        with patch("tollbooth.nostr_credentials.create_connection", return_value=mock_ws):
+            ex._subscribe_to_relays()
+
+        # Parse the REQ message
+        sent = mock_ws.send.call_args_list[0][0][0]
+        req = json.loads(sent)
+        # req = ["REQ", sub_id, filter1, filter2, ...]
+        assert req[0] == "REQ"
+        filter_nip04 = req[2]
+        filter_giftwrap = req[3]
+
+        # Both filters should include operator + ephemeral pubkeys
+        expected_pubkeys = [ex._pubkey_hex, agent_key.public_key.hex()]
+        assert filter_nip04["#p"] == expected_pubkeys
+        assert filter_giftwrap["#p"] == expected_pubkeys
+
+    @pytest.mark.asyncio
+    async def test_receive_decrypts_with_ephemeral_key(self):
+        """NIP-04 DM encrypted to ephemeral agent key decrypts correctly."""
+        operator = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        # Simulate self-DM: operator is both sender and recipient
+        agent_key = PrivateKey()
+        ex._ephemeral_agents[(operator.public_key.bech32(), "x")] = agent_key
+        ex._pending_poisons[(operator.public_key.bech32(), "x")] = (
+            "test-poison-42", time.time() + 900,
+        )
+
+        # Patron (operator) sends DM encrypted to the ephemeral agent's pubkey
+        payload = {
+            "api_key": "sk-self-123",
+            "api_secret": "self-secret",
+            "poison": "test-poison-42",
+        }
+        event = _make_nip04_event(
+            operator, agent_key.public_key.hex(), payload,
+        )
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                operator.public_key.bech32(), service="x",
+            )
+
+        assert result["success"] is True
+        assert result["credentials"]["api_key"] == "sk-self-123"
+        assert result["encryption"] == "nip04"
+
+    @pytest.mark.asyncio
+    async def test_receive_decrypts_nip17_with_ephemeral_key(self):
+        """NIP-17 gift wrap encrypted to ephemeral agent key decrypts correctly."""
+        operator = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        agent_key = PrivateKey()
+        ex._ephemeral_agents[(operator.public_key.bech32(), "x")] = agent_key
+        ex._pending_poisons[(operator.public_key.bech32(), "x")] = (
+            "test-poison-99", time.time() + 900,
+        )
+
+        payload = {
+            "api_key": "sk-wrapped-self",
+            "api_secret": "wrapped-secret",
+            "poison": "test-poison-99",
+        }
+        # Gift wrap encrypted to agent key (not operator key)
+        event = _make_gift_wrap_event(
+            operator, agent_key.hex(), agent_key.public_key.hex(), payload,
+        )
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                operator.public_key.bech32(), service="x",
+            )
+
+        assert result["success"] is True
+        assert result["credentials"]["api_key"] == "sk-wrapped-self"
+        assert result["encryption"] == "nip44"
+
+    @pytest.mark.asyncio
+    async def test_ephemeral_agent_cleaned_up_after_receive(self):
+        """Ephemeral agent key is deleted after successful receive."""
+        operator = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        agent_key = PrivateKey()
+        poison_key = (operator.public_key.bech32(), "x")
+        ex._ephemeral_agents[poison_key] = agent_key
+        ex._pending_poisons[poison_key] = ("cleanup-test-11", time.time() + 900)
+
+        payload = {
+            "api_key": "key",
+            "api_secret": "secret",
+            "poison": "cleanup-test-11",
+        }
+        event = _make_nip04_event(
+            operator, agent_key.public_key.hex(), payload,
+        )
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            await ex.receive(operator.public_key.bech32(), service="x")
+
+        # Both poison and ephemeral agent should be cleaned up
+        assert poison_key not in ex._ephemeral_agents
+        assert poison_key not in ex._pending_poisons
+
+    def test_build_gift_wrap_with_explicit_key(self):
+        """_build_gift_wrap_with uses the provided key for rumor + seal."""
+        ex = _make_exchange()
+        explicit_key = PrivateKey()
+        recipient = PrivateKey()
+
+        message = ex._build_gift_wrap_with(
+            explicit_key.hex(),
+            explicit_key.public_key.hex(),
+            recipient.public_key.hex(),
+            "test message",
+        )
+
+        # The message is a JSON-encoded EVENT
+        parsed = json.loads(message)
+        assert parsed[0] == "EVENT"
+        wrap_event = parsed[1]
+        assert wrap_event["kind"] == _KIND_GIFT_WRAP
+
+        # Unwrap to verify the explicit key was used in the seal
+        from tollbooth.nip44 import decrypt as nip44_decrypt
+        seal_json = nip44_decrypt(
+            wrap_event["content"],
+            recipient.hex(),
+            wrap_event["pubkey"],
+        )
+        seal = json.loads(seal_json)
+        assert seal["kind"] == _KIND_SEAL
+        assert seal["pubkey"] == explicit_key.public_key.hex()
+
+        # Decrypt seal to verify rumor pubkey
+        dm_json = nip44_decrypt(
+            seal["content"], recipient.hex(), seal["pubkey"],
+        )
+        dm = json.loads(dm_json)
+        assert dm["kind"] == _KIND_PRIVATE_DM
+        assert dm["pubkey"] == explicit_key.public_key.hex()
+        assert dm["content"] == "test message"
+
+    def test_build_nip04_dm_with_explicit_key(self):
+        """_build_nip04_dm_with uses the provided key for event + encryption."""
+        ex = _make_exchange()
+        explicit_key = PrivateKey()
+        recipient = PrivateKey()
+
+        message = ex._build_nip04_dm_with(
+            explicit_key.hex(),
+            explicit_key.public_key.hex(),
+            recipient.public_key.hex(),
+            "test nip04 message",
+        )
+
+        parsed = json.loads(message)
+        assert parsed[0] == "EVENT"
+        event = parsed[1]
+        assert event["kind"] == _KIND_ENCRYPTED_DM
+        assert event["pubkey"] == explicit_key.public_key.hex()
+
+        # Decrypt with recipient's key + explicit sender pubkey
+        from tollbooth.nip04 import decrypt as nip04_decrypt
+        plaintext = nip04_decrypt(
+            event["content"],
+            recipient.hex(),
+            explicit_key.public_key.hex(),
+        )
+        assert plaintext == "test nip04 message"
