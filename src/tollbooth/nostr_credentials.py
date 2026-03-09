@@ -864,8 +864,8 @@ class NostrCredentialExchange:
             )
 
         # Resolve poison expectation up front
-        poison_service = self._resolve_service(service)
-        poison_key = (sender_npub, poison_service) if poison_service else None
+        resolved_service = self._resolve_service(service)
+        poison_key = (sender_npub, resolved_service) if resolved_service else None
         expected = self._pending_poisons.get(poison_key) if poison_key else None
 
         if expected is not None:
@@ -883,8 +883,8 @@ class NostrCredentialExchange:
 
         # Resolve ephemeral agent key for self-DM decryption
         agent_key = self._ephemeral_agents.get(
-            (sender_npub, poison_service),
-        ) if poison_service else None
+            (sender_npub, resolved_service),
+        ) if resolved_service else None
         decrypt_privkey = agent_key.hex() if agent_key else None
 
         # Pop-and-acknowledge: decrypt each candidate, consume it from
@@ -983,9 +983,8 @@ class NostrCredentialExchange:
         # Remove poison from payload so it doesn't confuse template matching
         payload.pop("poison", None)
 
-        # Match template
-        payload_service = payload.get("service")
-        template = self._match_template(payload_service, payload)
+        # Match template — use the server's resolved service, not the payload
+        template = self._match_template(resolved_service, payload)
 
         # Validate against template
         try:
