@@ -117,6 +117,32 @@ class DPYCRegistry:
             "name": svc.get("name", "unknown"),
         }
 
+    async def resolve_service_by_name(self, service_name: str) -> dict[str, str]:
+        """Find a service by name across ALL members (any role).
+
+        Scans the full registry for a member whose ``services[]`` contains
+        a service with the given name. Returns the first active match.
+
+        Returns ``{"npub": member_npub, "url": service_url, "name": service_name}``.
+        Raises ``RegistryError`` if not found.
+        """
+        members = await self._fetch()
+
+        for member in members:
+            if member.get("status") != "active":
+                continue
+            for svc in member.get("services") or []:
+                if svc.get("name") == service_name:
+                    return {
+                        "npub": member["npub"],
+                        "url": svc["url"],
+                        "name": svc["name"],
+                    }
+
+        raise RegistryError(
+            f"No active member with service '{service_name}' found in DPYC registry."
+        )
+
     async def _fetch(self) -> list[dict[str, Any]]:
         """Return the cached member list, refreshing if stale."""
         now = time.monotonic()
@@ -205,5 +231,22 @@ async def resolve_oracle_service(
     registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
     try:
         return await registry.resolve_oracle_service(operator_npub)
+    finally:
+        await registry.close()
+
+
+async def resolve_service_by_name(
+    service_name: str,
+    registry_url: str = DEFAULT_REGISTRY_URL,
+    cache_ttl_seconds: int = 300,
+) -> dict[str, str]:
+    """Convenience function: find a service by name across all members.
+
+    Returns ``{"npub": member_npub, "url": service_url, "name": service_name}``.
+    Creates a one-shot ``DPYCRegistry``, performs the lookup, and closes.
+    """
+    registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
+    try:
+        return await registry.resolve_service_by_name(service_name)
     finally:
         await registry.close()
