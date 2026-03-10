@@ -121,6 +121,7 @@ The `tollbooth.tools` package provides functions your MCP server wraps as tools.
 | `resolve_authority_service` | Convenience: finds an operator's upstream Authority service URL in one call. |
 | `resolve_authority_npub` | Finds an operator's upstream Authority npub from the registry. |
 | `resolve_oracle_service` | Walks the authority chain to the Prime Authority and returns the Oracle service URL. |
+| `resolve_service_by_name` | Finds a service by name across all active members (any role). Used for peer discovery of community services like OAuth2 collectors. |
 
 ### Vault Backends
 
