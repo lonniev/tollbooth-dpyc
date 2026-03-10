@@ -892,6 +892,122 @@ class TestCredentialVault:
         assert result["credentials"]["api_key"] == "rotated"
         assert result["encryption"] == "nip04"
 
+    @pytest.mark.asyncio
+    async def test_receive_restores_pending_state_from_vault(self):
+        """Cold-start recovery: pending poison + agent key restored from vault."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        vault = MockCredentialVault()
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=vault)
+
+        # 1) open_channel — stores pending state in-memory AND vault
+        with patch.object(ex, "send_dm"), \
+             patch.object(ex, "_send_dm_as"):
+            channel = await ex.open_channel(
+                "x",
+                greeting="Hello",
+                recipient_npub=sender.public_key.bech32(),
+            )
+
+        poison = channel["poison"]
+
+        # Verify vault received the pending blob
+        vault_blob = await vault.fetch_credentials(
+            "__pending__x", sender.public_key.bech32(),
+        )
+        assert vault_blob is not None
+
+        # 2) Simulate cold start — wipe in-memory state
+        ex._pending_poisons.clear()
+        ex._ephemeral_agents.clear()
+
+        # 3) Inject a valid DM containing the poison
+        payload = {"api_key": "restored-key", "api_secret": "restored-secret"}
+        delimited = _to_delimited({**payload, "poison": poison})
+        event = _make_nip04_event(
+            sender, operator.public_key.hex(), delimited,
+        )
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        # 4) receive — should restore from vault and succeed
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x",
+            )
+
+        assert result["success"] is True
+        assert result["credentials"]["api_key"] == "restored-key"
+
+        # 5) Vault pending entry should be cleaned up
+        pending_after = await vault.fetch_credentials(
+            "__pending__x", sender.public_key.bech32(),
+        )
+        assert pending_after is None
+
+    @pytest.mark.asyncio
+    async def test_receive_restores_ephemeral_agent_from_vault(self):
+        """Cold-start recovery: ephemeral agent key restored for self-DM."""
+        operator = PrivateKey()
+        vault = MockCredentialVault()
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=vault)
+
+        # 1) open_channel as self-DM (recipient == operator)
+        with patch.object(ex, "send_dm"), \
+             patch.object(ex, "_send_dm_as"):
+            channel = await ex.open_channel(
+                "x",
+                greeting="Hello",
+                recipient_npub=operator.public_key.bech32(),
+            )
+
+        poison = channel["poison"]
+        agent_npub = channel.get("agent_npub")
+        assert agent_npub is not None  # self-DM creates an agent
+
+        # Verify vault has agent_nsec_hex in the pending blob
+        vault_blob_raw = await vault.fetch_credentials(
+            "__pending__x", operator.public_key.bech32(),
+        )
+        assert vault_blob_raw is not None
+
+        # Grab the agent key before clearing (we need it for encryption)
+        poison_key = (operator.public_key.bech32(), "x")
+        agent_key = ex._ephemeral_agents[poison_key]
+        agent_pubkey_hex = agent_key.public_key.hex()
+
+        # 2) Simulate cold start
+        ex._pending_poisons.clear()
+        ex._ephemeral_agents.clear()
+
+        # 3) Inject DM encrypted to the ephemeral agent (self-DM scenario)
+        payload = {"api_key": "agent-key", "api_secret": "agent-secret"}
+        delimited = _to_delimited({**payload, "poison": poison})
+        event = _make_nip04_event(
+            operator, agent_pubkey_hex, delimited,
+        )
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        # 4) receive — should restore agent from vault and decrypt
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                operator.public_key.bech32(), service="x",
+            )
+
+        assert result["success"] is True
+        assert result["credentials"]["api_key"] == "agent-key"
+
+        # 5) Vault pending entry cleaned up
+        pending_after = await vault.fetch_credentials(
+            "__pending__x", operator.public_key.bech32(),
+        )
+        assert pending_after is None
+
 
 # ── NostrProfile tests ────────────────────────────────────────────────
 

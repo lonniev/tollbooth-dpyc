@@ -730,6 +730,18 @@ class NostrCredentialExchange:
             expiry = time.time() + self._freshness_window
             self._pending_poisons[(recipient_npub, service)] = (poison, expiry)
 
+            # Persist pending state to survive cold starts
+            if self._credential_vault is not None:
+                pending_blob: dict[str, Any] = {
+                    "poison": poison,
+                    "expiry": expiry,
+                }
+                if agent_key is not None:
+                    pending_blob["agent_nsec_hex"] = agent_key.hex()
+                await self._vault_store(
+                    f"__pending__{service}", recipient_npub, pending_blob,
+                )
+
         result: dict[str, Any] = {
             "success": True,
             "npub": self._npub,
@@ -868,6 +880,42 @@ class NostrCredentialExchange:
         poison_key = (sender_npub, resolved_service) if resolved_service else None
         expected = self._pending_poisons.get(poison_key) if poison_key else None
 
+        # Cold-start recovery: restore pending state from vault
+        if expected is None and self._credential_vault is not None and poison_key:
+            pending = await self._vault_fetch(
+                f"__pending__{resolved_service}", sender_npub,
+            )
+            if pending and "poison" in pending:
+                p_expiry = pending.get("expiry", 0)
+                if time.time() <= p_expiry:
+                    self._pending_poisons[poison_key] = (
+                        pending["poison"], p_expiry,
+                    )
+                    # Restore ephemeral agent key if present
+                    agent_nsec_hex = pending.get("agent_nsec_hex")
+                    if agent_nsec_hex:
+                        from pynostr.key import PrivateKey as _PK
+                        restored_key = _PK(bytes.fromhex(agent_nsec_hex))
+                        self._ephemeral_agents[poison_key] = restored_key
+                        logger.info(
+                            "Restored ephemeral agent %s from vault for %s/%s",
+                            restored_key.public_key.bech32()[:20],
+                            sender_npub[:16], resolved_service,
+                        )
+                    expected = self._pending_poisons.get(poison_key)
+                    logger.info(
+                        "Restored pending poison from vault for %s/%s",
+                        sender_npub[:16], resolved_service,
+                    )
+                else:
+                    # Expired — clean up vault
+                    try:
+                        await self._credential_vault.delete_credentials(
+                            f"__pending__{resolved_service}", sender_npub,
+                        )
+                    except Exception:
+                        pass
+
         if expected is not None:
             expected_phrase, expiry = expected
             if time.time() > expiry:
@@ -968,6 +1016,15 @@ class NostrCredentialExchange:
         # Discard ephemeral agent key — one-time use
         if poison_key and poison_key in self._ephemeral_agents:
             del self._ephemeral_agents[poison_key]
+
+        # Clean up vault pending state
+        if self._credential_vault is not None and resolved_service:
+            try:
+                await self._credential_vault.delete_credentials(
+                    f"__pending__{resolved_service}", sender_npub,
+                )
+            except Exception:
+                pass  # best-effort cleanup
 
         # Parse credential payload (already parsed above, but re-parse
         # cleanly for the validation path below)
