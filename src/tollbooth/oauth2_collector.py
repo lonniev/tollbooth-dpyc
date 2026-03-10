@@ -1,0 +1,238 @@
+"""Generic OAuth2 Authorization Code flow helpers for Tollbooth MCP services.
+
+Builds authorization URLs, exchanges codes for tokens, and retrieves
+encrypted codes from an external OAuth2 collector. Uses the patron's
+npub as the OAuth state parameter — no server-side pending-state storage
+needed. The collector encrypts the auth code with SHA-256(state) and this
+module decrypts it on retrieval.
+
+Provider-agnostic: callers supply authorize_endpoint, token_endpoint,
+scope, etc. MCP services build thin wrappers that bind provider-specific
+constants (e.g. Schwab URLs, scopes).
+
+Not exported from ``__init__.py`` — import directly::
+
+    from tollbooth.oauth2_collector import begin_oauth_flow, retrieve_code_from_collector
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import logging
+import time
+import urllib.parse
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+class OAuthCollectorError(Exception):
+    """Base exception for OAuth2 collector operations."""
+
+
+# ---------------------------------------------------------------------------
+# URL builder
+# ---------------------------------------------------------------------------
+
+
+def build_authorize_url(
+    authorize_endpoint: str,
+    client_id: str,
+    redirect_uri: str,
+    state: str,
+    *,
+    scope: str | None = None,
+    extra_params: dict[str, str] | None = None,
+) -> str:
+    """Construct an OAuth2 authorization URL.
+
+    Args:
+        authorize_endpoint: Full URL of the provider's authorize endpoint.
+        client_id: OAuth2 client / app key.
+        redirect_uri: Registered redirect URI (typically the collector callback).
+        state: Opaque state token (the patron's npub in Tollbooth flows).
+        scope: Optional OAuth2 scope string (e.g. ``"readonly"``).
+        extra_params: Additional query parameters to include.
+
+    Returns:
+        Fully-encoded authorization URL string.
+    """
+    params: dict[str, str] = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "state": state,
+    }
+    if scope is not None:
+        params["scope"] = scope
+    if extra_params:
+        params.update(extra_params)
+    return f"{authorize_endpoint}?{urllib.parse.urlencode(params)}"
+
+
+# ---------------------------------------------------------------------------
+# Begin flow
+# ---------------------------------------------------------------------------
+
+
+def begin_oauth_flow(
+    patron_npub: str,
+    client_id: str,
+    redirect_uri: str,
+    authorize_endpoint: str,
+    *,
+    scope: str | None = None,
+    provider_name: str = "the provider",
+    extra_params: dict[str, str] | None = None,
+) -> dict:
+    """Start a new OAuth flow. Returns the authorization URL and status dict.
+
+    Uses the patron's npub as the OAuth state parameter — the collector
+    encrypts the auth code with SHA-256(npub) and the MCP server decrypts
+    it on retrieval.
+
+    Args:
+        patron_npub: Patron Nostr public key (``npub1...``).
+        client_id: OAuth2 client / app key.
+        redirect_uri: Registered redirect URI.
+        authorize_endpoint: Provider's authorize URL.
+        scope: Optional OAuth2 scope.
+        provider_name: Human-readable name for status messages.
+        extra_params: Additional query parameters.
+
+    Returns:
+        Dict with ``status``, ``authorize_url``, and ``message`` keys.
+    """
+    url = build_authorize_url(
+        authorize_endpoint,
+        client_id,
+        redirect_uri,
+        patron_npub,
+        scope=scope,
+        extra_params=extra_params,
+    )
+    return {
+        "status": "pending",
+        "authorize_url": url,
+        "message": (
+            f"Open this URL in your browser to authorize with {provider_name}. "
+            "After authorizing, call check_oauth_status to confirm."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Token exchange
+# ---------------------------------------------------------------------------
+
+
+async def exchange_code_for_token(
+    code: str,
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str,
+    token_endpoint: str,
+) -> dict:
+    """Exchange an authorization code for an access/refresh token pair.
+
+    POST to ``token_endpoint`` with Basic Auth and
+    ``grant_type=authorization_code``. Adds a computed ``expires_at``
+    field to the returned token dict.
+
+    Args:
+        code: The authorization code from the collector.
+        client_id: OAuth2 client / app key.
+        client_secret: OAuth2 client secret.
+        redirect_uri: Redirect URI used during authorization.
+        token_endpoint: Provider's token endpoint URL.
+
+    Returns:
+        Token dict with ``access_token``, ``refresh_token``, ``expires_at``, etc.
+
+    Raises:
+        httpx.HTTPStatusError: If the token endpoint returns an error status.
+    """
+    credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+
+    async with httpx.AsyncClient() as http:
+        resp = await http.post(
+            token_endpoint,
+            headers={
+                "Authorization": f"Basic {credentials}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            content=urllib.parse.urlencode({
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+            }),
+        )
+        resp.raise_for_status()
+        token = resp.json()
+
+    token["expires_at"] = time.time() + token.get("expires_in", 1800)
+    return token
+
+
+# ---------------------------------------------------------------------------
+# Collector retrieval + decryption
+# ---------------------------------------------------------------------------
+
+
+def decrypt_collector_code(encrypted_b64: str, state: str) -> str:
+    """Decrypt an authorization code encrypted by the collector.
+
+    XOR with SHA-256(state) keystream — symmetric with the collector's
+    ``_encrypt_code`` implementation.
+
+    Args:
+        encrypted_b64: URL-safe base64-encoded encrypted code.
+        state: The same state token used during authorization (the npub).
+
+    Returns:
+        Plaintext authorization code.
+
+    Raises:
+        OAuthCollectorError: If decryption produces invalid UTF-8.
+    """
+    key = hashlib.sha256(state.encode()).digest()
+    encrypted = base64.urlsafe_b64decode(encrypted_b64)
+    decrypted = bytes(c ^ key[i % 32] for i, c in enumerate(encrypted))
+    try:
+        return decrypted.decode()
+    except UnicodeDecodeError as exc:
+        raise OAuthCollectorError(
+            "Decryption produced invalid UTF-8 — state token may be wrong."
+        ) from exc
+
+
+async def retrieve_code_from_collector(
+    collector_url: str,
+    state_token: str,
+) -> str | None:
+    """Fetch an authorization code from the external OAuth2 collector.
+
+    The collector stores codes encrypted with SHA-256(state). This function
+    retrieves the encrypted code and decrypts it.
+
+    Args:
+        collector_url: Base URL of the collector service.
+        state_token: The state token (patron npub) used during authorization.
+
+    Returns:
+        Plaintext code string, or ``None`` if not yet available.
+
+    Raises:
+        OAuthCollectorError: If decryption fails.
+        httpx.HTTPStatusError: If the collector returns an unexpected error.
+    """
+    url = f"{collector_url.rstrip('/')}/oauth/retrieve"
+    async with httpx.AsyncClient() as http:
+        resp = await http.get(url, params={"state": state_token})
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        encrypted_code = resp.json()["code"]
+    return decrypt_collector_code(encrypted_code, state_token)
