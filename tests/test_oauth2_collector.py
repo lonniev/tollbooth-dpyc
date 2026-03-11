@@ -241,7 +241,7 @@ class TestRetrieveCodeFromCollector:
 
         assert result == "auth-code-abc"
         mock_http.get.assert_called_once_with(
-            "https://collector.example.com/oauth/retrieve",
+            "https://collector.example.com/mcp/oauth/retrieve",
             params={"state": state},
         )
 
@@ -288,6 +288,6 @@ class TestRetrieveCodeFromCollector:
 
         assert result == "xyz"
         mock_http.get.assert_called_once_with(
-            "https://collector.example.com/oauth/retrieve",
+            "https://collector.example.com/mcp/oauth/retrieve",
             params={"state": state},
         )

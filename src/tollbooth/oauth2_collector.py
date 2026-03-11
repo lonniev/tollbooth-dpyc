@@ -228,7 +228,7 @@ async def retrieve_code_from_collector(
         OAuthCollectorError: If decryption fails.
         httpx.HTTPStatusError: If the collector returns an unexpected error.
     """
-    url = f"{collector_url.rstrip('/')}/oauth/retrieve"
+    url = f"{collector_url.rstrip('/')}/mcp/oauth/retrieve"
     async with httpx.AsyncClient() as http:
         resp = await http.get(url, params={"state": state_token})
         if resp.status_code == 404:
