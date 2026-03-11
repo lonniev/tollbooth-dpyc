@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -47,7 +48,7 @@ class TestBuildAuthorizeUrl:
         assert "client_id=my-key" in url
         assert "redirect_uri=" in url
         assert "state=state123" in url
-        assert "response_mode=form_post" in url
+        assert "response_mode" not in url
 
     def test_includes_scope_when_provided(self):
         url = build_authorize_url(
@@ -223,10 +224,24 @@ class TestRetrieveCodeFromCollector:
         state = "npub1abc123"
         encrypted = _fake_encrypt("auth-code-abc", state)
 
+        sse_body = (
+            "event: message\n"
+            "data: "
+            + json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "structuredContent": {"found": True, "code": encrypted}
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"code": encrypted}
-        mock_response.raise_for_status = MagicMock()
+        mock_response.text = sse_body
 
         mock_http = AsyncMock()
         mock_http.post.return_value = mock_response
@@ -241,15 +256,32 @@ class TestRetrieveCodeFromCollector:
             )
 
         assert result == "auth-code-abc"
-        mock_http.post.assert_called_once_with(
-            "https://collector.example.com/mcp/oauth/retrieve",
-            json={"state": state},
-        )
+        call_args = mock_http.post.call_args
+        assert call_args[0][0] == "https://collector.example.com/mcp/"
 
     @pytest.mark.asyncio
-    async def test_returns_none_on_404(self):
+    async def test_returns_none_when_not_found(self):
+        sse_body = (
+            "event: message\n"
+            "data: "
+            + json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "structuredContent": {
+                            "found": False,
+                            "error": "not found or expired",
+                        }
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
         mock_response = MagicMock()
-        mock_response.status_code = 404
+        mock_response.status_code = 200
+        mock_response.text = sse_body
 
         mock_http = AsyncMock()
         mock_http.post.return_value = mock_response
@@ -270,10 +302,24 @@ class TestRetrieveCodeFromCollector:
         state = "npub1xyz"
         encrypted = _fake_encrypt("xyz", state)
 
+        sse_body = (
+            "event: message\n"
+            "data: "
+            + json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "structuredContent": {"found": True, "code": encrypted}
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"code": encrypted}
-        mock_response.raise_for_status = MagicMock()
+        mock_response.text = sse_body
 
         mock_http = AsyncMock()
         mock_http.post.return_value = mock_response
@@ -288,7 +334,5 @@ class TestRetrieveCodeFromCollector:
             )
 
         assert result == "xyz"
-        mock_http.post.assert_called_once_with(
-            "https://collector.example.com/mcp/oauth/retrieve",
-            json={"state": state},
-        )
+        call_args = mock_http.post.call_args
+        assert call_args[0][0] == "https://collector.example.com/mcp/"

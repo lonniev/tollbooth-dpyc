@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import time
 import urllib.parse
@@ -64,7 +65,6 @@ def build_authorize_url(
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "state": state,
-        "response_mode": "form_post",
     }
     if scope is not None:
         params["scope"] = scope
@@ -229,11 +229,32 @@ async def retrieve_code_from_collector(
         OAuthCollectorError: If decryption fails.
         httpx.HTTPStatusError: If the collector returns an unexpected error.
     """
-    url = f"{collector_url.rstrip('/')}/mcp/oauth/retrieve"
+    url = f"{collector_url.rstrip('/')}/mcp/"
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {"name": "retrieve_code", "arguments": {"state": state_token}},
+        "id": 1,
+    }
     async with httpx.AsyncClient() as http:
-        resp = await http.post(url, json={"state": state_token})
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        encrypted_code = resp.json()["code"]
-    return decrypt_collector_code(encrypted_code, state_token)
+        resp = await http.post(
+            url,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+        )
+        if resp.status_code != 200:
+            raise OAuthCollectorError(
+                f"Collector returned HTTP {resp.status_code}"
+            )
+        text = resp.text
+        for line in text.strip().split("\n"):
+            if line.startswith("data: "):
+                data = json.loads(line[6:])
+                content = data.get("result", {}).get("structuredContent", {})
+                if not content.get("found"):
+                    return None
+                return decrypt_collector_code(content["code"], state_token)
+    return None
