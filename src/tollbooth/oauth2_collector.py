@@ -64,6 +64,7 @@ def build_authorize_url(
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "state": state,
+        "response_mode": "form_post",
     }
     if scope is not None:
         params["scope"] = scope
@@ -230,7 +231,7 @@ async def retrieve_code_from_collector(
     """
     url = f"{collector_url.rstrip('/')}/mcp/oauth/retrieve"
     async with httpx.AsyncClient() as http:
-        resp = await http.get(url, params={"state": state_token})
+        resp = await http.post(url, json={"state": state_token})
         if resp.status_code == 404:
             return None
         resp.raise_for_status()

@@ -47,6 +47,7 @@ class TestBuildAuthorizeUrl:
         assert "client_id=my-key" in url
         assert "redirect_uri=" in url
         assert "state=state123" in url
+        assert "response_mode=form_post" in url
 
     def test_includes_scope_when_provided(self):
         url = build_authorize_url(
@@ -228,7 +229,7 @@ class TestRetrieveCodeFromCollector:
         mock_response.raise_for_status = MagicMock()
 
         mock_http = AsyncMock()
-        mock_http.get.return_value = mock_response
+        mock_http.post.return_value = mock_response
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
         mock_http.__aexit__ = AsyncMock(return_value=False)
 
@@ -240,9 +241,9 @@ class TestRetrieveCodeFromCollector:
             )
 
         assert result == "auth-code-abc"
-        mock_http.get.assert_called_once_with(
+        mock_http.post.assert_called_once_with(
             "https://collector.example.com/mcp/oauth/retrieve",
-            params={"state": state},
+            json={"state": state},
         )
 
     @pytest.mark.asyncio
@@ -251,7 +252,7 @@ class TestRetrieveCodeFromCollector:
         mock_response.status_code = 404
 
         mock_http = AsyncMock()
-        mock_http.get.return_value = mock_response
+        mock_http.post.return_value = mock_response
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
         mock_http.__aexit__ = AsyncMock(return_value=False)
 
@@ -275,7 +276,7 @@ class TestRetrieveCodeFromCollector:
         mock_response.raise_for_status = MagicMock()
 
         mock_http = AsyncMock()
-        mock_http.get.return_value = mock_response
+        mock_http.post.return_value = mock_response
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
         mock_http.__aexit__ = AsyncMock(return_value=False)
 
@@ -287,7 +288,7 @@ class TestRetrieveCodeFromCollector:
             )
 
         assert result == "xyz"
-        mock_http.get.assert_called_once_with(
+        mock_http.post.assert_called_once_with(
             "https://collector.example.com/mcp/oauth/retrieve",
-            params={"state": state},
+            json={"state": state},
         )
