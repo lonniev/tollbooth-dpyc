@@ -34,3 +34,18 @@ CREATE TABLE IF NOT EXISTS tool_demand (
     count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (tool_name, window_key)
 );
+
+-- Operator pricing models (runtime-configurable tool pricing)
+CREATE TABLE IF NOT EXISTS operator_pricing_models (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    operator TEXT NOT NULL,
+    name TEXT NOT NULL,
+    model_json JSONB NOT NULL,        -- {name, tools: [...], pipeline: [...]}
+    is_active BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_per_operator
+    ON operator_pricing_models (operator) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_pricing_models_operator
+    ON operator_pricing_models (operator);

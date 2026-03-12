@@ -319,7 +319,7 @@ class TestEnsureSchema:
             return_value=_response(200, _sql_result(rows=[], command="CREATE"))
         )
         await vault.ensure_schema()
-        assert vault._client.post.call_count == 9  # 5 tables + 4 indexes
+        assert vault._client.post.call_count == 12  # 6 tables + 6 indexes
 
     @pytest.mark.asyncio
     async def test_schema_statements_use_if_not_exists(self) -> None:

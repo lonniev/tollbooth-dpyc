@@ -25,3 +25,5 @@ class TollboothConfig:
     # Constraint Engine (opt-in)
     constraints_enabled: bool = False
     constraints_config: str | None = None  # JSON string of constraint config
+    # Pricing Model cache TTL (PricingResolver)
+    pricing_cache_ttl_seconds: float = 300.0

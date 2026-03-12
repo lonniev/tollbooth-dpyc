@@ -22,6 +22,7 @@ from tollbooth.oracle_protocol import OracleProtocol
 from tollbooth.ledger_cache import LedgerCache
 from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_API_SATS, ECOSYSTEM_LINKS
 from tollbooth.pricing import ToolPricing
+from tollbooth.pricing_model import PricingModel, ToolPrice, PipelineStep
 from tollbooth.vaults import TheBrainVault, NeonVault, NeonQueryError
 from tollbooth.ots import MerkleTree, InclusionProof, OTSCalendarClient
 from tollbooth.nostr_certificate import verify_nostr_certificate, NOSTR_CERT_KIND
@@ -46,6 +47,16 @@ try:
 except ImportError:
     OracleClient = None  # type: ignore[assignment,misc]
     OracleClientError = None  # type: ignore[assignment,misc]
+
+try:
+    from tollbooth.pricing_store import PricingModelStore
+except ImportError:
+    PricingModelStore = None  # type: ignore[assignment,misc]
+
+try:
+    from tollbooth.pricing_resolver import PricingResolver
+except ImportError:
+    PricingResolver = None  # type: ignore[assignment,misc]
 
 try:
     from tollbooth.nostr_audit import NostrAuditPublisher, AuditedVault
@@ -192,6 +203,11 @@ __all__ = [
     "NeonVault",
     "NeonQueryError",
     "ToolPricing",
+    "PricingModel",
+    "ToolPrice",
+    "PipelineStep",
+    "PricingModelStore",
+    "PricingResolver",
     "ToolTier",
     "MAX_INVOICE_SATS",
     "LOW_BALANCE_FLOOR_API_SATS",

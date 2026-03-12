@@ -56,6 +56,7 @@ class ConstraintGate:
     def __init__(self, config: TollboothConfig) -> None:
         self._enabled = config.constraints_enabled
         self._engine: ConstraintEngine | None = None
+        self._resolver: Any | None = None  # PricingResolver (avoid circular import)
 
         if self._enabled and config.constraints_config:
             try:
@@ -64,6 +65,14 @@ class ConstraintGate:
             except (json.JSONDecodeError, ConfigError) as e:
                 logger.error("Failed to load constraint config: %s", e)
                 self._enabled = False
+
+    def attach_resolver(self, resolver: Any) -> None:
+        """Wire a :class:`PricingResolver` as a dynamic engine source.
+
+        When attached, :meth:`check_async` will prefer the resolver's
+        engine over the static one loaded from config.
+        """
+        self._resolver = resolver
 
     @property
     def enabled(self) -> bool:
@@ -131,6 +140,83 @@ class ConstraintGate:
             return error, 0
 
         # Apply price modifier if present
+        effective_cost = base_cost
+        if result.price_modifier:
+            effective_cost = result.price_modifier.apply_to(base_cost)
+
+        return None, effective_cost
+
+    async def check_async(
+        self,
+        tool_name: str,
+        base_cost: int,
+        ledger: Any,
+        npub: str = "",
+        membership_tier: str = "default",
+        invocation_count: int = 0,
+        global_demand: dict[str, int] | None = None,
+    ) -> tuple[dict[str, Any] | None, int]:
+        """Async version of :meth:`check` that prefers the resolver's engine.
+
+        If a :class:`PricingResolver` is attached via :meth:`attach_resolver`,
+        its dynamically-loaded engine takes precedence over the static one.
+        Falls back to the static engine (or passthrough) on resolver failure.
+        """
+        engine = self._engine  # static default
+
+        if self._resolver is not None:
+            try:
+                dynamic_engine = await self._resolver.get_constraint_engine()
+                if dynamic_engine is not None:
+                    engine = dynamic_engine
+            except Exception:
+                logger.warning(
+                    "PricingResolver.get_constraint_engine() failed; "
+                    "falling back to static engine",
+                    exc_info=True,
+                )
+
+        if engine is None and not self._enabled:
+            return None, base_cost
+
+        if engine is None:
+            return None, base_cost
+
+        context = ConstraintContext(
+            ledger=LedgerSnapshot(
+                balance_api_sats=ledger.balance_api_sats,
+                total_deposited_api_sats=ledger.total_deposited_api_sats,
+                total_consumed_api_sats=ledger.total_consumed_api_sats,
+                total_expired_api_sats=ledger.total_expired_api_sats,
+            ),
+            patron=PatronIdentity(
+                npub=npub,
+                membership_tier=membership_tier,
+            ),
+            env=EnvironmentSnapshot(
+                utc_now=datetime.now(timezone.utc),
+                tool_name=tool_name,
+                invocation_count=invocation_count,
+                global_demand=tuple(
+                    (global_demand or {}).items()
+                ),
+            ),
+        )
+
+        result = engine.evaluate(tool_name, context)
+
+        if not result.allowed:
+            error: dict[str, Any] = {
+                "success": False,
+                "error": result.message or f"Constraint denied: {result.reason}",
+                "constraint_reason": result.reason,
+            }
+            if result.retry_after:
+                error["retry_after"] = result.retry_after.isoformat()
+            if result.metadata:
+                error["constraint_metadata"] = result.metadata
+            return error, 0
+
         effective_cost = base_cost
         if result.price_modifier:
             effective_cost = result.price_modifier.apply_to(base_cost)

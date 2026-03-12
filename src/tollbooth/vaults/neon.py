@@ -275,6 +275,26 @@ class NeonVault:
             "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()"
             ")"
         )
+        # -- Operator pricing models (runtime-configurable tool pricing) --
+        await self._execute(
+            "CREATE TABLE IF NOT EXISTS operator_pricing_models ("
+            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            "    operator TEXT NOT NULL,"
+            "    name TEXT NOT NULL,"
+            "    model_json JSONB NOT NULL,"
+            "    is_active BOOLEAN DEFAULT false,"
+            "    created_at TIMESTAMPTZ DEFAULT now(),"
+            "    updated_at TIMESTAMPTZ DEFAULT now()"
+            ")"
+        )
+        await self._execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS one_active_per_operator "
+            "ON operator_pricing_models (operator) WHERE is_active = true"
+        )
+        await self._execute(
+            "CREATE INDEX IF NOT EXISTS idx_pricing_models_operator "
+            "ON operator_pricing_models (operator)"
+        )
 
     # -- Global demand counters (surge pricing) --------------------------------
 

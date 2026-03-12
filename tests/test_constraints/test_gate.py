@@ -412,3 +412,135 @@ class TestWildcardConstraintsApplied:
         )
         assert denial2 is None
         assert cost2 == 0
+
+
+# ---------------------------------------------------------------------------
+# attach_resolver + check_async
+# ---------------------------------------------------------------------------
+
+
+class _MockResolver:
+    """Minimal mock PricingResolver for gate tests."""
+
+    def __init__(self, engine: Any = None, *, fail: bool = False):
+        self._engine = engine
+        self._fail = fail
+
+    async def get_constraint_engine(self) -> Any:
+        if self._fail:
+            raise RuntimeError("resolver failed")
+        return self._engine
+
+
+class TestAttachResolver:
+    def test_attach_sets_resolver(self):
+        config = TollboothConfig()
+        gate = ConstraintGate(config)
+        resolver = _MockResolver()
+        gate.attach_resolver(resolver)
+        assert gate._resolver is resolver
+
+
+class TestCheckAsyncNoResolver:
+    @pytest.mark.asyncio
+    async def test_passthrough_when_disabled(self):
+        """check_async returns (None, base_cost) when gate is disabled."""
+        config = TollboothConfig()
+        gate = ConstraintGate(config)
+
+        denial, cost = await gate.check_async(
+            tool_name="search",
+            base_cost=100,
+            ledger=_StubLedger(),
+        )
+        assert denial is None
+        assert cost == 100
+
+    @pytest.mark.asyncio
+    async def test_uses_static_engine(self):
+        """check_async uses static engine when no resolver attached."""
+        config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=_free_trial_config(first_n_free=3),
+        )
+        gate = ConstraintGate(config)
+
+        denial, cost = await gate.check_async(
+            tool_name="search",
+            base_cost=100,
+            ledger=_StubLedger(),
+            invocation_count=0,
+        )
+        assert denial is None
+        assert cost == 0  # free trial
+
+
+class TestCheckAsyncWithResolver:
+    @pytest.mark.asyncio
+    async def test_prefers_resolver_engine(self):
+        """check_async uses dynamic engine from resolver over static one."""
+        from tollbooth.constraints.config import load_constraints
+
+        # Static engine: free trial (makes cost 0)
+        config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=_free_trial_config(first_n_free=3),
+        )
+        gate = ConstraintGate(config)
+
+        # Dynamic engine: 50% coupon (makes cost 50)
+        dynamic_cfg = json.loads(_coupon_config(discount_percent=50.0))
+        dynamic_engine = load_constraints(dynamic_cfg)
+        resolver = _MockResolver(engine=dynamic_engine)
+        gate.attach_resolver(resolver)
+
+        denial, cost = await gate.check_async(
+            tool_name="search",
+            base_cost=100,
+            ledger=_StubLedger(),
+            invocation_count=0,
+        )
+        assert denial is None
+        assert cost == 50  # coupon from resolver, not free trial from static
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_static_on_resolver_failure(self):
+        """check_async falls back to static engine when resolver fails."""
+        config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=_free_trial_config(first_n_free=3),
+        )
+        gate = ConstraintGate(config)
+
+        resolver = _MockResolver(fail=True)
+        gate.attach_resolver(resolver)
+
+        denial, cost = await gate.check_async(
+            tool_name="search",
+            base_cost=100,
+            ledger=_StubLedger(),
+            invocation_count=0,
+        )
+        assert denial is None
+        assert cost == 0  # free trial from static engine
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_static_when_resolver_returns_none(self):
+        """check_async uses static engine when resolver returns None engine."""
+        config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=_free_trial_config(first_n_free=3),
+        )
+        gate = ConstraintGate(config)
+
+        resolver = _MockResolver(engine=None)
+        gate.attach_resolver(resolver)
+
+        denial, cost = await gate.check_async(
+            tool_name="search",
+            base_cost=100,
+            ledger=_StubLedger(),
+            invocation_count=0,
+        )
+        assert denial is None
+        assert cost == 0  # free trial from static engine
