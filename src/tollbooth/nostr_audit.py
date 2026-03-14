@@ -287,6 +287,14 @@ class AuditedVault:
         self._inner = inner
         self._publisher = publisher
 
+    async def _execute(
+        self,
+        query: str,
+        params: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        """Pure passthrough to inner vault (SQL access for PricingModelStore etc.)."""
+        return await self._inner._execute(query, params)
+
     async def store_ledger(self, user_id: str, ledger_json: str) -> str:
         """Delegate to inner vault, then publish audit event."""
         result = await self._inner.store_ledger(user_id, ledger_json)
