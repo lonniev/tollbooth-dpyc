@@ -40,6 +40,8 @@ from typing import Any
 from tollbooth.constraints.base import (
     ConstraintContext,
     ConstraintResult,
+    ConstraintSchema,
+    ParamSchema,
     PriceModifier,
     ToolConstraint,
 )
@@ -231,4 +233,19 @@ class JsonExpressionConstraint(ToolConstraint):
             deny_reason=data.get("deny_reason", "expression_denied"),
             deny_message=data.get("deny_message", "Constraint expression not satisfied."),
             price_modifier=data.get("price_modifier"),
+        )
+
+    @classmethod
+    def schema(cls) -> ConstraintSchema:
+        return ConstraintSchema(
+            type="json_expression",
+            category="Dynamic",
+            description="Evaluate a safe JSON expression tree against the constraint context. Supports and/or/not logic with field comparisons.",
+            params=[
+                ParamSchema(name="expression", type="string", description="JSON dict representing the condition tree (and/or/not combinators with field/op/value leaves)."),
+                ParamSchema(name="on_match", type="string", required=False, default="allow", description="Action when expression is true: 'allow' or 'deny'."),
+                ParamSchema(name="deny_reason", type="string", required=False, default="expression_denied", description="Machine-readable denial reason code."),
+                ParamSchema(name="deny_message", type="string", required=False, default="Constraint expression not satisfied.", description="Human-readable denial message."),
+                ParamSchema(name="price_modifier", type="string", required=False, description="Optional PriceModifier dict applied on match (only for on_match='allow')."),
+            ],
         )

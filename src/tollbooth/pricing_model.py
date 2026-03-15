@@ -20,6 +20,10 @@ class ToolPrice:
     price_sats: int
     category: str = ""
     intent: str = ""
+    price_type: str = "flat"           # "flat" | "percent" | "formula"
+    price_formula: str | None = None   # percent expression or formula string
+    min_cost: int = 0                  # floor — minimum cost in sats
+    max_cost: int | None = None        # ceiling — maximum cost in sats
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -30,6 +34,14 @@ class ToolPrice:
             d["category"] = self.category
         if self.intent:
             d["intent"] = self.intent
+        if self.price_type != "flat":
+            d["price_type"] = self.price_type
+        if self.price_formula is not None:
+            d["price_formula"] = self.price_formula
+        if self.min_cost > 0:
+            d["min_cost"] = self.min_cost
+        if self.max_cost is not None:
+            d["max_cost"] = self.max_cost
         return d
 
     @classmethod
@@ -39,6 +51,10 @@ class ToolPrice:
             price_sats=int(data["price_sats"]),
             category=data.get("category", ""),
             intent=data.get("intent", ""),
+            price_type=data.get("price_type", "flat"),
+            price_formula=data.get("price_formula", None),
+            min_cost=int(data.get("min_cost", 0)),
+            max_cost=int(data["max_cost"]) if data.get("max_cost") is not None else None,
         )
 
 

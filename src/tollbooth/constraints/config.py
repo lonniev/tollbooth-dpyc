@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from tollbooth.constraints.base import ToolConstraint
+from tollbooth.constraints.base import ConstraintSchema, ToolConstraint
 from tollbooth.constraints.engine import ConstraintEngine
 from tollbooth.constraints.expression import JsonExpressionConstraint
 from tollbooth.constraints.periodic import PeriodicRefreshConstraint
@@ -184,3 +184,8 @@ def validate_config(config: dict[str, Any]) -> list[str]:
                 )
 
     return errors
+
+
+def get_all_schemas() -> list[ConstraintSchema]:
+    """Return the schema for every registered constraint type."""
+    return [cls.schema() for cls in CONSTRAINT_REGISTRY.values()]

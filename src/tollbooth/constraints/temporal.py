@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 from tollbooth.constraints.base import (
     ConstraintContext,
     ConstraintResult,
+    ConstraintSchema,
+    ParamSchema,
     ToolConstraint,
 )
 
@@ -95,6 +97,19 @@ class TemporalWindowConstraint(ToolConstraint):
             schedule=data["schedule"],
             timezone=data.get("timezone", "UTC"),
             days_of_week=data.get("days_of_week"),
+        )
+
+    @classmethod
+    def schema(cls) -> ConstraintSchema:
+        return ConstraintSchema(
+            type="temporal_window",
+            category="Access",
+            description="Restrict tool access to a time-of-day window, optionally on specific days of the week.",
+            params=[
+                ParamSchema(name="schedule", type="schedule", description="HH:MM-HH:MM time range (24-hour). Wraps midnight when end < start."),
+                ParamSchema(name="timezone", type="timezone", required=False, default="UTC", description="IANA timezone name (e.g. US/Eastern)."),
+                ParamSchema(name="days_of_week", type="string", required=False, description="List of weekday numbers (0=Mon..6=Sun). Omit for every day."),
+            ],
         )
 
     # ---- helpers ----

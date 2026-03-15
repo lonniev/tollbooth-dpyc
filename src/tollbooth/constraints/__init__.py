@@ -10,8 +10,10 @@ All classes are re-exported here for convenience::
 from tollbooth.constraints.base import (
     ConstraintContext,
     ConstraintResult,
+    ConstraintSchema,
     EnvironmentSnapshot,
     LedgerSnapshot,
+    ParamSchema,
     PatronIdentity,
     PriceModifier,
     ToolConstraint,
@@ -19,6 +21,7 @@ from tollbooth.constraints.base import (
 from tollbooth.constraints.config import (
     CONSTRAINT_REGISTRY,
     ConfigError,
+    get_all_schemas,
     load_constraint,
     load_constraints,
     validate_config,
@@ -43,6 +46,8 @@ __all__ = [
     "ToolConstraint",
     "ConstraintContext",
     "ConstraintResult",
+    "ConstraintSchema",
+    "ParamSchema",
     "PriceModifier",
     "LedgerSnapshot",
     "PatronIdentity",
@@ -65,6 +70,7 @@ __all__ = [
     # Config
     "CONSTRAINT_REGISTRY",
     "ConfigError",
+    "get_all_schemas",
     "load_constraint",
     "load_constraints",
     "validate_config",

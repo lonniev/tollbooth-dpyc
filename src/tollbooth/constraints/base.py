@@ -150,6 +150,47 @@ class ConstraintResult:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class ParamSchema:
+    """Schema for a single constraint parameter."""
+
+    name: str
+    type: str  # "int", "float", "string", "bool", "schedule", "timezone", "tiers"
+    required: bool = True
+    default: Any = None
+    description: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "name": self.name,
+            "type": self.type,
+            "required": self.required,
+        }
+        if self.default is not None:
+            d["default"] = self.default
+        if self.description:
+            d["description"] = self.description
+        return d
+
+
+@dataclass
+class ConstraintSchema:
+    """Schema describing a constraint type and its parameters."""
+
+    type: str
+    category: str  # "Pricing", "Access", "Dynamic"
+    description: str
+    params: list[ParamSchema] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": self.type,
+            "category": self.category,
+            "description": self.description,
+            "params": [p.to_dict() for p in self.params],
+        }
+
+
 class ToolConstraint(ABC):
     """Abstract base for all constraints."""
 

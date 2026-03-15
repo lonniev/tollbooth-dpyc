@@ -8,6 +8,8 @@ from typing import Any
 from tollbooth.constraints.base import (
     ConstraintContext,
     ConstraintResult,
+    ConstraintSchema,
+    ParamSchema,
     PriceModifier,
     ToolConstraint,
 )
@@ -165,6 +167,25 @@ class CouponConstraint(ToolConstraint):
             patron_redemptions=int(data.get("patron_redemptions", 0)),
         )
 
+    @classmethod
+    def schema(cls) -> ConstraintSchema:
+        return ConstraintSchema(
+            type="coupon",
+            category="Pricing",
+            description="Apply a discount when a valid coupon code is present. Supports expiry, global caps, and per-patron caps.",
+            params=[
+                ParamSchema(name="code", type="string", description="The coupon code string."),
+                ParamSchema(name="discount_percent", type="float", required=False, default=0.0, description="Percentage discount (0-100)."),
+                ParamSchema(name="discount_sats", type="int", required=False, default=0, description="Absolute discount in api-sats."),
+                ParamSchema(name="free", type="bool", required=False, default=False, description="If true, the tool call is free."),
+                ParamSchema(name="expires_at", type="string", required=False, description="ISO-8601 expiry datetime."),
+                ParamSchema(name="max_redemptions", type="int", required=False, description="Global cap on total redemptions."),
+                ParamSchema(name="max_per_patron", type="int", required=False, description="Per-patron redemption cap."),
+                ParamSchema(name="current_redemptions", type="int", required=False, default=0, description="Total redemptions so far (externally tracked)."),
+                ParamSchema(name="patron_redemptions", type="int", required=False, default=0, description="Current patron's redemptions (externally tracked)."),
+            ],
+        )
+
 
 # ---------------------------------------------------------------------------
 # FreeTrialConstraint
@@ -211,6 +232,17 @@ class FreeTrialConstraint(ToolConstraint):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> FreeTrialConstraint:
         return cls(first_n_free=int(data["first_n_free"]))
+
+    @classmethod
+    def schema(cls) -> ConstraintSchema:
+        return ConstraintSchema(
+            type="free_trial",
+            category="Pricing",
+            description="Grant the first N invocations for free.",
+            params=[
+                ParamSchema(name="first_n_free", type="int", description="Number of free invocations per patron."),
+            ],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +297,18 @@ class LoyaltyDiscountConstraint(ToolConstraint):
         return cls(
             threshold_consumed_api_sats=int(data["threshold_consumed_api_sats"]),
             discount_percent=float(data["discount_percent"]),
+        )
+
+    @classmethod
+    def schema(cls) -> ConstraintSchema:
+        return ConstraintSchema(
+            type="loyalty_discount",
+            category="Pricing",
+            description="Reward patrons who have consumed at least a threshold of api-sats with a percentage discount.",
+            params=[
+                ParamSchema(name="threshold_consumed_api_sats", type="int", description="Minimum api-sats consumed to qualify."),
+                ParamSchema(name="discount_percent", type="float", description="Percentage discount (0-100) for qualifying patrons."),
+            ],
         )
 
 
@@ -323,6 +367,17 @@ class BulkBonusConstraint(ToolConstraint):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BulkBonusConstraint:
         return cls(tiers=list(data["tiers"]))
+
+    @classmethod
+    def schema(cls) -> ConstraintSchema:
+        return ConstraintSchema(
+            type="bulk_bonus",
+            category="Pricing",
+            description="Tiered bonus multiplier based on total consumption. Each tier has min_consumed and bonus_multiplier.",
+            params=[
+                ParamSchema(name="tiers", type="tiers", description="List of {min_consumed: int, bonus_multiplier: float} tier objects."),
+            ],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -413,4 +468,20 @@ class HappyHourConstraint(ToolConstraint):
             discount_percent=float(data.get("discount_percent", 0.0)),
             discount_sats=int(data.get("discount_sats", 0)),
             free=bool(data.get("free", False)),
+        )
+
+    @classmethod
+    def schema(cls) -> ConstraintSchema:
+        return ConstraintSchema(
+            type="happy_hour",
+            category="Pricing",
+            description="Apply a pricing discount during a temporal window. Outside the window, calls are still allowed at full price.",
+            params=[
+                ParamSchema(name="schedule", type="schedule", description="HH:MM-HH:MM time range (24-hour)."),
+                ParamSchema(name="timezone", type="timezone", required=False, default="UTC", description="IANA timezone name."),
+                ParamSchema(name="days_of_week", type="string", required=False, description="List of weekday numbers (0=Mon..6=Sun)."),
+                ParamSchema(name="discount_percent", type="float", required=False, default=0.0, description="Percentage discount (0-100)."),
+                ParamSchema(name="discount_sats", type="int", required=False, default=0, description="Absolute discount in api-sats."),
+                ParamSchema(name="free", type="bool", required=False, default=False, description="If true, the tool call is free during happy hour."),
+            ],
         )

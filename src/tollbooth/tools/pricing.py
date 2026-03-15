@@ -6,9 +6,47 @@ import json
 import logging
 from typing import Any
 
+from tollbooth.constraints.config import CONSTRAINT_REGISTRY, get_all_schemas
 from tollbooth.pricing_model import PricingModel
 
 logger = logging.getLogger(__name__)
+
+
+def list_constraint_types() -> list[dict[str, Any]]:
+    """Return schema dicts for all registered constraint types."""
+    return [s.to_dict() for s in get_all_schemas()]
+
+
+def _validate_pipeline(pipeline: list) -> list[str]:
+    """Validate pipeline steps against the constraint registry.
+
+    Returns a list of error strings (empty = valid).
+    """
+    errors: list[str] = []
+    schemas_by_type = {s.type: s for s in get_all_schemas()}
+
+    for i, step in enumerate(pipeline):
+        ctype = step.type
+        if ctype not in CONSTRAINT_REGISTRY:
+            errors.append(
+                f"Step #{i} ({step.id!r}): unknown constraint type {ctype!r}. "
+                f"Valid types: {sorted(CONSTRAINT_REGISTRY)}"
+            )
+            continue
+
+        schema = schemas_by_type.get(ctype)
+        if schema is None:
+            continue  # no schema to validate against
+
+        # Check required params are present
+        for param in schema.params:
+            if param.required and param.name not in step.params:
+                errors.append(
+                    f"Step #{i} ({step.id!r}): missing required param {param.name!r} "
+                    f"for constraint type {ctype!r}."
+                )
+
+    return errors
 
 
 def _model_to_response(model: PricingModel) -> dict[str, Any]:
@@ -67,6 +105,11 @@ async def set_pricing_model_tool(
         model = PricingModel.from_json(model_json, model_id=model_id, operator=operator)
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         return {"status": "error", "error": f"Invalid model_json: {e}"}
+
+    # Validate pipeline steps against constraint registry
+    validation_errors = _validate_pipeline(model.pipeline)
+    if validation_errors:
+        return {"status": "error", "error": "Pipeline validation failed", "details": validation_errors}
 
     try:
         await store.ensure_schema()

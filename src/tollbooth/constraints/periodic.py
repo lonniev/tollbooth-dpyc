@@ -9,6 +9,8 @@ from typing import Any
 from tollbooth.constraints.base import (
     ConstraintContext,
     ConstraintResult,
+    ConstraintSchema,
+    ParamSchema,
     ToolConstraint,
 )
 
@@ -152,4 +154,18 @@ class PeriodicRefreshConstraint(ToolConstraint):
             window_duration=str(data["window_duration"]),
             current_window_count=int(data.get("current_window_count", 0)),
             window_start=data.get("window_start"),
+        )
+
+    @classmethod
+    def schema(cls) -> ConstraintSchema:
+        return ConstraintSchema(
+            type="periodic_refresh",
+            category="Access",
+            description="Rate-limit invocations to a maximum per rolling time window.",
+            params=[
+                ParamSchema(name="max_per_window", type="int", description="Max invocations allowed per window."),
+                ParamSchema(name="window_duration", type="string", description="ISO-8601 duration (e.g. PT5H for 5 hours)."),
+                ParamSchema(name="current_window_count", type="int", required=False, default=0, description="Invocations already consumed in current window."),
+                ParamSchema(name="window_start", type="string", required=False, description="ISO-8601 datetime of current window start."),
+            ],
         )

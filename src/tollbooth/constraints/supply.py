@@ -7,6 +7,8 @@ from typing import Any
 from tollbooth.constraints.base import (
     ConstraintContext,
     ConstraintResult,
+    ConstraintSchema,
+    ParamSchema,
     ToolConstraint,
 )
 
@@ -76,4 +78,17 @@ class FiniteSupplyConstraint(ToolConstraint):
             max_invocations=int(data["max_invocations"]),
             current_count=int(data.get("current_count", 0)),
             scope=str(data.get("scope", "global")),
+        )
+
+    @classmethod
+    def schema(cls) -> ConstraintSchema:
+        return ConstraintSchema(
+            type="finite_supply",
+            category="Access",
+            description="Cap total invocations globally or per-patron.",
+            params=[
+                ParamSchema(name="max_invocations", type="int", description="Total allowed invocations."),
+                ParamSchema(name="current_count", type="int", required=False, default=0, description="Externally tracked current usage count."),
+                ParamSchema(name="scope", type="string", required=False, default="global", description="'global' or 'per_patron'."),
+            ],
         )

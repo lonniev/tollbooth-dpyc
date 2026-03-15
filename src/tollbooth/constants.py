@@ -22,8 +22,15 @@ ECOSYSTEM_LINKS: dict[str, str] = {
 
 
 class ToolTier(IntEnum):
-    """Cost tiers for tool-call metering (satoshis per call)."""
+    """Cost tiers for tool-call metering (satoshis per call).
 
+    RESTRICTED is a special access tier (not a cost tier): the tool is
+    visible/listed but only callable by the operator npub.  Calls from
+    any other identity are rejected.  In STDIO mode (local dev) the
+    restriction is not enforced.
+    """
+
+    RESTRICTED = -1  # operator-only access; cost = 0 for the operator
     FREE = 0
     READ = 1
     WRITE = 5

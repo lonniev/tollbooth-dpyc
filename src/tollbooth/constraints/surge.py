@@ -8,6 +8,8 @@ from typing import Any
 from tollbooth.constraints.base import (
     ConstraintContext,
     ConstraintResult,
+    ConstraintSchema,
+    ParamSchema,
     PriceModifier,
     ToolConstraint,
 )
@@ -125,4 +127,17 @@ class SurgePricingConstraint(ToolConstraint):
             max_capacity=int(data["max_capacity"]),
             tiers=tiers,
             window=str(data.get("window", "1h")),
+        )
+
+    @classmethod
+    def schema(cls) -> ConstraintSchema:
+        return ConstraintSchema(
+            type="surge_pricing",
+            category="Dynamic",
+            description="Demand-elastic pricing derived from global demand counters. Never denies — only reprices via surge multiplier tiers.",
+            params=[
+                ParamSchema(name="max_capacity", type="int", description="Maximum invocations per window (capacity baseline)."),
+                ParamSchema(name="tiers", type="tiers", description="List of {capacity_pct: float (0-1], multiplier: float} tier objects."),
+                ParamSchema(name="window", type="string", required=False, default="1h", description="Advisory time window label (e.g. '1h', '24h')."),
+            ],
         )
