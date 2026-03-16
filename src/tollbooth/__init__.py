@@ -16,7 +16,14 @@ from tollbooth.vault_backend import VaultBackend
 from tollbooth.credential_vault_backend import CredentialVaultBackend, SessionBindingBackend
 from tollbooth.actor_types import ActorRole, ObsoletePractice, ToolPath, ToolPathInfo
 from tollbooth.slug_tools import make_slug_tool
-from tollbooth.operator_protocol import OperatorProtocol, OPERATOR_BASE_CATALOG, OPERATOR_OBSOLETE_PRACTICES
+from tollbooth.operator_protocol import (
+    OperatorProtocol,
+    OPERATOR_BASE_CATALOG,
+    OPERATOR_OBSOLETE_PRACTICES,
+    OperatorConformanceError,
+    validate_operator_tools,
+    async_validate_operator_tools,
+)
 from tollbooth.authority_protocol import AuthorityProtocol, AUTHORITY_BASE_CATALOG
 from tollbooth.oracle_protocol import OracleProtocol
 from tollbooth.ledger_cache import LedgerCache
@@ -194,6 +201,9 @@ __all__ = [
     "OperatorProtocol",
     "OPERATOR_BASE_CATALOG",
     "OPERATOR_OBSOLETE_PRACTICES",
+    "OperatorConformanceError",
+    "validate_operator_tools",
+    "async_validate_operator_tools",
     "AuthorityProtocol",
     "AUTHORITY_BASE_CATALOG",
     "OracleProtocol",

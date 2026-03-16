@@ -437,3 +437,82 @@ class OperatorProtocol(Protocol):
     async def network_advisory(self) -> str:
         """(cold, delegates to Oracle) Get active network advisories."""
         ...
+
+
+# ── Catalog conformance validation ────────────────────────────────
+
+import asyncio
+import logging
+
+_conformance_logger = logging.getLogger("tollbooth.conformance")
+
+
+class OperatorConformanceError(Exception):
+    """Raised when strict validation finds missing base-catalog tools."""
+
+
+def _check_catalog(
+    registered_names: set[str],
+    slug: str,
+    catalog: list[ToolPathInfo] | None = None,
+    strict: bool = False,
+    logger: logging.Logger | None = None,
+) -> list[str]:
+    """Compare *registered_names* against the base catalog.
+
+    Returns the list of missing tool names (from the catalog perspective).
+    Checks for both ``{slug}_{tool_name}`` and bare ``{tool_name}``.
+    """
+    if catalog is None:
+        catalog = OPERATOR_BASE_CATALOG
+    if logger is None:
+        logger = _conformance_logger
+
+    missing: list[str] = []
+    for entry in catalog:
+        prefixed = f"{slug}_{entry.tool_name}"
+        if prefixed not in registered_names and entry.tool_name not in registered_names:
+            missing.append(entry.tool_name)
+
+    if missing:
+        msg = (
+            f"Operator '{slug}' is missing {len(missing)} base-catalog "
+            f"tool(s): {', '.join(missing)}"
+        )
+        if strict:
+            raise OperatorConformanceError(msg)
+        logger.warning(msg)
+
+    return missing
+
+
+def validate_operator_tools(
+    mcp_server: Any,
+    slug: str,
+    catalog: list[ToolPathInfo] | None = None,
+    strict: bool = False,
+) -> list[str]:
+    """Synchronous catalog validation — call before ``mcp.run()``.
+
+    Introspects the FastMCP server's registered tools and checks them
+    against the base catalog (or a custom *catalog*).
+
+    Returns the list of missing tool names (empty if fully conformant).
+    Raises :class:`OperatorConformanceError` when *strict* is True and
+    tools are missing.
+    """
+    tools = asyncio.run(mcp_server.list_tools())
+    registered = {t.name for t in tools}
+    return _check_catalog(registered, slug, catalog, strict)
+
+
+async def async_validate_operator_tools(
+    mcp_server: Any,
+    slug: str,
+    catalog: list[ToolPathInfo] | None = None,
+    strict: bool = False,
+) -> list[str]:
+    """Async catalog validation — for lifespan hooks or async startup."""
+    tools = await mcp_server.list_tools()
+    registered = {t.name for t in tools}
+    return _check_catalog(registered, slug, catalog, strict)
