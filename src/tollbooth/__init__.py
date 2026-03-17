@@ -72,6 +72,25 @@ except ImportError:
     AuditedVault = None  # type: ignore[assignment,misc]
 
 try:
+    from tollbooth.operator_proof import verify_operator_proof, verify_identity_proof, OPERATOR_PROOF_KIND
+except ImportError:
+    verify_operator_proof = None  # type: ignore[assignment,misc]
+    verify_identity_proof = None  # type: ignore[assignment,misc]
+    OPERATOR_PROOF_KIND = None  # type: ignore[assignment,misc]
+
+try:
+    from tollbooth.acl_verify import verify_acl_event, check_acl_access, ACL_EVENT_KIND
+except ImportError:
+    verify_acl_event = None  # type: ignore[assignment,misc]
+    check_acl_access = None  # type: ignore[assignment,misc]
+    ACL_EVENT_KIND = None  # type: ignore[assignment,misc]
+
+try:
+    from tollbooth.acl_store import ToolAclStore
+except ImportError:
+    ToolAclStore = None  # type: ignore[assignment,misc]
+
+try:
     from tollbooth.nostr_credentials import (
         NostrCredentialExchange,
         NostrProfile,
@@ -271,6 +290,15 @@ __all__ = [
     "encode_credential_card",
     "decode_credential_card",
     "render_qr",
+    # Operator Proof
+    "verify_operator_proof",
+    "verify_identity_proof",
+    "OPERATOR_PROOF_KIND",
+    # ACL
+    "verify_acl_event",
+    "check_acl_access",
+    "ACL_EVENT_KIND",
+    "ToolAclStore",
     "courier_health",
     "courier_ping",
     "probe_relay_liveness",

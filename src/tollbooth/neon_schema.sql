@@ -49,3 +49,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_active_per_operator
     ON operator_pricing_models (operator) WHERE is_active = true;
 CREATE INDEX IF NOT EXISTS idx_pricing_models_operator
     ON operator_pricing_models (operator);
+
+-- Nostr-signed tool ACLs (per-tool authorization for non-operator callers)
+CREATE TABLE IF NOT EXISTS tool_acls (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    operator TEXT NOT NULL,
+    tool_pattern TEXT NOT NULL,
+    signed_event_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (operator, tool_pattern)
+);
+CREATE INDEX IF NOT EXISTS idx_tool_acls_operator
+    ON tool_acls (operator);

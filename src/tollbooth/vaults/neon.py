@@ -295,6 +295,22 @@ class NeonVault:
             "CREATE INDEX IF NOT EXISTS idx_pricing_models_operator "
             "ON operator_pricing_models (operator)"
         )
+        # -- Tool ACLs (Nostr-signed per-tool authorization) --
+        await self._execute(
+            "CREATE TABLE IF NOT EXISTS tool_acls ("
+            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            "    operator TEXT NOT NULL,"
+            "    tool_pattern TEXT NOT NULL,"
+            "    signed_event_json JSONB NOT NULL,"
+            "    created_at TIMESTAMPTZ DEFAULT now(),"
+            "    updated_at TIMESTAMPTZ DEFAULT now(),"
+            "    UNIQUE (operator, tool_pattern)"
+            ")"
+        )
+        await self._execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_acls_operator "
+            "ON tool_acls (operator)"
+        )
 
     # -- Global demand counters (surge pricing) --------------------------------
 
