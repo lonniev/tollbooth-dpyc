@@ -317,7 +317,7 @@ class UserLedger:
             self.credited_invoices.append(invoice_id)
 
     def rollback_debit(self, tool_name: str, api_sats: int) -> None:
-        """Undo a previous debit by creating a compensating tranche (never expires)."""
+        """Undo a previous debit by creating a compensating tranche."""
         if api_sats <= 0:
             return
         now = datetime.now(timezone.utc)
@@ -326,7 +326,7 @@ class UserLedger:
             original_sats=api_sats,
             remaining_sats=api_sats,
             invoice_id=f"rollback:{tool_name}",
-            expires_at=None,  # Compensating tranches never expire
+            expires_at=(now + timedelta(days=7)).isoformat(),
         ))
         self.total_consumed_api_sats -= api_sats
 

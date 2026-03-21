@@ -258,7 +258,7 @@ class TestUserLedger:
         assert ledger.total_consumed_api_sats == 0
 
     def test_rollback_creates_compensating_tranche(self) -> None:
-        """Rollback creates a new non-expiring tranche, doesn't modify old ones."""
+        """Rollback creates a new tranche with 7-day expiration."""
         ledger = _ledger_with_balance(100)
         ledger.debit("search", 30)
         initial_count = len(ledger.tranches)
@@ -267,7 +267,7 @@ class TestUserLedger:
         comp = ledger.tranches[-1]
         assert comp.original_sats == 30
         assert comp.remaining_sats == 30
-        assert comp.expires_at is None
+        assert comp.expires_at is not None
         assert comp.invoice_id == "rollback:search"
 
     def test_rollback_clamps_to_zero(self) -> None:
