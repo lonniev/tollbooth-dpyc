@@ -135,12 +135,17 @@ class Tranche:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Tranche:
+        expires_at = data.get("expires_at")
+        invoice_id = str(data.get("invoice_id", ""))
+        # Migrate legacy perpetual rollback tranches → 7-day expiry
+        if expires_at is None and invoice_id.startswith("rollback:"):
+            expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
         return cls(
             granted_at=str(data.get("granted_at", "")),
             original_sats=int(data.get("original_sats", 0)),
             remaining_sats=int(data.get("remaining_sats", 0)),
-            invoice_id=str(data.get("invoice_id", "")),
-            expires_at=data.get("expires_at"),
+            invoice_id=invoice_id,
+            expires_at=expires_at,
         )
 
 
