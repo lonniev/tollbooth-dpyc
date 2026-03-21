@@ -317,17 +317,28 @@ class UserLedger:
             self.credited_invoices.append(invoice_id)
 
     def rollback_debit(self, tool_name: str, api_sats: int) -> None:
-        """Undo a previous debit by creating a compensating tranche."""
+        """Undo a previous debit by adding sats back to the soonest-expiring tranche."""
         if api_sats <= 0:
             return
         now = datetime.now(timezone.utc)
-        self.tranches.append(Tranche(
-            granted_at=now.isoformat(),
-            original_sats=api_sats,
-            remaining_sats=api_sats,
-            invoice_id=f"rollback:{tool_name}",
-            expires_at=(now + timedelta(days=7)).isoformat(),
-        ))
+        # Find the active tranche expiring soonest; fall back to any active tranche
+        active = [t for t in self.tranches if t.remaining_sats > 0 and not t.is_expired(now)]
+        target = None
+        if active:
+            with_expiry = [t for t in active if t.expires_at is not None]
+            target = min(with_expiry, key=lambda t: t.expires_at) if with_expiry else active[0]
+        if target:
+            target.remaining_sats += api_sats
+            target.original_sats += api_sats
+        else:
+            # No active tranches — create one with 7-day TTL
+            self.tranches.append(Tranche(
+                granted_at=now.isoformat(),
+                original_sats=api_sats,
+                remaining_sats=api_sats,
+                invoice_id=f"rollback:{tool_name}",
+                expires_at=(now + timedelta(days=7)).isoformat(),
+            ))
         self.total_consumed_api_sats -= api_sats
 
         today = date.today().isoformat()
