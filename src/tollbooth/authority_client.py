@@ -39,7 +39,7 @@ class AuthorityCertifier:
         self._operator_npub = operator_npub
         self._certify_tool_name = certify_tool_name
 
-    async def certify(self, amount_sats: int) -> dict[str, Any]:
+    async def certify_credits(self, amount_sats: int) -> dict[str, Any]:
         """Call the Authority's certify_credits tool and return the certificate dict.
 
         Returns dict with keys: certificate, jti, amount_sats, fee_sats,

@@ -50,7 +50,7 @@ async def test_certify_success():
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
         )
-        result = await certifier.certify(100)
+        result = await certifier.certify_credits(100)
 
     assert result["certificate"] == "eyJhbGciOi..."
     assert result["net_sats"] == 90
@@ -84,7 +84,7 @@ async def test_certify_authority_refuses():
             operator_npub="npub1operator",
         )
         with pytest.raises(AuthorityCertifyError, match="Insufficient credit balance"):
-            await certifier.certify(100)
+            await certifier.certify_credits(100)
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +105,7 @@ async def test_certify_connection_failure():
             operator_npub="npub1operator",
         )
         with pytest.raises(AuthorityCertifyError, match="Failed to connect"):
-            await certifier.certify(100)
+            await certifier.certify_credits(100)
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ async def test_certify_custom_tool_name():
             operator_npub="npub1operator",
             certify_tool_name="custom_certify",
         )
-        await certifier.certify(50)
+        await certifier.certify_credits(50)
 
     mock_client.call_tool.assert_awaited_once_with(
         "custom_certify",
@@ -178,7 +178,7 @@ async def test_certify_calltoolresult_data():
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
         )
-        result = await certifier.certify(100)
+        result = await certifier.certify_credits(100)
 
     assert result["certificate"] == "eyJhbGciOi..."
     assert result["jti"] == "ctr-456"
@@ -212,7 +212,7 @@ async def test_certify_calltoolresult_content():
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
         )
-        result = await certifier.certify(50)
+        result = await certifier.certify_credits(50)
 
     assert result["certificate"] == "eyJhbGciOi..."
     assert result["jti"] == "ctr-789"
@@ -240,7 +240,7 @@ async def test_certify_unexpected_format():
             operator_npub="npub1operator",
         )
         with pytest.raises(AuthorityCertifyError, match="unexpected response"):
-            await certifier.certify(100)
+            await certifier.certify_credits(100)
 
 
 # ---------------------------------------------------------------------------
