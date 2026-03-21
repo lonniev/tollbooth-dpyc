@@ -576,6 +576,7 @@ class TestCheckBalance:
         assert result["success"] is True
         assert result["balance_api_sats"] == 0
         assert result["pending_invoices"] == 0
+        assert result["pending_invoice_ids"] == []
         assert result["active_tranches"] == 0
 
     @pytest.mark.asyncio
@@ -593,6 +594,7 @@ class TestCheckBalance:
         assert result["total_deposited_api_sats"] == 10000
         assert result["total_consumed_api_sats"] == 5000
         assert result["pending_invoices"] == 1
+        assert result["pending_invoice_ids"] == ["inv-a"]
         assert result["last_deposit_at"] == "2026-02-15"
         assert result["active_tranches"] == 1
 

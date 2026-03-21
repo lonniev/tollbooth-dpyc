@@ -393,6 +393,7 @@ async def check_balance_tool(
         "total_deposited_api_sats": ledger.total_deposited_api_sats,
         "total_consumed_api_sats": ledger.total_consumed_api_sats,
         "pending_invoices": len(ledger.pending_invoices),
+        "pending_invoice_ids": list(ledger.pending_invoices),
         "last_deposit_at": ledger.last_deposit_at,
     }
 
