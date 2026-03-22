@@ -44,6 +44,23 @@ class ToolPrice:
             d["max_cost"] = self.max_cost
         return d
 
+    def to_tool_pricing(self) -> "ToolPricing":
+        """Convert this declarative price entry to a runtime ToolPricing."""
+        from tollbooth.pricing import ToolPricing
+
+        if self.price_type == "percent":
+            return ToolPricing(
+                rate_percent=float(self.price_sats),
+                rate_param=self.price_formula or "",
+                min_cost=self.min_cost,
+                max_cost=self.max_cost,
+            )
+        return ToolPricing(
+            fixed=self.price_sats,
+            min_cost=self.min_cost,
+            max_cost=self.max_cost,
+        )
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ToolPrice:
         return cls(

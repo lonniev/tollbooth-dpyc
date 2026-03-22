@@ -198,3 +198,59 @@ class TestGetConstraintEngine:
         resolver = PricingResolver(store=store, operator="npub1op")
         engine = await resolver.get_constraint_engine()
         assert engine is None
+
+
+# ---------------------------------------------------------------------------
+# get_tool_pricing
+# ---------------------------------------------------------------------------
+
+
+def _model_with_percent() -> PricingModel:
+    return PricingModel(
+        model_id="uuid-2",
+        operator="npub1op",
+        name="WithPercent",
+        is_active=True,
+        tools=[
+            ToolPrice(tool_name="search", price_sats=3),
+            ToolPrice(
+                tool_name="certify_credits", price_sats=2,
+                price_type="percent", price_formula="amount_sats", min_cost=10,
+            ),
+        ],
+    )
+
+
+class TestGetToolPricing:
+    @pytest.mark.asyncio
+    async def test_flat_tool(self) -> None:
+        store = _MockStore(model=_model_with_percent())
+        resolver = PricingResolver(store=store, operator="npub1op")
+        pricing = await resolver.get_tool_pricing("search")
+        assert pricing.fixed == 3
+        assert pricing.compute() == 3
+
+    @pytest.mark.asyncio
+    async def test_percent_tool(self) -> None:
+        store = _MockStore(model=_model_with_percent())
+        resolver = PricingResolver(store=store, operator="npub1op")
+        pricing = await resolver.get_tool_pricing("certify_credits")
+        assert pricing.rate_percent == 2.0
+        assert pricing.compute(amount_sats=1000) == 20
+        assert pricing.compute(amount_sats=100) == 10  # min_cost
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_falls_back(self) -> None:
+        store = _MockStore(model=_model_with_percent())
+        resolver = PricingResolver(
+            store=store, operator="npub1op", fallback_costs={"other": 42},
+        )
+        pricing = await resolver.get_tool_pricing("other")
+        assert pricing.fixed == 42
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_defaults_free(self) -> None:
+        store = _MockStore(model=_model_with_percent())
+        resolver = PricingResolver(store=store, operator="npub1op")
+        pricing = await resolver.get_tool_pricing("nonexistent")
+        assert pricing.compute() == 0

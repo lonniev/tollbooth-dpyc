@@ -97,6 +97,21 @@ class PricingResolver:
             return self._cached_cost_map[tool_name]
         return self._fallback_costs.get(tool_name, 0)
 
+    async def get_tool_pricing(self, tool_name: str) -> "ToolPricing":
+        """Return a ToolPricing for *tool_name*, supporting ad valorem pricing.
+
+        Resolution order: active model's ToolPrice → fallback flat cost → free.
+        """
+        from tollbooth.pricing import ToolPricing
+
+        await self._ensure_fresh()
+        if self._cached_model is not None:
+            for tp in self._cached_model.tools:
+                if tp.tool_name == tool_name:
+                    return tp.to_tool_pricing()
+        flat = self._fallback_costs.get(tool_name, 0)
+        return ToolPricing(fixed=flat)
+
     async def get_constraint_engine(self) -> ConstraintEngine | None:
         """Return the constraint engine from the active model's pipeline.
 

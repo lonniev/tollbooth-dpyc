@@ -35,6 +35,30 @@ class TestToolPrice:
         assert tp.category == ""
         assert tp.intent == ""
 
+    def test_to_tool_pricing_flat(self) -> None:
+        tp = ToolPrice(tool_name="search", price_sats=5, min_cost=1, max_cost=100)
+        pricing = tp.to_tool_pricing()
+        assert pricing.fixed == 5
+        assert pricing.rate_percent == 0.0
+        assert pricing.min_cost == 1
+        assert pricing.max_cost == 100
+        assert pricing.compute() == 5
+
+    def test_to_tool_pricing_percent(self) -> None:
+        tp = ToolPrice(
+            tool_name="certify_credits", price_sats=2,
+            price_type="percent", price_formula="amount_sats", min_cost=10,
+        )
+        pricing = tp.to_tool_pricing()
+        assert pricing.rate_percent == 2.0
+        assert pricing.rate_param == "amount_sats"
+        assert pricing.min_cost == 10
+        assert pricing.fixed == 0
+        # 2% of 1000 = 20
+        assert pricing.compute(amount_sats=1000) == 20
+        # 2% of 100 = 2, but min_cost = 10
+        assert pricing.compute(amount_sats=100) == 10
+
 
 # ---------------------------------------------------------------------------
 # PipelineStep

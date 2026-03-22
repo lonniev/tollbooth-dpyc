@@ -327,7 +327,7 @@ class UserLedger:
             return
         now = datetime.now(timezone.utc)
         # Find the active tranche expiring soonest; fall back to any active tranche
-        active = [t for t in self.tranches if t.remaining_sats > 0 and not t.is_expired(now)]
+        active = [t for t in self.tranches if t.remaining_sats > 0 and not t.is_expired_at(now)]
         target = None
         if active:
             with_expiry = [t for t in active if t.expires_at is not None]
