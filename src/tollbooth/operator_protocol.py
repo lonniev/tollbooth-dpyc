@@ -83,6 +83,35 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
         cost_tier="FREE",
         agent_hint="Return the Operator's health and version info.",
     ),
+    # ── Hot-path (Bitcoin Notarization) ────────────────────────────
+    ToolPathInfo(
+        tool_name="notarize_ledger",
+        path=ToolPath.HOT,
+        requires_auth=True,
+        cost_tier="RESTRICTED",
+        agent_hint=(
+            "Create a Bitcoin-notarized snapshot of all patron balances. "
+            "Builds a Merkle tree and submits the root to OpenTimestamps "
+            "calendars. Bitcoin confirmation in 1-6 hours. Operator-only."
+        ),
+    ),
+    ToolPathInfo(
+        tool_name="get_notarization_proof",
+        path=ToolPath.HOT,
+        requires_auth=True,
+        cost_tier="READ",
+        agent_hint=(
+            "Get a verifiable Merkle inclusion proof that a patron's "
+            "balance was included in a Bitcoin-notarized snapshot."
+        ),
+    ),
+    ToolPathInfo(
+        tool_name="list_notarizations",
+        path=ToolPath.HOT,
+        requires_auth=False,
+        cost_tier="FREE",
+        agent_hint="List recent Bitcoin notarization records.",
+    ),
     # ── Hot-path (Secure Courier) ──────────────────────────────────
     ToolPathInfo(
         tool_name="session_status",
@@ -224,14 +253,6 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
         requires_auth=False,
         cost_tier="FREE",
         agent_hint="Get onboarding instructions from the Oracle.",
-    ),
-    ToolPathInfo(
-        tool_name="get_tax_rate",
-        path=ToolPath.DELEGATION,
-        delegates_to=ActorRole.ORACLE,
-        requires_auth=False,
-        cost_tier="FREE",
-        agent_hint="Get the current tax rate from the Oracle.",
     ),
     ToolPathInfo(
         tool_name="about",

@@ -1,7 +1,11 @@
-"""Tollbooth credit management, anchoring, pricing, and ACL tools."""
+"""Tollbooth credit management, notarization, pricing, and ACL tools."""
 
 from tollbooth.tools.credits import reconcile_pending_invoices
-from tollbooth.tools.anchors import (
+from tollbooth.tools.notarization import (
+    notarize_ledger_tool,
+    get_notarization_proof_tool,
+    list_notarizations_tool,
+    # Backward compat aliases
     anchor_ledger_tool,
     get_anchor_proof_tool,
     list_anchors_tool,
@@ -18,6 +22,9 @@ from tollbooth.tools.acl import (
 
 __all__ = [
     "reconcile_pending_invoices",
+    "notarize_ledger_tool",
+    "get_notarization_proof_tool",
+    "list_notarizations_tool",
     "anchor_ledger_tool",
     "get_anchor_proof_tool",
     "list_anchors_tool",
