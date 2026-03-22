@@ -137,8 +137,8 @@ class Tranche:
     def from_dict(cls, data: dict[str, Any]) -> Tranche:
         expires_at = data.get("expires_at")
         invoice_id = str(data.get("invoice_id", ""))
-        # Migrate legacy perpetual rollback tranches → 7-day expiry
-        if expires_at is None and invoice_id.startswith("rollback:"):
+        # Migrate any perpetual tranche → 7-day expiry from now
+        if expires_at is None:
             expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
         return cls(
             granted_at=str(data.get("granted_at", "")),
@@ -297,16 +297,15 @@ class UserLedger:
 
         return True
 
+    _DEFAULT_TTL_SECONDS = 604800  # 7 days
+
     def credit_deposit(
         self, api_sats: int, invoice_id: str, ttl_seconds: int | None = None,
     ) -> None:
-        """Add credits as a new tranche with optional TTL."""
+        """Add credits as a new tranche. Defaults to 7-day TTL if none specified."""
         now = datetime.now(timezone.utc)
-        expires_at = (
-            (now + timedelta(seconds=ttl_seconds)).isoformat()
-            if ttl_seconds is not None
-            else None
-        )
+        effective_ttl = ttl_seconds if ttl_seconds is not None else self._DEFAULT_TTL_SECONDS
+        expires_at = (now + timedelta(seconds=effective_ttl)).isoformat()
         self.tranches.append(Tranche(
             granted_at=now.isoformat(),
             original_sats=api_sats,

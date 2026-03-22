@@ -484,14 +484,14 @@ class TestCheckPayment:
 
     @pytest.mark.asyncio
     async def test_settled_without_ttl(self) -> None:
-        """Settlement without TTL creates non-expiring tranche."""
+        """Settlement without explicit TTL defaults to 7-day expiry."""
         btcpay = _mock_btcpay({
             "id": "inv-1", "status": "Settled", "amount": "500",
         })
         ledger = UserLedger()
         cache = _mock_cache(ledger)
         await check_payment_tool(btcpay, cache, "user1", "inv-1")
-        assert ledger.tranches[0].expires_at is None
+        assert ledger.tranches[0].expires_at is not None
 
     @pytest.mark.asyncio
     async def test_settled_vip_multiplier(self) -> None:
