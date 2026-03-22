@@ -93,6 +93,9 @@ class LedgerCache:
         async with lock:
             if user_id in self._entries:
                 entry = self._entries[user_id]
+                # Migrate any perpetual tranches still in cache from pre-TTL code
+                if self._migrate_perpetual_tranches(entry.ledger):
+                    entry.dirty = True
                 if self._flush_due_entry(entry):
                     self._fire_and_forget_flush(user_id, entry)
                 self._entries.move_to_end(user_id)
@@ -108,6 +111,30 @@ class LedgerCache:
             self._entries[user_id] = _CacheEntry(ledger=ledger)
             self._entries.move_to_end(user_id)
             return ledger
+
+    @staticmethod
+    def _migrate_perpetual_tranches(ledger: UserLedger) -> bool:
+        """Assign 7-day TTL to any cached tranches that still lack expiration.
+
+        Returns True if any tranches were migrated (entry should be flushed).
+        """
+        from datetime import datetime, timedelta, timezone
+
+        migrated = False
+        for t in ledger.tranches:
+            if t.expires_at is None and t.remaining_sats > 0:
+                t.expires_at = (
+                    datetime.now(timezone.utc) + timedelta(days=7)
+                ).isoformat()
+                migrated = True
+        if migrated:
+            logger.info(
+                "Migrated perpetual tranches for cached ledger "
+                "(patron=%s, count=%d)",
+                getattr(ledger, "user_id", "?"),
+                sum(1 for t in ledger.tranches if t.expires_at is not None),
+            )
+        return migrated
 
     def mark_dirty(self, user_id: str) -> None:
         """Mark a cached entry as dirty (needs flush to vault)."""
