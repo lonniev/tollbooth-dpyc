@@ -104,11 +104,18 @@ class LedgerCache:
             # Cache miss — load from vault
             ledger = await self._load_from_vault(user_id)
 
+            # Belt-and-suspenders: migrate perpetual tranches even on fresh load
+            # (from_dict should handle this, but catch any edge cases)
+            dirty = self._migrate_perpetual_tranches(ledger)
+
             # Evict LRU if at capacity
             while len(self._entries) >= self._maxsize:
                 self._fire_and_forget_evict()
 
-            self._entries[user_id] = _CacheEntry(ledger=ledger)
+            entry = _CacheEntry(ledger=ledger)
+            if dirty:
+                entry.dirty = True
+            self._entries[user_id] = entry
             self._entries.move_to_end(user_id)
             return ledger
 
