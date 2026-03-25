@@ -31,6 +31,8 @@ from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_AP
 from tollbooth.pricing import ToolPricing
 from tollbooth.pricing_model import PricingModel, ToolPrice, PipelineStep
 from tollbooth.vaults import TheBrainVault, NeonVault, NeonQueryError
+from tollbooth.bootstrap import BootstrapClient, BootstrapResult, ensure_bootstrapped
+from tollbooth.vault_encryption import VaultCipher
 from tollbooth.ots import MerkleTree, InclusionProof, OTSCalendarClient
 from tollbooth.nostr_certificate import verify_nostr_certificate, NOSTR_CERT_KIND
 from tollbooth.identity_credential import (

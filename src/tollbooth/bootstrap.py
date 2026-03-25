@@ -35,6 +35,38 @@ class BootstrapResult:
     error: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Lazy singleton — call from any tool's initialization path
+# ---------------------------------------------------------------------------
+
+_cached_result: BootstrapResult | None = None
+
+
+async def ensure_bootstrapped() -> BootstrapResult:
+    """Run bootstrap once, cache the result for process lifetime.
+
+    Call this from the first tool invocation. Returns immediately
+    on subsequent calls.
+
+    Reads ``TOLLBOOTH_NOSTR_OPERATOR_NSEC`` from the environment.
+    """
+    import os
+
+    global _cached_result
+    if _cached_result is not None:
+        return _cached_result
+
+    nsec = os.environ.get("TOLLBOOTH_NOSTR_OPERATOR_NSEC", "")
+    if not nsec:
+        result = BootstrapResult(error="TOLLBOOTH_NOSTR_OPERATOR_NSEC not set")
+        _cached_result = result
+        return result
+
+    client = BootstrapClient(nsec_hex=nsec)
+    _cached_result = await client.bootstrap()
+    return _cached_result
+
+
 class BootstrapClient:
     """Discovers operator config from the Authority using only the nsec.
 
