@@ -55,6 +55,7 @@ class NeonVault:
         self,
         database_url: str,
         http_endpoint: str | None = None,
+        encryption_nsec_hex: str | None = None,
     ) -> None:
         parsed = urlparse(database_url)
 
@@ -71,6 +72,25 @@ class NeonVault:
             timeout=30.0,
         )
         self._version_cache: dict[str, int] = {}
+
+        # Field encryption — if nsec provided, all stored values are AES-256-GCM encrypted.
+        # Without nsec, vault operates in plaintext mode (backward compatible).
+        self._cipher = None
+        if encryption_nsec_hex:
+            from tollbooth.vault_encryption import VaultCipher
+            self._cipher = VaultCipher(nsec_hex=encryption_nsec_hex)
+
+    def _encrypt(self, plaintext: str) -> str:
+        """Encrypt if cipher is configured, otherwise passthrough."""
+        return self._cipher.encrypt(plaintext) if self._cipher else plaintext
+
+    def _decrypt(self, value: str) -> str:
+        """Decrypt if cipher is configured. Handles migration from plaintext."""
+        if not self._cipher:
+            return value
+        if self._cipher.is_encrypted(value):
+            return self._cipher.decrypt(value)
+        return value  # Legacy plaintext — return as-is
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""
@@ -111,6 +131,7 @@ class NeonVault:
 
         Returns the new version as a string.
         """
+        ledger_json = self._encrypt(ledger_json)
         cached_version = self._version_cache.get(user_id)
 
         if cached_version is not None:
@@ -169,7 +190,7 @@ class NeonVault:
         ledger_json = rows[0]["ledger_json"]
         version = rows[0]["version"]
         self._version_cache[user_id] = version
-        return ledger_json
+        return self._decrypt(ledger_json)
 
     async def snapshot_ledger(
         self, user_id: str, ledger_json: str, timestamp: str,
