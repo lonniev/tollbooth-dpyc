@@ -177,11 +177,14 @@ class BootstrapClient:
     async def _get_config(self, authority_url: str) -> dict[str, str] | None:
         """Call get_operator_config on the Authority with Schnorr proof."""
         try:
+            from tollbooth.operator_proof import create_operator_proof
+            proof = create_operator_proof(self._nsec_hex, "get_operator_config")
+
             from fastmcp import Client
             async with Client(authority_url, auth="oauth") as client:
                 result = await client.call_tool(
                     "get_operator_config",
-                    {"npub": self.npub},
+                    {"npub": self.npub, "operator_proof": proof},
                 )
                 # Parse response
                 for block in getattr(result, "content", []):

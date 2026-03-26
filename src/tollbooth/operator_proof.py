@@ -5,8 +5,8 @@ Nostr kind-27235 event (NIP-98 style).  The ``u`` tag carries the tool name
 instead of a URL and ``created_at`` must be within 60 seconds of the current
 server time.
 
-Servers **only verify** — signing happens exclusively on the client where
-the operator's nsec lives.
+The ``create_operator_proof`` function signs proofs for bootstrap and
+MCP-to-MCP calls where the operator's nsec is available in-process.
 
 Dependencies: ``pynostr`` (already available via ``tollbooth-dpyc[nostr]``).
 """
@@ -32,6 +32,35 @@ def _npub_to_hex(npub: str) -> str:
     from pynostr.key import PublicKey  # type: ignore[import-untyped]
 
     return PublicKey.from_npub(npub).hex()
+
+
+def create_operator_proof(nsec: str, tool_name: str) -> str:
+    """Create a signed kind-27235 operator proof.
+
+    Args:
+        nsec: The operator's Nostr private key (bech32 nsec1... or hex).
+        tool_name: The MCP tool name to embed in the ``u`` tag.
+
+    Returns:
+        JSON string of the signed Nostr event.
+    """
+    from pynostr.key import PrivateKey  # type: ignore[import-untyped]
+    from pynostr.event import Event  # type: ignore[import-untyped]
+
+    if nsec.startswith("nsec1"):
+        pk = PrivateKey.from_nsec(nsec)
+    else:
+        pk = PrivateKey(bytes.fromhex(nsec))
+
+    event = Event(
+        pubkey=pk.public_key.hex(),
+        kind=OPERATOR_PROOF_KIND,
+        content="",
+        created_at=int(time.time()),
+        tags=[["u", tool_name]],
+    )
+    event.sign(pk.hex())
+    return json.dumps(event.to_dict())
 
 
 def verify_identity_proof(
