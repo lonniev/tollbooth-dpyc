@@ -1,5 +1,10 @@
 """OperatorRuntime — the core DPYC protocol engine for all operators.
 
+Also provides ``register_standard_tools(mcp, slug, runtime, settings_fn)``
+which registers all standard DPYC tools (check_balance, purchase_credits,
+service_status, Secure Courier, Oracle delegation, pricing, onboarding)
+on any FastMCP app.  Operators call this once and only write domain tools.
+
 Encapsulates bootstrap, vault initialization, ledger cache, credit
 gating, Secure Courier, and npub resolution. Operators instantiate
 this once and delegate all DPYC protocol operations to it.
@@ -336,3 +341,322 @@ class OperatorRuntime:
             self.operator_npub(),
             field_names,
         )
+
+
+# ======================================================================
+# Standard tool registration
+# ======================================================================
+
+
+def register_standard_tools(
+    mcp: Any,
+    slug: str,
+    rt: OperatorRuntime,
+    *,
+    settings_fn: Any = None,
+    service_name: str = "",
+    service_version: str = "",
+) -> None:
+    """Register all standard DPYC tools on a FastMCP app.
+
+    Call once at module level.  Operators only write domain-specific tools.
+
+    Args:
+        mcp: The FastMCP app instance.
+        slug: Tool name prefix (e.g., ``"weather"``).
+        rt: The OperatorRuntime instance.
+        settings_fn: Callable returning the operator's Settings instance
+            (for onboarding status introspection).
+        service_name: Service name for service_status (e.g., ``"tollbooth-sample"``).
+        service_version: Version string for service_status.
+    """
+    from tollbooth.slug_tools import make_slug_tool
+    tool = make_slug_tool(mcp, slug)
+
+    # -- Credit tools --------------------------------------------------
+
+    @tool
+    async def check_balance(npub: str = "") -> dict[str, Any]:
+        """Check your current credit balance and usage summary.
+
+        Free — no credits required. Pass your npub to identify yourself.
+        """
+        try:
+            npub = resolve_npub(npub)
+            cache = await rt.ledger_cache()
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        from tollbooth.tools import credits
+        return await credits.check_balance_tool(cache, npub)
+
+    @tool
+    async def purchase_credits(amount_sats: int = 1000, npub: str = "") -> dict[str, Any]:
+        """Buy credits via Bitcoin Lightning.
+
+        Creates a Lightning invoice. Pay it with any Lightning wallet,
+        then call check_payment to confirm.
+
+        Free — no credits required to call.
+        """
+        try:
+            npub = resolve_npub(npub)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+        try:
+            from tollbooth.authority_client import AuthorityCertifier
+            from tollbooth.registry import resolve_authority_service
+            auth_info = await resolve_authority_service(rt.operator_npub())
+            cert_result = await AuthorityCertifier(auth_info["url"]).certify_credits(amount_sats)
+            certificate = cert_result.get("certificate", "")
+        except Exception as e:
+            return {"success": False, "error": f"Authority certification failed: {e}"}
+
+        try:
+            cache = await rt.ledger_cache()
+            from tollbooth.tools import credits
+            return await credits.purchase_credits_tool(
+                cache, npub, amount_sats, certificate,
+            )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+    @tool
+    async def check_payment(invoice_id: str, npub: str = "") -> dict[str, Any]:
+        """Check the payment status of a Lightning invoice.
+
+        Call after paying the invoice from purchase_credits.
+        Free — no credits required.
+        """
+        try:
+            npub = resolve_npub(npub)
+            cache = await rt.ledger_cache()
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        from tollbooth.tools import credits
+        return await credits.check_payment_tool(cache, npub, invoice_id)
+
+    @tool
+    async def restore_credits(invoice_id: str, npub: str = "") -> dict[str, Any]:
+        """Restore credits from a previously paid invoice. Free."""
+        try:
+            npub = resolve_npub(npub)
+            cache = await rt.ledger_cache()
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        from tollbooth.tools import credits
+        return await credits.restore_credits_tool(cache, npub, invoice_id)
+
+    @tool
+    async def account_statement(npub: str = "") -> dict[str, Any]:
+        """View your transaction history. Free."""
+        try:
+            npub = resolve_npub(npub)
+            cache = await rt.ledger_cache()
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        from tollbooth.tools import credits
+        return await credits.account_statement_tool(cache, npub)
+
+    @tool
+    async def account_statement_infographic(npub: str = "") -> dict[str, Any]:
+        """Visual summary of your account. Cost: 1 sat (READ tier)."""
+        err = await rt.debit_or_error("account_statement_infographic", npub)
+        if err:
+            return err
+        try:
+            npub = resolve_npub(npub)
+            cache = await rt.ledger_cache()
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        from tollbooth.tools import credits
+        return await credits.account_statement_infographic_tool(cache, npub)
+
+    # -- Service status ------------------------------------------------
+
+    @tool
+    async def service_status() -> dict[str, Any]:
+        """Check the health and configuration of this service. Free."""
+        import os
+        vault_ok = rt._vault is not None
+        courier_ok = rt._courier is not None and hasattr(rt._courier, '_exchange') and rt._courier._exchange._credential_vault is not None
+        return {
+            "success": True,
+            "service": service_name or slug,
+            "version": service_version,
+            "vault_configured": vault_ok,
+            "courier_has_vault": courier_ok,
+            "process_id": os.getpid(),
+        }
+
+    # -- Onboarding ----------------------------------------------------
+
+    @tool
+    async def get_onboarding_status() -> dict[str, Any]:
+        """Report this operator's configuration readiness.
+
+        Shows which settings are configured, which are missing, and how
+        to deliver each missing value. Free.
+        """
+        if settings_fn:
+            return await rt.onboarding_status(settings_fn())
+        return {"success": False, "error": "No settings introspection configured."}
+
+    # -- Secure Courier ------------------------------------------------
+
+    @tool
+    async def session_status() -> dict[str, Any]:
+        """Check session state — shows whether credentials are active
+        or onboarding is needed. Free."""
+        return {
+            "success": True,
+            "operator_npub": rt.operator_npub(),
+            "credential_service": rt._credential_service,
+            "courier_configured": rt._courier is not None,
+        }
+
+    @tool
+    async def request_credential_channel(
+        sender_npub: str = "",
+        service: str = "",
+    ) -> dict[str, Any]:
+        """Open a Secure Courier channel for credential delivery.
+
+        Sends a welcome DM with a credential template to the provided npub.
+        Free.
+        """
+        if not sender_npub:
+            sender_npub = rt.operator_npub()
+        if not service:
+            service = rt._credential_service
+        courier = await rt.courier()
+        if courier is None:
+            return {"success": False, "error": "Secure Courier not configured."}
+        try:
+            return await courier.open_channel(
+                service, greeting="", recipient_npub=sender_npub,
+            )
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @tool
+    async def receive_credentials(
+        sender_npub: str = "",
+        service: str = "",
+        credential_card: str = "",
+    ) -> dict[str, Any]:
+        """Pick up credentials from the Secure Courier. Free."""
+        if not sender_npub:
+            sender_npub = rt.operator_npub()
+        if not service:
+            service = rt._credential_service
+        courier = await rt.courier()
+        if courier is None:
+            return {"success": False, "error": "Secure Courier not configured."}
+        try:
+            return await courier.receive(
+                sender_npub, service, credential_card=credential_card or None,
+            )
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @tool
+    async def forget_credentials(service: str = "") -> dict[str, Any]:
+        """Delete vaulted credentials for key rotation. Free."""
+        if not service:
+            service = rt._credential_service
+        npub = rt.operator_npub()
+        courier = await rt.courier()
+        if courier is None:
+            return {"success": False, "error": "Secure Courier not configured."}
+        try:
+            return await courier.forget(npub, service)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # -- Oracle delegation ---------------------------------------------
+
+    @tool
+    async def how_to_join() -> dict[str, Any]:
+        """Get DPYC onboarding instructions from the Oracle. Free."""
+        return await _call_oracle(rt, "how_to_join")
+
+    @tool
+    async def get_tax_rate() -> dict[str, Any]:
+        """Get the current DPYC certification tax rate. Free."""
+        return await _call_oracle(rt, "get_tax_rate")
+
+    @tool
+    async def lookup_member(npub: str) -> dict[str, Any]:
+        """Look up a DPYC community member by npub. Free."""
+        return await _call_oracle(rt, "lookup_member", {"npub": npub})
+
+    @tool
+    async def about() -> dict[str, Any]:
+        """Describe the DPYC ecosystem via the Oracle. Free."""
+        return await _call_oracle(rt, "about")
+
+    @tool
+    async def network_advisory() -> dict[str, Any]:
+        """Get active network advisories from the Oracle. Free."""
+        return await _call_oracle(rt, "network_advisory")
+
+    # -- Pricing CRUD --------------------------------------------------
+
+    @tool
+    async def get_pricing_model() -> dict[str, Any]:
+        """Get the active pricing model for this operator. Free."""
+        try:
+            vault = await rt.vault()
+            from tollbooth.pricing_store import PricingModelStore
+            store = PricingModelStore(neon_vault=vault)
+            from tollbooth.tools.pricing import get_pricing_model_tool
+            return await get_pricing_model_tool(store, rt.operator_npub())
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    @tool
+    async def set_pricing_model(model_json: str) -> dict[str, Any]:
+        """Set the active pricing model. RESTRICTED to operator."""
+        err = await rt.debit_or_error("set_pricing_model", rt.operator_npub())
+        if err:
+            return err
+        try:
+            vault = await rt.vault()
+            from tollbooth.pricing_store import PricingModelStore
+            store = PricingModelStore(neon_vault=vault)
+            from tollbooth.tools.pricing import set_pricing_model_tool
+            return await set_pricing_model_tool(
+                store, rt.operator_npub(), model_json,
+            )
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+
+# ======================================================================
+# Oracle delegation helper
+# ======================================================================
+
+
+async def _call_oracle(
+    rt: OperatorRuntime,
+    tool_name: str,
+    args: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Call an Oracle tool via MCP-to-MCP."""
+    try:
+        from tollbooth.registry import resolve_oracle_service
+        oracle_info = await resolve_oracle_service(rt.operator_npub())
+        from fastmcp import Client
+        async with Client(oracle_info["url"], auth="oauth") as client:
+            result = await client.call_tool(tool_name, args or {})
+            for block in getattr(result, "content", []):
+                if hasattr(block, "text"):
+                    import json as _json
+                    try:
+                        return _json.loads(block.text)
+                    except (ValueError, TypeError):
+                        return {"success": True, "result": block.text}
+        return {"success": True, "result": str(result)}
+    except Exception as e:
+        return {"success": False, "error": f"Oracle delegation failed: {e}"}
