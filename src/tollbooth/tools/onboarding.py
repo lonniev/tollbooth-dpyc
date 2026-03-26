@@ -23,6 +23,7 @@ Config fields are classified into three provisioning categories:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -58,8 +59,17 @@ def classify_field(name: str) -> str:
     return "secret"
 
 
-def get_onboarding_status_for(settings: BaseSettings) -> dict[str, Any]:
+def get_onboarding_status_for(
+    settings: BaseSettings,
+    vault_credentials: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Introspect a Settings instance and return onboarding status.
+
+    Args:
+        settings: The operator's Pydantic BaseSettings instance.
+        vault_credentials: Optional dict of credentials loaded from
+            the Secure Courier vault.  Fields present here are treated
+            as configured even if the corresponding env var is absent.
 
     Returns a dict suitable for JSON serialization with:
     - ``ready``: True if all required fields are configured
@@ -67,6 +77,7 @@ def get_onboarding_status_for(settings: BaseSettings) -> dict[str, Any]:
     - ``missing``: list of dicts with field name, category, and hint
     - ``summary``: human-readable status string
     """
+    vault = vault_credentials or {}
     configured: list[dict[str, str]] = []
     missing: list[dict[str, str]] = []
 
@@ -74,10 +85,12 @@ def get_onboarding_status_for(settings: BaseSettings) -> dict[str, Any]:
         category = classify_field(name)
         value = getattr(settings, name, None)
 
-        # Fields with non-None defaults are tuning — skip unless None
+        # Check env var first, then vault
         has_value = value is not None
         if has_value and isinstance(value, str):
             has_value = len(value.strip()) > 0
+        if not has_value and category == "secret" and name in vault:
+            has_value = True
 
         entry = {
             "field": name,
@@ -86,9 +99,7 @@ def get_onboarding_status_for(settings: BaseSettings) -> dict[str, Any]:
 
         if has_value:
             # Don't leak secret values — just confirm configured
-            if category == "secret":
-                entry["status"] = "configured"
-            elif category == "identity":
+            if category in ("secret", "identity"):
                 entry["status"] = "configured"
             else:
                 entry["value"] = str(value) if category == "tuning" else "provisioned"
@@ -123,14 +134,13 @@ def get_onboarding_status_for(settings: BaseSettings) -> dict[str, Any]:
     if ready:
         summary = "Operator is fully configured and ready to serve."
     else:
-        missing_names = [m["field"] for m in missing]
         authority_missing = [m for m in missing if m["category"] == "authority"]
         secret_missing = [m for m in missing if m["category"] == "secret"]
         parts = []
         if authority_missing:
             parts.append(
                 f"{len(authority_missing)} authority-provisioned "
-                f"({'value' if len(authority_missing) == 1 else 'values'}) "
+                f"{'value' if len(authority_missing) == 1 else 'values'} "
                 "pending — restart operator or call get_operator_config"
             )
         if secret_missing:
@@ -150,18 +160,95 @@ def get_onboarding_status_for(settings: BaseSettings) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Singleton settings reference — operators register theirs at startup
+# Generic vault credential loader
 # ---------------------------------------------------------------------------
 
-_operator_settings: BaseSettings | None = None
+
+async def load_vault_credentials(
+    courier_service: Any,
+    service: str,
+    operator_npub: str,
+) -> dict[str, str] | None:
+    """Load credentials from the Secure Courier vault for a given service.
+
+    This is the generic helper that any operator can use.  It accesses
+    the courier's credential vault, fetches the encrypted blob, decrypts
+    it, and returns the credential dict.
+
+    Args:
+        courier_service: The operator's ``SecureCourierService`` instance.
+        service: The credential template service name (e.g.,
+            ``"tollbooth-sample-operator"``).
+        operator_npub: The operator's npub (vault key).
+
+    Returns:
+        Dict of credential field names to values, or None if not found.
+    """
+    if courier_service is None:
+        return None
+    try:
+        vault = courier_service._exchange._credential_vault
+        if vault is None:
+            return None
+        blob = await vault.fetch_credentials(service, operator_npub)
+        if blob is None:
+            return None
+        plaintext = courier_service._exchange._vault_decrypt(blob)
+        return json.loads(plaintext)
+    except Exception as exc:
+        logger.debug("Vault credential load failed for %s: %s", service, exc)
+        return None
 
 
-def register_operator_settings(settings: BaseSettings) -> None:
-    """Register the operator's Settings instance for onboarding introspection."""
-    global _operator_settings
-    _operator_settings = settings
+async def get_onboarding_status_with_vault(
+    settings: BaseSettings,
+    courier_service: Any,
+    service: str,
+    operator_npub: str,
+) -> dict[str, Any]:
+    """Convenience: run ``get_onboarding_status_for`` with vault check.
+
+    Loads credentials from the Secure Courier vault and passes them
+    to ``get_onboarding_status_for`` so that vault-delivered secrets
+    show as configured.
+    """
+    vault_creds = await load_vault_credentials(
+        courier_service, service, operator_npub,
+    )
+    return get_onboarding_status_for(settings, vault_credentials=vault_creds)
 
 
-def get_registered_settings() -> BaseSettings | None:
-    """Return the registered operator settings, or None."""
-    return _operator_settings
+# ---------------------------------------------------------------------------
+# Generic vault-aware config loader
+# ---------------------------------------------------------------------------
+
+
+async def load_config_from_vault(
+    courier_service: Any,
+    service: str,
+    operator_npub: str,
+    field_names: list[str],
+) -> dict[str, str]:
+    """Load specific config fields from the Secure Courier vault.
+
+    Returns a dict of field_name → value for fields that are present
+    in the vault.  Missing fields are omitted from the result.
+
+    Use this to hydrate operator config at runtime::
+
+        creds = await load_config_from_vault(
+            courier, "my-service", npub,
+            ["api_key", "api_secret", "host"]
+        )
+        client = MyClient(
+            api_key=creds.get("api_key"),
+            api_secret=creds.get("api_secret"),
+            host=creds.get("host"),
+        )
+    """
+    vault_creds = await load_vault_credentials(
+        courier_service, service, operator_npub,
+    )
+    if vault_creds is None:
+        return {}
+    return {k: v for k, v in vault_creds.items() if k in field_names}
