@@ -130,6 +130,21 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
         ),
     ),
     ToolPathInfo(
+        tool_name="get_onboarding_status",
+        path=ToolPath.HOT,
+        requires_auth=False,
+        cost_tier="FREE",
+        agent_hint=(
+            "Report the operator's configuration readiness. Returns which "
+            "settings are configured, which are missing, and how to deliver "
+            "each missing value. Authority-provisioned values (like the Neon "
+            "database URL) are fetched automatically on registration. "
+            "Operator secrets (like BTCPay credentials) must be delivered "
+            "via Secure Courier encrypted DM. Call this first when helping "
+            "an operator complete its setup."
+        ),
+    ),
+    ToolPathInfo(
         tool_name="request_credential_channel",
         path=ToolPath.HOT,
         requires_auth=True,
