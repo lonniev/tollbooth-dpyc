@@ -448,29 +448,28 @@ def register_standard_tools(
         return await credits.restore_credits_tool(cache, npub, invoice_id)
 
     @tool
-    async def account_statement(npub: str = "") -> dict[str, Any]:
-        """View your transaction history. Free."""
-        try:
-            npub = resolve_npub(npub)
-            cache = await rt.ledger_cache()
-        except ValueError as e:
-            return {"success": False, "error": str(e)}
-        from tollbooth.tools import credits
-        return await credits.account_statement_tool(cache, npub)
+    async def account_statement(npub: str = "", days: int = 30) -> dict[str, Any]:
+        """Generate a customer-facing account statement with purchase history and usage.
 
-    @tool
-    async def account_statement_infographic(npub: str = "") -> dict[str, Any]:
-        """Visual summary of your account. Cost: 1 sat (READ tier)."""
-        err = await rt.debit_or_error("account_statement_infographic", npub)
-        if err:
-            return err
+        Returns account summary, invoice line items, active credit tranches,
+        all-time per-tool usage breakdown, and recent daily usage logs.
+        Free — no credits consumed.
+
+        Args:
+            npub: Your Nostr public key.
+            days: Number of days of daily usage history to include (default 30).
+        """
         try:
             npub = resolve_npub(npub)
             cache = await rt.ledger_cache()
         except ValueError as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        return await credits.account_statement_infographic_tool(cache, npub)
+        return await credits.account_statement_tool(cache, npub, days=days)
+
+    # NOTE: account_statement_infographic is NOT a standard tool.
+    # Each operator renders its own SVG layout. Register it in your
+    # operator's server.py if you have an infographic renderer.
 
     # -- Service status ------------------------------------------------
 
