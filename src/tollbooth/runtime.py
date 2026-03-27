@@ -362,13 +362,27 @@ class OperatorRuntime:
                 result["summary"] = "Operator is fully configured and ready to serve."
 
         # Enrich missing secret fields with descriptions from credential template
+        # Optional fields don't block the operator from coming online
         if self._credential_template is not None:
             tmpl_fields = self._credential_template.fields
+            required_missing = []
             for field in result.get("missing", []):
                 if field["category"] == "secret" and field["field"] in tmpl_fields:
                     spec = tmpl_fields[field["field"]]
                     if hasattr(spec, "description") and spec.description:
                         field["how"] = spec.description
+                    if not spec.required:
+                        field["optional"] = True
+                        # Don't count optional fields as blocking
+                        continue
+                required_missing.append(field)
+            # Recalculate readiness with only required fields
+            all_missing = result.get("missing", [])
+            result["missing"] = required_missing
+            result["optional_missing"] = [f for f in all_missing if f not in required_missing]
+            result["ready"] = len(required_missing) == 0
+            if result["ready"]:
+                result["summary"] = "Operator is fully configured and ready to serve."
 
         # Include bootstrap state and operator identity for the app
         result["bootstrap_error"] = bootstrap_error

@@ -43,6 +43,9 @@ TUNING_FIELDS = {
     "credit_ttl_seconds",
     "constraints_enabled",
     "constraints_config",
+    "btcpay_tier_config",
+    "btcpay_user_tiers",
+    "tollbooth_nostr_relays",
 }
 
 # Everything else with a None default is a secret that needs Secure Courier
