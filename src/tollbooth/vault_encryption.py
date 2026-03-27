@@ -18,7 +18,6 @@ import base64
 import hashlib
 import hmac
 import os
-from typing import Optional
 
 
 # AES-256-GCM via cryptography library (already a transitive dep)

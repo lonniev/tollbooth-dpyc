@@ -10,7 +10,6 @@ from typing import Any
 from tollbooth.config import TollboothConfig
 from tollbooth.constraints.base import (
     ConstraintContext,
-    ConstraintResult,
     EnvironmentSnapshot,
     LedgerSnapshot,
     PatronIdentity,

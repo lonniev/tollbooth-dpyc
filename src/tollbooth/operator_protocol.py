@@ -36,6 +36,8 @@ extend with their own entries::
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, Protocol, runtime_checkable
 
 from tollbooth.actor_types import ActorRole, ObsoletePractice, ToolPath, ToolPathInfo
@@ -476,9 +478,6 @@ class OperatorProtocol(Protocol):
 
 
 # ── Catalog conformance validation ────────────────────────────────
-
-import asyncio
-import logging
 
 _conformance_logger = logging.getLogger("tollbooth.conformance")
 

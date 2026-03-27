@@ -3,7 +3,7 @@
 import json
 import time
 from datetime import date, datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pynostr.event import Event  # type: ignore[import-untyped]
@@ -13,7 +13,6 @@ from tollbooth.btcpay_client import (
     BTCPayAuthError,
     BTCPayClient,
     BTCPayConnectionError,
-    BTCPayError,
     BTCPayServerError,
 )
 from tollbooth.certificate import reset_jti_store

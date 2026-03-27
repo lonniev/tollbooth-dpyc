@@ -2,7 +2,6 @@
 
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pynostr.event import Event  # type: ignore[import-untyped]
@@ -13,7 +12,6 @@ from tollbooth.certificate import (
     _JTIStore,
     reset_jti_store,
     verify_certificate_auto,
-    UNDERSTOOD_PROTOCOLS,
 )
 from tollbooth.nostr_certificate import NOSTR_CERT_KIND, NOSTR_CERT_TAG, NOSTR_CERT_LABEL
 

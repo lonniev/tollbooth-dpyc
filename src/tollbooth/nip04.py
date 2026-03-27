@@ -15,7 +15,6 @@ Reference: https://github.com/nostr-protocol/nips/blob/master/04.md
 from __future__ import annotations
 
 import base64
-import hashlib
 
 from coincurve import PrivateKey as _CoinPrivateKey  # type: ignore[import-untyped]
 from coincurve import PublicKey as _CoinPublicKey  # type: ignore[import-untyped]

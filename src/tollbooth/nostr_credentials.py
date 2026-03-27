@@ -39,7 +39,6 @@ from tollbooth.credential_templates import (
     FieldSpec,
     TemplateValidationError,
     render_delimited_instructions,
-    render_template_instructions,
     validate_payload,
 )
 from tollbooth.credential_vault_backend import CredentialVaultBackend
@@ -441,7 +440,7 @@ class NostrCredentialExchange:
 
         if not nip17_ok and not nip04_ok:
             raise CourierError(
-                f"All relay sends failed for both protocols: "
+                "All relay sends failed for both protocols: "
                 + "; ".join(errors)
             )
 
@@ -530,7 +529,7 @@ class NostrCredentialExchange:
 
         if not nip17_ok and not nip04_ok:
             raise CourierError(
-                f"All relay sends failed for both protocols: "
+                "All relay sends failed for both protocols: "
                 + "; ".join(errors)
             )
 

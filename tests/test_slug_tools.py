@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from tollbooth.slug_tools import make_slug_tool
 

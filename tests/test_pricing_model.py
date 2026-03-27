@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from tollbooth.pricing_model import PipelineStep, PricingModel, ToolPrice
 

@@ -4,7 +4,7 @@ import asyncio
 import time
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
@@ -140,7 +140,7 @@ class TestLedgerCacheEviction:
         assert cache.size == 2
         # user1 should still be cached (no vault call)
         vault.fetch_ledger.reset_mock()
-        ledger = await cache.get("user1")
+        await cache.get("user1")
         vault.fetch_ledger.assert_not_called()
 
 
@@ -178,7 +178,7 @@ class TestLedgerCacheFlush:
     async def test_flush_clears_dirty_flag(self) -> None:
         vault = _mock_vault()
         cache = LedgerCache(vault, maxsize=5)
-        ledger = await cache.get("user1")
+        await cache.get("user1")
         cache.mark_dirty("user1")
         await cache.flush_dirty()
         # Second flush should be a no-op
@@ -319,7 +319,7 @@ class TestLedgerCacheBackgroundFlush:
         vault = _mock_vault()
         cache = LedgerCache(vault, maxsize=5, flush_interval_secs=999)
         await cache.start_background_flush()
-        ledger = await cache.get("user1")
+        await cache.get("user1")
         cache.mark_dirty("user1")
         await cache.stop()  # should flush before returning
         vault.store_ledger.assert_called_once()

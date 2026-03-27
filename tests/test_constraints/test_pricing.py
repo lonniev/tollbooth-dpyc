@@ -2,14 +2,12 @@
 
 from datetime import datetime, timezone
 
-import pytest
 
 from tollbooth.constraints.base import (
     ConstraintContext,
     EnvironmentSnapshot,
     LedgerSnapshot,
     PatronIdentity,
-    PriceModifier,
 )
 from tollbooth.constraints.pricing import (
     BulkBonusConstraint,

@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from tollbooth.pricing_model import PricingModel, ToolPrice
 from tollbooth.pricing_store import PricingModelStore
 from tollbooth.tools.pricing import get_pricing_model_tool, set_pricing_model_tool
 from tollbooth.vaults.neon import NeonVault

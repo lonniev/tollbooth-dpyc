@@ -12,8 +12,6 @@ Then send a DM from Primal to the printed npub containing:
 """
 
 import asyncio
-import sys
-import time
 
 from pynostr.key import PrivateKey
 
@@ -58,7 +56,7 @@ async def main():
     print('    {"api_key": "test-key-123", "api_secret": "test-secret-456"}')
     print()
     print(f"  Listening on {len(RELAYS)} relays...")
-    print(f"  Freshness window: 600 seconds")
+    print("  Freshness window: 600 seconds")
     print()
 
     exchange = NostrCredentialExchange(
@@ -69,7 +67,7 @@ async def main():
     )
 
     # Open channel (starts subscription)
-    channel = await exchange.open_channel(
+    _channel = await exchange.open_channel(
         "test", greeting="Hi — this is the Secure Courier demo.",
     )
     print("  Channel open. Waiting for your DM...")

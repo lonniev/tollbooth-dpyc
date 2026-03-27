@@ -2,13 +2,12 @@
 
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pynostr.key import PrivateKey
 
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
-from tollbooth.credential_vault_backend import CredentialVaultBackend
 from tollbooth.nip44 import encrypt as nip44_encrypt
 from tollbooth.nip04 import _get_shared_secret
 from tollbooth.nostr_credentials import (
@@ -1052,7 +1051,7 @@ class TestPublishProfile:
         profile = NostrProfile(name="test-mcp", about="Test service")
 
         published = []
-        original_publish = ex._publish_to_relays
+        _original_publish = ex._publish_to_relays
 
         def capture_publish(message: str) -> None:
             published.append(message)
@@ -1162,7 +1161,6 @@ class TestSendDm:
 
     def test_send_dm_all_relays_reject(self):
         """Raises CourierError when every relay rejects both protocols."""
-        from tollbooth.nostr_credentials import CourierError
 
         ex = _make_exchange()
         patron = PrivateKey()
@@ -1362,7 +1360,7 @@ class TestPoisonSlug:
             ex._received_events.append(valid_event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             patch.object(ex, "_request_deletion") as mock_delete:
+             patch.object(ex, "_request_deletion") as _mock_delete:
             result = await ex.receive(sender_npub)
 
         assert result["success"] is True

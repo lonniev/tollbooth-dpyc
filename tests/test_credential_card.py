@@ -8,12 +8,10 @@ from unittest.mock import patch
 
 import pytest
 from pynostr.event import Event
-from pynostr.key import PrivateKey, PublicKey
+from pynostr.key import PrivateKey
 
 from tollbooth.credential_card import (
-    CREDENTIAL_CARD_KIND,
     DEFAULT_EXPIRY_DAYS,
-    CredentialCardError,
     CredentialCardExpired,
     CredentialCardInvalid,
     _ncred_decode,
@@ -205,7 +203,7 @@ class TestSignatureVerification:
         )
         # Replace sig with a different key's signature
         event_dict = _ncred_decode(ncred)
-        forger = PrivateKey()
+        _forger = PrivateKey()
         # Create a valid event from forger but with our operator's pubkey
         event_dict["sig"] = "0" * 128  # invalid sig
         forged_json = json.dumps(event_dict, separators=(",", ":")).encode("utf-8")

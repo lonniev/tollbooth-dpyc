@@ -1,14 +1,12 @@
 """Tests for the SecureCourierService high-level wrapper."""
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pynostr.key import PrivateKey
 
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.nostr_credentials import (
-    CourierNotReady,
     NostrCredentialExchange,
     NostrProfile,
 )

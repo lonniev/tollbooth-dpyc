@@ -20,7 +20,6 @@ from pynostr.key import PrivateKey
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.nostr_credentials import (
     NostrCredentialExchange,
-    _parse_delimited_credentials,
 )
 
 logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
@@ -113,8 +112,8 @@ async def main():
     logger.info("=" * 60)
     logger.info("STEP 1: open_channel(service='schwab-operator', recipient=self)")
     with patch.object(ex, "_start_subscription"), \
-         patch.object(ex, "send_dm") as mock_send, \
-         patch.object(ex, "_send_dm_as") as mock_send_as:
+         patch.object(ex, "send_dm") as _mock_send, \
+         patch.object(ex, "_send_dm_as") as _mock_send_as:
         result = await ex.open_channel(
             "schwab-operator",
             greeting="Schwab MCP operator credentials",

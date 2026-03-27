@@ -20,7 +20,6 @@ import json
 import os
 import sys
 from typing import Any
-import time
 
 from tollbooth import UserLedger
 from tollbooth.nostr_audit import AuditedVault, NostrAuditPublisher
@@ -92,7 +91,7 @@ async def main() -> None:
     vault = AuditedVault(inner_vault, publisher)
     print(f"  Publisher enabled: {publisher.enabled}")
     print(f"  Relays: {relays}")
-    print(f"  Inner vault: MockVault (in-memory)")
+    print("  Inner vault: MockVault (in-memory)")
 
     # ── Step 2: Create ledger and credit ────────────────────────
     banner("2. Create ledger, credit 1000 api_sats")
@@ -104,7 +103,7 @@ async def main() -> None:
     banner("3. Store ledger → triggers Nostr audit event (flush)")
     version = await vault.store_ledger(DEMO_USER, ledger.to_json())
     print(f"  Stored → version={version}")
-    print(f"  Audit event published (fire-and-forget)")
+    print("  Audit event published (fire-and-forget)")
 
     # Small delay for thread to complete
     await asyncio.sleep(2)
@@ -115,7 +114,7 @@ async def main() -> None:
     print(f"  Balance after debit: {ledger.balance_api_sats}")
     version = await vault.store_ledger(DEMO_USER, ledger.to_json())
     print(f"  Stored → version={version}")
-    print(f"  Second audit event published")
+    print("  Second audit event published")
 
     await asyncio.sleep(2)
 
@@ -125,7 +124,7 @@ async def main() -> None:
     ts = datetime.now(timezone.utc).isoformat()
     snap_id = await vault.snapshot_ledger(DEMO_USER, ledger.to_json(), ts)
     print(f"  Snapshot → id={snap_id}")
-    print(f"  Snapshot audit event published")
+    print("  Snapshot audit event published")
 
     await asyncio.sleep(2)
 
@@ -171,11 +170,11 @@ async def main() -> None:
 
     # ── Summary ─────────────────────────────────────────────────
     banner("Summary")
-    print(f"  3 audit events published (2 flushes + 1 snapshot)")
+    print("  3 audit events published (2 flushes + 1 snapshot)")
     print(f"  Final balance: {ledger.balance_api_sats} api_sats")
-    print(f"  Verify with filter:")
-    print(f'    {{"kinds": [30078], "#t": ["tollbooth-audit"]}}')
-    print(f"\n  Done ✓")
+    print("  Verify with filter:")
+    print('    {"kinds": [30078], "#t": ["tollbooth-audit"]}')
+    print("\n  Done ✓")
 
 
 if __name__ == "__main__":

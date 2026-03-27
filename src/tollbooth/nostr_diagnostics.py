@@ -700,6 +700,6 @@ async def courier_ping(
             f"Ping sent to {npub} via {confirmed_count}/{len(relays)} relays. "
             f"Ask the recipient to check their Nostr client for a DM from {operator_npub}."
             if confirmed_count > 0
-            else f"Ping failed — no relay confirmed delivery. Check relay connectivity."
+            else "Ping failed — no relay confirmed delivery. Check relay connectivity."
         ),
     }

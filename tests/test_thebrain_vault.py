@@ -814,7 +814,7 @@ class TestStoreLedger:
     async def test_search_fallback_finds_daily_child(self) -> None:
         """When graph returns stale data, search endpoint finds the child."""
         from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         vault = _vault()
         vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})

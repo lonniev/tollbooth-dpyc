@@ -41,8 +41,8 @@ try:
         SessionBindingBackend,
     )
     from tollbooth.nostr_credentials import (
-        CourierError,
-        CourierNotReady,
+        CourierError,  # noqa: F401
+        CourierNotReady,  # noqa: F401
         NostrCredentialExchange,
         NostrProfile,
     )
@@ -53,7 +53,7 @@ except ImportError:
 
 try:
     from tollbooth.credential_card import (
-        CredentialCardError,
+        CredentialCardError,  # noqa: F401
         encode_credential_card,
         render_qr,
     )

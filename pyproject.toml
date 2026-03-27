@@ -48,6 +48,12 @@ Issues = "https://github.com/lonniev/tollbooth-dpyc/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/tollbooth"]
 
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+ignore = ["E501"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

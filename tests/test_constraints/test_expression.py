@@ -2,7 +2,6 @@
 
 import ast
 import inspect
-import textwrap
 from datetime import datetime, timezone
 
 import pytest
@@ -12,7 +11,6 @@ from tollbooth.constraints.base import (
     EnvironmentSnapshot,
     LedgerSnapshot,
     PatronIdentity,
-    PriceModifier,
 )
 from tollbooth.constraints.expression import (
     JsonExpressionConstraint,

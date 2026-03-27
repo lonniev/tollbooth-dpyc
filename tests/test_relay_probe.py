@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from tollbooth.nostr_diagnostics import probe_relay_liveness
 from tollbooth import nostr_diagnostics

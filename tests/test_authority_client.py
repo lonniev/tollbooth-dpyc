@@ -255,7 +255,7 @@ async def test_resolve_authority_service_success():
 
     import httpx
 
-    from tollbooth.registry import DPYCRegistry, RegistryError
+    from tollbooth.registry import DPYCRegistry
 
     members = [
         {

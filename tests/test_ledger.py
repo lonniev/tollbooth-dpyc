@@ -3,7 +3,6 @@
 import json
 from datetime import date, datetime, timedelta, timezone
 
-import pytest
 
 from tollbooth.ledger import Tranche, ToolUsage, UserLedger
 

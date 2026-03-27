@@ -7,7 +7,7 @@ and a service name for matching incoming payloads.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

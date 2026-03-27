@@ -4,14 +4,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-import pytest
 from pynostr.key import PrivateKey
 
 from tollbooth.ledger import Tranche
 from tollbooth.nostr_notifications import (
-    DEFAULT_CRITICAL_PERCENT,
-    DEFAULT_EXPIRATION_WINDOW_SECS,
-    DEFAULT_WARNING_PERCENT,
     NotificationLevel,
     NotificationManager,
     NotificationPreferences,
@@ -570,7 +566,6 @@ class TestNip44DmSending:
         assert args[0] == "Hello patron"
 
         # Give daemon thread a moment to start
-        import time
         time.sleep(0.1)
 
     @patch("tollbooth.nostr_notifications.create_connection")
@@ -586,7 +581,6 @@ class TestNip44DmSending:
         # Call _publish_to_relays directly (synchronous) for deterministic test
         mgr._send_nip44_dm(npub, "test")
         # Wait for daemon thread
-        import time
         time.sleep(0.2)
 
         # Both relays should have been contacted

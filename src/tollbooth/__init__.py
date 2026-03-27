@@ -329,4 +329,11 @@ __all__ = [
     "SurgePricingConstraint",
     "load_constraints",
     "validate_config",
+    # Bootstrap & Runtime
+    "BootstrapClient",
+    "BootstrapResult",
+    "ensure_bootstrapped",
+    "OperatorRuntime",
+    "resolve_npub",
+    "VaultCipher",
 ]

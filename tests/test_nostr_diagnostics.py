@@ -1,14 +1,12 @@
 """Tests for Nostr Relay Health Diagnostics (courier_health / courier_ping)."""
 
 import json
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pynostr.key import PrivateKey
 
 from tollbooth.nostr_diagnostics import (
-    DiagnosticError,
     _KIND_ENCRYPTED_DM,
     _KIND_GIFT_WRAP,
     _extract_nip_support,

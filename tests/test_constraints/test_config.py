@@ -20,7 +20,7 @@ from tollbooth.constraints.config import (
 from tollbooth.constraints.engine import ConstraintEngine
 from tollbooth.constraints.temporal import TemporalWindowConstraint
 from tollbooth.constraints.supply import FiniteSupplyConstraint
-from tollbooth.constraints.pricing import FreeTrialConstraint, CouponConstraint
+from tollbooth.constraints.pricing import FreeTrialConstraint
 
 
 def _ctx(hour=12, invocation_count=0):

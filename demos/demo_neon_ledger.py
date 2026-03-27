@@ -121,7 +121,7 @@ async def main() -> None:
         print(f"  Deposited:     {final.total_deposited_api_sats}")
         print(f"  Consumed:      {final.total_consumed_api_sats}")
         print(f"  Tranches:      {len(final.tranches)}")
-        print(f"  History:")
+        print("  History:")
         for tool, u in final.history.items():
             print(f"    {tool}: {u.calls} calls, {u.api_sats} api_sats")
 

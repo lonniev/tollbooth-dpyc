@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -225,7 +224,7 @@ class TestPublishLedgerUpdate:
         with (
             patch("tollbooth.nostr_audit.PrivateKey", create=True) as MockPK,
             patch("tollbooth.nostr_audit.Event", create=True) as MockEvent,
-            patch("tollbooth.nostr_audit.threading") as mock_threading,
+            patch("tollbooth.nostr_audit.threading") as _mock_threading,
             patch("tollbooth.nostr_audit._HAS_NIP44", True),
             patch(
                 "tollbooth.nostr_audit._nip44_encrypt",
