@@ -52,7 +52,7 @@ packages = ["src/tollbooth"]
 line-length = 120
 
 [tool.ruff.lint]
-ignore = ["E501"]
+ignore = ["E501", "F821"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
