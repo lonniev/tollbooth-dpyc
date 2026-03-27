@@ -23,5 +23,11 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev,nostr,qr]"
 
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint
+        run: ruff check .
+
       - name: Run tests
         run: pytest tests/ -q
