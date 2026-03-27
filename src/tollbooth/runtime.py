@@ -68,6 +68,7 @@ class OperatorRuntime:
         credential_service: str = "",
         credential_template: Any | None = None,
         credential_greeting: str = "",
+        service_name: str = "",
         relays: list[str] | None = None,
         constraint_gate: Any | None = None,
     ) -> None:
@@ -76,6 +77,7 @@ class OperatorRuntime:
         self._credential_service = credential_service
         self._credential_template = credential_template
         self._credential_greeting = credential_greeting
+        self._service_name = service_name
         self._relays = relays
         self._constraint_gate = constraint_gate
 
@@ -359,9 +361,12 @@ class OperatorRuntime:
             if result["ready"]:
                 result["summary"] = "Operator is fully configured and ready to serve."
 
-        # Always include bootstrap state for diagnostics
+        # Include bootstrap state and operator identity for the app
         result["bootstrap_error"] = bootstrap_error
         result["vault_ok"] = vault_ok
+        result["credential_greeting"] = self._credential_greeting
+        result["credential_service"] = self._credential_service
+        result["operator_name"] = self._service_name
 
         return result
 
