@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from tollbooth.pricing import ToolPricing
+    from tollbooth.pricing import ToolPricing  # noqa: F401
 
 
 @dataclass
