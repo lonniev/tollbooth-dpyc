@@ -362,9 +362,26 @@ class OperatorRuntime:
                 result["summary"] = "Operator is fully configured and ready to serve."
 
         # Enrich missing secret fields with descriptions from credential template
-        # Optional fields don't block the operator from coming online
+        # Also add template-only fields (not in Settings) that haven't been delivered
         if self._credential_template is not None:
             tmpl_fields = self._credential_template.fields
+
+            # Check which template fields are already configured (in vault)
+            vault_creds = {}
+            try:
+                from tollbooth.tools.onboarding import load_vault_credentials
+                courier = await self.courier()
+                vault_creds = await load_vault_credentials(
+                    courier, self._credential_service, self.operator_npub(),
+                ) or {}
+            except Exception:
+                pass
+
+            # Track which fields are accounted for
+            known_fields = {f["field"] for f in result.get("configured", [])}
+            known_fields.update(f["field"] for f in result.get("missing", []))
+
+            # Enrich existing missing fields with descriptions
             required_missing = []
             for field in result.get("missing", []):
                 if field["category"] == "secret" and field["field"] in tmpl_fields:
@@ -373,13 +390,30 @@ class OperatorRuntime:
                         field["how"] = spec.description
                     if not spec.required:
                         field["optional"] = True
-                        # Don't count optional fields as blocking
                         continue
                 required_missing.append(field)
-            # Recalculate readiness with only required fields
+
+            # Add template fields not in Settings (e.g. app_key, secret)
+            for name, spec in tmpl_fields.items():
+                if name in known_fields:
+                    continue
+                if name in vault_creds:
+                    result["configured"].append({
+                        "field": name, "category": "secret", "status": "configured",
+                    })
+                else:
+                    entry = {
+                        "field": name, "category": "secret", "status": "missing",
+                        "how": spec.description if hasattr(spec, "description") and spec.description else "Deliver via Secure Courier.",
+                    }
+                    if spec.required:
+                        required_missing.append(entry)
+                    else:
+                        result.setdefault("optional_missing", []).append(entry)
+
             all_missing = result.get("missing", [])
             result["missing"] = required_missing
-            result["optional_missing"] = [f for f in all_missing if f not in required_missing]
+            result["optional_missing"] = [f for f in all_missing if f not in required_missing] + result.get("optional_missing", [])
             result["ready"] = len(required_missing) == 0
             if result["ready"]:
                 result["summary"] = "Operator is fully configured and ready to serve."
