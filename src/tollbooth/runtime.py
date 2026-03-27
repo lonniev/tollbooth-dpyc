@@ -327,6 +327,16 @@ class OperatorRuntime:
         """Return onboarding status with vault + bootstrap check."""
         from tollbooth.tools.onboarding import get_onboarding_status_with_vault
 
+        # Actively try to bootstrap the vault so we can report its status
+        vault_ok = self._vault is not None
+        bootstrap_error = ""
+        if not vault_ok:
+            try:
+                await self.vault()
+                vault_ok = True
+            except Exception as exc:
+                bootstrap_error = str(exc)
+
         result = await get_onboarding_status_with_vault(
             settings=settings,
             courier_service=await self.courier(),
@@ -335,8 +345,7 @@ class OperatorRuntime:
         )
 
         # If vault is bootstrapped, mark neon_database_url as configured
-        # even though the env var isn't set (bootstrap provides it)
-        if self._vault is not None:
+        if vault_ok:
             still_missing = []
             for field in result.get("missing", []):
                 if field["field"] == "neon_database_url":
@@ -349,6 +358,9 @@ class OperatorRuntime:
             result["ready"] = len(still_missing) == 0
             if result["ready"]:
                 result["summary"] = "Operator is fully configured and ready to serve."
+
+        if bootstrap_error:
+            result["bootstrap_error"] = bootstrap_error
 
         return result
 
