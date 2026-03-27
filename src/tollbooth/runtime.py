@@ -467,9 +467,36 @@ def register_standard_tools(
         from tollbooth.tools import credits
         return await credits.account_statement_tool(cache, npub, days=days)
 
-    # NOTE: account_statement_infographic is NOT a standard tool.
-    # Each operator renders its own SVG layout. Register it in your
-    # operator's server.py if you have an infographic renderer.
+    @tool
+    async def account_statement_infographic(npub: str = "", days: int = 30) -> dict[str, Any]:
+        """Generate a visual SVG infographic of your account statement.
+
+        Returns the same data as account_statement, rendered as a dark-themed
+        SVG graphic with balance hero, metrics cards, health gauge, tranche
+        table, and tool usage breakdown. Costs 1 api_sat per call.
+
+        Args:
+            npub: Your Nostr public key.
+            days: Number of days of daily usage history to include (default 30).
+        """
+        err = await rt.debit_or_error("account_statement_infographic", npub)
+        if err:
+            return err
+        try:
+            npub = resolve_npub(npub)
+            cache = await rt.ledger_cache()
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        from tollbooth.tools import credits
+        statement = await credits.account_statement_tool(cache, npub, days=days)
+        from tollbooth.infographic import render_account_infographic
+        svg = render_account_infographic(statement)
+        return {
+            "svg": svg,
+            "generated_at": __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ).isoformat(),
+        }
 
     # -- Service status ------------------------------------------------
 
