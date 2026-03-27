@@ -148,14 +148,11 @@ class BootstrapClient:
         config = self._read_config_from_relays(result.authority_npub)
 
         if config is None:
-            from pynostr.key import PublicKey  # type: ignore[import-untyped]
-            auth_hex = PublicKey.from_npub(result.authority_npub).hex() if result.authority_npub.startswith("npub1") else result.authority_npub
             diag = getattr(self, '_relay_diag', 'no diag')
+            logger.warning("Bootstrap relay diagnostics: %s", diag)
             result.error = (
-                f"No bootstrap config on relays. "
-                f"auth={auth_hex[:16]}... "
-                f"op={self.pubkey_hex[:16]}... "
-                f"[{diag}]"
+                f"No bootstrap config on relays from authority "
+                f"{result.authority_npub[:20]}..."
             )
             return result
 
@@ -182,7 +179,6 @@ class BootstrapClient:
 
     def _read_config_from_relays(self, authority_npub: str) -> dict[str, str] | None:
         """Poll Nostr relays for bootstrap config DM from the Authority."""
-        import traceback
         try:
             from pynostr.key import PublicKey  # type: ignore[import-untyped]
             from tollbooth.bootstrap_relay import receive_bootstrap_config
@@ -199,6 +195,5 @@ class BootstrapClient:
             self._relay_diag = diag
             return config
         except Exception as exc:
-            tb = traceback.format_exc()
-            self._relay_diag = f"EXCEPTION: {exc}\n{tb}"
+            self._relay_diag = str(exc)
             return None

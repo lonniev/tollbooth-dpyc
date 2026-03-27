@@ -210,10 +210,7 @@ def receive_bootstrap_config(
                                     authority_pubkey_hex[:16], relay_url, ts,
                                 )
                     except Exception as exc:
-                        relay_errors.append(
-                            f"{relay_url}: decrypt err: {exc} "
-                            f"(content_start={event_data['content'][:20]}...)"
-                        )
+                        relay_errors.append(f"{relay_url}: decrypt err: {exc}")
 
             ws.send(json.dumps(["CLOSE", sub_id]))
             ws.close()

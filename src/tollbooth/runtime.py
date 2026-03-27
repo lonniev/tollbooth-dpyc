@@ -328,12 +328,6 @@ class OperatorRuntime:
         from tollbooth.tools.onboarding import get_onboarding_status_with_vault
 
         # Actively try to bootstrap the vault so we can report its status
-        # Reset cached bootstrap failure to allow retry
-        import tollbooth.bootstrap as _bootstrap_mod
-        if self._vault is None and _bootstrap_mod._cached_result is not None:
-            if not _bootstrap_mod._cached_result.success:
-                _bootstrap_mod._cached_result = None
-
         vault_ok = self._vault is not None
         bootstrap_error = ""
         if not vault_ok:
@@ -341,8 +335,7 @@ class OperatorRuntime:
                 await self.vault()
                 vault_ok = True
             except Exception as exc:
-                import traceback as _tb
-                bootstrap_error = f"{exc}\n{_tb.format_exc()}"
+                bootstrap_error = str(exc)
 
         result = await get_onboarding_status_with_vault(
             settings=settings,
@@ -549,22 +542,12 @@ def register_standard_tools(
                       and hasattr(rt._courier, '_exchange')
                       and rt._courier._exchange._credential_vault is not None)
 
-        # Try bootstrap and capture error if it fails
-        bootstrap_error = ""
-        if not vault_ok:
-            try:
-                await rt.vault()
-                vault_ok = True
-            except Exception as exc:
-                bootstrap_error = str(exc)
-
         return {
             "success": True,
             "service": service_name or slug,
             "version": service_version,
             "vault_configured": vault_ok,
             "courier_has_vault": courier_ok,
-            "bootstrap_error": bootstrap_error,
             "process_id": os.getpid(),
         }
 
