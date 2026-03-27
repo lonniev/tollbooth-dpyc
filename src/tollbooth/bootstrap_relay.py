@@ -184,9 +184,9 @@ def receive_bootstrap_config(
                     event_data = msg[2]
                     try:
                         plaintext = nip04_decrypt(
+                            ciphertext_with_iv=event_data["content"],
                             private_key_hex=op_pk.hex(),
                             public_key_hex=authority_pubkey_hex,
-                            ciphertext=event_data["content"],
                         )
                         payload = json.loads(plaintext)
                         if payload.get("type") == BOOTSTRAP_CONFIG_TAG:
