@@ -147,6 +147,17 @@ def receive_bootstrap_config(
         op_pk = PrivateKey(bytes.fromhex(operator_nsec))
 
     op_pubkey_hex = op_pk.public_key.hex()
+    op_privkey_hex = op_pk.hex()
+
+    # Sanity check — ensure hex strings are valid
+    try:
+        bytes.fromhex(op_privkey_hex)
+        bytes.fromhex(authority_pubkey_hex)
+    except ValueError as e:
+        logger.error("Bootstrap key hex invalid: priv=%s... pub=%s... err=%s",
+                     op_privkey_hex[:8], authority_pubkey_hex[:8], e)
+        return None, f"key hex error: {e}"
+
     since = int(time.time()) - max_age_seconds
 
     # Build subscription filter: NIP-04 DMs (kind 4) from authority to operator
@@ -185,7 +196,7 @@ def receive_bootstrap_config(
                     try:
                         plaintext = nip04_decrypt(
                             ciphertext_with_iv=event_data["content"],
-                            private_key_hex=op_pk.hex(),
+                            private_key_hex=op_privkey_hex,
                             public_key_hex=authority_pubkey_hex,
                         )
                         payload = json.loads(plaintext)
@@ -199,7 +210,10 @@ def receive_bootstrap_config(
                                     authority_pubkey_hex[:16], relay_url, ts,
                                 )
                     except Exception as exc:
-                        relay_errors.append(f"{relay_url}: decrypt failed: {exc}")
+                        relay_errors.append(
+                            f"{relay_url}: decrypt err: {exc} "
+                            f"(content_start={event_data['content'][:20]}...)"
+                        )
 
             ws.send(json.dumps(["CLOSE", sub_id]))
             ws.close()
