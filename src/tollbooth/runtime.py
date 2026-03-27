@@ -359,8 +359,9 @@ class OperatorRuntime:
             if result["ready"]:
                 result["summary"] = "Operator is fully configured and ready to serve."
 
-        if bootstrap_error:
-            result["bootstrap_error"] = bootstrap_error
+        # Always include bootstrap state for diagnostics
+        result["bootstrap_error"] = bootstrap_error
+        result["vault_ok"] = vault_ok
 
         return result
 
