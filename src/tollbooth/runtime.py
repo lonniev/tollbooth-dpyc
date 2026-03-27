@@ -507,13 +507,26 @@ def register_standard_tools(
         """Check the health and configuration of this service. Free."""
         import os
         vault_ok = rt._vault is not None
-        courier_ok = rt._courier is not None and hasattr(rt._courier, '_exchange') and rt._courier._exchange._credential_vault is not None
+        courier_ok = (rt._courier is not None
+                      and hasattr(rt._courier, '_exchange')
+                      and rt._courier._exchange._credential_vault is not None)
+
+        # Try bootstrap and capture error if it fails
+        bootstrap_error = ""
+        if not vault_ok:
+            try:
+                await rt.vault()
+                vault_ok = True
+            except Exception as exc:
+                bootstrap_error = str(exc)
+
         return {
             "success": True,
             "service": service_name or slug,
             "version": service_version,
             "vault_configured": vault_ok,
             "courier_has_vault": courier_ok,
+            "bootstrap_error": bootstrap_error,
             "process_id": os.getpid(),
         }
 
