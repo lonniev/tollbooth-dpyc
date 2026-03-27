@@ -30,4 +30,4 @@ jobs:
         run: ruff check .
 
       - name: Run tests
-        run: pytest tests/ -q
+        run: pytest tests/ -q --import-mode=importlib
