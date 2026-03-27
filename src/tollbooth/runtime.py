@@ -361,6 +361,15 @@ class OperatorRuntime:
             if result["ready"]:
                 result["summary"] = "Operator is fully configured and ready to serve."
 
+        # Enrich missing secret fields with descriptions from credential template
+        if self._credential_template is not None:
+            tmpl_fields = self._credential_template.fields
+            for field in result.get("missing", []):
+                if field["category"] == "secret" and field["field"] in tmpl_fields:
+                    spec = tmpl_fields[field["field"]]
+                    if hasattr(spec, "description") and spec.description:
+                        field["how"] = spec.description
+
         # Include bootstrap state and operator identity for the app
         result["bootstrap_error"] = bootstrap_error
         result["vault_ok"] = vault_ok

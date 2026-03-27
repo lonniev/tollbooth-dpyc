@@ -16,6 +16,7 @@ class FieldSpec:
 
     required: bool = True
     sensitive: bool = True
+    description: str = ""
 
 
 @dataclass(frozen=True)
