@@ -126,7 +126,7 @@ def receive_bootstrap_config(
     authority_pubkey_hex: str,
     relays: list[str] | None = None,
     max_age_seconds: int = 30 * 24 * 3600,  # 30 days
-) -> dict[str, str] | None:
+) -> tuple[dict[str, str] | None, str]:
     """Read bootstrap config from Nostr relays.
 
     Called by the operator on cold start. Polls relays for NIP-04
@@ -210,15 +210,11 @@ def receive_bootstrap_config(
         except Exception as exc:
             relay_errors.append(f"{relay_url}: {exc}")
 
-    if best_config is None and relay_errors:
-        logger.warning(
-            "Bootstrap relay poll: %d events found, %d errors: %s",
-            events_found, len(relay_errors), "; ".join(relay_errors),
-        )
-    elif best_config is None:
-        logger.warning(
-            "Bootstrap relay poll: no events found on %d relays (auth=%s, op=%s)",
-            len(relay_urls), authority_pubkey_hex[:16], op_pubkey_hex[:16],
-        )
+    diag = f"relays={len(relay_urls)}, events={events_found}"
+    if relay_errors:
+        diag += f", errors=[{'; '.join(relay_errors)}]"
 
-    return best_config
+    if best_config is None:
+        logger.warning("Bootstrap relay poll failed: %s", diag)
+
+    return best_config, diag

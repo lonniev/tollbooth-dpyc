@@ -142,12 +142,12 @@ class BootstrapClient:
         if config is None:
             from pynostr.key import PublicKey  # type: ignore[import-untyped]
             auth_hex = PublicKey.from_npub(result.authority_npub).hex() if result.authority_npub.startswith("npub1") else result.authority_npub
+            diag = getattr(self, '_relay_diag', 'no diag')
             result.error = (
                 f"No bootstrap config on relays. "
-                f"authority={result.authority_npub[:20]}... "
-                f"(hex={auth_hex[:16]}...) "
-                f"operator={self.npub[:20]}... "
-                f"(hex={self.pubkey_hex[:16]}...)"
+                f"auth={auth_hex[:16]}... "
+                f"op={self.pubkey_hex[:16]}... "
+                f"[{diag}]"
             )
             return result
 
@@ -183,7 +183,9 @@ class BootstrapClient:
         else:
             authority_hex = authority_npub
 
-        return receive_bootstrap_config(
+        config, diag = receive_bootstrap_config(
             operator_nsec=self._nsec_hex,
             authority_pubkey_hex=authority_hex,
         )
+        self._relay_diag = diag
+        return config
