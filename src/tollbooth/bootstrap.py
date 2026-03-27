@@ -2,14 +2,14 @@
 
 The bootstrap sequence:
 1. Derive npub from nsec
-2. Call Authority's get_operator_config(npub, proof) → Neon URL + config
-3. If "not registered" → register via Authority → retry
-4. Connect to Neon with encryption
-5. Check for stored service config (BTCPay, etc.)
-6. If missing → request via Secure Courier
+2. Look up Authority's npub from the community registry
+3. Poll Nostr relays for bootstrap config DM from the Authority
+4. Extract Neon URL from the encrypted config
+5. Connect to Neon with encryption
 
-This module provides the BootstrapClient that tollbooth operators
-call at startup to discover their persistence and config.
+The Authority sends the bootstrap config as a NIP-04 encrypted DM
+at registration time. The operator reads it on cold start — no OAuth,
+no MCP-to-MCP calls, no additional env vars beyond the nsec.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ class BootstrapResult:
     encryption_nsec_hex: str | None = None
     npub: str = ""
     authority_npub: str = ""
-    authority_url: str = ""
     config: dict[str, str] = field(default_factory=dict)
     error: str | None = None
 
@@ -67,7 +66,10 @@ async def ensure_bootstrapped() -> BootstrapResult:
 
 
 class BootstrapClient:
-    """Discovers operator config from the Authority using only the nsec.
+    """Discovers operator config from Nostr relays using only the nsec.
+
+    The Authority sends a NIP-04 encrypted DM containing the operator's
+    Neon URL at registration time. This client reads it on cold start.
 
     Usage::
 
@@ -112,44 +114,37 @@ class BootstrapClient:
     async def bootstrap(self) -> BootstrapResult:
         """Run the full bootstrap sequence.
 
-        Optimistic: tries get_operator_config first (fast path for
-        already-registered operators). Falls back to registration
-        if not found.
+        1. Resolve Authority npub from registry
+        2. Poll relays for bootstrap config DM from Authority
+        3. Extract Neon URL
         """
         result = BootstrapResult(
             npub=self.npub,
             encryption_nsec_hex=self._nsec_hex,
         )
 
-        # Step 1: Resolve Authority URL from registry
+        # Step 1: Resolve Authority npub from registry
         try:
             authority_info = await self._resolve_authority()
             result.authority_npub = authority_info.get("npub", "")
-            result.authority_url = authority_info.get("url", "")
         except Exception as e:
             result.error = f"Cannot resolve Authority: {e}"
             logger.warning("Bootstrap: %s", result.error)
             return result
 
-        if not result.authority_url:
-            result.error = "No Authority URL found in registry"
+        if not result.authority_npub:
+            result.error = "No Authority npub found in registry"
             return result
 
-        # Step 2: Try get_operator_config (optimistic — already registered)
-        config = await self._get_config(result.authority_url)
+        # Step 2: Read bootstrap config from Nostr relays
+        config = self._read_config_from_relays(result.authority_npub)
 
         if config is None:
-            # Step 3: Not registered — register first, then retry
-            logger.info("Bootstrap: not registered, requesting registration...")
-            registered = await self._register(result.authority_url)
-            if not registered:
-                result.error = "Registration failed"
-                return result
-            # Retry config after registration
-            config = await self._get_config(result.authority_url)
-
-        if config is None:
-            result.error = "Config not available after registration"
+            result.error = (
+                "No bootstrap config found on Nostr relays. "
+                "The Authority sends the config DM during registration. "
+                "Try re-registering the operator with its Authority."
+            )
             return result
 
         result.config = config
@@ -164,62 +159,27 @@ class BootstrapClient:
                 "configured" if result.neon_database_url else "missing",
             )
         else:
-            result.error = "Neon URL not in config — Authority may not have provisioned it"
+            result.error = "Neon URL not in bootstrap config from Authority"
 
         return result
 
     async def _resolve_authority(self) -> dict[str, str]:
-        """Resolve this operator's Authority URL from the registry."""
+        """Resolve this operator's Authority npub from the registry."""
         from tollbooth.registry import resolve_authority_service
         return await resolve_authority_service(self.npub)
 
-    async def _get_config(self, authority_url: str) -> dict[str, str] | None:
-        """Call get_operator_config on the Authority with Schnorr proof."""
-        try:
-            from tollbooth.operator_proof import create_operator_proof
-            proof = create_operator_proof(self._nsec_hex, "get_operator_config")
+    def _read_config_from_relays(self, authority_npub: str) -> dict[str, str] | None:
+        """Poll Nostr relays for bootstrap config DM from the Authority."""
+        from pynostr.key import PublicKey  # type: ignore[import-untyped]
+        from tollbooth.bootstrap_relay import receive_bootstrap_config
 
-            from fastmcp import Client
-            async with Client(authority_url, auth="oauth") as client:
-                result = await client.call_tool(
-                    "get_operator_config",
-                    {"npub": self.npub, "operator_proof": proof},
-                )
-                # Parse response
-                for block in getattr(result, "content", []):
-                    if hasattr(block, "text"):
-                        try:
-                            data = json.loads(block.text)
-                            if data.get("success"):
-                                return data.get("config", {})
-                            logger.info("get_operator_config: %s", data.get("error", "unknown"))
-                            return None
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-        except Exception as e:
-            logger.warning("get_operator_config failed: %s", e)
-        return None
+        # Convert authority npub to hex
+        if authority_npub.startswith("npub1"):
+            authority_hex = PublicKey.from_npub(authority_npub).hex()
+        else:
+            authority_hex = authority_npub
 
-    async def _register(self, authority_url: str) -> bool:
-        """Call register_operator on the Authority."""
-        try:
-            from fastmcp import Client
-            async with Client(authority_url, auth="oauth") as client:
-                result = await client.call_tool(
-                    "register_operator",
-                    {"npub": self.npub},
-                )
-                for block in getattr(result, "content", []):
-                    if hasattr(block, "text"):
-                        try:
-                            data = json.loads(block.text)
-                            if data.get("success"):
-                                logger.info("Registration successful: %s", data.get("message", ""))
-                                return True
-                            logger.warning("Registration failed: %s", data.get("error", ""))
-                            return False
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-        except Exception as e:
-            logger.warning("register_operator failed: %s", e)
-        return False
+        return receive_bootstrap_config(
+            operator_nsec=self._nsec_hex,
+            authority_pubkey_hex=authority_hex,
+        )
