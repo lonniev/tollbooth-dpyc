@@ -325,14 +325,33 @@ class OperatorRuntime:
     # ------------------------------------------------------------------
 
     async def onboarding_status(self, settings: Any) -> dict[str, Any]:
-        """Return onboarding status with vault check."""
+        """Return onboarding status with vault + bootstrap check."""
         from tollbooth.tools.onboarding import get_onboarding_status_with_vault
-        return await get_onboarding_status_with_vault(
+
+        result = await get_onboarding_status_with_vault(
             settings=settings,
             courier_service=await self.courier(),
             service=self._credential_service,
             operator_npub=self.operator_npub(),
         )
+
+        # If vault is bootstrapped, mark neon_database_url as configured
+        # even though the env var isn't set (bootstrap provides it)
+        if self._vault is not None:
+            still_missing = []
+            for field in result.get("missing", []):
+                if field["field"] == "neon_database_url":
+                    field["status"] = "configured"
+                    field["how"] = None
+                    result["configured"].append(field)
+                else:
+                    still_missing.append(field)
+            result["missing"] = still_missing
+            result["ready"] = len(still_missing) == 0
+            if result["ready"]:
+                result["summary"] = "Operator is fully configured and ready to serve."
+
+        return result
 
     async def load_credentials(self, field_names: list[str]) -> dict[str, str]:
         """Load specific credentials from the Secure Courier vault."""
