@@ -9,10 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from tollbooth.pricing import ToolPricing
+from typing import Any
 
 from tollbooth.constraints.config import load_constraints
 from tollbooth.constraints.engine import ConstraintEngine
