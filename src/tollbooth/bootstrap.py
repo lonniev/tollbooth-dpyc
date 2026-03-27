@@ -118,9 +118,17 @@ class BootstrapClient:
         2. Poll relays for bootstrap config DM from Authority
         3. Extract Neon URL
         """
+        # Convert nsec to hex for vault encryption
+        from pynostr.key import PrivateKey as _PK  # type: ignore[import-untyped]
+        nsec = self._nsec_hex
+        if nsec.startswith("nsec1"):
+            nsec_hex = _PK.from_nsec(nsec).hex()
+        else:
+            nsec_hex = nsec
+
         result = BootstrapResult(
             npub=self.npub,
-            encryption_nsec_hex=self._nsec_hex,
+            encryption_nsec_hex=nsec_hex,
         )
 
         # Step 1: Resolve Authority npub from registry
