@@ -328,6 +328,12 @@ class OperatorRuntime:
         from tollbooth.tools.onboarding import get_onboarding_status_with_vault
 
         # Actively try to bootstrap the vault so we can report its status
+        # Reset cached bootstrap failure to allow retry
+        import tollbooth.bootstrap as _bootstrap_mod
+        if self._vault is None and _bootstrap_mod._cached_result is not None:
+            if not _bootstrap_mod._cached_result.success:
+                _bootstrap_mod._cached_result = None
+
         vault_ok = self._vault is not None
         bootstrap_error = ""
         if not vault_ok:
@@ -335,7 +341,8 @@ class OperatorRuntime:
                 await self.vault()
                 vault_ok = True
             except Exception as exc:
-                bootstrap_error = str(exc)
+                import traceback as _tb
+                bootstrap_error = f"{exc}\n{_tb.format_exc()}"
 
         result = await get_onboarding_status_with_vault(
             settings=settings,
