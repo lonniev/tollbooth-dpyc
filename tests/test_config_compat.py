@@ -32,8 +32,6 @@ class TestConfigBackwardsCompatibility:
         assert config.btcpay_host is None
         assert config.btcpay_store_id is None
         assert config.btcpay_api_key is None
-        assert config.btcpay_tier_config is None
-        assert config.btcpay_user_tiers is None
         assert config.seed_balance_sats == 0
         assert config.authority_npub is None
         assert config.credit_ttl_seconds == 604800
@@ -48,8 +46,6 @@ class TestConfigBackwardsCompatibility:
             btcpay_host="https://pay.example.com",
             btcpay_store_id="store123",
             btcpay_api_key="key456",
-            btcpay_tier_config='{"tiers":{}}',
-            btcpay_user_tiers='{"users":{}}',
             seed_balance_sats=500,
             authority_npub="npub1xxx",
             credit_ttl_seconds=3600,
@@ -61,8 +57,6 @@ class TestConfigBackwardsCompatibility:
         assert config.btcpay_host == "https://pay.example.com"
         assert config.btcpay_store_id == "store123"
         assert config.btcpay_api_key == "key456"
-        assert config.btcpay_tier_config == '{"tiers":{}}'
-        assert config.btcpay_user_tiers == '{"users":{}}'
         assert config.seed_balance_sats == 500
         assert config.authority_npub == "npub1xxx"
         assert config.credit_ttl_seconds == 3600

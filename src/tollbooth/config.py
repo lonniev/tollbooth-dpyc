@@ -12,8 +12,6 @@ class TollboothConfig:
     btcpay_host: str | None = None
     btcpay_store_id: str | None = None
     btcpay_api_key: str | None = None
-    btcpay_tier_config: str | None = None
-    btcpay_user_tiers: str | None = None
     seed_balance_sats: int = 0
     authority_npub: str | None = None  # Nostr npub (Schnorr verification)
     credit_ttl_seconds: int | None = 604800  # 7 days default, None = never

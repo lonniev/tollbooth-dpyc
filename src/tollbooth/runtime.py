@@ -1,21 +1,31 @@
 """OperatorRuntime — the core DPYC protocol engine for all operators.
 
-Also provides ``register_standard_tools(mcp, slug, runtime, settings_fn)``
+Also provides ``register_standard_tools(mcp, slug, runtime)``
 which registers all standard DPYC tools (check_balance, purchase_credits,
 service_status, Secure Courier, Oracle delegation, pricing, onboarding)
 on any FastMCP app.  Operators call this once and only write domain tools.
 
 Encapsulates bootstrap, vault initialization, ledger cache, credit
-gating, Secure Courier, and npub resolution. Operators instantiate
-this once and delegate all DPYC protocol operations to it.
+gating, Secure Courier, OTS anchoring, and npub resolution. Operators
+instantiate this once and delegate all DPYC protocol operations to it.
+
+Supports dual credential templates:
+- ``operator_credential_template``: BTCPay + operator-specific secrets,
+  delivered once at setup via Secure Courier
+- ``patron_credential_template``: per-user API keys delivered via
+  Secure Courier (for API-key-based patrons, not OAuth2)
 
 Usage::
 
     runtime = OperatorRuntime(
         nsec_env_var="TOLLBOOTH_NOSTR_OPERATOR_NSEC",
         tool_costs={"my_tool": ToolTier.READ, "free_tool": ToolTier.FREE},
-        credential_service="my-operator",
-        credential_template=CredentialTemplate(...),
+        operator_credential_template=CredentialTemplate(
+            service="my-operator", ...
+        ),
+        patron_credential_template=CredentialTemplate(
+            service="my-patron", ...
+        ),
     )
 
     # In a tool function:
@@ -65,21 +75,27 @@ class OperatorRuntime:
         *,
         nsec_env_var: str = "TOLLBOOTH_NOSTR_OPERATOR_NSEC",
         tool_costs: dict[str, int] | None = None,
-        credential_service: str = "",
-        credential_template: Any | None = None,
-        credential_greeting: str = "",
+        operator_credential_template: Any | None = None,
+        patron_credential_template: Any | None = None,
+        operator_credential_greeting: str = "",
+        patron_credential_greeting: str = "",
         service_name: str = "",
         relays: list[str] | None = None,
         constraint_gate: Any | None = None,
+        ots_enabled: bool = False,
+        ots_calendars: list[str] | None = None,
     ) -> None:
         self._nsec_env_var = nsec_env_var
         self._tool_costs = tool_costs or {}
-        self._credential_service = credential_service
-        self._credential_template = credential_template
-        self._credential_greeting = credential_greeting
+        self._operator_credential_template = operator_credential_template
+        self._patron_credential_template = patron_credential_template
+        self._operator_credential_greeting = operator_credential_greeting
+        self._patron_credential_greeting = patron_credential_greeting
         self._service_name = service_name
         self._relays = relays
         self._constraint_gate = constraint_gate
+        self._ots_enabled = ots_enabled
+        self._ots_calendars = ots_calendars
 
         # Lazy singletons
         self._vault: Any | None = None
@@ -87,6 +103,20 @@ class OperatorRuntime:
         self._courier: Any | None = None
         self._operator_npub: str | None = None
         self._nsec: str | None = None
+
+    @property
+    def operator_credential_service(self) -> str:
+        """Return the operator credential service name."""
+        if self._operator_credential_template:
+            return self._operator_credential_template.service
+        return ""
+
+    @property
+    def patron_credential_service(self) -> str:
+        """Return the patron credential service name."""
+        if self._patron_credential_template:
+            return self._patron_credential_template.service
+        return ""
 
     # ------------------------------------------------------------------
     # Identity
@@ -222,8 +252,10 @@ class OperatorRuntime:
             logger.warning("No persistent credential vault: %s", exc)
 
         templates = {}
-        if self._credential_service and self._credential_template:
-            templates[self._credential_service] = self._credential_template
+        if self._operator_credential_template:
+            templates[self._operator_credential_template.service] = self._operator_credential_template
+        if self._patron_credential_template:
+            templates[self._patron_credential_template.service] = self._patron_credential_template
 
         self._courier = SecureCourierService(
             operator_nsec=nsec,
@@ -325,11 +357,23 @@ class OperatorRuntime:
     # Onboarding
     # ------------------------------------------------------------------
 
-    async def onboarding_status(self, settings: Any) -> dict[str, Any]:
-        """Return onboarding status with vault + bootstrap check."""
-        from tollbooth.tools.onboarding import get_onboarding_status_with_vault
+    async def onboarding_status(self) -> dict[str, Any]:
+        """Return onboarding status — template-driven, no Settings introspection.
 
-        # Actively try to bootstrap the vault so we can report its status
+        Checks:
+        1. Identity: is nsec set?
+        2. Bootstrap: can we reach the vault (Authority-provisioned Neon URL)?
+        3. Operator credentials: are all operator_credential_template fields in vault?
+        """
+        # 1. Identity check
+        identity_ok = False
+        try:
+            self._get_nsec()
+            identity_ok = True
+        except RuntimeError:
+            pass
+
+        # 2. Bootstrap check — actively try to bring up the vault
         vault_ok = self._vault is not None
         bootstrap_error = ""
         if not vault_ok:
@@ -339,100 +383,156 @@ class OperatorRuntime:
             except Exception as exc:
                 bootstrap_error = str(exc)
 
-        result = await get_onboarding_status_with_vault(
-            settings=settings,
-            courier_service=await self.courier(),
-            service=self._credential_service,
-            operator_npub=self.operator_npub(),
-        )
+        # 3. Operator credential check — template fields vs vault contents
+        configured: list[dict[str, str]] = []
+        missing: list[dict[str, str]] = []
+        optional_missing: list[dict[str, str]] = []
 
-        # If vault is bootstrapped, mark neon_database_url as configured
-        if vault_ok:
-            still_missing = []
-            for field in result.get("missing", []):
-                if field["field"] == "neon_database_url":
-                    field["status"] = "configured"
-                    field["how"] = None
-                    result["configured"].append(field)
-                else:
-                    still_missing.append(field)
-            result["missing"] = still_missing
-            result["ready"] = len(still_missing) == 0
-            if result["ready"]:
-                result["summary"] = "Operator is fully configured and ready to serve."
+        if not identity_ok:
+            missing.append({
+                "field": self._nsec_env_var,
+                "category": "identity",
+                "status": "missing",
+                "how": f"Set {self._nsec_env_var} in the deployment environment.",
+            })
 
-        # Enrich missing secret fields with descriptions from credential template
-        # Also add template-only fields (not in Settings) that haven't been delivered
-        if self._credential_template is not None:
-            tmpl_fields = self._credential_template.fields
+        if not vault_ok:
+            missing.append({
+                "field": "neon_database_url",
+                "category": "authority",
+                "status": "missing",
+                "how": "Auto-provisioned by Authority during registration. "
+                       "Call get_operator_config or restart the operator to fetch.",
+            })
+        else:
+            configured.append({
+                "field": "neon_database_url",
+                "category": "authority",
+                "status": "configured",
+            })
 
-            # Check which template fields are already configured (in vault)
-            vault_creds = {}
-            try:
-                from tollbooth.tools.onboarding import load_vault_credentials
-                courier = await self.courier()
-                vault_creds = await load_vault_credentials(
-                    courier, self._credential_service, self.operator_npub(),
-                ) or {}
-            except Exception:
-                pass
-
-            # Track which fields are accounted for
-            known_fields = {f["field"] for f in result.get("configured", [])}
-            known_fields.update(f["field"] for f in result.get("missing", []))
-
-            # Enrich existing missing fields with descriptions
-            required_missing = []
-            for field in result.get("missing", []):
-                if field["category"] == "secret" and field["field"] in tmpl_fields:
-                    spec = tmpl_fields[field["field"]]
-                    if hasattr(spec, "description") and spec.description:
-                        field["how"] = spec.description
-                    if not spec.required:
-                        field["optional"] = True
-                        continue
-                required_missing.append(field)
-
-            # Add template fields not in Settings (e.g. app_key, secret)
-            for name, spec in tmpl_fields.items():
-                if name in known_fields:
-                    continue
+        # Check operator credential template fields against vault
+        if self._operator_credential_template is not None:
+            vault_creds = await self._load_vault_creds(
+                self._operator_credential_template.service,
+            )
+            for name, spec in self._operator_credential_template.fields.items():
                 if name in vault_creds:
-                    result["configured"].append({
+                    configured.append({
                         "field": name, "category": "secret", "status": "configured",
                     })
                 else:
                     entry = {
-                        "field": name, "category": "secret", "status": "missing",
-                        "how": spec.description if hasattr(spec, "description") and spec.description else "Deliver via Secure Courier.",
+                        "field": name,
+                        "category": "secret",
+                        "status": "missing",
+                        "how": spec.description if spec.description else "Deliver via Secure Courier.",
                     }
                     if spec.required:
-                        required_missing.append(entry)
+                        missing.append(entry)
                     else:
-                        result.setdefault("optional_missing", []).append(entry)
+                        optional_missing.append(entry)
 
-            all_missing = result.get("missing", [])
-            result["missing"] = required_missing
-            result["optional_missing"] = [f for f in all_missing if f not in required_missing] + result.get("optional_missing", [])
-            result["ready"] = len(required_missing) == 0
-            if result["ready"]:
-                result["summary"] = "Operator is fully configured and ready to serve."
+        ready = len(missing) == 0
+        if ready:
+            summary = "Operator is fully configured and ready to serve."
+        else:
+            secret_missing = [m for m in missing if m["category"] == "secret"]
+            parts = []
+            if not identity_ok:
+                parts.append(f"Set {self._nsec_env_var} to boot")
+            if not vault_ok:
+                parts.append("bootstrap pending — restart or call get_operator_config")
+            if secret_missing:
+                names = ", ".join(m["field"] for m in secret_missing)
+                parts.append(f"{len(secret_missing)} secret(s) needed via Secure Courier: {names}")
+            summary = "Not ready. " + "; ".join(parts) + "."
 
-        # Include bootstrap state and operator identity for the app
-        result["bootstrap_error"] = bootstrap_error
-        result["vault_ok"] = vault_ok
-        result["credential_greeting"] = self._credential_greeting
-        result["credential_service"] = self._credential_service
-        result["operator_name"] = self._service_name
-
+        result: dict[str, Any] = {
+            "ready": ready,
+            "configured": configured,
+            "missing": missing,
+            "optional_missing": optional_missing,
+            "summary": summary,
+            "bootstrap_error": bootstrap_error,
+            "vault_ok": vault_ok,
+            "credential_greeting": self._operator_credential_greeting,
+            "credential_service": self.operator_credential_service,
+            "operator_name": self._service_name,
+        }
         return result
 
-    async def load_credentials(self, field_names: list[str]) -> dict[str, str]:
-        """Load specific credentials from the Secure Courier vault."""
+    async def patron_onboarding_status(self, patron_npub: str) -> dict[str, Any]:
+        """Return patron onboarding status — checks patron_credential_template against vault.
+
+        Only relevant for API-key-based patrons. OAuth2 patrons don't use this.
+        """
+        if not self._patron_credential_template:
+            return {"ready": True, "summary": "No patron credentials required."}
+
+        vault_creds = await self._load_vault_creds(
+            self._patron_credential_template.service,
+            npub_override=patron_npub,
+        )
+
+        configured = []
+        missing = []
+        for name, spec in self._patron_credential_template.fields.items():
+            if name in vault_creds:
+                configured.append({
+                    "field": name, "category": "patron_secret", "status": "configured",
+                })
+            else:
+                entry = {
+                    "field": name,
+                    "category": "patron_secret",
+                    "status": "missing",
+                    "how": spec.description if spec.description else "Deliver via Secure Courier.",
+                }
+                if spec.required:
+                    missing.append(entry)
+
+        ready = len(missing) == 0
+        return {
+            "ready": ready,
+            "configured": configured,
+            "missing": missing,
+            "summary": "Patron credentials configured." if ready else f"Missing: {', '.join(m['field'] for m in missing)}",
+            "credential_greeting": self._patron_credential_greeting,
+            "credential_service": self.patron_credential_service,
+        }
+
+    async def _load_vault_creds(
+        self,
+        service: str,
+        npub_override: str | None = None,
+    ) -> dict[str, str]:
+        """Load credentials from vault for a given service."""
+        try:
+            from tollbooth.tools.onboarding import load_vault_credentials
+            courier = await self.courier()
+            npub = npub_override or self.operator_npub()
+            return await load_vault_credentials(courier, service, npub) or {}
+        except Exception:
+            return {}
+
+    async def load_credentials(
+        self,
+        field_names: list[str],
+        *,
+        service: str | None = None,
+    ) -> dict[str, str]:
+        """Load specific credentials from the Secure Courier vault.
+
+        Args:
+            field_names: Which fields to load.
+            service: Credential service name. Defaults to operator credential service.
+        """
         from tollbooth.tools.onboarding import load_config_from_vault
+        svc = service or self.operator_credential_service
         return await load_config_from_vault(
             await self.courier(),
-            self._credential_service,
+            svc,
             self.operator_npub(),
             field_names,
         )
@@ -448,7 +548,6 @@ def register_standard_tools(
     slug: str,
     rt: OperatorRuntime,
     *,
-    settings_fn: Any = None,
     service_name: str = "",
     service_version: str = "",
 ) -> None:
@@ -460,8 +559,6 @@ def register_standard_tools(
         mcp: The FastMCP app instance.
         slug: Tool name prefix (e.g., ``"weather"``).
         rt: The OperatorRuntime instance.
-        settings_fn: Callable returning the operator's Settings instance
-            (for onboarding status introspection).
         service_name: Service name for service_status (e.g., ``"tollbooth-sample"``).
         service_version: Version string for service_status.
     """
@@ -622,9 +719,7 @@ def register_standard_tools(
         Shows which settings are configured, which are missing, and how
         to deliver each missing value. Free.
         """
-        if settings_fn:
-            return await rt.onboarding_status(settings_fn())
-        return {"success": False, "error": "No settings introspection configured."}
+        return await rt.onboarding_status()
 
     # -- Secure Courier ------------------------------------------------
 
@@ -635,7 +730,8 @@ def register_standard_tools(
         return {
             "success": True,
             "operator_npub": rt.operator_npub(),
-            "credential_service": rt._credential_service,
+            "operator_credential_service": rt.operator_credential_service,
+            "patron_credential_service": rt.patron_credential_service,
             "courier_configured": rt._courier is not None,
         }
 
@@ -644,7 +740,7 @@ def register_standard_tools(
         sender_npub: str = "",
         service: str = "",
     ) -> dict[str, Any]:
-        """Open a Secure Courier channel for credential delivery.
+        """Open a Secure Courier channel for operator credential delivery.
 
         Sends a welcome DM with a credential template to the provided npub.
         Free.
@@ -652,14 +748,14 @@ def register_standard_tools(
         if not sender_npub:
             sender_npub = rt.operator_npub()
         if not service:
-            service = rt._credential_service
+            service = rt.operator_credential_service
         courier = await rt.courier()
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
         try:
             return await courier.open_channel(
                 service,
-                greeting=rt._credential_greeting,
+                greeting=rt._operator_credential_greeting,
                 recipient_npub=sender_npub,
             )
         except Exception as e:
@@ -671,7 +767,7 @@ def register_standard_tools(
         service: str = "",
         credential_card: str = "",
     ) -> dict[str, Any]:
-        """Pick up credentials from the Secure Courier.
+        """Pick up operator credentials from the Secure Courier.
 
         Checks the vault first (instant), then polls Nostr relays for
         encrypted DMs. If a credential_card (ncred1...) is provided,
@@ -680,7 +776,7 @@ def register_standard_tools(
         if not sender_npub:
             sender_npub = rt.operator_npub()
         if not service:
-            service = rt._credential_service
+            service = rt.operator_credential_service
         courier = await rt.courier()
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
@@ -697,7 +793,7 @@ def register_standard_tools(
     async def forget_credentials(service: str = "") -> dict[str, Any]:
         """Delete vaulted credentials for key rotation. Free."""
         if not service:
-            service = rt._credential_service
+            service = rt.operator_credential_service
         npub = rt.operator_npub()
         courier = await rt.courier()
         if courier is None:
@@ -706,6 +802,57 @@ def register_standard_tools(
             return await courier.forget(npub, service)
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    # -- Patron credential tools (only if patron template is set) ------
+
+    if rt._patron_credential_template is not None:
+        @tool
+        async def request_patron_credentials(
+            sender_npub: str = "",
+        ) -> dict[str, Any]:
+            """Open a Secure Courier channel for patron credential delivery.
+
+            Sends a welcome DM with a credential template to the patron.
+            Free.
+            """
+            if not sender_npub:
+                return {"success": False, "error": "sender_npub is required."}
+            courier = await rt.courier()
+            if courier is None:
+                return {"success": False, "error": "Secure Courier not configured."}
+            try:
+                return await courier.open_channel(
+                    rt.patron_credential_service,
+                    greeting=rt._patron_credential_greeting,
+                    recipient_npub=sender_npub,
+                )
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+        @tool
+        async def receive_patron_credentials(
+            sender_npub: str = "",
+            credential_card: str = "",
+        ) -> dict[str, Any]:
+            """Pick up patron credentials from the Secure Courier.
+
+            Checks the vault first, then polls Nostr relays.
+            Free.
+            """
+            if not sender_npub:
+                return {"success": False, "error": "sender_npub is required."}
+            courier = await rt.courier()
+            if courier is None:
+                return {"success": False, "error": "Secure Courier not configured."}
+            try:
+                service = rt.patron_credential_service
+                if credential_card:
+                    return await courier._exchange.redeem_credential_card(
+                        credential_card, service,
+                    )
+                return await courier.receive(sender_npub, service)
+            except Exception as e:
+                return {"success": False, "error": str(e)}
 
     # -- Oracle delegation ---------------------------------------------
 

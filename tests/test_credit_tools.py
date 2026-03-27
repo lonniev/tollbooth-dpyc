@@ -21,8 +21,6 @@ from tollbooth.ledger import ToolUsage, Tranche, UserLedger
 from tollbooth.ledger_cache import LedgerCache
 from tollbooth.nostr_certificate import NOSTR_CERT_KIND, NOSTR_CERT_TAG, NOSTR_CERT_LABEL
 from tollbooth.tools.credits import (
-    _get_multiplier,
-    _get_tier_info,
     account_statement_tool,
     btcpay_status_tool,
     check_balance_tool,
@@ -138,114 +136,15 @@ def _mock_cache(ledger: UserLedger | None = None):
     return cache
 
 
-TIER_CONFIG = json.dumps({
-    "default": {"credit_multiplier": 1},
-    "vip": {"credit_multiplier": 100},
-})
-
-TIER_CONFIG_WITH_TTL = json.dumps({
-    "default": {"credit_multiplier": 1, "credit_ttl_seconds": 604800},
-    "vip": {"credit_multiplier": 100, "credit_ttl_seconds": 2592000},
-})
-
-USER_TIERS = json.dumps({
-    "user-vip": "vip",
-    "user-standard": "default",
-})
-
-
 def _make_config(**overrides) -> TollboothConfig:
     """Create a TollboothConfig with sensible defaults."""
     defaults = {
         "btcpay_host": "https://btcpay.example.com",
         "btcpay_store_id": "store-123",
         "btcpay_api_key": "key-abc",
-        "btcpay_tier_config": TIER_CONFIG,
-        "btcpay_user_tiers": USER_TIERS,
     }
     defaults.update(overrides)
     return TollboothConfig(**defaults)
-
-
-# ---------------------------------------------------------------------------
-# _get_multiplier
-# ---------------------------------------------------------------------------
-
-
-class TestGetMultiplier:
-    def test_default_when_no_config(self) -> None:
-        assert _get_multiplier("user1", None, None) == 1
-
-    def test_default_tier(self) -> None:
-        assert _get_multiplier("user-standard", TIER_CONFIG, USER_TIERS) == 1
-
-    def test_vip_tier(self) -> None:
-        assert _get_multiplier("user-vip", TIER_CONFIG, USER_TIERS) == 100
-
-    def test_unknown_user_gets_default(self) -> None:
-        assert _get_multiplier("user-unknown", TIER_CONFIG, USER_TIERS) == 1
-
-    def test_corrupt_json_returns_default(self) -> None:
-        assert _get_multiplier("user1", "not json", "also not json") == 1
-
-
-class TestGetTierInfo:
-    def test_default_when_no_config(self) -> None:
-        name, mult, ttl = _get_tier_info("user1", None, None)
-        assert name == "default"
-        assert mult == 1
-        assert ttl is None
-
-    def test_vip_tier(self) -> None:
-        name, mult, ttl = _get_tier_info("user-vip", TIER_CONFIG, USER_TIERS)
-        assert name == "vip"
-        assert mult == 100
-        assert ttl is None  # No TTL in TIER_CONFIG
-
-    def test_standard_tier(self) -> None:
-        name, mult, ttl = _get_tier_info("user-standard", TIER_CONFIG, USER_TIERS)
-        assert name == "default"
-        assert mult == 1
-
-    def test_unknown_user(self) -> None:
-        name, mult, ttl = _get_tier_info("user-unknown", TIER_CONFIG, USER_TIERS)
-        assert name == "default"
-        assert mult == 1
-
-    def test_corrupt_json(self) -> None:
-        name, mult, ttl = _get_tier_info("user1", "bad", "bad")
-        assert name == "default"
-        assert mult == 1
-        assert ttl is None
-
-    def test_tier_ttl_from_config(self) -> None:
-        """Per-tier TTL is extracted from tier config JSON."""
-        name, mult, ttl = _get_tier_info(
-            "user-standard", TIER_CONFIG_WITH_TTL, USER_TIERS,
-        )
-        assert ttl == 604800
-
-    def test_vip_tier_ttl(self) -> None:
-        name, mult, ttl = _get_tier_info(
-            "user-vip", TIER_CONFIG_WITH_TTL, USER_TIERS,
-        )
-        assert ttl == 2592000
-
-    def test_default_ttl_fallback(self) -> None:
-        """When tier config has no TTL, falls back to default_credit_ttl_seconds."""
-        name, mult, ttl = _get_tier_info(
-            "user1", TIER_CONFIG, USER_TIERS,
-            default_credit_ttl_seconds=86400,
-        )
-        assert ttl == 86400
-
-    def test_tier_ttl_overrides_default(self) -> None:
-        """Per-tier TTL takes precedence over default."""
-        name, mult, ttl = _get_tier_info(
-            "user-standard", TIER_CONFIG_WITH_TTL, USER_TIERS,
-            default_credit_ttl_seconds=86400,
-        )
-        assert ttl == 604800  # tier's TTL, not the default
 
 
 # ---------------------------------------------------------------------------
@@ -321,36 +220,6 @@ class TestPurchaseCredits:
             authority_npub=_TEST_AUTHORITY_NPUB,
         )
         assert "inv-99" in ledger.pending_invoices
-
-    @pytest.mark.asyncio
-    async def test_default_tier_shown(self) -> None:
-        btcpay = _mock_btcpay({"id": "inv-1", "checkoutLink": "https://x.com"})
-        cache = _mock_cache()
-        result = await purchase_credits_tool(
-            btcpay, cache, "user1", 1000,
-            certificate=_test_certificate(net_sats=1000),
-            authority_npub=_TEST_AUTHORITY_NPUB,
-            tier_config_json=TIER_CONFIG, user_tiers_json=USER_TIERS,
-        )
-        assert result["tier"] == "default"
-        assert result["multiplier"] == 1
-        assert result["expected_credits"] == 1000
-
-    @pytest.mark.asyncio
-    async def test_vip_tier_shown(self) -> None:
-        btcpay = _mock_btcpay({"id": "inv-1", "checkoutLink": "https://x.com"})
-        cache = _mock_cache()
-        result = await purchase_credits_tool(
-            btcpay, cache, "user-vip", 500,
-            certificate=_test_certificate(amount_sats=500, net_sats=490),
-            authority_npub=_TEST_AUTHORITY_NPUB,
-            tier_config_json=TIER_CONFIG, user_tiers_json=USER_TIERS,
-        )
-        assert result["tier"] == "vip"
-        assert result["multiplier"] == 100
-        # Invoice for full amount_sats (500), not net_sats — patron pays sticker price
-        assert result["expected_credits"] == 50000
-
 
 class TestInvoiceDmCallback:
     """Tests for the invoice_dm_callback parameter on purchase_credits_tool."""
@@ -445,12 +314,9 @@ class TestCheckPayment:
         })
         ledger = UserLedger(pending_invoices=["inv-1"])
         cache = _mock_cache(ledger)
-        result = await check_payment_tool(
-            btcpay, cache, "user1", "inv-1",
-            tier_config_json=TIER_CONFIG, user_tiers_json=USER_TIERS,
-        )
+        result = await check_payment_tool(btcpay, cache, "user1", "inv-1")
         assert result["success"] is True
-        assert result["credits_granted"] == 1000  # default multiplier = 1
+        assert result["credits_granted"] == 1000
         assert result["balance_api_sats"] == 1000
         assert "inv-1" not in ledger.pending_invoices
         cache.mark_dirty.assert_called()
@@ -491,20 +357,6 @@ class TestCheckPayment:
         cache = _mock_cache(ledger)
         await check_payment_tool(btcpay, cache, "user1", "inv-1")
         assert ledger.tranches[0].expires_at is not None
-
-    @pytest.mark.asyncio
-    async def test_settled_vip_multiplier(self) -> None:
-        btcpay = _mock_btcpay({
-            "id": "inv-1", "status": "Settled", "amount": "500",
-        })
-        ledger = UserLedger(pending_invoices=["inv-1"])
-        cache = _mock_cache(ledger)
-        result = await check_payment_tool(
-            btcpay, cache, "user-vip", "inv-1",
-            tier_config_json=TIER_CONFIG, user_tiers_json=USER_TIERS,
-        )
-        assert result["credits_granted"] == 50000  # 500 * 100
-        assert result["multiplier"] == 100
 
     @pytest.mark.asyncio
     async def test_settled_idempotent(self) -> None:
@@ -620,26 +472,6 @@ class TestCheckBalance:
         await check_balance_tool(cache, "user1")
         cache.mark_dirty.assert_not_called()
         assert ledger.balance_api_sats == 500
-
-    @pytest.mark.asyncio
-    async def test_default_tier_shown(self) -> None:
-        cache = _mock_cache()
-        result = await check_balance_tool(
-            cache, "user1",
-            tier_config_json=TIER_CONFIG, user_tiers_json=USER_TIERS,
-        )
-        assert result["tier"] == "default"
-        assert result["multiplier"] == 1
-
-    @pytest.mark.asyncio
-    async def test_vip_tier_shown(self) -> None:
-        cache = _mock_cache()
-        result = await check_balance_tool(
-            cache, "user-vip",
-            tier_config_json=TIER_CONFIG, user_tiers_json=USER_TIERS,
-        )
-        assert result["tier"] == "vip"
-        assert result["multiplier"] == 100
 
     @pytest.mark.asyncio
     async def test_seed_balance_granted_shown(self) -> None:
@@ -822,8 +654,6 @@ class TestBTCPayStatus:
         assert result["btcpay_host"] == "https://btcpay.example.com"
         assert result["btcpay_store_id"] == "store-123"
         assert result["btcpay_api_key_status"] == "present"
-        assert result["tier_config"] == "2 tier(s)"
-        assert result["user_tiers"] == "2 user(s)"
         assert result["server_reachable"] is True
         assert result["store_name"] == "My Store"
         assert result["credit_ttl_seconds"] == 604800
@@ -849,15 +679,6 @@ class TestBTCPayStatus:
         assert result["btcpay_host"] is None
         assert result["server_reachable"] is None
         assert result["store_name"] is None
-
-    @pytest.mark.asyncio
-    async def test_invalid_tier_config_json(self) -> None:
-        """Invalid tier config JSON reported."""
-        config = _make_config(btcpay_tier_config="not valid json{")
-
-        result = await btcpay_status_tool(config, None)
-
-        assert result["tier_config"] == "invalid JSON"
 
     @pytest.mark.asyncio
     async def test_server_unreachable(self) -> None:

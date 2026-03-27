@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.metadata
-import json
 import logging
 import platform
 from datetime import date, datetime, timedelta, timezone
@@ -19,60 +18,12 @@ from tollbooth.constants import LOW_BALANCE_FLOOR_API_SATS, MAX_INVOICE_SATS
 
 logger = logging.getLogger(__name__)
 
-# Default credit multiplier for users not in tier config
-_DEFAULT_MULTIPLIER = 1
-
-
-def _get_tier_info(
-    user_id: str,
-    tier_config_json: str | None,
-    user_tiers_json: str | None,
-    default_credit_ttl_seconds: int | None = None,
-) -> tuple[str, int, int | None]:
-    """Look up tier name, credit multiplier, and credit TTL for a user.
-
-    Returns (tier_name, multiplier, credit_ttl_seconds).
-    """
-    if not tier_config_json or not user_tiers_json:
-        return "default", _DEFAULT_MULTIPLIER, default_credit_ttl_seconds
-
-    try:
-        tier_config = json.loads(tier_config_json)
-        user_tiers = json.loads(user_tiers_json)
-    except (json.JSONDecodeError, TypeError):
-        logger.warning("Invalid tier config JSON; using default multiplier.")
-        return "default", _DEFAULT_MULTIPLIER, default_credit_ttl_seconds
-
-    tier_name = user_tiers.get(user_id, "default")
-    tier = tier_config.get(tier_name, tier_config.get("default", {}))
-    multiplier = int(tier.get("credit_multiplier", _DEFAULT_MULTIPLIER))
-
-    # TTL: per-tier override, then config default, then None (never)
-    ttl_raw = tier.get("credit_ttl_seconds")
-    if ttl_raw is not None:
-        ttl = int(ttl_raw)
-    else:
-        ttl = default_credit_ttl_seconds
-    return tier_name, multiplier, ttl
-
-
-def _get_multiplier(
-    user_id: str,
-    tier_config_json: str | None,
-    user_tiers_json: str | None,
-) -> int:
-    """Look up credit multiplier for a user based on tier config."""
-    _, multiplier, _ = _get_tier_info(user_id, tier_config_json, user_tiers_json)
-    return multiplier
-
 
 async def _create_purchase_invoice(
     btcpay: BTCPayClient,
     cache: LedgerCache,
     user_id: str,
     amount_sats: int,
-    tier_config_json: str | None,
-    user_tiers_json: str | None,
     extra_metadata: dict[str, Any] | None = None,
     default_credit_ttl_seconds: int | None = None,
     invoice_dm_callback: Callable[[str], Awaitable[None]] | None = None,
@@ -80,6 +31,7 @@ async def _create_purchase_invoice(
     """Shared logic: validate amount, create BTCPay invoice, record in ledger.
 
     Both certified (operator) and direct (Authority) purchases funnel here.
+    1 sat = 1 api_sat (no multiplier).
     """
     if amount_sats <= 0:
         return {"success": False, "error": "amount_sats must be positive."}
@@ -109,18 +61,13 @@ async def _create_purchase_invoice(
     checkout_link = invoice.get("checkoutLink", "")
     expiry = invoice.get("expirationTime", "")
 
-    tier_name, multiplier, ttl = _get_tier_info(
-        user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
-    )
-    expected_credits = amount_sats * multiplier
-
     # Record pending invoice — flush immediately so the invoice survives cache loss
     ledger = await cache.get(user_id)
     ledger.pending_invoices.append(invoice_id)
     ledger.record_invoice_created(
         invoice_id=invoice_id,
         amount_sats=amount_sats,
-        multiplier=multiplier,
+        multiplier=1,
         created_at=datetime.now(timezone.utc).isoformat(),
     )
     cache.mark_dirty(user_id)
@@ -131,22 +78,19 @@ async def _create_purchase_invoice(
         "success": True,
         "invoice_id": invoice_id,
         "amount_sats": amount_sats,
+        "expected_credits": amount_sats,
         "checkout_link": checkout_link,
         "expiration": expiry,
-        "tier": tier_name,
-        "multiplier": multiplier,
-        "expected_credits": expected_credits,
         "message": (
             f"Invoice created for {amount_sats:,} sats.\n\n"
             f"Pay here: {checkout_link}\n"
             f"Expires: {expiry}\n"
-            f"Tier: {tier_name} ({multiplier}x) — "
-            f"you will receive {expected_credits:,} credits on settlement.\n\n"
+            f"You will receive {amount_sats:,} credits on settlement.\n\n"
             f'After paying, call check_payment with invoice_id: "{invoice_id}"'
         ),
     }
-    if ttl is not None:
-        result["credit_ttl_seconds"] = ttl
+    if default_credit_ttl_seconds is not None:
+        result["credit_ttl_seconds"] = default_credit_ttl_seconds
 
     # Fire-and-forget invoice DM — failure never blocks the purchase
     if invoice_dm_callback is not None:
@@ -174,8 +118,6 @@ async def purchase_credits_tool(
     amount_sats: int,
     certificate: str,
     authority_npub: str,
-    tier_config_json: str | None = None,
-    user_tiers_json: str | None = None,
     default_credit_ttl_seconds: int | None = None,
     ban_check_oracle_url: str | None = None,
     invoice_dm_callback: Callable[[str], Awaitable[None]] | None = None,
@@ -246,7 +188,6 @@ async def purchase_credits_tool(
 
     result = await _create_purchase_invoice(
         btcpay, cache, user_id, invoice_sats,
-        tier_config_json, user_tiers_json,
         extra_metadata={"certificate_jti": cert_claims["jti"]},
         default_credit_ttl_seconds=default_credit_ttl_seconds,
         invoice_dm_callback=invoice_dm_callback,
@@ -261,8 +202,6 @@ async def direct_purchase_tool(
     cache: LedgerCache,
     user_id: str,
     amount_sats: int,
-    tier_config_json: str | None = None,
-    user_tiers_json: str | None = None,
     default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Create a BTCPay invoice for a direct credit purchase (no certificate).
@@ -272,7 +211,6 @@ async def direct_purchase_tool(
     """
     return await _create_purchase_invoice(
         btcpay, cache, user_id, amount_sats,
-        tier_config_json, user_tiers_json,
         extra_metadata={"purpose": "direct_credit_purchase"},
         default_credit_ttl_seconds=default_credit_ttl_seconds,
     )
@@ -283,8 +221,6 @@ async def check_payment_tool(
     cache: LedgerCache,
     user_id: str,
     invoice_id: str,
-    tier_config_json: str | None = None,
-    user_tiers_json: str | None = None,
     default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Poll a BTCPay invoice and credit the user's balance on settlement.
@@ -325,11 +261,8 @@ async def check_payment_tool(
             # Credit the user — flush immediately so credits survive cache loss
             amount_str = invoice.get("amount", "0")
             amount_sats = int(float(amount_str))
-            _, multiplier, ttl = _get_tier_info(
-                user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
-            )
-            credited = amount_sats * multiplier
-            ledger.credit_deposit(credited, invoice_id, ttl_seconds=ttl)
+            credited = amount_sats
+            ledger.credit_deposit(credited, invoice_id, ttl_seconds=default_credit_ttl_seconds)
             ledger.record_invoice_settled(
                 invoice_id=invoice_id,
                 api_sats_credited=credited,
@@ -344,7 +277,6 @@ async def check_payment_tool(
                     credited, user_id, invoice_id,
                 )
             result["credits_granted"] = credited
-            result["multiplier"] = multiplier
             result["message"] = f"Payment settled! {credited:,} credits added to your balance."
 
     elif status == "Expired":
@@ -373,22 +305,13 @@ async def check_payment_tool(
 async def check_balance_tool(
     cache: LedgerCache,
     user_id: str,
-    tier_config_json: str | None = None,
-    user_tiers_json: str | None = None,
-    default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
-    """Return the user's current credit balance, tier info, and usage summary."""
+    """Return the user's current credit balance and usage summary."""
     ledger = await cache.get(user_id)
     today = date.today().isoformat()
 
-    tier_name, multiplier, _ = _get_tier_info(
-        user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
-    )
-
     result: dict[str, Any] = {
         "success": True,
-        "tier": tier_name,
-        "multiplier": multiplier,
         "balance_api_sats": ledger.balance_api_sats,
         "total_deposited_api_sats": ledger.total_deposited_api_sats,
         "total_consumed_api_sats": ledger.total_consumed_api_sats,
@@ -449,8 +372,6 @@ async def restore_credits_tool(
     cache: LedgerCache,
     user_id: str,
     invoice_id: str,
-    tier_config_json: str | None = None,
-    user_tiers_json: str | None = None,
     default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Restore credits from a paid invoice that was lost due to cache or vault issues."""
@@ -470,10 +391,7 @@ async def restore_credits_tool(
     if vault_record and vault_record.status == "Settled" and vault_record.api_sats_credited > 0:
         # Restore from vault record — no BTCPay call needed
         credited = vault_record.api_sats_credited
-        _, _, ttl = _get_tier_info(
-            user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
-        )
-        ledger.credit_deposit(credited, invoice_id, ttl_seconds=ttl)
+        ledger.credit_deposit(credited, invoice_id, ttl_seconds=default_credit_ttl_seconds)
         cache.mark_dirty(user_id)
         if not await cache.flush_user(user_id):
             logger.error(
@@ -485,7 +403,6 @@ async def restore_credits_tool(
             "invoice_id": invoice_id,
             "source": "vault_record",
             "amount_sats": vault_record.amount_sats,
-            "multiplier": vault_record.multiplier,
             "credits_granted": credited,
             "balance_api_sats": ledger.balance_api_sats,
             "message": f"Restored {credited:,} credits from vault invoice record.",
@@ -508,12 +425,9 @@ async def restore_credits_tool(
     # Credit the balance
     amount_str = invoice.get("amount", "0")
     amount_sats = int(float(amount_str))
-    _, multiplier, ttl = _get_tier_info(
-        user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
-    )
-    credited = amount_sats * multiplier
+    credited = amount_sats
 
-    ledger.credit_deposit(credited, invoice_id, ttl_seconds=ttl)
+    ledger.credit_deposit(credited, invoice_id, ttl_seconds=default_credit_ttl_seconds)
     ledger.record_invoice_settled(
         invoice_id=invoice_id,
         api_sats_credited=credited,
@@ -532,7 +446,6 @@ async def restore_credits_tool(
         "invoice_id": invoice_id,
         "source": "btcpay",
         "amount_sats": amount_sats,
-        "multiplier": multiplier,
         "credits_granted": credited,
         "balance_api_sats": ledger.balance_api_sats,
         "message": f"Restored {credited:,} credits from invoice {invoice_id}.",
@@ -543,8 +456,6 @@ async def reconcile_pending_invoices(
     btcpay: BTCPayClient,
     cache: LedgerCache,
     user_id: str,
-    tier_config_json: str | None = None,
-    user_tiers_json: str | None = None,
     default_credit_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Reconcile pending invoices on startup: credit settled, remove terminal."""
@@ -568,11 +479,8 @@ async def reconcile_pending_invoices(
         if status == "Settled" and invoice_id not in ledger.credited_invoices:
             amount_str = invoice.get("amount", "0")
             amount_sats = int(float(amount_str))
-            _, multiplier, ttl = _get_tier_info(
-                user_id, tier_config_json, user_tiers_json, default_credit_ttl_seconds,
-            )
-            credited = amount_sats * multiplier
-            ledger.credit_deposit(credited, invoice_id, ttl_seconds=ttl)
+            credited = amount_sats
+            ledger.credit_deposit(credited, invoice_id, ttl_seconds=default_credit_ttl_seconds)
             ledger.record_invoice_settled(
                 invoice_id=invoice_id,
                 api_sats_credited=credited,
@@ -779,26 +687,6 @@ async def btcpay_status_tool(
         except importlib.metadata.PackageNotFoundError:
             versions[pkg.replace("-", "_")] = "unknown"
     result["versions"] = versions
-
-    # Tier config
-    if config.btcpay_tier_config:
-        try:
-            tiers = json.loads(config.btcpay_tier_config)
-            result["tier_config"] = f"{len(tiers)} tier(s)"
-        except (json.JSONDecodeError, TypeError):
-            result["tier_config"] = "invalid JSON"
-    else:
-        result["tier_config"] = "missing"
-
-    # User tiers
-    if config.btcpay_user_tiers:
-        try:
-            users = json.loads(config.btcpay_user_tiers)
-            result["user_tiers"] = f"{len(users)} user(s)"
-        except (json.JSONDecodeError, TypeError):
-            result["user_tiers"] = "invalid JSON"
-    else:
-        result["user_tiers"] = "missing"
 
     # Credit TTL
     result["credit_ttl_seconds"] = config.credit_ttl_seconds
