@@ -59,6 +59,13 @@ class TestGetCost:
             store=store, operator="npub1op", fallback_costs={"search": 99},
         )
         cost = await resolver.get_cost("search")
+        assert store.call_count > 0, (
+            f"Store was never called! "
+            f"cache_ts={resolver._cache_ts}, "
+            f"stale={resolver._is_stale()}, "
+            f"cached_model={resolver._cached_model}, "
+            f"cached_cost_map={resolver._cached_cost_map}"
+        )
         assert cost == 3  # from model, not fallback
 
     @pytest.mark.asyncio
