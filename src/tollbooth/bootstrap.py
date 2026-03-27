@@ -140,10 +140,14 @@ class BootstrapClient:
         config = self._read_config_from_relays(result.authority_npub)
 
         if config is None:
+            from pynostr.key import PublicKey  # type: ignore[import-untyped]
+            auth_hex = PublicKey.from_npub(result.authority_npub).hex() if result.authority_npub.startswith("npub1") else result.authority_npub
             result.error = (
-                "No bootstrap config found on Nostr relays. "
-                "The Authority sends the config DM during registration. "
-                "Try re-registering the operator with its Authority."
+                f"No bootstrap config on relays. "
+                f"authority={result.authority_npub[:20]}... "
+                f"(hex={auth_hex[:16]}...) "
+                f"operator={self.npub[:20]}... "
+                f"(hex={self.pubkey_hex[:16]}...)"
             )
             return result
 

@@ -161,6 +161,8 @@ def receive_bootstrap_config(
 
     best_config: dict[str, str] | None = None
     best_ts = 0
+    relay_errors: list[str] = []
+    events_found = 0
 
     for relay_url in relay_urls:
         try:
@@ -178,6 +180,7 @@ def receive_bootstrap_config(
                     break
 
                 if msg[0] == "EVENT" and len(msg) >= 3:
+                    events_found += 1
                     event_data = msg[2]
                     try:
                         plaintext = nip04_decrypt(
@@ -196,16 +199,26 @@ def receive_bootstrap_config(
                                     authority_pubkey_hex[:16], relay_url, ts,
                                 )
                     except Exception as exc:
-                        logger.debug("Failed to decrypt bootstrap DM: %s", exc)
+                        relay_errors.append(f"{relay_url}: decrypt failed: {exc}")
 
             ws.send(json.dumps(["CLOSE", sub_id]))
             ws.close()
 
-            # If we found config, no need to check more relays
             if best_config is not None:
                 break
 
         except Exception as exc:
-            logger.debug("Failed to poll %s for bootstrap config: %s", relay_url, exc)
+            relay_errors.append(f"{relay_url}: {exc}")
+
+    if best_config is None and relay_errors:
+        logger.warning(
+            "Bootstrap relay poll: %d events found, %d errors: %s",
+            events_found, len(relay_errors), "; ".join(relay_errors),
+        )
+    elif best_config is None:
+        logger.warning(
+            "Bootstrap relay poll: no events found on %d relays (auth=%s, op=%s)",
+            len(relay_urls), authority_pubkey_hex[:16], op_pubkey_hex[:16],
+        )
 
     return best_config
