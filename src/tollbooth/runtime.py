@@ -68,6 +68,7 @@ class OperatorRuntime:
         tool_costs: dict[str, int] | None = None,
         credential_service: str = "",
         credential_template: Any | None = None,
+        credential_greeting: str = "",
         relays: list[str] | None = None,
         constraint_gate: Any | None = None,
     ) -> None:
@@ -75,6 +76,7 @@ class OperatorRuntime:
         self._tool_costs = tool_costs or {}
         self._credential_service = credential_service
         self._credential_template = credential_template
+        self._credential_greeting = credential_greeting
         self._relays = relays
         self._constraint_gate = constraint_gate
 
@@ -560,7 +562,9 @@ def register_standard_tools(
             return {"success": False, "error": "Secure Courier not configured."}
         try:
             return await courier.open_channel(
-                service, greeting="", recipient_npub=sender_npub,
+                service,
+                greeting=rt._credential_greeting,
+                recipient_npub=sender_npub,
             )
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -571,7 +575,12 @@ def register_standard_tools(
         service: str = "",
         credential_card: str = "",
     ) -> dict[str, Any]:
-        """Pick up credentials from the Secure Courier. Free."""
+        """Pick up credentials from the Secure Courier.
+
+        Checks the vault first (instant), then polls Nostr relays for
+        encrypted DMs. If a credential_card (ncred1...) is provided,
+        redeems it directly without relay polling. Free.
+        """
         if not sender_npub:
             sender_npub = rt.operator_npub()
         if not service:
@@ -580,9 +589,11 @@ def register_standard_tools(
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
         try:
-            return await courier.receive(
-                sender_npub, service, credential_card=credential_card or None,
-            )
+            if credential_card:
+                return await courier._exchange.redeem_credential_card(
+                    credential_card, service,
+                )
+            return await courier.receive(sender_npub, service)
         except Exception as e:
             return {"success": False, "error": str(e)}
 
