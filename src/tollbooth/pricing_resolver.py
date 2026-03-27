@@ -51,7 +51,9 @@ class PricingResolver:
         self._cached_model: PricingModel | None = None
         self._cached_cost_map: dict[str, int] | None = None
         self._cached_engine: ConstraintEngine | None = None
-        self._cache_ts: float = 0.0
+        # Initialize to negative infinity so the first _is_stale() always
+        # returns True — even if time.monotonic() is small (fresh CI runner).
+        self._cache_ts: float = -self._cache_ttl - 1.0
 
     def _is_stale(self) -> bool:
         return (time.monotonic() - self._cache_ts) > self._cache_ttl
