@@ -446,8 +446,8 @@ class TestFreshnessAndReplay:
     """Tests for freshness window and double-pickup prevention."""
 
     @pytest.mark.asyncio
-    async def test_stale_event_ignored(self):
-        """Events older than freshness window are not matched."""
+    async def test_old_event_still_processed(self):
+        """Events are processed regardless of age — no time-based filtering."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec, freshness_window=60)
@@ -455,15 +455,15 @@ class TestFreshnessAndReplay:
         payload = {"api_key": "key", "api_secret": "secret"}
         event = _make_nip04_event(
             sender, operator.public_key.hex(), payload,
-            created_at=int(time.time()) - 120,  # 2 minutes ago, window is 1 min
+            created_at=int(time.time()) - 120,  # 2 minutes ago
         )
 
         with ex._lock:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"):
-            with pytest.raises(CourierTimeout):
-                await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(sender.public_key.bech32())
+            assert result["success"] is True
 
     @pytest.mark.asyncio
     async def test_double_pickup_prevented(self):
@@ -2018,27 +2018,27 @@ class TestNip17TimestampHardening:
         assert len(results) == 1
         assert results[0]["id"] == "gw_fuzzed_ts"
 
-    def test_nip04_stale_event_still_filtered(self):
-        """NIP-04 events older than freshness window are still rejected."""
+    def test_nip04_old_event_still_found(self):
+        """NIP-04 events are found regardless of age — no time filtering."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec, freshness_window=60)
 
-        stale_event = {
-            "id": "nip04_stale",
+        old_event = {
+            "id": "nip04_old",
             "kind": _KIND_ENCRYPTED_DM,
             "pubkey": sender.public_key.hex(),
             "content": "encrypted-content",
-            "created_at": int(time.time()) - 120,  # 2 min ago, window is 1 min
+            "created_at": int(time.time()) - 120,  # 2 min ago
             "tags": [["p", operator.public_key.hex()]],
             "sig": "fake_sig",
         }
 
         with ex._lock:
-            ex._received_events.append(stale_event)
+            ex._received_events.append(old_event)
 
         results = ex._find_dm_candidates(sender.public_key.hex())
-        assert len(results) == 0
+        assert len(results) == 1
 
 
 # ── _npub_to_hex validation ──────────────────────────────────────────

@@ -901,8 +901,7 @@ class NostrCredentialExchange:
                     ", ".join(sorted(senders)),
                 )
             raise CourierTimeout(
-                f"No DM found from {sender_npub} within the "
-                f"{self._freshness_window}-second freshness window. "
+                f"No DM found from {sender_npub} on configured relays. "
                 f"If you just sent your reply, Nostr relay propagation "
                 f"may take 10-30 seconds — wait a moment and try again. "
                 f"Otherwise, make sure you sent the DM from your Nostr "
@@ -1574,13 +1573,10 @@ class NostrCredentialExchange:
         cannot be filtered by sender until decrypted (the real sender is
         inside the encrypted seal), so all addressed wraps are included.
         """
-        now = int(time.time())
-        cutoff = now - self._freshness_window
         logger.info(
-            "_find_dm_candidates: sender=%s, total_events=%d, "
-            "consumed=%d, cutoff_age=%ds",
+            "_find_dm_candidates: sender=%s, total_events=%d, consumed=%d",
             sender_hex[:16], len(self._received_events),
-            len(self._consumed_ids), self._freshness_window,
+            len(self._consumed_ids),
         )
 
         with self._lock:
@@ -1591,16 +1587,6 @@ class NostrCredentialExchange:
                     continue
 
                 kind = event.get("kind", 0)
-                created_at = event.get("created_at", 0)
-
-                # NIP-17 created_at is deliberately fuzzed 0-48h into the past
-                if kind == _KIND_GIFT_WRAP:
-                    effective_cutoff = cutoff - _TIMESTAMP_FUZZ_SECONDS
-                else:
-                    effective_cutoff = cutoff
-
-                if created_at < effective_cutoff:
-                    continue
 
                 if kind == _KIND_ENCRYPTED_DM:
                     # NIP-04: sender is event.pubkey
@@ -1608,9 +1594,8 @@ class NostrCredentialExchange:
                         candidates.append(event)
 
                 elif kind == _KIND_GIFT_WRAP:
-                    # NIP-17: sender is hidden inside the seal
-                    # We can't filter by sender until we unwrap, so
-                    # include all gift wraps addressed to us
+                    # NIP-17: sender is hidden inside the seal —
+                    # include all gift wraps, filter after decryption
                     candidates.append(event)
 
             # Newest first
