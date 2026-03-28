@@ -425,7 +425,7 @@ class TestLoadCredentials:
             mock_load.return_value = {"btcpay_host": "https://pay.example.com"}
             rt._courier = MagicMock()
 
-            result = await rt.load_credentials(["btcpay_host"])
+            await rt.load_credentials(["btcpay_host"])
 
             mock_load.assert_called_once()
             call_args = mock_load.call_args
@@ -444,7 +444,7 @@ class TestLoadCredentials:
             mock_load.return_value = {"api_key": "k"}
             rt._courier = MagicMock()
 
-            result = await rt.load_credentials(["api_key"], service="test-patron")
+            await rt.load_credentials(["api_key"], service="test-patron")
 
             call_args = mock_load.call_args
             assert call_args[0][1] == "test-patron"
