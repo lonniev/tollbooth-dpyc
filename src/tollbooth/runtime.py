@@ -326,6 +326,7 @@ class OperatorRuntime:
                 }
 
         ledger = await cache.get(npub)
+        effective_cost = int(effective_cost)
         if ledger.balance_api_sats < effective_cost:
             return {
                 "success": False,
@@ -806,7 +807,25 @@ def register_standard_tools(
         except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        return await credits.check_payment_tool(cashier, cache, npub, invoice_id)
+        result = await credits.check_payment_tool(cashier, cache, npub, invoice_id)
+
+        # Send a thank-you DM on successful settlement
+        if result.get("status") == "Settled" and result.get("credits_granted", 0) > 0:
+            try:
+                courier = await rt.courier()
+                if courier is not None:
+                    credited = result["credits_granted"]
+                    courier._exchange.send_dm(
+                        npub,
+                        f"\u26a1 Thank you for your purchase!\n\n"
+                        f"Invoice {invoice_id} settled.\n"
+                        f"{credited:,} credits added to your balance.\n\n"
+                        f"— {service_name or slug}",
+                    )
+            except Exception:
+                pass  # DM is a courtesy, never blocks
+
+        return result
 
     @tool
     async def restore_credits(invoice_id: str, npub: str = "") -> dict[str, Any]:
