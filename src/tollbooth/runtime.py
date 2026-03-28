@@ -774,7 +774,9 @@ def register_standard_tools(
             from tollbooth.authority_client import AuthorityCertifier
             from tollbooth.registry import resolve_authority_service
             auth_info = await resolve_authority_service(rt.operator_npub())
-            cert_result = await AuthorityCertifier(auth_info["url"]).certify_credits(amount_sats)
+            cert_result = await AuthorityCertifier(
+                auth_info["url"], rt.operator_npub(),
+            ).certify_credits(amount_sats)
             certificate = cert_result.get("certificate", "")
         except Exception as e:
             return {"success": False, "error": f"Authority certification failed: {e}"}
