@@ -101,6 +101,7 @@ class OperatorRuntime:
         self._vault: Any | None = None
         self._ledger_cache: Any | None = None
         self._courier: Any | None = None
+        self._btcpay: Any | None = None
         self._operator_npub: str | None = None
         self._nsec: str | None = None
 
@@ -537,6 +538,128 @@ class OperatorRuntime:
             field_names,
         )
 
+    # ------------------------------------------------------------------
+    # BTCPay client (from operator credential vault)
+    # ------------------------------------------------------------------
+
+    async def ensure_btcpay(self) -> Any:
+        """Return a BTCPayClient constructed from vault credentials.
+
+        Loads btcpay_host, btcpay_api_key, btcpay_store_id from the
+        operator credential vault.  Cached after first successful load.
+        """
+        if self._btcpay is not None:
+            return self._btcpay
+
+        from tollbooth.btcpay_client import BTCPayClient
+
+        creds = await self.load_credentials(
+            ["btcpay_host", "btcpay_api_key", "btcpay_store_id"],
+        )
+        host = creds.get("btcpay_host")
+        api_key = creds.get("btcpay_api_key")
+        store_id = creds.get("btcpay_store_id")
+
+        if not all([host, api_key, store_id]):
+            raise ValueError(
+                "BTCPay not configured. Deliver btcpay_host, btcpay_api_key, "
+                "btcpay_store_id via Secure Courier (request_credential_channel)."
+            )
+
+        self._btcpay = BTCPayClient(
+            host=host, api_key=api_key, store_id=store_id,
+        )
+        return self._btcpay
+
+    # ------------------------------------------------------------------
+    # Horizon auth helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def get_current_user_id() -> str | None:
+        """Extract FastMCP Cloud user ID from request headers.
+
+        Returns None in STDIO mode or when no auth headers present.
+        """
+        try:
+            from fastmcp.server.dependencies import get_http_headers
+            headers = get_http_headers(include_all=True)
+            return headers.get("fastmcp-cloud-user")
+        except Exception:
+            return None
+
+    @staticmethod
+    def require_user_id() -> str:
+        """Extract FastMCP Cloud user ID or raise ValueError."""
+        user_id = OperatorRuntime.get_current_user_id()
+        if not user_id:
+            raise ValueError(
+                "Multi-tenant mode requires Horizon authentication. "
+                "Connect via the operator's MCP endpoint URL."
+            )
+        return user_id
+
+    # ------------------------------------------------------------------
+    # Low-balance warning injection
+    # ------------------------------------------------------------------
+
+    async def inject_low_balance_warning(
+        self,
+        result: dict[str, Any],
+        npub: str,
+        seed_balance_sats: int = 0,
+    ) -> dict[str, Any]:
+        """Append low_balance_warning to result if balance is running low.
+
+        Call this at the end of every paid tool to proactively warn patrons.
+        No-op if npub is invalid or cache is unavailable.
+        """
+        try:
+            from tollbooth.tools.credits import compute_low_balance_warning
+            npub = resolve_npub(npub)
+            cache = await self.ledger_cache()
+            warning = compute_low_balance_warning(
+                await cache.get(npub), seed_balance_sats,
+            )
+            if warning:
+                result["low_balance_warning"] = warning
+        except Exception:
+            pass
+        return result
+
+    # ------------------------------------------------------------------
+    # Demand tracking (for surge pricing constraints)
+    # ------------------------------------------------------------------
+
+    def _demand_window_key(self) -> str:
+        """Current hourly demand window key."""
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00")
+
+    async def get_global_demand(self, tool_name: str) -> dict[str, int]:
+        """Get current hourly demand count for a tool (for surge pricing)."""
+        try:
+            vault = await self.vault()
+            count = await vault.get_demand(tool_name, self._demand_window_key())
+            return {tool_name: count}
+        except Exception:
+            return {}
+
+    def fire_and_forget_demand_increment(self, tool_name: str) -> None:
+        """Increment demand counter for a tool (non-blocking)."""
+        import asyncio
+
+        async def _increment() -> None:
+            try:
+                vault = await self.vault()
+                await vault.increment_demand(
+                    tool_name, self._demand_window_key(),
+                )
+            except Exception:
+                pass
+
+        asyncio.create_task(_increment())
+
 
 # ======================================================================
 # Standard tool registration
@@ -911,6 +1034,84 @@ def register_standard_tools(
             )
         except Exception as e:
             return {"status": "error", "error": str(e)}
+
+    # -- Constraint Engine tools ---------------------------------------
+
+    @tool
+    async def check_price(tool_name: str, npub: str = "") -> dict[str, Any]:
+        """Preview the effective cost of a tool call.
+
+        Shows the base cost and any constraint effects (discounts, free
+        trials, surge pricing). Free — no credits required.
+        """
+        base_cost = rt._tool_costs.get(tool_name)
+        if base_cost is None:
+            return {
+                "success": False,
+                "error": f"Unknown tool: {tool_name}. "
+                f"Valid: {list(rt._tool_costs.keys())}",
+            }
+
+        result: dict[str, Any] = {
+            "success": True,
+            "tool_name": tool_name,
+            "base_cost_api_sats": int(base_cost),
+            "effective_cost_api_sats": int(base_cost),
+            "constraints_enabled": False,
+            "constraint_effects": [],
+        }
+
+        gate = rt._constraint_gate
+        if gate and gate.enabled and base_cost > 0:
+            result["constraints_enabled"] = True
+            try:
+                resolved = resolve_npub(npub)
+                cache = await rt.ledger_cache()
+                ledger = await cache.get(resolved)
+                demand = await rt.get_global_demand(tool_name)
+                denial, effective = gate.check(
+                    tool_name=tool_name,
+                    base_cost=int(base_cost),
+                    ledger=ledger,
+                    npub=resolved,
+                    global_demand=demand,
+                )
+                if demand.get(tool_name, 0) > 0:
+                    result["current_demand"] = demand[tool_name]
+                if denial:
+                    result["effective_cost_api_sats"] = 0
+                    result["constraint_effects"].append({
+                        "type": "denied",
+                        "reason": denial.get("constraint_reason", "blocked"),
+                    })
+                else:
+                    result["effective_cost_api_sats"] = effective
+                    if effective != base_cost:
+                        result["constraint_effects"].append({
+                            "type": "discount",
+                            "from": int(base_cost),
+                            "to": effective,
+                        })
+            except ValueError:
+                result["constraint_effects"].append({
+                    "type": "info",
+                    "message": "npub required for constraint evaluation.",
+                })
+
+        return result
+
+    @tool
+    async def list_constraint_types() -> dict[str, Any]:
+        """List all available constraint types and their parameter schemas.
+
+        Returns the type, category, description, and parameter specs for
+        every constraint that can be used in a pricing pipeline.
+        Free — no credits required.
+        """
+        from tollbooth.tools.pricing import (
+            list_constraint_types as _list,
+        )
+        return {"status": "ok", "constraint_types": _list()}
 
 
 # ======================================================================
