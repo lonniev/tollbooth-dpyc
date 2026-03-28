@@ -877,6 +877,29 @@ class NostrCredentialExchange:
             candidates = self._find_dm_candidates(sender_hex)
 
         if not candidates:
+            # Log relay diagnostics for debugging
+            total_events = len(self._received_events)
+            consumed = len(self._consumed_ids)
+            logger.warning(
+                "receive_credentials: no DM candidates for %s. "
+                "Relay state: %d events received, %d consumed, "
+                "%d relays configured, freshness_window=%ds.",
+                sender_npub[:20], total_events, consumed,
+                len(self._relays), self._freshness_window,
+            )
+            if total_events > 0:
+                # Show what senders we DO have DMs from
+                import time as _time
+                now = _time.time()
+                senders = set()
+                for evt in self._received_events:
+                    age = int(now - evt.get("created_at", 0))
+                    sender = evt.get("sender_npub", "?")[:20]
+                    senders.add(f"{sender}(age={age}s)")
+                logger.warning(
+                    "receive_credentials: DMs on hand from: %s",
+                    ", ".join(sorted(senders)),
+                )
             raise CourierTimeout(
                 f"No DM found from {sender_npub} within the "
                 f"{self._freshness_window}-second freshness window. "
@@ -1553,6 +1576,12 @@ class NostrCredentialExchange:
         """
         now = int(time.time())
         cutoff = now - self._freshness_window
+        logger.info(
+            "_find_dm_candidates: sender=%s, total_events=%d, "
+            "consumed=%d, cutoff_age=%ds",
+            sender_hex[:16], len(self._received_events),
+            len(self._consumed_ids), self._freshness_window,
+        )
 
         with self._lock:
             candidates = []
