@@ -1194,8 +1194,19 @@ def register_standard_tools(
             from tollbooth.tools.pricing import get_pricing_model_tool
             result = await get_pricing_model_tool(store, rt.operator_npub())
 
-            # Auto-seed from TOOL_COSTS if store is empty
-            if result.get("model_id") is None and rt._tool_costs:
+            # Auto-seed from TOOL_COSTS if store is empty or stale
+            needs_seed = result.get("model_id") is None
+            if not needs_seed and rt._tool_costs:
+                # Check if stored model is missing tools
+                stored_tools = {
+                    t["tool_name"] for t in (result.get("tools") or [])
+                }
+                paid_tools = {
+                    n for n, c in rt._tool_costs.items() if int(c) > 0
+                }
+                needs_seed = not paid_tools.issubset(stored_tools)
+
+            if needs_seed and rt._tool_costs:
                 seed = _build_default_pricing_model(rt, service_name)
                 if seed:
                     from tollbooth.tools.pricing import set_pricing_model_tool
