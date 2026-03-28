@@ -779,10 +779,12 @@ def register_standard_tools(
             return {"success": False, "error": f"Authority certification failed: {e}"}
 
         try:
+            btcpay = await rt.ensure_btcpay()
             cache = await rt.ledger_cache()
             from tollbooth.tools import credits
             return await credits.purchase_credits_tool(
-                cache, npub, amount_sats, certificate,
+                btcpay, cache, npub, amount_sats, certificate,
+                authority_npub=auth_info.get("npub", ""),
             )
         except ValueError as e:
             return {"success": False, "error": str(e)}
@@ -799,11 +801,12 @@ def register_standard_tools(
         """
         try:
             npub = resolve_npub(npub)
+            btcpay = await rt.ensure_btcpay()
             cache = await rt.ledger_cache()
-        except ValueError as e:
+        except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        return await credits.check_payment_tool(cache, npub, invoice_id)
+        return await credits.check_payment_tool(btcpay, cache, npub, invoice_id)
 
     @tool
     async def restore_credits(invoice_id: str, npub: str = "") -> dict[str, Any]:
@@ -814,11 +817,12 @@ def register_standard_tools(
         """
         try:
             npub = resolve_npub(npub)
+            btcpay = await rt.ensure_btcpay()
             cache = await rt.ledger_cache()
-        except ValueError as e:
+        except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        return await credits.restore_credits_tool(cache, npub, invoice_id)
+        return await credits.restore_credits_tool(btcpay, cache, npub, invoice_id)
 
     @tool
     async def account_statement(npub: str = "", days: int = 30) -> dict[str, Any]:
