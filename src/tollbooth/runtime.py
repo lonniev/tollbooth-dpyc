@@ -970,10 +970,15 @@ def register_standard_tools(
             return {"success": False, "error": "Secure Courier not configured."}
         try:
             if credential_card:
-                return await courier._exchange.redeem_credential_card(
+                result = await courier._exchange.redeem_credential_card(
                     credential_card, service,
                 )
-            return await courier.receive(sender_npub, service)
+            else:
+                result = await courier.receive(sender_npub, service)
+            # Invalidate cached BTCPay client when operator creds change
+            if result.get("success") and service == rt.operator_credential_service:
+                rt._btcpay = None
+            return result
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -987,7 +992,10 @@ def register_standard_tools(
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
         try:
-            return await courier.forget(npub, service)
+            result = await courier.forget(npub, service)
+            if service == rt.operator_credential_service:
+                rt._btcpay = None
+            return result
         except Exception as e:
             return {"success": False, "error": str(e)}
 
