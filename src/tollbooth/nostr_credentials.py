@@ -888,17 +888,24 @@ class NostrCredentialExchange:
                 len(self._relays), self._freshness_window,
             )
             if total_events > 0:
-                # Show what senders we DO have DMs from
                 import time as _time
                 now = _time.time()
-                senders = set()
+                # Count by kind and consumed status
+                kinds: dict[int, int] = {}
+                consumed_count = 0
                 for evt in self._received_events:
-                    age = int(now - evt.get("created_at", 0))
-                    sender = evt.get("sender_npub", "?")[:20]
-                    senders.add(f"{sender}(age={age}s)")
+                    k = evt.get("kind", 0)
+                    kinds[k] = kinds.get(k, 0) + 1
+                    if evt.get("id", "") in self._consumed_ids:
+                        consumed_count += 1
+                kind_summary = ", ".join(
+                    f"kind{k}={n}" for k, n in sorted(kinds.items())
+                )
                 logger.warning(
-                    "receive_credentials: DMs on hand from: %s",
-                    ", ".join(sorted(senders)),
+                    "receive_credentials: events by kind: %s, "
+                    "consumed=%d/%d, looking for sender=%s",
+                    kind_summary, consumed_count, total_events,
+                    sender_npub[:20],
                 )
             raise CourierTimeout(
                 f"No DM found from {sender_npub} on configured relays. "
@@ -1600,6 +1607,12 @@ class NostrCredentialExchange:
 
             # Newest first
             candidates.sort(key=lambda e: e.get("created_at", 0), reverse=True)
+            logger.info(
+                "_find_dm_candidates: %d candidates from %d unconsumed events",
+                len(candidates),
+                sum(1 for e in self._received_events
+                    if e.get("id", "") not in self._consumed_ids),
+            )
             return candidates
 
     def _decrypt_dm(
