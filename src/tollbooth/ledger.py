@@ -112,6 +112,11 @@ class Tranche:
     invoice_id: str = ""
     expires_at: str | None = None  # ISO datetime, None = never expires
 
+    def __post_init__(self) -> None:
+        # Defensive: ensure numeric fields are int even if deserialized as str
+        self.original_sats = int(self.original_sats)
+        self.remaining_sats = int(self.remaining_sats)
+
     def is_expired_at(self, now: datetime) -> bool:
         """Check if this tranche is expired at the given time."""
         if self.expires_at is None:
@@ -176,6 +181,11 @@ class UserLedger:
     daily_log: dict[str, dict[str, ToolUsage]] = field(default_factory=dict)
     history: dict[str, ToolUsage] = field(default_factory=dict)
     invoices: dict[str, InvoiceRecord] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.total_deposited_api_sats = int(self.total_deposited_api_sats)
+        self.total_consumed_api_sats = int(self.total_consumed_api_sats)
+        self.total_expired_api_sats = int(self.total_expired_api_sats)
 
     @property
     def balance_api_sats(self) -> int:
