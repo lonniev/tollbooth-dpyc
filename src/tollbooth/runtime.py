@@ -303,7 +303,10 @@ class OperatorRuntime:
             return None
 
         try:
-            npub = resolve_npub(npub)
+            if not npub or not npub.startswith("npub1"):
+                npub = self.operator_npub()
+            else:
+                npub = resolve_npub(npub)
             cache = await self.ledger_cache()
         except ValueError as e:
             return {"success": False, "error": str(e)}
