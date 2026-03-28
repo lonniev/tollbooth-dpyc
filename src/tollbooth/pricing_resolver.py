@@ -84,7 +84,7 @@ class PricingResolver:
                 exc_info=True,
             )
             # Keep existing cache (stale > nothing)
-            if self._cache_ts == 0.0:
+            if self._cache_ts < 0:
                 # First call ever failed — mark as attempted so we don't
                 # hammer Neon on every request
                 self._cache_ts = time.monotonic()
@@ -124,4 +124,4 @@ class PricingResolver:
 
     def refresh(self) -> None:
         """Force cache reset — call after Pricing Studio activates a model."""
-        self._cache_ts = 0.0
+        self._cache_ts = -self._cache_ttl - 1.0
