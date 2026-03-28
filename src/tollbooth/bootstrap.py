@@ -14,7 +14,6 @@ no MCP-to-MCP calls, no additional env vars beyond the nsec.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 
