@@ -326,16 +326,14 @@ class OperatorRuntime:
                 }
 
         ledger = await cache.get(npub)
-        effective_cost = int(effective_cost)
-        balance = int(ledger.balance_api_sats)
-        if balance < effective_cost:
+        if ledger.balance_api_sats < effective_cost:
             return {
                 "success": False,
                 "error": (
-                    f"Insufficient balance: {balance} sats "
+                    f"Insufficient balance: {ledger.balance_api_sats} sats "
                     f"available, {effective_cost} required for {tool_name}."
                 ),
-                "balance_sats": balance,
+                "balance_sats": ledger.balance_api_sats,
                 "cost_sats": effective_cost,
             }
 
