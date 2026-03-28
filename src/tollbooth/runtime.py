@@ -214,6 +214,18 @@ class OperatorRuntime:
     async def courier(self) -> Any:
         """Return the SecureCourierService with persistent vault."""
         if self._courier is not None:
+            # Retry vault attachment if courier was created without one
+            if (hasattr(self._courier, '_exchange')
+                    and self._courier._exchange._credential_vault is None
+                    and self._vault is not None):
+                try:
+                    from tollbooth.vaults.neon import NeonCredentialVault
+                    cv = NeonCredentialVault(neon_vault=self._vault)
+                    await cv.ensure_schema()
+                    self._courier._exchange._credential_vault = cv
+                    logger.info("Attached credential vault to courier (late init)")
+                except Exception:
+                    pass
             return self._courier
 
         nsec = self._get_nsec()
