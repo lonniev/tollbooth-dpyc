@@ -339,7 +339,7 @@ class OperatorRuntime:
                 "cost_sats": effective_cost,
             }
 
-        ledger.debit(effective_cost, tool_name)
+        ledger.debit(tool_name, effective_cost)
         cache.mark_dirty(npub)
         return None
 
@@ -351,7 +351,7 @@ class OperatorRuntime:
             cost = self._tool_costs.get(tool_name, 0)
             if cost > 0:
                 ledger = await cache.get(npub)
-                ledger.credit(cost, f"rollback:{tool_name}")
+                ledger.credit_deposit(cost, f"rollback:{tool_name}")
                 cache.mark_dirty(npub)
         except Exception:
             pass  # best-effort rollback
