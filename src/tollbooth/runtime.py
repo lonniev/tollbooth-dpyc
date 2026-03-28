@@ -101,7 +101,7 @@ class OperatorRuntime:
         self._vault: Any | None = None
         self._ledger_cache: Any | None = None
         self._courier: Any | None = None
-        self._btcpay: Any | None = None
+        self._cashier: Any | None = None
         self._operator_npub: str | None = None
         self._nsec: str | None = None
 
@@ -542,14 +542,14 @@ class OperatorRuntime:
     # BTCPay client (from operator credential vault)
     # ------------------------------------------------------------------
 
-    async def ensure_btcpay(self) -> Any:
+    async def ensure_cashier(self) -> Any:
         """Return a BTCPayClient constructed from vault credentials.
 
         Loads btcpay_host, btcpay_api_key, btcpay_store_id from the
         operator credential vault.  Cached after first successful load.
         """
-        if self._btcpay is not None:
-            return self._btcpay
+        if self._cashier is not None:
+            return self._cashier
 
         from tollbooth.btcpay_client import BTCPayClient
 
@@ -566,10 +566,10 @@ class OperatorRuntime:
                 "btcpay_store_id via Secure Courier (request_credential_channel)."
             )
 
-        self._btcpay = BTCPayClient(
+        self._cashier = BTCPayClient(
             host=host, api_key=api_key, store_id=store_id,
         )
-        return self._btcpay
+        return self._cashier
 
     # ------------------------------------------------------------------
     # Horizon auth helpers
@@ -779,11 +779,11 @@ def register_standard_tools(
             return {"success": False, "error": f"Authority certification failed: {e}"}
 
         try:
-            btcpay = await rt.ensure_btcpay()
+            cashier = await rt.ensure_cashier()
             cache = await rt.ledger_cache()
             from tollbooth.tools import credits
             return await credits.purchase_credits_tool(
-                btcpay, cache, npub, amount_sats, certificate,
+                cashier, cache, npub, amount_sats, certificate,
                 authority_npub=auth_info.get("npub", ""),
             )
         except ValueError as e:
@@ -801,12 +801,12 @@ def register_standard_tools(
         """
         try:
             npub = resolve_npub(npub)
-            btcpay = await rt.ensure_btcpay()
+            cashier = await rt.ensure_cashier()
             cache = await rt.ledger_cache()
         except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        return await credits.check_payment_tool(btcpay, cache, npub, invoice_id)
+        return await credits.check_payment_tool(cashier, cache, npub, invoice_id)
 
     @tool
     async def restore_credits(invoice_id: str, npub: str = "") -> dict[str, Any]:
@@ -817,12 +817,12 @@ def register_standard_tools(
         """
         try:
             npub = resolve_npub(npub)
-            btcpay = await rt.ensure_btcpay()
+            cashier = await rt.ensure_cashier()
             cache = await rt.ledger_cache()
         except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        return await credits.restore_credits_tool(btcpay, cache, npub, invoice_id)
+        return await credits.restore_credits_tool(cashier, cache, npub, invoice_id)
 
     @tool
     async def account_statement(npub: str = "", days: int = 30) -> dict[str, Any]:
@@ -977,7 +977,7 @@ def register_standard_tools(
                 result = await courier.receive(sender_npub, service)
             # Invalidate cached BTCPay client when operator creds change
             if result.get("success") and service == rt.operator_credential_service:
-                rt._btcpay = None
+                rt._cashier = None
             return result
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -994,7 +994,7 @@ def register_standard_tools(
         try:
             result = await courier.forget(npub, service)
             if service == rt.operator_credential_service:
-                rt._btcpay = None
+                rt._cashier = None
             return result
         except Exception as e:
             return {"success": False, "error": str(e)}
