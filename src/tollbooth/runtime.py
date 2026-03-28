@@ -908,10 +908,18 @@ def register_standard_tools(
                       and hasattr(rt._courier, '_exchange')
                       and rt._courier._exchange._credential_vault is not None)
 
+        wheel_version = "unknown"
+        try:
+            import importlib.metadata
+            wheel_version = importlib.metadata.version("tollbooth-dpyc")
+        except Exception:
+            pass
+
         return {
             "success": True,
             "service": service_name or slug,
             "version": service_version,
+            "tollbooth_dpyc_version": wheel_version,
             "vault_configured": vault_ok,
             "courier_has_vault": courier_ok,
             "process_id": os.getpid(),
