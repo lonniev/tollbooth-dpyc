@@ -303,10 +303,7 @@ class OperatorRuntime:
             return None
 
         try:
-            if not npub or not npub.startswith("npub1"):
-                npub = self.operator_npub()
-            else:
-                npub = resolve_npub(npub)
+            npub = resolve_npub(npub)
             cache = await self.ledger_cache()
         except ValueError as e:
             return {"success": False, "error": str(e)}
@@ -735,23 +732,19 @@ def register_standard_tools(
 
     # -- Credit tools --------------------------------------------------
 
-    def _resolve_or_operator(npub: str) -> str:
-        """Resolve npub, falling back to operator's own npub if empty."""
-        if not npub or not npub.startswith("npub1"):
-            return rt.operator_npub()
-        return resolve_npub(npub)
-
     @tool
     async def check_balance(npub: str = "") -> dict[str, Any]:
         """Check your current credit balance and usage summary.
 
-        Free — no credits required. Pass your npub to identify yourself.
-        If omitted, checks the operator's own balance.
+        Free — no credits required.
+
+        Args:
+            npub: Required. Your Nostr public key (npub1...).
         """
         try:
-            npub = _resolve_or_operator(npub)
+            npub = resolve_npub(npub)
             cache = await rt.ledger_cache()
-        except (ValueError, RuntimeError) as e:
+        except ValueError as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
         return await credits.check_balance_tool(cache, npub)
@@ -764,10 +757,14 @@ def register_standard_tools(
         then call check_payment to confirm.
 
         Free — no credits required to call.
+
+        Args:
+            amount_sats: Satoshis to purchase (default 1000).
+            npub: Required. Your Nostr public key (npub1...).
         """
         try:
-            npub = _resolve_or_operator(npub)
-        except (ValueError, RuntimeError) as e:
+            npub = resolve_npub(npub)
+        except ValueError as e:
             return {"success": False, "error": str(e)}
 
         try:
@@ -796,22 +793,29 @@ def register_standard_tools(
 
         Call after paying the invoice from purchase_credits.
         Free — no credits required.
+
+        Args:
+            npub: Required. Your Nostr public key (npub1...).
         """
         try:
-            npub = _resolve_or_operator(npub)
+            npub = resolve_npub(npub)
             cache = await rt.ledger_cache()
-        except (ValueError, RuntimeError) as e:
+        except ValueError as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
         return await credits.check_payment_tool(cache, npub, invoice_id)
 
     @tool
     async def restore_credits(invoice_id: str, npub: str = "") -> dict[str, Any]:
-        """Restore credits from a previously paid invoice. Free."""
+        """Restore credits from a previously paid invoice. Free.
+
+        Args:
+            npub: Required. Your Nostr public key (npub1...).
+        """
         try:
-            npub = _resolve_or_operator(npub)
+            npub = resolve_npub(npub)
             cache = await rt.ledger_cache()
-        except (ValueError, RuntimeError) as e:
+        except ValueError as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
         return await credits.restore_credits_tool(cache, npub, invoice_id)
@@ -825,13 +829,13 @@ def register_standard_tools(
         Free — no credits consumed.
 
         Args:
-            npub: Your Nostr public key.
+            npub: Required. Your Nostr public key (npub1...).
             days: Number of days of daily usage history to include (default 30).
         """
         try:
-            npub = _resolve_or_operator(npub)
+            npub = resolve_npub(npub)
             cache = await rt.ledger_cache()
-        except (ValueError, RuntimeError) as e:
+        except ValueError as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
         return await credits.account_statement_tool(cache, npub, days=days)
@@ -845,12 +849,12 @@ def register_standard_tools(
         table, and tool usage breakdown. Costs 1 api_sat per call.
 
         Args:
-            npub: Your Nostr public key.
+            npub: Required. Your Nostr public key (npub1...).
             days: Number of days of daily usage history to include (default 30).
         """
         try:
-            npub = _resolve_or_operator(npub)
-        except (ValueError, RuntimeError) as e:
+            npub = resolve_npub(npub)
+        except ValueError as e:
             return {"success": False, "error": str(e)}
         err = await rt.debit_or_error("account_statement_infographic", npub)
         if err:
