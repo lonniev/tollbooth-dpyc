@@ -448,3 +448,182 @@ class TestLoadCredentials:
 
             call_args = mock_load.call_args
             assert call_args[0][1] == "test-patron"
+
+
+# ---------------------------------------------------------------------------
+# Cashier (payment processor) abstraction
+# ---------------------------------------------------------------------------
+
+
+class TestCashier:
+    @pytest.mark.asyncio
+    async def test_ensure_cashier_caches(self) -> None:
+        """Second call returns cached instance without re-loading."""
+        rt = _make_runtime(operator_template=BTCPAY_TEMPLATE)
+        rt._operator_npub = "npub1testfake"
+
+        mock_client = MagicMock()
+
+        with patch("tollbooth.tools.onboarding.load_config_from_vault", new_callable=AsyncMock) as mock_load:
+            mock_load.return_value = {
+                "btcpay_host": "https://pay.test",
+                "btcpay_api_key": "key",
+                "btcpay_store_id": "store",
+            }
+            rt._courier = MagicMock()
+
+            with patch("tollbooth.btcpay_client.BTCPayClient") as mock_cls:
+                mock_cls.return_value = mock_client
+                first = await rt.ensure_cashier()
+                second = await rt.ensure_cashier()
+                assert first is second
+                mock_cls.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ensure_cashier_raises_without_creds(self) -> None:
+        """Raises ValueError when BTCPay creds are missing."""
+        rt = _make_runtime(operator_template=BTCPAY_TEMPLATE)
+        rt._operator_npub = "npub1testfake"
+
+        with patch("tollbooth.tools.onboarding.load_config_from_vault", new_callable=AsyncMock) as mock_load:
+            mock_load.return_value = {}
+            rt._courier = MagicMock()
+
+            with pytest.raises(ValueError, match="BTCPay not configured"):
+                await rt.ensure_cashier()
+
+    def test_cashier_invalidation(self) -> None:
+        """Setting _cashier to None forces re-creation on next call."""
+        rt = _make_runtime()
+        rt._cashier = MagicMock()
+        assert rt._cashier is not None
+        rt._cashier = None
+        assert rt._cashier is None
+
+
+# ---------------------------------------------------------------------------
+# npub enforcement — no silent fallback
+# ---------------------------------------------------------------------------
+
+
+class TestNpubEnforcement:
+    @pytest.mark.asyncio
+    async def test_debit_or_error_rejects_empty_npub(self) -> None:
+        """Paid tools reject empty npub."""
+        rt = OperatorRuntime(
+            tool_costs={"paid_tool": 5},
+            service_name="Test",
+        )
+        rt._vault = MagicMock()
+        rt._ledger_cache = MagicMock()
+
+        result = await rt.debit_or_error("paid_tool", "")
+        assert result is not None
+        assert result["success"] is False
+        assert "npub" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_debit_or_error_passes_free_tools(self) -> None:
+        """Free tools (cost=0) pass without npub."""
+        rt = OperatorRuntime(
+            tool_costs={"free_tool": 0},
+            service_name="Test",
+        )
+        result = await rt.debit_or_error("free_tool", "")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_debit_or_error_passes_unknown_tools(self) -> None:
+        """Tools not in cost map default to 0 (free)."""
+        rt = OperatorRuntime(
+            tool_costs={},
+            service_name="Test",
+        )
+        result = await rt.debit_or_error("unknown_tool", "")
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Auto-seed pricing model
+# ---------------------------------------------------------------------------
+
+
+class TestAutoSeedPricing:
+    def test_build_default_pricing_model(self) -> None:
+        """Generates a valid pricing model JSON from tool costs."""
+        from tollbooth.runtime import _build_default_pricing_model
+        import json
+
+        rt = OperatorRuntime(
+            tool_costs={"search": 1, "write": 5, "heavy_op": 10, "free": 0},
+            service_name="Test Service",
+        )
+        result = _build_default_pricing_model(rt, "Test Service")
+
+        assert result is not None
+        model = json.loads(result)
+        assert model["name"] == "Test Service Default Pricing"
+        # Free tools excluded
+        tool_names = {t["tool_name"] for t in model["tools"]}
+        assert "free" not in tool_names
+        assert "search" in tool_names
+        assert "write" in tool_names
+        assert "heavy_op" in tool_names
+        # Prices match
+        prices = {t["tool_name"]: t["price_sats"] for t in model["tools"]}
+        assert prices["search"] == 1
+        assert prices["write"] == 5
+        assert prices["heavy_op"] == 10
+
+    def test_build_default_no_paid_tools(self) -> None:
+        """Returns None when all tools are free."""
+        from tollbooth.runtime import _build_default_pricing_model
+
+        rt = OperatorRuntime(
+            tool_costs={"info": 0, "status": 0},
+            service_name="Free Service",
+        )
+        result = _build_default_pricing_model(rt, "Free Service")
+        assert result is None
+
+    def test_build_default_empty_costs(self) -> None:
+        """Returns None when no tools defined."""
+        from tollbooth.runtime import _build_default_pricing_model
+
+        rt = OperatorRuntime(tool_costs={}, service_name="Empty")
+        result = _build_default_pricing_model(rt, "Empty")
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Demand tracking
+# ---------------------------------------------------------------------------
+
+
+class TestDemandTracking:
+    @pytest.mark.asyncio
+    async def test_get_global_demand_returns_count(self) -> None:
+        """Returns demand count from vault."""
+        rt = _make_runtime()
+        mock_vault = AsyncMock()
+        mock_vault.get_demand = AsyncMock(return_value=42)
+        rt._vault = mock_vault
+
+        result = await rt.get_global_demand("search")
+        assert result == {"search": 42}
+
+    @pytest.mark.asyncio
+    async def test_get_global_demand_empty_on_error(self) -> None:
+        """Returns empty dict on vault error."""
+        rt = _make_runtime()
+        rt._vault = None  # will cause vault() to fail
+
+        result = await rt.get_global_demand("search")
+        assert result == {}
+
+    def test_demand_window_key_format(self) -> None:
+        """Window key is hourly ISO format."""
+        rt = _make_runtime()
+        key = rt._demand_window_key()
+        assert "T" in key
+        assert key.endswith(":00")
