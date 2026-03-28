@@ -931,6 +931,9 @@ def register_standard_tools(
         """Open a Secure Courier channel for operator credential delivery.
 
         Sends a welcome DM with a credential template to the provided npub.
+        Use this to deliver or rotate operator secrets (payment processor
+        credentials, API keys). After the recipient replies with filled
+        credentials, call receive_credentials to pick them up.
         Free.
         """
         if not sender_npub:
@@ -959,7 +962,9 @@ def register_standard_tools(
 
         Checks the vault first (instant), then polls Nostr relays for
         encrypted DMs. If a credential_card (ncred1...) is provided,
-        redeems it directly without relay polling. Free.
+        redeems it directly without relay polling. On success, the
+        payment processor client is reinitialized from the new
+        credentials — no server restart needed. Free.
         """
         if not sender_npub:
             sender_npub = rt.operator_npub()
@@ -984,7 +989,12 @@ def register_standard_tools(
 
     @tool
     async def forget_credentials(service: str = "") -> dict[str, Any]:
-        """Delete vaulted credentials for key rotation. Free."""
+        """Delete vaulted credentials for key rotation.
+
+        Call this before re-delivering credentials (e.g., switching to a
+        different payment processor store). After forgetting, call
+        request_credential_channel to start a new delivery. Free.
+        """
         if not service:
             service = rt.operator_credential_service
         npub = rt.operator_npub()
