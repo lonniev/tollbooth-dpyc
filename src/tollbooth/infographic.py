@@ -69,10 +69,14 @@ def _text(
 # ---------------------------------------------------------------------------
 
 
-def render_account_infographic(data: dict[str, Any]) -> str:
+def render_account_infographic(
+    data: dict[str, Any],
+    service_name: str = "Account",
+) -> str:
     """Return SVG markup for a visual account statement.
 
     *data* is the dict returned by ``account_statement_tool``.
+    *service_name* is the operator's display name for the header.
     """
     summary = data.get("account_summary", {})
     balance = summary.get("balance_api_sats", 0)
@@ -89,7 +93,7 @@ def render_account_infographic(data: dict[str, Any]) -> str:
     # ── Header ────────────────────────────────────────────────────────
     header_h = 80
     parts.append(_card(cy, header_h))
-    parts.append(_text(CARD_X + 48, cy + 38, "Personal Brain",
+    parts.append(_text(CARD_X + 48, cy + 38, escape(service_name),
                        size=22, weight="bold", family="sans-serif"))
     parts.append(_text(CARD_X + 48, cy + 60, "Account Statement",
                        size=14, fill=ACCENT_ORANGE, family="sans-serif"))

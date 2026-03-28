@@ -952,7 +952,9 @@ def register_standard_tools(
         from tollbooth.tools import credits
         statement = await credits.account_statement_tool(cache, npub, days=days)
         from tollbooth.infographic import render_account_infographic
-        svg = render_account_infographic(statement)
+        svg = render_account_infographic(
+            statement, service_name=service_name or slug,
+        )
         return {
             "svg": svg,
             "generated_at": __import__("datetime").datetime.now(
