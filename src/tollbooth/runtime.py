@@ -539,6 +539,70 @@ class OperatorRuntime:
         )
 
     # ------------------------------------------------------------------
+    # Patron session persistence (general-purpose)
+    # ------------------------------------------------------------------
+
+    async def store_patron_session(
+        self,
+        patron_npub: str,
+        credentials: dict[str, str],
+        *,
+        service: str | None = None,
+    ) -> bool:
+        """Persist patron session credentials to the encrypted vault.
+
+        Call this after any successful patron authentication (OAuth,
+        API key delivery, Secure Courier, etc.). The credentials are
+        encrypted with the operator's key and stored in Neon, keyed
+        by (service, patron_npub). Survives process restarts.
+
+        Args:
+            patron_npub: The patron's npub (vault key).
+            credentials: Dict of credential fields to store (e.g.,
+                ``{"token_json": "...", "account_hash": "..."}``).
+            service: Credential service name. Defaults to
+                patron_credential_service.
+
+        Returns True on success, False on failure.
+        """
+        svc = service or self.patron_credential_service
+        if not svc:
+            logger.warning("No patron credential service configured.")
+            return False
+        try:
+            courier = await self.courier()
+            if courier is None or courier._exchange._credential_vault is None:
+                logger.warning("No credential vault for patron session storage.")
+                return False
+            await courier._exchange._vault_store(svc, patron_npub, credentials)
+            return True
+        except Exception as exc:
+            logger.warning("Patron session store failed: %s", exc)
+            return False
+
+    async def load_patron_session(
+        self,
+        patron_npub: str,
+        *,
+        service: str | None = None,
+    ) -> dict[str, str] | None:
+        """Restore patron session credentials from the encrypted vault.
+
+        Call this on session miss (e.g., after process restart) before
+        returning "no active session." If credentials exist in the vault,
+        returns them as a dict. Returns None if not found.
+
+        Args:
+            patron_npub: The patron's npub (vault key).
+            service: Credential service name. Defaults to
+                patron_credential_service.
+        """
+        svc = service or self.patron_credential_service
+        if not svc:
+            return None
+        return await self._load_vault_creds(svc, npub_override=patron_npub) or None
+
+    # ------------------------------------------------------------------
     # BTCPay client (from operator credential vault)
     # ------------------------------------------------------------------
 
