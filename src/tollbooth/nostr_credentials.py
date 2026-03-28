@@ -1759,6 +1759,12 @@ class NostrCredentialExchange:
             )
 
         event["encryption"] = "nip44"
+        # Propagate the real timestamp from the inner DM to the outer event
+        # so callers see when the message was actually sent, not the fuzzed
+        # gift-wrap timestamp
+        inner_created_at = dm.get("created_at")
+        if inner_created_at:
+            event["created_at"] = inner_created_at
         return dm.get("content", "")
 
     def _request_deletion(self, event_id: str) -> None:
