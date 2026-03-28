@@ -836,22 +836,34 @@ class NostrCredentialExchange:
             vaulted = await self._vault_fetch(vault_service, sender_npub)
             if vaulted is not None:
                 template = self._templates[vault_service]
-                sensitive_count = sum(
-                    1 for name in vaulted
-                    if template.fields.get(name, FieldSpec()).sensitive
-                )
-                return {
-                    "success": True,
-                    "service": vault_service,
-                    "fields_received": len(vaulted),
-                    "sensitive_fields": sensitive_count,
-                    "encryption": "vault",
-                    "credentials": vaulted,
-                    "message": (
-                        f"Credentials for {vault_service} restored from vault "
-                        f"({len(vaulted)} fields). No relay I/O needed."
-                    ),
+                # Check if vault blob satisfies the current template
+                required_fields = {
+                    name for name, spec in template.fields.items()
+                    if spec.required
                 }
+                if required_fields.issubset(vaulted.keys()):
+                    sensitive_count = sum(
+                        1 for name in vaulted
+                        if template.fields.get(name, FieldSpec()).sensitive
+                    )
+                    return {
+                        "success": True,
+                        "service": vault_service,
+                        "fields_received": len(vaulted),
+                        "sensitive_fields": sensitive_count,
+                        "encryption": "vault",
+                        "credentials": vaulted,
+                        "message": (
+                            f"Credentials for {vault_service} restored from vault "
+                            f"({len(vaulted)} fields). No relay I/O needed."
+                        ),
+                    }
+                logger.info(
+                    "Vault blob for %s/%s has %d fields but template requires %s "
+                    "— falling through to relay poll.",
+                    vault_service, sender_npub[:16],
+                    len(vaulted), required_fields - vaulted.keys(),
+                )
 
         # ── Relay DM flow (pop-and-acknowledge) ────────────────────
         #

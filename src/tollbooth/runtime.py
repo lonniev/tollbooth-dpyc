@@ -661,6 +661,48 @@ class OperatorRuntime:
         asyncio.create_task(_increment())
 
 
+def _build_default_pricing_model(
+    rt: OperatorRuntime,
+    service_name: str,
+) -> str | None:
+    """Build a default pricing model JSON from the runtime's tool costs.
+
+    Returns a JSON string suitable for ``set_pricing_model_tool``, or
+    None if no paid tools exist.
+    """
+    import json as _json
+    from tollbooth.constants import ToolTier
+
+    tier_labels = {
+        ToolTier.FREE: ("free", "Informational"),
+        ToolTier.READ: ("read", "Data retrieval"),
+        ToolTier.WRITE: ("write", "State-changing operation"),
+        ToolTier.HEAVY: ("heavy", "Resource-intensive operation"),
+    }
+
+    tools = []
+    for name, cost in rt._tool_costs.items():
+        cost_int = int(cost)
+        if cost_int <= 0:
+            continue
+        cat, intent = tier_labels.get(cost_int, ("custom", "Custom"))
+        tools.append({
+            "tool_name": name,
+            "price_sats": cost_int,
+            "category": cat,
+            "intent": intent,
+        })
+
+    if not tools:
+        return None
+
+    model = {
+        "name": f"{service_name or 'Operator'} Default Pricing",
+        "tools": tools,
+    }
+    return _json.dumps(model)
+
+
 # ======================================================================
 # Standard tool registration
 # ======================================================================
@@ -690,16 +732,23 @@ def register_standard_tools(
 
     # -- Credit tools --------------------------------------------------
 
+    def _resolve_or_operator(npub: str) -> str:
+        """Resolve npub, falling back to operator's own npub if empty."""
+        if not npub or not npub.startswith("npub1"):
+            return rt.operator_npub()
+        return resolve_npub(npub)
+
     @tool
     async def check_balance(npub: str = "") -> dict[str, Any]:
         """Check your current credit balance and usage summary.
 
         Free — no credits required. Pass your npub to identify yourself.
+        If omitted, checks the operator's own balance.
         """
         try:
-            npub = resolve_npub(npub)
+            npub = _resolve_or_operator(npub)
             cache = await rt.ledger_cache()
-        except ValueError as e:
+        except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
         return await credits.check_balance_tool(cache, npub)
@@ -714,8 +763,8 @@ def register_standard_tools(
         Free — no credits required to call.
         """
         try:
-            npub = resolve_npub(npub)
-        except ValueError as e:
+            npub = _resolve_or_operator(npub)
+        except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
 
         try:
@@ -744,9 +793,9 @@ def register_standard_tools(
         Free — no credits required.
         """
         try:
-            npub = resolve_npub(npub)
+            npub = _resolve_or_operator(npub)
             cache = await rt.ledger_cache()
-        except ValueError as e:
+        except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
         return await credits.check_payment_tool(cache, npub, invoice_id)
@@ -755,9 +804,9 @@ def register_standard_tools(
     async def restore_credits(invoice_id: str, npub: str = "") -> dict[str, Any]:
         """Restore credits from a previously paid invoice. Free."""
         try:
-            npub = resolve_npub(npub)
+            npub = _resolve_or_operator(npub)
             cache = await rt.ledger_cache()
-        except ValueError as e:
+        except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
         return await credits.restore_credits_tool(cache, npub, invoice_id)
@@ -775,9 +824,9 @@ def register_standard_tools(
             days: Number of days of daily usage history to include (default 30).
         """
         try:
-            npub = resolve_npub(npub)
+            npub = _resolve_or_operator(npub)
             cache = await rt.ledger_cache()
-        except ValueError as e:
+        except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
         return await credits.account_statement_tool(cache, npub, days=days)
@@ -794,13 +843,16 @@ def register_standard_tools(
             npub: Your Nostr public key.
             days: Number of days of daily usage history to include (default 30).
         """
+        try:
+            npub = _resolve_or_operator(npub)
+        except (ValueError, RuntimeError) as e:
+            return {"success": False, "error": str(e)}
         err = await rt.debit_or_error("account_statement_infographic", npub)
         if err:
             return err
         try:
-            npub = resolve_npub(npub)
             cache = await rt.ledger_cache()
-        except ValueError as e:
+        except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
         statement = await credits.account_statement_tool(cache, npub, days=days)
@@ -1008,13 +1060,31 @@ def register_standard_tools(
 
     @tool
     async def get_pricing_model() -> dict[str, Any]:
-        """Get the active pricing model for this operator. Free."""
+        """Get the active pricing model for this operator. Free.
+
+        If no model exists but the operator has tool costs defined,
+        auto-seeds a default pricing model from the tool cost map.
+        """
         try:
             vault = await rt.vault()
             from tollbooth.pricing_store import PricingModelStore
             store = PricingModelStore(neon_vault=vault)
             from tollbooth.tools.pricing import get_pricing_model_tool
-            return await get_pricing_model_tool(store, rt.operator_npub())
+            result = await get_pricing_model_tool(store, rt.operator_npub())
+
+            # Auto-seed from TOOL_COSTS if store is empty
+            if result.get("model_id") is None and rt._tool_costs:
+                seed = _build_default_pricing_model(rt, service_name)
+                if seed:
+                    from tollbooth.tools.pricing import set_pricing_model_tool
+                    await set_pricing_model_tool(
+                        store, rt.operator_npub(), seed,
+                    )
+                    result = await get_pricing_model_tool(
+                        store, rt.operator_npub(),
+                    )
+
+            return result
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
