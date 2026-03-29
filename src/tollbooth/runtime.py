@@ -84,6 +84,7 @@ class OperatorRuntime:
         constraint_gate: Any | None = None,
         ots_enabled: bool = False,
         ots_calendars: list[str] | None = None,
+        on_forget: Any | None = None,
     ) -> None:
         self._nsec_env_var = nsec_env_var
         self._tool_costs = tool_costs or {}
@@ -96,6 +97,7 @@ class OperatorRuntime:
         self._constraint_gate = constraint_gate
         self._ots_enabled = ots_enabled
         self._ots_calendars = ots_calendars
+        self._on_forget = on_forget  # callback(service, npub) on credential forget
 
         # Lazy singletons
         self._vault: Any | None = None
@@ -1180,6 +1182,12 @@ def register_standard_tools(
             result = await courier.forget(target_npub, service)
             if service == rt.operator_credential_service:
                 rt._cashier = None
+            # Fire on_forget callback so operators can clear caches
+            if rt._on_forget and result.get("success"):
+                try:
+                    rt._on_forget(service, target_npub)
+                except Exception:
+                    pass
             return result
         except Exception as e:
             return {"success": False, "error": str(e)}
