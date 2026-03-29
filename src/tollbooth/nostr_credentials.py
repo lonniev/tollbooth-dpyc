@@ -888,8 +888,6 @@ class NostrCredentialExchange:
                 len(self._relays), self._freshness_window,
             )
             if total_events > 0:
-                import time as _time
-                now = _time.time()
                 # Count by kind and consumed status
                 kinds: dict[int, int] = {}
                 consumed_count = 0
