@@ -995,13 +995,9 @@ def register_standard_tools(
         # Collect FastMCP / Horizon build info from env
         build_info: dict[str, str] = {}
         for key in (
-            "FASTMCP_DEPLOYMENT_ID",
-            "FASTMCP_SERVER_NAME",
-            "GIT_SHA", "GIT_COMMIT", "SOURCE_COMMIT",
-            "RENDER_GIT_COMMIT",
-            "RAILWAY_GIT_COMMIT_SHA",
-            "VERCEL_GIT_COMMIT_SHA",
-            "FLY_IMAGE_REF",
+            "FASTMCP_CLOUD_URL",
+            "FASTMCP_CLOUD_GIT_COMMIT_SHA",
+            "FASTMCP_CLOUD_GIT_REPO",
         ):
             val = os.environ.get(key)
             if val:
