@@ -1044,19 +1044,37 @@ def register_standard_tools(
         sender_npub: str = "",
         service: str = "",
     ) -> dict[str, Any]:
-        """Open a Secure Courier channel for operator credential delivery.
+        """Open a Secure Courier channel for credential delivery.
 
-        Sends a welcome DM with the operator's credential template.
-        To rotate ANY operator secrets (payment processor, API keys, etc.),
-        call this with no service argument — the operator's full credential
-        template will be sent. All fields must be re-provided; there is no
-        partial update. After the recipient replies, call receive_credentials.
+        Sends a welcome DM with a credential template. All fields must
+        be re-provided; there is no partial update. After the recipient
+        replies, call receive_credentials with the same service.
+
+        Args:
+            sender_npub: Required. The npub to send the template to.
+            service: Required. The credential service name (e.g.,
+                from get_onboarding_status credential_service field).
         Free.
         """
         if not sender_npub:
-            sender_npub = rt.operator_npub()
+            return {
+                "success": False,
+                "error": "sender_npub is required.",
+            }
         if not service:
-            service = rt.operator_credential_service
+            return {
+                "success": False,
+                "error": (
+                    "service is required. Use the credential_service "
+                    "from get_onboarding_status. Available: "
+                    + ", ".join(
+                        s for s in [
+                            rt.operator_credential_service,
+                            rt.patron_credential_service,
+                        ] if s
+                    )
+                ),
+            }
         courier = await rt.courier()
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
@@ -1075,18 +1093,39 @@ def register_standard_tools(
         service: str = "",
         credential_card: str = "",
     ) -> dict[str, Any]:
-        """Pick up operator credentials from the Secure Courier.
+        """Pick up credentials from the Secure Courier.
 
         Checks the vault first (instant), then polls Nostr relays for
         encrypted DMs. If a credential_card (ncred1...) is provided,
         redeems it directly without relay polling. On success, the
         payment processor client is reinitialized from the new
-        credentials — no server restart needed. Free.
+        credentials — no server restart needed.
+
+        Args:
+            sender_npub: Required. The npub that sent the credentials.
+            service: Required. The credential service name (must match
+                the service used in request_credential_channel).
+        Free.
         """
         if not sender_npub:
-            sender_npub = rt.operator_npub()
+            return {
+                "success": False,
+                "error": "sender_npub is required.",
+            }
         if not service:
-            service = rt.operator_credential_service
+            return {
+                "success": False,
+                "error": (
+                    "service is required. Use the same service from "
+                    "request_credential_channel. Available: "
+                    + ", ".join(
+                        s for s in [
+                            rt.operator_credential_service,
+                            rt.patron_credential_service,
+                        ] if s
+                    )
+                ),
+            }
         courier = await rt.courier()
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
@@ -1106,14 +1145,28 @@ def register_standard_tools(
 
     @tool
     async def forget_credentials(service: str = "") -> dict[str, Any]:
-        """Delete vaulted operator credentials for key rotation.
+        """Delete vaulted credentials for key rotation.
 
         Call this before re-delivering credentials. After forgetting,
-        call request_credential_channel to start a fresh delivery of
-        ALL operator credentials. Free.
+        call request_credential_channel to start a fresh delivery.
+
+        Args:
+            service: Required. The credential service to forget.
+        Free.
         """
         if not service:
-            service = rt.operator_credential_service
+            return {
+                "success": False,
+                "error": (
+                    "service is required. Available: "
+                    + ", ".join(
+                        s for s in [
+                            rt.operator_credential_service,
+                            rt.patron_credential_service,
+                        ] if s
+                    )
+                ),
+            }
         npub = rt.operator_npub()
         courier = await rt.courier()
         if courier is None:
