@@ -1144,14 +1144,19 @@ def register_standard_tools(
             return {"success": False, "error": str(e)}
 
     @tool
-    async def forget_credentials(service: str = "") -> dict[str, Any]:
-        """Delete vaulted credentials for key rotation.
+    async def forget_credentials(
+        service: str = "",
+        npub: str = "",
+    ) -> dict[str, Any]:
+        """Delete vaulted credentials for a specific service and npub.
 
-        Call this before re-delivering credentials. After forgetting,
-        call request_credential_channel to start a fresh delivery.
+        For operator credentials, omit npub (defaults to operator).
+        For patron credentials, pass the patron's npub.
 
         Args:
             service: Required. The credential service to forget.
+            npub: The npub whose credentials to forget. Defaults to
+                operator npub for operator services.
         Free.
         """
         if not service:
@@ -1167,12 +1172,12 @@ def register_standard_tools(
                     )
                 ),
             }
-        npub = rt.operator_npub()
+        target_npub = npub if npub else rt.operator_npub()
         courier = await rt.courier()
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
         try:
-            result = await courier.forget(npub, service)
+            result = await courier.forget(target_npub, service)
             if service == rt.operator_credential_service:
                 rt._cashier = None
             return result
