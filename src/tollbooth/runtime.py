@@ -992,6 +992,21 @@ def register_standard_tools(
         except Exception:
             pass
 
+        # Collect FastMCP / Horizon build info from env
+        build_info: dict[str, str] = {}
+        for key in (
+            "FASTMCP_DEPLOYMENT_ID",
+            "FASTMCP_SERVER_NAME",
+            "GIT_SHA", "GIT_COMMIT", "SOURCE_COMMIT",
+            "RENDER_GIT_COMMIT",
+            "RAILWAY_GIT_COMMIT_SHA",
+            "VERCEL_GIT_COMMIT_SHA",
+            "FLY_IMAGE_REF",
+        ):
+            val = os.environ.get(key)
+            if val:
+                build_info[key.lower()] = val
+
         return {
             "success": True,
             "service": service_name or slug,
@@ -1000,6 +1015,7 @@ def register_standard_tools(
             "vault_configured": vault_ok,
             "courier_has_vault": courier_ok,
             "process_id": os.getpid(),
+            "build_info": build_info or None,
         }
 
     # -- Onboarding ----------------------------------------------------
