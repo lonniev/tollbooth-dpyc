@@ -40,9 +40,11 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import logging
 import os
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -333,11 +335,7 @@ class OperatorRuntime:
                 npub=npub,
             )
             if denial:
-                return {
-                    "success": False,
-                    "error": denial.reason,
-                    "constraint": denial.constraint_name,
-                }
+                return denial
 
         ledger = await cache.get(npub)
         if ledger.balance_api_sats < effective_cost:
@@ -737,6 +735,71 @@ class OperatorRuntime:
                 pass
 
         asyncio.create_task(_increment())
+
+    # ------------------------------------------------------------------
+    # Paid tool decorator
+    # ------------------------------------------------------------------
+
+    def paid_tool(
+        self,
+        tool_name: str,
+        *,
+        catch_errors: bool = True,
+    ) -> Callable:
+        """Decorator that wraps a domain function with debit/rollback/warning.
+
+        Eliminates the per-tool boilerplate that every operator repeats:
+        debit → try body → demand increment → low-balance warning → rollback.
+
+        The decorated function **must** accept ``npub`` as a keyword argument.
+        Any other parameters are passed through unchanged.
+
+        Args:
+            tool_name: The tool cost key (must be in ``tool_costs``).
+            catch_errors: If True (default), catch exceptions from the body
+                and return ``{"success": False, "error": ...}`` after rollback.
+                If False, re-raise after rollback (caller handles the error).
+
+        Example::
+
+            @tool
+            @runtime.paid_tool("get_weather")
+            async def get_weather(lat: float, lon: float, npub: str = ""):
+                return await weather.get(lat, lon)
+        """
+        rt = self
+
+        def decorator(fn: Callable) -> Callable:
+            @functools.wraps(fn)
+            async def wrapper(*args: Any, **kwargs: Any) -> Any:
+                # Extract npub from kwargs (or positional via signature)
+                sig = inspect.signature(fn)
+                bound = sig.bind(*args, **kwargs)
+                bound.apply_defaults()
+                npub = bound.arguments.get("npub", "")
+
+                # Debit
+                err = await rt.debit_or_error(tool_name, npub)
+                if err is not None:
+                    return err
+
+                # Execute domain logic
+                try:
+                    result = await fn(*args, **kwargs)
+                except Exception as exc:
+                    await rt.rollback_debit(tool_name, npub)
+                    if catch_errors:
+                        return {"success": False, "error": str(exc)}
+                    raise
+
+                # Demand tracking + low-balance warning
+                rt.fire_and_forget_demand_increment(tool_name)
+                if isinstance(result, dict):
+                    result = await rt.inject_low_balance_warning(result, npub)
+                return result
+
+            return wrapper
+        return decorator
 
 
 def _build_default_pricing_model(
@@ -1407,6 +1470,57 @@ def register_standard_tools(
             list_constraint_types as _list,
         )
         return {"status": "ok", "constraint_types": _list()}
+
+    # -- OTS notarization tools (opt-in) --------------------------------
+
+    if rt._ots_enabled:
+        from tollbooth.tools.notarization import (
+            notarize_ledger_tool,
+            get_notarization_proof_tool,
+            list_notarizations_tool,
+        )
+
+        @tool
+        async def notarize_ledger() -> dict[str, Any]:
+            """Build a Merkle tree of all patron balances and submit the root
+            to Bitcoin via OpenTimestamps.
+
+            Operator-only background task. Bitcoin confirmation takes 1-6 hours.
+            Free — no credits required.
+            """
+            vault = await rt.vault()
+            return await notarize_ledger_tool(vault, ots_calendars=rt._ots_calendars)
+
+        @tool
+        async def get_notarization_proof(
+            notarization_id: str,
+            npub: str,
+        ) -> dict[str, Any]:
+            """Generate a Merkle inclusion proof that a patron's balance was
+            included in a Bitcoin-notarized snapshot.
+
+            Args:
+                notarization_id: The notarization record ID.
+                npub: The patron's Nostr public key (npub1...).
+            """
+            vault = await rt.vault()
+            return await get_notarization_proof_tool(vault, notarization_id, npub)
+
+        @tool
+        async def list_notarizations(
+            limit: int = 20,
+            status: str = "",
+        ) -> dict[str, Any]:
+            """List recent Bitcoin notarization records.
+
+            Args:
+                limit: Maximum records to return (default 20).
+                status: Optional filter (e.g., 'submitted', 'confirmed').
+            """
+            vault = await rt.vault()
+            return await list_notarizations_tool(
+                vault, limit=limit, status=status or None,
+            )
 
 
 # ======================================================================
