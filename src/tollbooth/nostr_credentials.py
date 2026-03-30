@@ -865,6 +865,35 @@ class NostrCredentialExchange:
                     len(vaulted), required_fields - vaulted.keys(),
                 )
 
+        # ── Cold-start recovery: restore ephemeral agent before relay poll ──
+        #
+        # On cold start, the in-memory ephemeral agent keys are gone.
+        # Restore them from the vault BEFORE subscribing to relays, so
+        # the relay subscription filter includes the ephemeral pubkey
+        # and can find NIP-17 gift wraps addressed to it.
+        resolved_service_early = self._resolve_service(service)
+        poison_key_early = (sender_npub, resolved_service_early) if resolved_service_early else None
+        if (poison_key_early
+                and poison_key_early not in self._ephemeral_agents
+                and self._credential_vault is not None):
+            pending = await self._vault_fetch(
+                f"__pending__{resolved_service_early}", sender_npub,
+            )
+            if pending and "poison" in pending:
+                p_expiry = pending.get("expiry", 0)
+                if time.time() <= p_expiry:
+                    agent_nsec_hex = pending.get("agent_nsec_hex")
+                    if agent_nsec_hex:
+                        from pynostr.key import PrivateKey as _PK
+                        restored_key = _PK(bytes.fromhex(agent_nsec_hex))
+                        self._ephemeral_agents[poison_key_early] = restored_key
+                        # Re-subscribe with the restored agent key
+                        self._subscribe_to_relays()
+                        logger.info(
+                            "Cold-start: restored ephemeral agent %s, re-subscribed relays",
+                            restored_key.public_key.bech32()[:20],
+                        )
+
         # ── Relay DM flow (pop-and-acknowledge) ────────────────────
         #
         # Treat the relay like a message queue: pop every DM from the
