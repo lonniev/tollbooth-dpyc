@@ -44,6 +44,7 @@ import functools
 import inspect
 import logging
 import os
+import signal
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,11 @@ class OperatorRuntime:
         self._operator_npub: str | None = None
         self._nsec: str | None = None
 
+        # Shutdown state
+        self._shutdown_triggered: bool = False
+        self._shutdown_handlers_registered: bool = False
+        self._cleanup_callbacks: list[Callable[[], Any]] = []
+
     @property
     def operator_credential_service(self) -> str:
         """Return the operator credential service name."""
@@ -171,6 +177,86 @@ class OperatorRuntime:
             pk = PrivateKey.from_nsec(nsec)
             return pk.hex()
         return nsec
+
+    # ------------------------------------------------------------------
+    # Shutdown
+    # ------------------------------------------------------------------
+
+    def add_cleanup_callback(self, callback: Callable[[], Any]) -> None:
+        """Register an async or sync cleanup callback for graceful shutdown.
+
+        Callbacks run in order during ``graceful_shutdown()`` after the
+        ledger cache is flushed and the vault is closed.  Each callback
+        is called at most once per shutdown.
+        """
+        self._cleanup_callbacks.append(callback)
+
+    def register_shutdown_handlers(self) -> None:
+        """Register SIGINT/SIGTERM handlers that trigger graceful shutdown.
+
+        Idempotent — safe to call multiple times; only the first call
+        installs signal handlers.
+        """
+        if self._shutdown_handlers_registered:
+            return
+        self._shutdown_handlers_registered = True
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(
+                    sig,
+                    lambda: asyncio.ensure_future(self.graceful_shutdown()),
+                )
+        except (RuntimeError, NotImplementedError):
+            pass
+
+    async def graceful_shutdown(self) -> None:
+        """Flush ledger cache, close vault, run cleanup callbacks.
+
+        Idempotent — only the first invocation performs work.
+        """
+        if self._shutdown_triggered:
+            return
+        self._shutdown_triggered = True
+
+        # 1. Flush and stop ledger cache
+        if self._ledger_cache is not None:
+            dirty = self._ledger_cache.dirty_count
+            logger.info("Graceful shutdown: flushing %d dirty entries...", dirty)
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_flush_ledger(), timeout=8.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Graceful shutdown timed out after 8s — "
+                    "some entries may be lost."
+                )
+            self._ledger_cache = None
+
+        # 2. Close vault
+        if self._vault is not None:
+            closer = getattr(self._vault, "close", None)
+            if closer is not None:
+                await closer()
+            self._vault = None
+
+        # 3. Run operator-registered cleanup callbacks
+        for cb in self._cleanup_callbacks:
+            try:
+                result = cb()
+                if asyncio.iscoroutine(result) or asyncio.isfuture(result):
+                    await result
+            except Exception as exc:
+                logger.warning("Shutdown cleanup callback failed: %s", exc)
+        self._cleanup_callbacks.clear()
+
+    async def _shutdown_flush_ledger(self) -> None:
+        """Flush and stop the ledger cache (extracted for wait_for wrapping)."""
+        assert self._ledger_cache is not None
+        flushed = await self._ledger_cache.flush_all()
+        await self._ledger_cache.stop()
+        logger.info("Shutdown: flushed %d entries.", flushed)
 
     # ------------------------------------------------------------------
     # Bootstrap & Vault

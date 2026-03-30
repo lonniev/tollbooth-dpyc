@@ -35,6 +35,7 @@ from tollbooth.bootstrap import BootstrapClient, BootstrapResult, ensure_bootstr
 from tollbooth.runtime import OperatorRuntime, resolve_npub
 from tollbooth.session_cache import SessionCache
 from tollbooth.patron_session import PatronSessionCache
+from tollbooth.shortlinks import create_shortlink
 from tollbooth.vault_encryption import VaultCipher
 from tollbooth.ots import MerkleTree, InclusionProof, OTSCalendarClient
 from tollbooth.nostr_certificate import verify_nostr_certificate, NOSTR_CERT_KIND
@@ -351,4 +352,6 @@ __all__ = [
     "OperatorRuntime",
     "resolve_npub",
     "VaultCipher",
+    # Shortlinks
+    "create_shortlink",
 ]
