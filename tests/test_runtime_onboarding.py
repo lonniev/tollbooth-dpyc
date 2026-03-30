@@ -395,7 +395,7 @@ class TestPatronToolRegistration:
 class TestOTSConfig:
     def test_ots_defaults(self) -> None:
         rt = _make_runtime()
-        assert rt._ots_enabled is False
+        assert rt._ots_enabled is True
         assert rt._ots_calendars is None
 
     def test_ots_enabled(self) -> None:

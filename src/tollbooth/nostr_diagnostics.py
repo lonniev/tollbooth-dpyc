@@ -207,6 +207,79 @@ def probe_relay_liveness(
     return results
 
 
+# ── Relay resolution ──────────────────────────────────────────────────
+
+DEFAULT_RELAY = "wss://nostr.wine"
+FALLBACK_RELAY_POOL = [
+    "wss://relay.primal.net",
+    "wss://relay.damus.io",
+    "wss://nos.lol",
+    "wss://relay.nostr.band",
+]
+
+
+def resolve_relays(
+    configured: str | list[str] | None = None,
+    *,
+    timeout: int = 5,
+) -> list[str]:
+    """Resolve a working set of Nostr relay URLs.
+
+    Accepts an optional *configured* value — either a comma-separated
+    string (as typically read from an environment variable) or an
+    explicit list of URLs.  The function:
+
+    1. Parses and probes the configured relays for liveness.
+    2. If any are live, returns them (sorted fastest-first).
+    3. If all configured relays are dead, probes ``FALLBACK_RELAY_POOL``.
+    4. If fallback relays are live, returns those.
+    5. As a last resort, returns the configured list plus the fallback
+       pool unprobed, hoping for eventual recovery.
+
+    Args:
+        configured: Relay URL(s) — a comma-separated string, a list
+            of URLs, or ``None`` (defaults to ``DEFAULT_RELAY``).
+        timeout: Per-relay probe timeout in seconds (default 5).
+
+    Returns:
+        A non-empty list of relay WebSocket URLs.
+    """
+    # Normalise input to a list
+    if configured is None:
+        relays = [DEFAULT_RELAY]
+    elif isinstance(configured, str):
+        relays = [r.strip() for r in configured.split(",") if r.strip()]
+        if not relays:
+            relays = [DEFAULT_RELAY]
+    else:
+        relays = [r.strip() for r in configured if r.strip()]
+        if not relays:
+            relays = [DEFAULT_RELAY]
+
+    results = probe_relay_liveness(relays, timeout=timeout)
+    live = [r["relay"] for r in results if r["connected"]]
+
+    if live:
+        logger.info("Relay probe: %d/%d configured relays live", len(live), len(relays))
+        return live
+
+    # All configured relays down — probe fallback pool
+    logger.warning(
+        "All configured relays down (%s), probing fallback pool...",
+        ", ".join(relays),
+    )
+    fallback_results = probe_relay_liveness(FALLBACK_RELAY_POOL, timeout=timeout)
+    fallback_live = [r["relay"] for r in fallback_results if r["connected"]]
+
+    if fallback_live:
+        logger.info("Fallback relays live: %s", ", ".join(fallback_live))
+        return fallback_live
+
+    # Nothing alive — return configured + fallback and hope for recovery
+    logger.warning("No relays responded — using full list, hoping for recovery")
+    return relays + FALLBACK_RELAY_POOL
+
+
 def _test_subscription_filter(
     relay_url: str,
     pubkey_hex: str,

@@ -84,9 +84,10 @@ class OperatorRuntime:
         service_name: str = "",
         relays: list[str] | None = None,
         constraint_gate: Any | None = None,
-        ots_enabled: bool = False,
+        ots_enabled: bool = True,
         ots_calendars: list[str] | None = None,
         on_forget: Any | None = None,
+        operator_settings: dict[str, Any] | None = None,
     ) -> None:
         self._nsec_env_var = nsec_env_var
         self._tool_costs = tool_costs or {}
@@ -100,6 +101,7 @@ class OperatorRuntime:
         self._ots_enabled = ots_enabled
         self._ots_calendars = ots_calendars
         self._on_forget = on_forget  # callback(service, npub) on credential forget
+        self._operator_settings: dict[str, Any] = operator_settings or {}
 
         # Lazy singletons
         self._vault: Any | None = None
@@ -122,6 +124,15 @@ class OperatorRuntime:
         if self._patron_credential_template:
             return self._patron_credential_template.service
         return ""
+
+    @property
+    def operator_settings(self) -> dict[str, Any]:
+        """Operator-supplied settings dict.
+
+        Operators pass whatever config they need at OperatorRuntime init
+        time and access it here — no global singleton required.
+        """
+        return self._operator_settings
 
     # ------------------------------------------------------------------
     # Identity
@@ -237,26 +248,12 @@ class OperatorRuntime:
             return None
 
         try:
-            from tollbooth.nostr_diagnostics import probe_relay_liveness
+            from tollbooth.nostr_diagnostics import resolve_relays
             from tollbooth.secure_courier import SecureCourierService
         except ImportError:
             return None
 
-        relays = self._relays or ["wss://nostr.wine"]
-        if not self._relays:
-            from tollbooth.nostr_diagnostics import probe_relay_liveness
-            results = probe_relay_liveness(relays, timeout=5)
-            live = [r["relay"] for r in results if r["connected"]]
-            if not live:
-                fallback = [
-                    "wss://relay.primal.net", "wss://relay.damus.io",
-                    "wss://nos.lol", "wss://relay.nostr.band",
-                ]
-                fallback_results = probe_relay_liveness(fallback, timeout=5)
-                live = [r["relay"] for r in fallback_results if r["connected"]]
-            if not live:
-                live = relays + ["wss://relay.primal.net", "wss://nos.lol"]
-            relays = live
+        relays = resolve_relays(self._relays)
 
         # Build credential vault from bootstrapped Neon
         credential_vault = None

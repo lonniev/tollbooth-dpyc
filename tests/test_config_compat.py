@@ -37,7 +37,7 @@ class TestConfigBackwardsCompatibility:
         assert config.credit_ttl_seconds == 604800
         assert config.flush_batch_size == 10
         assert config.flush_staleness_secs == 120.0
-        assert config.ots_enabled is False
+        assert config.ots_enabled is True
         assert config.ots_calendars is None
 
     def test_all_existing_fields_settable(self):

@@ -18,7 +18,7 @@ class TollboothConfig:
     flush_batch_size: int = 10
     flush_staleness_secs: float = 120.0
     # OpenTimestamps Bitcoin anchoring
-    ots_enabled: bool = False
+    ots_enabled: bool = True
     ots_calendars: str | None = None  # Comma-separated URLs; None = defaults
     # Constraint Engine (opt-in)
     constraints_enabled: bool = False
