@@ -743,9 +743,9 @@ class OperatorRuntime:
         return self._cashier
 
     async def resolve_credit_ttl(self) -> int | None:
-        """Return the effective credit TTL in seconds from the tranche_expiration constraint.
+        """Return the effective credit TTL in seconds from the demurrage constraint.
 
-        Scans the active pricing model's pipeline for a tranche_expiration
+        Scans the active pricing model's pipeline for a demurrage
         step and returns ttl_days * 86400. Returns None if no such constraint
         exists (credits never expire).
         """
@@ -756,7 +756,7 @@ class OperatorRuntime:
             if result.get("status") == "ok":
                 for step in result.get("pipeline", []):
                     step_data = step if isinstance(step, dict) else step.to_dict()
-                    if step_data.get("type") == "tranche_expiration":
+                    if step_data.get("type") == "demurrage":
                         params = step_data.get("params", step_data)
                         days = int(params.get("ttl_days", step_data.get("ttl_days", 15)))
                         return days * 86400

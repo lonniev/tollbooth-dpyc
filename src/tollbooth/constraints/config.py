@@ -11,7 +11,7 @@ from typing import Any
 
 from tollbooth.constraints.base import ConstraintSchema, ToolConstraint
 from tollbooth.constraints.engine import ConstraintEngine
-from tollbooth.constraints.expiration import TrancheExpirationConstraint
+from tollbooth.constraints.demurrage import DemurrageConstraint
 from tollbooth.constraints.expression import JsonExpressionConstraint
 from tollbooth.constraints.periodic import PeriodicRefreshConstraint
 from tollbooth.constraints.pricing import (
@@ -41,7 +41,7 @@ CONSTRAINT_REGISTRY: dict[str, type[ToolConstraint]] = {
     "happy_hour": HappyHourConstraint,
     "json_expression": JsonExpressionConstraint,
     "surge_pricing": SurgePricingConstraint,
-    "tranche_expiration": TrancheExpirationConstraint,
+    "demurrage": DemurrageConstraint,
 }
 
 

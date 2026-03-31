@@ -1,4 +1,4 @@
-"""Tranche expiration constraint — set credit demurrage as a pipeline step."""
+"""Demurrage constraint — credit decay encourages velocity of circulation."""
 
 from __future__ import annotations
 
@@ -13,15 +13,18 @@ from tollbooth.constraints.base import (
 )
 
 
-class TrancheExpirationConstraint(ToolConstraint):
-    """Set per-tranche credit expiration (demurrage).
+class DemurrageConstraint(ToolConstraint):
+    """Apply demurrage to credit tranches — unused credits expire.
 
-    Credits not used within the TTL are forfeited. The TTL is computed
-    once at credit-deposit time and stamped on each tranche.
+    In the Austrian economic tradition, demurrage encourages the velocity
+    of circulation by giving credits a finite shelf life. This is not a
+    penalty — it is a natural property of the credit that aligns patron
+    incentives with operator sustainability.
 
-    This constraint always allows tool calls — it is informational,
-    not a gate. The runtime reads ``ttl_seconds`` from the evaluation
-    metadata when depositing credits.
+    The TTL is computed once at credit-deposit time and stamped on each
+    tranche. This constraint always allows tool calls — it is
+    informational, not a gate. The runtime reads ``ttl_seconds`` from
+    the evaluation metadata when depositing credits.
 
     Parameters
     ----------
@@ -53,7 +56,7 @@ class TrancheExpirationConstraint(ToolConstraint):
     def evaluate(self, context: ConstraintContext) -> ConstraintResult:
         return ConstraintResult(
             allowed=True,
-            reason="tranche_expiration",
+            reason="demurrage",
             message=f"Credits expire after {self.ttl_days} days.",
             metadata={
                 "ttl_seconds": self.ttl_days * 86400,
@@ -62,11 +65,11 @@ class TrancheExpirationConstraint(ToolConstraint):
         )
 
     def describe(self) -> str:
-        return f"Credit tranches expire after {self.ttl_days} days"
+        return f"Demurrage: credit tranches expire after {self.ttl_days} days"
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "type": "tranche_expiration",
+            "type": "demurrage",
             "ttl_days": self.ttl_days,
             "target_usage_pct": self.target_usage_pct,
             "min_days": self.min_days,
@@ -74,7 +77,7 @@ class TrancheExpirationConstraint(ToolConstraint):
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TrancheExpirationConstraint:
+    def from_dict(cls, data: dict[str, Any]) -> DemurrageConstraint:
         return cls(
             ttl_days=int(data.get("ttl_days", 15)),
             target_usage_pct=float(data.get("target_usage_pct", 0.75)),
@@ -85,13 +88,15 @@ class TrancheExpirationConstraint(ToolConstraint):
     @classmethod
     def schema(cls) -> ConstraintSchema:
         return ConstraintSchema(
-            type="tranche_expiration",
+            type="demurrage",
             category="Credit Terms",
             description=(
-                "Set credit tranche expiration (demurrage). Credits not used "
-                "within the TTL are forfeited. The pricing interview recommends "
-                "a TTL based on expected daily usage so patrons use ~75% of "
-                "each tranche before expiration."
+                "Demurrage: credit tranches expire after a configurable number "
+                "of days. This encourages healthy velocity of circulation — "
+                "patrons are motivated to use their credits rather than hoard "
+                "them, and operators maintain predictable revenue flow. The "
+                "pricing interview recommends a TTL based on expected daily "
+                "usage so patrons use ~75% of each tranche before expiration."
             ),
             params=[
                 ParamSchema(
