@@ -688,9 +688,6 @@ async def btcpay_status_tool(
             versions[pkg.replace("-", "_")] = "unknown"
     result["versions"] = versions
 
-    # Credit TTL
-    result["credit_ttl_seconds"] = config.credit_ttl_seconds
-
     # Authority trust chain config
     authority_config: dict[str, Any] = {
         "npub_configured": bool(config.authority_npub),

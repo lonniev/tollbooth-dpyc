@@ -14,7 +14,6 @@ class TollboothConfig:
     btcpay_api_key: str | None = None
     seed_balance_sats: int = 0
     authority_npub: str | None = None  # Nostr npub (Schnorr verification)
-    credit_ttl_seconds: int | None = 604800  # 7 days default, None = never
     flush_batch_size: int = 10
     flush_staleness_secs: float = 120.0
     # OpenTimestamps Bitcoin anchoring

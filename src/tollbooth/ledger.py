@@ -307,15 +307,12 @@ class UserLedger:
 
         return True
 
-    _DEFAULT_TTL_SECONDS = 604800  # 7 days
-
     def credit_deposit(
         self, api_sats: int, invoice_id: str, ttl_seconds: int | None = None,
     ) -> None:
-        """Add credits as a new tranche. Defaults to 7-day TTL if none specified."""
+        """Add credits as a new tranche. ttl_seconds=None means no expiration."""
         now = datetime.now(timezone.utc)
-        effective_ttl = ttl_seconds if ttl_seconds is not None else self._DEFAULT_TTL_SECONDS
-        expires_at = (now + timedelta(seconds=effective_ttl)).isoformat()
+        expires_at = (now + timedelta(seconds=ttl_seconds)).isoformat() if ttl_seconds else None
         self.tranches.append(Tranche(
             granted_at=now.isoformat(),
             original_sats=api_sats,
