@@ -17,6 +17,7 @@ class FieldSpec:
     required: bool = True
     sensitive: bool = True
     description: str = ""
+    lifecycle: str = "set_once"  # "set_once" | "dynamic"
 
 
 @dataclass(frozen=True)

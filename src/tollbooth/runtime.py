@@ -516,12 +516,14 @@ class OperatorRuntime:
                 if name in vault_creds:
                     configured.append({
                         "field": name, "category": "secret", "status": "configured",
+                        "lifecycle": spec.lifecycle,
                     })
                 else:
                     entry = {
                         "field": name,
                         "category": "secret",
                         "status": "missing",
+                        "lifecycle": spec.lifecycle,
                         "how": spec.description if spec.description else "Deliver via Secure Courier.",
                     }
                     if spec.required:
@@ -564,7 +566,14 @@ class OperatorRuntime:
         Only relevant for API-key-based patrons. OAuth2 patrons don't use this.
         """
         if not self._patron_credential_template:
-            return {"ready": True, "summary": "No patron credentials required."}
+            return {
+                "ready": True,
+                "configured": [],
+                "missing": [],
+                "summary": "No patron credentials required — this service uses automatic authentication.",
+                "credential_type": "none_or_dynamic",
+                "credential_service": "",
+            }
 
         vault_creds = await self._load_vault_creds(
             self._patron_credential_template.service,
@@ -577,12 +586,14 @@ class OperatorRuntime:
             if name in vault_creds:
                 configured.append({
                     "field": name, "category": "patron_secret", "status": "configured",
+                    "lifecycle": spec.lifecycle,
                 })
             else:
                 entry = {
                     "field": name,
                     "category": "patron_secret",
                     "status": "missing",
+                    "lifecycle": spec.lifecycle,
                     "how": spec.description if spec.description else "Deliver via Secure Courier.",
                 }
                 if spec.required:
@@ -594,6 +605,7 @@ class OperatorRuntime:
             "configured": configured,
             "missing": missing,
             "summary": "Patron credentials configured." if ready else f"Missing: {', '.join(m['field'] for m in missing)}",
+            "credential_type": "set_once",
             "credential_greeting": self._patron_credential_greeting,
             "credential_service": self.patron_credential_service,
         }
@@ -1165,13 +1177,30 @@ def register_standard_tools(
     # -- Onboarding ----------------------------------------------------
 
     @tool
-    async def get_onboarding_status() -> dict[str, Any]:
+    async def get_operator_onboarding_status() -> dict[str, Any]:
         """Report this operator's configuration readiness.
 
-        Shows which settings are configured, which are missing, and how
-        to deliver each missing value. Free.
+        Shows which operator settings are configured, which are missing,
+        and how to deliver each missing value. For patron-level credential
+        status, use get_patron_onboarding_status instead. Free.
         """
         return await rt.onboarding_status()
+
+    @tool
+    async def get_patron_onboarding_status(patron_npub: str = "") -> dict[str, Any]:
+        """Report a patron's credential readiness for this operator.
+
+        For set-once services (eXcalibur, TheBrain), shows which patron
+        secrets are configured and which are missing. For dynamic/OAuth2
+        services (Schwab), reports that no patron credentials are needed.
+        Free.
+
+        Args:
+            patron_npub: Required. The patron's Nostr public key.
+        """
+        if not patron_npub or not patron_npub.startswith("npub1"):
+            return {"success": False, "error": "patron_npub is required."}
+        return await rt.patron_onboarding_status(patron_npub)
 
     # -- Secure Courier ------------------------------------------------
 
@@ -1201,7 +1230,7 @@ def register_standard_tools(
         Args:
             sender_npub: Required. The npub to send the template to.
             service: Required. The credential service name (e.g.,
-                from get_onboarding_status credential_service field).
+                from get_operator_onboarding_status or get_patron_onboarding_status).
         Free.
         """
         if not sender_npub:
@@ -1214,7 +1243,7 @@ def register_standard_tools(
                 "success": False,
                 "error": (
                     "service is required. Use the credential_service "
-                    "from get_onboarding_status. Available: "
+                    "from get_operator_onboarding_status or get_patron_onboarding_status. Available: "
                     + ", ".join(
                         s for s in [
                             rt.operator_credential_service,

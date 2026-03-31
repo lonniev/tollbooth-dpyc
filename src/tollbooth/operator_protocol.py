@@ -132,18 +132,29 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
         ),
     ),
     ToolPathInfo(
-        tool_name="get_onboarding_status",
+        tool_name="get_operator_onboarding_status",
         path=ToolPath.HOT,
         requires_auth=False,
         cost_tier="FREE",
         agent_hint=(
             "Report the operator's configuration readiness. Returns which "
-            "settings are configured, which are missing, and how to deliver "
-            "each missing value. Authority-provisioned values (like the Neon "
-            "database URL) are fetched automatically on registration. "
-            "Operator secrets (like BTCPay credentials) must be delivered "
-            "via Secure Courier encrypted DM. Call this first when helping "
-            "an operator complete its setup."
+            "operator settings are configured, which are missing, and how "
+            "to deliver each. For patron-level credential status, use "
+            "get_patron_onboarding_status instead."
+        ),
+    ),
+    ToolPathInfo(
+        tool_name="get_patron_onboarding_status",
+        path=ToolPath.HOT,
+        requires_auth=True,
+        cost_tier="FREE",
+        agent_hint=(
+            "Report a specific patron's credential readiness. Returns "
+            "which patron secrets (API keys, tokens) are configured and "
+            "which are missing. For services using OAuth2, reports that "
+            "no patron credentials are needed. Call this to determine "
+            "whether a patron needs to deliver credentials via Secure "
+            "Courier before they can use the service."
         ),
     ),
     ToolPathInfo(
@@ -393,6 +404,14 @@ class OperatorProtocol(Protocol):
 
     async def service_status(self) -> dict[str, Any]:
         """(hot) Return the Operator's health and version info."""
+        ...
+
+    async def get_operator_onboarding_status(self) -> dict[str, Any]:
+        """(hot) Report the operator's configuration readiness."""
+        ...
+
+    async def get_patron_onboarding_status(self, patron_npub: str) -> dict[str, Any]:
+        """(hot) Report a patron's credential readiness."""
         ...
 
     # ── Hot-path (Secure Courier) ────────────────────────────────
