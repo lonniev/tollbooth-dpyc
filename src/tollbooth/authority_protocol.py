@@ -136,7 +136,7 @@ class AuthorityProtocol(Protocol):
     # ── Hot-path (local ledger) ──────────────────────────────────
 
     async def certify_credits(
-        self, operator_id: str, amount_sats: int
+        self, npub: str, amount_sats: int
     ) -> dict[str, Any]:
         """(hot) Core product — certify a credit purchase for an operator."""
         ...

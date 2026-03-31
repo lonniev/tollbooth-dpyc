@@ -58,7 +58,7 @@ class AuthorityCertifier:
                 result = await client.call_tool(
                     self._certify_tool_name,
                     {
-                        "operator_id": self._operator_npub,
+                        "npub": self._operator_npub,
                         "amount_sats": amount_sats,
                     },
                 )
