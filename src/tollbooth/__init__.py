@@ -352,6 +352,9 @@ __all__ = [
     "OperatorRuntime",
     "resolve_npub",
     "VaultCipher",
+    # Session Caches
+    "SessionCache",
+    "PatronSessionCache",
     # Shortlinks
     "create_shortlink",
 ]
