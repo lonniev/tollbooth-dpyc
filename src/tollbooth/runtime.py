@@ -1104,7 +1104,11 @@ def register_standard_tools(
         except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        return await credits.restore_credits_tool(cashier, cache, npub, invoice_id)
+        ttl = await rt.resolve_credit_ttl()
+        return await credits.restore_credits_tool(
+            cashier, cache, npub, invoice_id,
+            default_credit_ttl_seconds=ttl,
+        )
 
     @tool
     async def account_statement(npub: str = "", days: int = 30) -> dict[str, Any]:

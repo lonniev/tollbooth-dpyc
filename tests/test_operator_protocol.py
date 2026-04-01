@@ -38,6 +38,12 @@ class StubOperator:
     async def service_status(self) -> dict[str, Any]:
         return {"status": "ok"}
 
+    async def get_operator_onboarding_status(self) -> dict[str, Any]:
+        return {"ready": True}
+
+    async def get_patron_onboarding_status(self, patron_npub: str) -> dict[str, Any]:
+        return {"ready": True}
+
     async def purchase_credits(
         self, npub: str, amount_sats: int, certificate: str
     ) -> dict[str, Any]:

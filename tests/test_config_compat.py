@@ -34,7 +34,6 @@ class TestConfigBackwardsCompatibility:
         assert config.btcpay_api_key is None
         assert config.seed_balance_sats == 0
         assert config.authority_npub is None
-        assert config.credit_ttl_seconds == 604800
         assert config.flush_batch_size == 10
         assert config.flush_staleness_secs == 120.0
         assert config.ots_enabled is True
@@ -48,7 +47,6 @@ class TestConfigBackwardsCompatibility:
             btcpay_api_key="key456",
             seed_balance_sats=500,
             authority_npub="npub1xxx",
-            credit_ttl_seconds=3600,
             flush_batch_size=5,
             flush_staleness_secs=60.0,
             ots_enabled=True,
@@ -59,7 +57,6 @@ class TestConfigBackwardsCompatibility:
         assert config.btcpay_api_key == "key456"
         assert config.seed_balance_sats == 500
         assert config.authority_npub == "npub1xxx"
-        assert config.credit_ttl_seconds == 3600
         assert config.flush_batch_size == 5
         assert config.flush_staleness_secs == 60.0
         assert config.ots_enabled is True

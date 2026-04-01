@@ -237,10 +237,10 @@ class TestUserLedger:
         assert t.expires_at is not None
 
     def test_credit_deposit_without_ttl(self) -> None:
-        """credit_deposit without ttl_seconds defaults to 7-day expiry."""
+        """credit_deposit without ttl_seconds creates perpetual tranche."""
         ledger = UserLedger()
         ledger.credit_deposit(500, "inv-1")
-        assert ledger.tranches[0].expires_at is not None
+        assert ledger.tranches[0].expires_at is None
 
     def test_credit_deposit_unknown_invoice(self) -> None:
         ledger = UserLedger(pending_invoices=["inv-1"])
