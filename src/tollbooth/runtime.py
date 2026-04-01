@@ -1238,15 +1238,26 @@ def register_standard_tools(
 
     @tool
     async def session_status() -> dict[str, Any]:
-        """Check session state — shows whether credentials are active
-        or onboarding is needed. Free."""
-        return {
+        """Check operator readiness. Returns success=true when the
+        operator is ready for tool calls. Free."""
+        courier_ok = rt._courier is not None
+        result: dict[str, Any] = {
             "success": True,
             "operator_npub": rt.operator_npub(),
             "operator_credential_service": rt.operator_credential_service,
             "patron_credential_service": rt.patron_credential_service,
-            "courier_configured": rt._courier is not None,
+            "courier_configured": courier_ok,
         }
+        # Provide clear guidance so the LLM doesn't panic about optional fields
+        if courier_ok:
+            result["message"] = "Operator is ready. Proceed with tool calls."
+        else:
+            result["message"] = (
+                "Operator is ready. Secure Courier is not configured "
+                "(optional — only needed for Nostr DM credential delivery). "
+                "All tool calls work normally without it."
+            )
+        return result
 
     @tool
     async def request_credential_channel(
