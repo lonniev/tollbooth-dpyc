@@ -1,33 +1,144 @@
 """SVG infographic generator for account statements.
 
-Produces a dark-themed, Bitcoin-orange-accented SVG infographic from
-the structured data returned by ``account_statement_tool``.  Pure Python
-— no external dependencies (matplotlib, Pillow, etc.).
+Produces a dark-themed SVG infographic from the structured data returned
+by ``account_statement_tool`` (patron) or ``account_statement`` (authority).
+Pure Python — no external dependencies.
+
+Operators and the Authority customise appearance via ``InfographicTheme``
+and ``InfographicSections`` dataclasses.  Three preset themes are provided:
+
+- ``THEME_BITCOIN_ORANGE`` — default for patron MCPs
+- ``THEME_GOLD_STEEL`` — eXcalibur MCP
+- ``THEME_FINANCE_TEAL`` — Schwab MCP
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 from xml.sax.saxutils import escape
 
 
 # ---------------------------------------------------------------------------
-# Colour palette
+# Theme & section configuration
 # ---------------------------------------------------------------------------
 
-BG_DARK = "#0f1419"
-BG_CARD = "#1a2332"
-BG_CARD_ALT = "#1e2a3a"
-ACCENT_ORANGE = "#f7931a"
-ACCENT_BLUE = "#4ecdc4"
-ACCENT_GREEN = "#2ecc71"
-ACCENT_RED = "#e74c3c"
-ACCENT_GOLD = "#d4a017"
-TEXT_WHITE = "#ecf0f1"
-TEXT_GRAY = "#8899aa"
-TEXT_DIM = "#556677"
-BORDER = "#2a3a4a"
+
+@dataclass(frozen=True)
+class InfographicTheme:
+    """Colour palette and branding for SVG infographics."""
+
+    # Background tones
+    bg_dark: str = "#0f1419"
+    bg_card: str = "#1a2332"
+    bg_card_alt: str = "#1e2a3a"
+    # Semantic accent colours
+    accent_primary: str = "#f7931a"  # header subtitle, consumed metric
+    accent_secondary: str = "#4ecdc4"  # links, sources
+    accent_positive: str = "#2ecc71"  # balance, remaining
+    accent_negative: str = "#e74c3c"  # warnings, expired
+    accent_highlight: str = "#d4a017"  # expiry dates
+    # Text tones
+    text_white: str = "#ecf0f1"
+    text_gray: str = "#8899aa"
+    text_dim: str = "#556677"
+    border: str = "#2a3a4a"
+    # Branding
+    service_name: str = "Account"
+    header_subtitle: str = "Account Statement"
+    header_icon: str = "\u26A1"
+    footer_brand: str = "Tollbooth Protocol"
+    # Data keys
+    balance_key: str = "balance_api_sats"
+    deposited_key: str = "total_deposited_api_sats"
+    unit_label: str = "api_sats"
+    hero_label: str = "A V A I L A B L E   B A L A N C E"
+
+    def with_name(self, name: str) -> InfographicTheme:
+        """Return a copy with a different service_name."""
+        return replace(self, service_name=name)
+
+
+@dataclass(frozen=True)
+class MetricDef:
+    """One metric box in the three-column metrics row."""
+
+    icon: str
+    label: str
+    data_key: str
+    color: str  # "primary", "secondary", "positive", "negative", or hex
+    dim_when_zero: bool = False
+
+
+@dataclass(frozen=True)
+class InfographicSections:
+    """Toggle which sections appear in the infographic."""
+
+    metrics_row: bool = True
+    balance_health_gauge: bool = True
+    credit_tranches: bool = True
+    tranche_expires_column: bool = True
+    tool_usage: bool = True
+    fee_schedule: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Preset themes
+# ---------------------------------------------------------------------------
+
+THEME_BITCOIN_ORANGE = InfographicTheme()
+
+THEME_GOLD_STEEL = InfographicTheme(
+    bg_dark="#0d1117", bg_card="#161b22", bg_card_alt="#1c2333",
+    accent_primary="#d4a017", accent_secondary="#58a6ff",
+    text_white="#e6edf3", text_gray="#8b949e", text_dim="#484f58",
+    border="#30363d",
+    header_icon="\u2694",
+    footer_brand="eXcalibur MCP \u2694",
+)
+
+THEME_FINANCE_TEAL = InfographicTheme(
+    bg_dark="#0d1117", bg_card="#161b22", bg_card_alt="#1c2333",
+    accent_primary="#00a0b0", accent_secondary="#58a6ff",
+    accent_highlight="#d4a017",
+    text_white="#e6edf3", text_gray="#8b949e", text_dim="#484f58",
+    border="#30363d",
+    header_icon="\U0001F4C8",
+    footer_brand="Schwab MCP \U0001F4C8",
+)
+
+THEME_AUTHORITY = InfographicTheme(
+    header_subtitle="Operator Account",
+    hero_label="C R E D I T   B A L A N C E",
+    balance_key="balance_sats",
+    deposited_key="total_deposited_sats",
+    unit_label="sats",
+)
+
+# ---------------------------------------------------------------------------
+# Preset metrics
+# ---------------------------------------------------------------------------
+
+PATRON_METRICS = (
+    MetricDef("\u2B07", "DEPOSITED", "total_deposited_api_sats", "secondary"),
+    MetricDef("\u2B06", "CONSUMED", "total_consumed_api_sats", "primary"),
+    MetricDef("\u23F1", "EXPIRED", "total_expired_api_sats", "negative", dim_when_zero=True),
+)
+
+AUTHORITY_METRICS = (
+    MetricDef("\u2B07", "DEPOSITED", "total_deposited_sats", "secondary"),
+    MetricDef("\u2B06", "FEES PAID", "total_fees_paid_sats", "primary"),
+    MetricDef("\u2714", "CERTIFIED", "total_certified_sats", "positive"),
+)
+
+AUTHORITY_SECTIONS = InfographicSections(
+    balance_health_gauge=False,
+    tranche_expires_column=False,
+    tool_usage=False,
+    fee_schedule=True,
+)
+
 
 # ---------------------------------------------------------------------------
 # Layout constants
@@ -36,13 +147,18 @@ BORDER = "#2a3a4a"
 WIDTH = 640
 CARD_X = 24
 CARD_W = WIDTH - 2 * CARD_X
-CARD_R = 10  # border-radius
+CARD_R = 10
 
 
-def _card(y: int, h: int, fill: str = BG_CARD) -> str:
+# ---------------------------------------------------------------------------
+# SVG helpers
+# ---------------------------------------------------------------------------
+
+
+def _card(y: int, h: int, theme: InfographicTheme) -> str:
     return (
         f'<rect x="{CARD_X}" y="{y}" width="{CARD_W}" height="{h}" '
-        f'rx="{CARD_R}" fill="{fill}" stroke="{BORDER}" stroke-width="1"/>'
+        f'rx="{CARD_R}" fill="{theme.bg_card}" stroke="{theme.border}" stroke-width="1"/>'
     )
 
 
@@ -52,7 +168,7 @@ def _text(
     text: str,
     *,
     size: int = 14,
-    fill: str = TEXT_WHITE,
+    fill: str = "#ecf0f1",
     weight: str = "normal",
     anchor: str = "start",
     family: str = "monospace",
@@ -64,6 +180,18 @@ def _text(
     )
 
 
+def _resolve_color(name: str, theme: InfographicTheme) -> str:
+    """Map a semantic colour name to a hex value, or return hex as-is."""
+    mapping = {
+        "primary": theme.accent_primary,
+        "secondary": theme.accent_secondary,
+        "positive": theme.accent_positive,
+        "negative": theme.accent_negative,
+        "highlight": theme.accent_highlight,
+    }
+    return mapping.get(name, name)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -71,216 +199,267 @@ def _text(
 
 def render_account_infographic(
     data: dict[str, Any],
-    service_name: str = "Account",
+    *,
+    service_name: str | None = None,
+    theme: InfographicTheme | None = None,
+    sections: InfographicSections | None = None,
+    metrics: tuple[MetricDef, ...] | None = None,
 ) -> str:
     """Return SVG markup for a visual account statement.
 
-    *data* is the dict returned by ``account_statement_tool``.
-    *service_name* is the operator's display name for the header.
+    Parameters
+    ----------
+    data:
+        Dict returned by ``account_statement_tool`` or authority's
+        ``account_statement``.
+    service_name:
+        Shorthand for ``theme=InfographicTheme(service_name=...)``.
+        If both *service_name* and *theme* are given, *service_name*
+        overrides the theme's service_name.
+    theme:
+        Colour palette and branding.  Defaults to ``THEME_BITCOIN_ORANGE``.
+    sections:
+        Toggle optional sections.  Defaults to all-patron layout.
+    metrics:
+        Three-column metrics row definitions.  Defaults to
+        ``PATRON_METRICS``.
     """
+    if theme is None:
+        theme = THEME_BITCOIN_ORANGE
+    if service_name is not None:
+        theme = theme.with_name(service_name)
+    if sections is None:
+        sections = InfographicSections()
+    if metrics is None:
+        metrics = PATRON_METRICS
+
     summary = data.get("account_summary", {})
-    balance = summary.get("balance_api_sats", 0)
-    deposited = summary.get("total_deposited_api_sats", 0)
-    consumed = summary.get("total_consumed_api_sats", 0)
-    expired = summary.get("total_expired_api_sats", 0)
+    balance = summary.get(theme.balance_key, 0)
+    deposited = summary.get(theme.deposited_key, 0)
     tranches: list[dict[str, Any]] = data.get("active_tranches", [])
     tool_usage: list[dict[str, Any]] = data.get("tool_usage_all_time", [])
     generated_at = data.get("generated_at", datetime.now(timezone.utc).isoformat())
 
     parts: list[str] = []
-    cy = 16  # current y cursor
+    cy = 16
 
     # ── Header ────────────────────────────────────────────────────────
     header_h = 80
-    parts.append(_card(cy, header_h))
-    parts.append(_text(CARD_X + 48, cy + 38, escape(service_name),
-                       size=22, weight="bold", family="sans-serif"))
-    parts.append(_text(CARD_X + 48, cy + 60, "Account Statement",
-                       size=14, fill=ACCENT_ORANGE, family="sans-serif"))
-    # lightning bolt
-    parts.append(_text(CARD_X + 20, cy + 46, "\u26A1", size=28,
-                       fill=ACCENT_ORANGE, family="sans-serif"))
-    # timestamp
+    parts.append(_card(cy, header_h, theme))
+    parts.append(_text(CARD_X + 48, cy + 38, escape(theme.service_name),
+                       size=22, weight="bold", family="sans-serif",
+                       fill=theme.text_white))
+    parts.append(_text(CARD_X + 48, cy + 60, theme.header_subtitle,
+                       size=14, fill=theme.accent_primary, family="sans-serif"))
+    parts.append(_text(CARD_X + 20, cy + 46, theme.header_icon, size=28,
+                       fill=theme.accent_primary, family="sans-serif"))
     ts_short = generated_at[:19].replace("T", " ") + " UTC"
     parts.append(_text(WIDTH - CARD_X - 16, cy + 64, ts_short,
-                       size=9, fill=TEXT_DIM, anchor="end"))
+                       size=9, fill=theme.text_dim, anchor="end"))
     cy += header_h + 12
 
     # ── Hero balance ──────────────────────────────────────────────────
     hero_h = 100
-    parts.append(_card(cy, hero_h))
-    parts.append(_text(WIDTH // 2, cy + 30,
-                       "A V A I L A B L E   B A L A N C E",
-                       size=10, fill=TEXT_GRAY, weight="bold",
+    parts.append(_card(cy, hero_h, theme))
+    parts.append(_text(WIDTH // 2, cy + 30, theme.hero_label,
+                       size=10, fill=theme.text_gray, weight="bold",
                        anchor="middle", family="sans-serif"))
     parts.append(_text(WIDTH // 2, cy + 72, f"{balance:,}",
-                       size=48, fill=ACCENT_GREEN, weight="bold",
+                       size=48, fill=theme.accent_positive, weight="bold",
                        anchor="middle"))
-    parts.append(_text(WIDTH // 2 + 100, cy + 72, "api_sats",
-                       size=13, fill=TEXT_GRAY, anchor="start",
+    parts.append(_text(WIDTH // 2 + 100, cy + 72, theme.unit_label,
+                       size=13, fill=theme.text_gray, anchor="start",
                        family="sans-serif"))
     cy += hero_h + 12
 
     # ── Metrics row ───────────────────────────────────────────────────
-    metrics = [
-        ("\u2B07", "DEPOSITED", deposited, ACCENT_BLUE),
-        ("\u2B06", "CONSUMED", consumed, ACCENT_ORANGE),
-        ("\u23F1", "EXPIRED", expired, ACCENT_RED if expired > 0 else TEXT_DIM),
-    ]
-    metric_w = (CARD_W - 24) // 3
-    metric_h = 80
-    for i, (icon, label, value, colour) in enumerate(metrics):
-        mx = CARD_X + 8 + i * (metric_w + 8)
-        parts.append(
-            f'<rect x="{mx}" y="{cy}" width="{metric_w}" height="{metric_h}" '
-            f'rx="8" fill="{BG_CARD_ALT}" stroke="{BORDER}" stroke-width="0.8"/>'
-        )
-        parts.append(_text(mx + metric_w // 2, cy + 24, icon,
-                           size=16, fill=colour, anchor="middle",
-                           family="sans-serif"))
-        parts.append(_text(mx + metric_w // 2, cy + 50, f"{value:,}",
-                           size=20, fill=colour, weight="bold",
-                           anchor="middle"))
-        parts.append(_text(mx + metric_w // 2, cy + 68, label,
-                           size=8, fill=TEXT_GRAY, weight="bold",
-                           anchor="middle", family="sans-serif"))
-    cy += metric_h + 12
+    if sections.metrics_row:
+        metric_w = (CARD_W - 24) // 3
+        metric_h = 80
+        for i, m in enumerate(metrics):
+            mx = CARD_X + 8 + i * (metric_w + 8)
+            value = summary.get(m.data_key, 0)
+            colour = _resolve_color(m.color, theme)
+            if m.dim_when_zero and value == 0:
+                colour = theme.text_dim
+            parts.append(
+                f'<rect x="{mx}" y="{cy}" width="{metric_w}" height="{metric_h}" '
+                f'rx="8" fill="{theme.bg_card_alt}" stroke="{theme.border}" stroke-width="0.8"/>'
+            )
+            parts.append(_text(mx + metric_w // 2, cy + 24, m.icon,
+                               size=16, fill=colour, anchor="middle",
+                               family="sans-serif"))
+            parts.append(_text(mx + metric_w // 2, cy + 50, f"{value:,}",
+                               size=20, fill=colour, weight="bold",
+                               anchor="middle"))
+            parts.append(_text(mx + metric_w // 2, cy + 68, m.label,
+                               size=8, fill=theme.text_gray, weight="bold",
+                               anchor="middle", family="sans-serif"))
+        cy += metric_h + 12
 
     # ── Balance health gauge ──────────────────────────────────────────
-    gauge_h = 130
-    parts.append(_card(cy, gauge_h))
-    parts.append(_text(CARD_X + 16, cy + 24, "BALANCE HEALTH",
-                       size=10, fill=TEXT_GRAY, weight="bold",
-                       family="sans-serif"))
+    if sections.balance_health_gauge:
+        consumed = summary.get("total_consumed_api_sats", 0)
+        expired = summary.get("total_expired_api_sats", 0)
+        gauge_h = 130
+        parts.append(_card(cy, gauge_h, theme))
+        parts.append(_text(CARD_X + 16, cy + 24, "BALANCE HEALTH",
+                           size=10, fill=theme.text_gray, weight="bold",
+                           family="sans-serif"))
 
-    bar_x = CARD_X + 16
-    bar_y = cy + 38
-    bar_w = CARD_W - 32
-    bar_h = 26
-    pct_remaining = (balance / deposited * 100) if deposited > 0 else 100
-    fill_w = max(int(bar_w * pct_remaining / 100), 0)
+        bar_x = CARD_X + 16
+        bar_y = cy + 38
+        bar_w = CARD_W - 32
+        bar_h = 26
+        pct_remaining = (balance / deposited * 100) if deposited > 0 else 100
+        fill_w = max(int(bar_w * pct_remaining / 100), 0)
 
-    parts.append(
-        f'<rect x="{bar_x}" y="{bar_y}" width="{bar_w}" height="{bar_h}" '
-        f'rx="6" fill="#1a1a2e" stroke="{BORDER}" stroke-width="0.5"/>'
-    )
-    if fill_w > 0:
         parts.append(
-            f'<rect x="{bar_x}" y="{bar_y}" width="{fill_w}" height="{bar_h}" '
-            f'rx="6" fill="{ACCENT_GREEN}" opacity="0.8"/>'
+            f'<rect x="{bar_x}" y="{bar_y}" width="{bar_w}" height="{bar_h}" '
+            f'rx="6" fill="#1a1a2e" stroke="{theme.border}" stroke-width="0.5"/>'
         )
-    parts.append(_text(bar_x + bar_w // 2, bar_y + 18,
-                       f"{pct_remaining:.1f}% remaining",
-                       size=12, fill=TEXT_WHITE, weight="bold",
-                       anchor="middle", family="sans-serif"))
+        if fill_w > 0:
+            parts.append(
+                f'<rect x="{bar_x}" y="{bar_y}" width="{fill_w}" height="{bar_h}" '
+                f'rx="6" fill="{theme.accent_positive}" opacity="0.8"/>'
+            )
+        parts.append(_text(bar_x + bar_w // 2, bar_y + 18,
+                           f"{pct_remaining:.1f}% remaining",
+                           size=12, fill=theme.text_white, weight="bold",
+                           anchor="middle", family="sans-serif"))
 
-    # Legend
-    ly = bar_y + bar_h + 20
-    parts.append(_text(bar_x, ly, f"\u25CF {balance:,} remaining",
-                       size=10, fill=ACCENT_GREEN))
-    parts.append(_text(bar_x + 180, ly, f"\u25CF {consumed:,} consumed",
-                       size=10, fill=ACCENT_ORANGE))
-    parts.append(_text(bar_x + 360, ly, f"\u25CF {expired:,} expired",
-                       size=10, fill=TEXT_DIM))
+        ly = bar_y + bar_h + 20
+        parts.append(_text(bar_x, ly, f"\u25CF {balance:,} remaining",
+                           size=10, fill=theme.accent_positive))
+        parts.append(_text(bar_x + 180, ly, f"\u25CF {consumed:,} consumed",
+                           size=10, fill=theme.accent_primary))
+        parts.append(_text(bar_x + 360, ly, f"\u25CF {expired:,} expired",
+                           size=10, fill=theme.text_dim))
 
-    total_calls = sum(t.get("calls", 0) for t in tool_usage)
-    avg_cost = consumed / total_calls if total_calls else 0
-    parts.append(_text(bar_x, ly + 20,
-                       f"Efficiency: {pct_remaining:.1f}%  |  "
-                       f"Cost per call: {avg_cost:.1f} api_sats  |  "
-                       f"Total calls: {total_calls}",
-                       size=9, fill=TEXT_DIM))
-    cy += gauge_h + 12
+        total_calls = sum(t.get("calls", 0) for t in tool_usage)
+        avg_cost = consumed / total_calls if total_calls else 0
+        parts.append(_text(bar_x, ly + 20,
+                           f"Efficiency: {pct_remaining:.1f}%  |  "
+                           f"Cost per call: {avg_cost:.1f} {theme.unit_label}  |  "
+                           f"Total calls: {total_calls}",
+                           size=9, fill=theme.text_dim))
+        cy += gauge_h + 12
 
     # ── Active credit tranches ────────────────────────────────────────
-    tranche_rows = max(len(tranches), 1)
-    tranche_h = 50 + tranche_rows * 24
-    parts.append(_card(cy, tranche_h))
-    parts.append(_text(CARD_X + 16, cy + 24, "ACTIVE CREDIT TRANCHES",
-                       size=10, fill=TEXT_GRAY, weight="bold",
-                       family="sans-serif"))
+    if sections.credit_tranches:
+        tranche_rows = max(len(tranches), 1)
+        tranche_h = 50 + tranche_rows * 24
+        parts.append(_card(cy, tranche_h, theme))
+        parts.append(_text(CARD_X + 16, cy + 24, "ACTIVE CREDIT TRANCHES",
+                           size=10, fill=theme.text_gray, weight="bold",
+                           family="sans-serif"))
 
-    cols_t = [CARD_X + 16, CARD_X + 120, CARD_X + 220, CARD_X + 320, CARD_X + 430]
-    headers_t = ["SOURCE", "GRANTED", "ORIGINAL", "REMAINING", "EXPIRES"]
-    for x, h in zip(cols_t, headers_t):
-        parts.append(_text(x, cy + 44, h, size=8, fill=TEXT_DIM, weight="bold"))
-    parts.append(
-        f'<line x1="{CARD_X + 12}" y1="{cy + 50}" '
-        f'x2="{WIDTH - CARD_X - 12}" y2="{cy + 50}" '
-        f'stroke="{BORDER}" stroke-width="0.5"/>'
-    )
+        if sections.tranche_expires_column:
+            cols_t = [CARD_X + 16, CARD_X + 120, CARD_X + 220, CARD_X + 320, CARD_X + 430]
+            headers_t = ["SOURCE", "GRANTED", "ORIGINAL", "REMAINING", "EXPIRES"]
+        else:
+            cols_t = [CARD_X + 16, CARD_X + 150, CARD_X + 280, CARD_X + 420]
+            headers_t = ["SOURCE", "GRANTED", "ORIGINAL", "REMAINING"]
 
-    if tranches:
-        for i, t in enumerate(tranches):
-            ry = cy + 68 + i * 24
-            source = t.get("invoice_id", "unknown")
-            if source.startswith("seed"):
-                source = "Seed (v1)"
-            elif len(source) > 14:
-                source = source[:12] + ".."
-            granted = str(t.get("granted_at", ""))[:10]
-            original = f'{t.get("original_sats", 0):,}'
-            remaining = f'{t.get("remaining_sats", 0):,}'
-            expires = str(t.get("expires_at", ""))[:10] if t.get("expires_at") else "\u2014"
-            parts.append(_text(cols_t[0], ry, source, size=10, fill=ACCENT_BLUE))
-            parts.append(_text(cols_t[1], ry, granted, size=10))
-            parts.append(_text(cols_t[2], ry, original, size=10))
-            parts.append(_text(cols_t[3], ry, remaining, size=10,
-                               fill=ACCENT_GREEN, weight="bold"))
-            expires_fill = ACCENT_GOLD if t.get("expires_at") else TEXT_DIM
-            parts.append(_text(cols_t[4], ry, expires, size=10, fill=expires_fill))
-    else:
-        parts.append(_text(cols_t[0], cy + 68, "No active tranches",
-                           size=10, fill=TEXT_DIM))
-    cy += tranche_h + 12
+        for x, h in zip(cols_t, headers_t):
+            parts.append(_text(x, cy + 44, h, size=8, fill=theme.text_dim, weight="bold"))
+        parts.append(
+            f'<line x1="{CARD_X + 12}" y1="{cy + 50}" '
+            f'x2="{WIDTH - CARD_X - 12}" y2="{cy + 50}" '
+            f'stroke="{theme.border}" stroke-width="0.5"/>'
+        )
+
+        if tranches:
+            for i, t in enumerate(tranches):
+                ry = cy + 68 + i * 24
+                source = t.get("invoice_id", "unknown")
+                if source.startswith("seed"):
+                    source = "Seed (v1)"
+                elif len(source) > 14:
+                    source = source[:12] + ".."
+                granted = str(t.get("granted_at", ""))[:10]
+                original = f'{t.get("original_sats", 0):,}'
+                remaining = f'{t.get("remaining_sats", 0):,}'
+                parts.append(_text(cols_t[0], ry, source, size=10, fill=theme.accent_secondary))
+                parts.append(_text(cols_t[1], ry, granted, size=10, fill=theme.text_white))
+                parts.append(_text(cols_t[2], ry, original, size=10, fill=theme.text_white))
+                parts.append(_text(cols_t[3], ry, remaining, size=10,
+                                   fill=theme.accent_positive, weight="bold"))
+                if sections.tranche_expires_column:
+                    expires = str(t.get("expires_at", ""))[:10] if t.get("expires_at") else "\u2014"
+                    expires_fill = theme.accent_highlight if t.get("expires_at") else theme.text_dim
+                    parts.append(_text(cols_t[4], ry, expires, size=10, fill=expires_fill))
+        else:
+            parts.append(_text(cols_t[0], cy + 68, "No active tranches",
+                               size=10, fill=theme.text_dim))
+        cy += tranche_h + 12
+
+    # ── Fee schedule (Authority only) ─────────────────────────────────
+    if sections.fee_schedule:
+        fee_schedule = data.get("fee_schedule", "See pricing model")
+        if isinstance(fee_schedule, dict):
+            fee_text = (
+                f"Ad valorem {fee_schedule.get('rate_percent', '?')}%"
+                f"  •  min {fee_schedule.get('min_sats', 0)} sats"
+            )
+        else:
+            fee_text = str(fee_schedule)
+        fee_h = 64
+        parts.append(_card(cy, fee_h, theme))
+        parts.append(_text(CARD_X + 16, cy + 24, "FEE SCHEDULE",
+                           size=10, fill=theme.text_gray, weight="bold",
+                           family="sans-serif"))
+        parts.append(_text(CARD_X + 16, cy + 48, fee_text,
+                           size=14, fill=theme.accent_primary, weight="bold"))
+        cy += fee_h + 12
 
     # ── Tool usage ────────────────────────────────────────────────────
-    usage_rows = max(len(tool_usage), 1)
-    usage_h = 50 + usage_rows * 24
-    parts.append(_card(cy, usage_h))
-    parts.append(_text(CARD_X + 16, cy + 24, "TOOL USAGE (ALL-TIME)",
-                       size=10, fill=TEXT_GRAY, weight="bold",
-                       family="sans-serif"))
+    if sections.tool_usage:
+        usage_rows = max(len(tool_usage), 1)
+        usage_h = 50 + usage_rows * 24
+        parts.append(_card(cy, usage_h, theme))
+        parts.append(_text(CARD_X + 16, cy + 24, "TOOL USAGE (ALL-TIME)",
+                           size=10, fill=theme.text_gray, weight="bold",
+                           family="sans-serif"))
 
-    cols_u = [CARD_X + 16, CARD_X + 260, CARD_X + 370, CARD_X + 480]
-    headers_u = ["TOOL", "CALLS", "COST", "AVG"]
-    for x, h in zip(cols_u, headers_u):
-        parts.append(_text(x, cy + 44, h, size=8, fill=TEXT_DIM, weight="bold"))
-    parts.append(
-        f'<line x1="{CARD_X + 12}" y1="{cy + 50}" '
-        f'x2="{WIDTH - CARD_X - 12}" y2="{cy + 50}" '
-        f'stroke="{BORDER}" stroke-width="0.5"/>'
-    )
+        cols_u = [CARD_X + 16, CARD_X + 260, CARD_X + 370, CARD_X + 480]
+        headers_u = ["TOOL", "CALLS", "COST", "AVG"]
+        for x, h in zip(cols_u, headers_u):
+            parts.append(_text(x, cy + 44, h, size=8, fill=theme.text_dim, weight="bold"))
+        parts.append(
+            f'<line x1="{CARD_X + 12}" y1="{cy + 50}" '
+            f'x2="{WIDTH - CARD_X - 12}" y2="{cy + 50}" '
+            f'stroke="{theme.border}" stroke-width="0.5"/>'
+        )
 
-    if tool_usage:
-        for i, u in enumerate(tool_usage):
-            ry = cy + 68 + i * 24
-            tool_name = u.get("tool", "?")
-            calls = u.get("calls", 0)
-            cost = u.get("api_sats", 0)
-            avg = cost / calls if calls else 0
-            parts.append(_text(cols_u[0], ry, tool_name, size=10, fill=ACCENT_BLUE))
-            parts.append(_text(cols_u[1], ry, str(calls), size=10))
-            suffix = "s" if cost != 1 else ""
-            parts.append(_text(cols_u[2], ry, f"{cost} sat{suffix}",
-                               size=10, fill=ACCENT_ORANGE))
-            parts.append(_text(cols_u[3], ry, f"{avg:.1f}", size=10, fill=TEXT_GRAY))
-    else:
-        parts.append(_text(cols_u[0], cy + 68, "No usage yet",
-                           size=10, fill=TEXT_DIM))
-    cy += usage_h + 12
+        if tool_usage:
+            for i, u in enumerate(tool_usage):
+                ry = cy + 68 + i * 24
+                tool_name = u.get("tool", "?")
+                calls = u.get("calls", 0)
+                cost = u.get("api_sats", 0)
+                avg = cost / calls if calls else 0
+                parts.append(_text(cols_u[0], ry, tool_name, size=10, fill=theme.accent_secondary))
+                parts.append(_text(cols_u[1], ry, str(calls), size=10, fill=theme.text_white))
+                suffix = "s" if cost != 1 else ""
+                parts.append(_text(cols_u[2], ry, f"{cost} sat{suffix}",
+                                   size=10, fill=theme.accent_primary))
+                parts.append(_text(cols_u[3], ry, f"{avg:.1f}", size=10, fill=theme.text_gray))
+        else:
+            parts.append(_text(cols_u[0], cy + 68, "No usage yet",
+                               size=10, fill=theme.text_dim))
+        cy += usage_h + 12
 
     # ── Footer ────────────────────────────────────────────────────────
-    footer_h = 60
     parts.append(_text(WIDTH // 2, cy + 16,
                        "DPYC \u2022 Don\u2019t Pester Your Customer",
-                       size=10, fill=TEXT_DIM, anchor="middle",
+                       size=10, fill=theme.text_dim, anchor="middle",
                        family="sans-serif"))
     parts.append(_text(WIDTH // 2, cy + 34,
-                       "Powered by Bitcoin Lightning \u26A1 \u2022 Tollbooth Protocol",
-                       size=9, fill=TEXT_DIM, anchor="middle",
+                       f"Powered by Bitcoin Lightning \u26A1 \u2022 {theme.footer_brand}",
+                       size=9, fill=theme.text_dim, anchor="middle",
                        family="sans-serif"))
-    cy += footer_h
+    cy += 60
 
     # ── Assemble SVG ──────────────────────────────────────────────────
     total_h = cy + 8
@@ -289,7 +468,7 @@ def render_account_infographic(
         f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'width="{WIDTH}" height="{total_h}" '
         f'viewBox="0 0 {WIDTH} {total_h}">\n'
-        f'  <rect width="{WIDTH}" height="{total_h}" fill="{BG_DARK}"/>\n'
+        f'  <rect width="{WIDTH}" height="{total_h}" fill="{theme.bg_dark}"/>\n'
         f"  {body}\n"
         f"</svg>"
     )
