@@ -1238,26 +1238,63 @@ def register_standard_tools(
 
     @tool
     async def session_status() -> dict[str, Any]:
-        """Check operator readiness. Returns success=true when the
-        operator is ready for tool calls. Free."""
-        courier_ok = rt._courier is not None
-        result: dict[str, Any] = {
+        """Check operator readiness. Returns the operator lifecycle
+        state and clear guidance on what to do next. Free.
+
+        Lifecycle states:
+        - ready: Operator is warm and fully operational. Proceed with tool calls.
+        - warming_up: Operator is initializing (cold start). Try a tool call — it will warm up on demand.
+        - not_registered: Operator has no Authority relationship yet. Call register_operator first.
+        - no_identity: Operator nsec is not configured. Deployment issue.
+        """
+        # 1. Identity check
+        try:
+            npub = rt.operator_npub()
+        except (RuntimeError, ValueError):
+            return {
+                "success": True,
+                "lifecycle": "no_identity",
+                "message": "Operator identity (nsec) is not configured. "
+                           "This is a deployment issue — set TOLLBOOTH_NOSTR_OPERATOR_NSEC.",
+            }
+
+        # 2. Vault / registration check
+        vault_ok = rt._vault is not None
+        if not vault_ok:
+            # Try to bring up the vault to distinguish warming_up vs not_registered
+            try:
+                await rt.vault()
+                vault_ok = True
+            except Exception as exc:
+                exc_str = str(exc)
+                if "not registered" in exc_str.lower() or "no neon url" in exc_str.lower():
+                    return {
+                        "success": True,
+                        "lifecycle": "not_registered",
+                        "operator_npub": npub,
+                        "message": "Operator is not yet registered with an Authority. "
+                                   "Call register_operator to provision persistence.",
+                    }
+                # Bootstrap failed for another reason — still warming up
+                return {
+                    "success": True,
+                    "lifecycle": "warming_up",
+                    "operator_npub": npub,
+                    "message": "Operator is initializing. Try a tool call — "
+                               "it will warm up on demand. If this persists, "
+                               "check the deployment logs.",
+                    "detail": exc_str,
+                }
+
+        # 3. Fully ready
+        return {
             "success": True,
-            "operator_npub": rt.operator_npub(),
+            "lifecycle": "ready",
+            "operator_npub": npub,
             "operator_credential_service": rt.operator_credential_service,
             "patron_credential_service": rt.patron_credential_service,
-            "courier_configured": courier_ok,
+            "message": "Operator is ready. Proceed with tool calls.",
         }
-        # Provide clear guidance so the LLM doesn't panic about optional fields
-        if courier_ok:
-            result["message"] = "Operator is ready. Proceed with tool calls."
-        else:
-            result["message"] = (
-                "Operator is ready. Secure Courier is not configured "
-                "(optional — only needed for Nostr DM credential delivery). "
-                "All tool calls work normally without it."
-            )
-        return result
 
     @tool
     async def request_credential_channel(
