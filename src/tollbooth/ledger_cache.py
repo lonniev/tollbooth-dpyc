@@ -102,7 +102,13 @@ class LedgerCache:
                 return entry.ledger
 
             # Cache miss — load from vault
-            ledger = await self._load_from_vault(user_id)
+            ledger, from_vault = await self._load_from_vault(user_id)
+
+            if not from_vault:
+                # Vault fetch failed (cold start, Neon not ready).
+                # Return the empty ledger but do NOT cache it — next call
+                # will retry the vault fetch after it has had time to connect.
+                return ledger
 
             # Belt-and-suspenders: migrate perpetual tranches even on fresh load
             # (from_dict should handle this, but catch any edge cases)
@@ -179,17 +185,23 @@ class LedgerCache:
         self.mark_dirty(user_id)
         return await self.flush_user(user_id)
 
-    async def _load_from_vault(self, user_id: str) -> UserLedger:
-        """Load ledger JSON from vault, returning fresh ledger on miss/error."""
+    async def _load_from_vault(self, user_id: str) -> tuple[UserLedger, bool]:
+        """Load ledger JSON from vault.
+
+        Returns (ledger, from_vault) — from_vault is True if the data came
+        from Neon (or the user genuinely has no ledger), False if the vault
+        fetch failed and we're returning an empty fallback that should NOT
+        be cached (to avoid masking a cold-start timing issue).
+        """
         try:
             ledger_json = await self._vault.fetch_ledger(user_id)
         except Exception:
-            logger.warning("Failed to load ledger from vault for %s.", user_id)
-            return UserLedger()
+            logger.warning("Failed to load ledger from vault for %s — returning uncached empty ledger.", user_id)
+            return UserLedger(), False
 
         if ledger_json is None:
-            return UserLedger()
-        return UserLedger.from_json(ledger_json)
+            return UserLedger(), True
+        return UserLedger.from_json(ledger_json), True
 
     def _fire_and_forget_flush(
         self, user_id: str, entry: _CacheEntry,
