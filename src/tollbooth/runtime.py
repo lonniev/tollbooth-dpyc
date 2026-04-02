@@ -271,20 +271,6 @@ class OperatorRuntime:
 
         import time as _time
         from tollbooth.vaults import NeonVault
-
-        # Try env var first (legacy)
-        neon_url = os.environ.get("NEON_DATABASE_URL", "")
-        if neon_url:
-            nsec_hex = self._get_nsec_hex()
-            self._vault = NeonVault(
-                database_url=neon_url,
-                encryption_nsec_hex=nsec_hex,
-            )
-            await self._vault.ensure_schema()
-            self._vault_ready_at = _time.monotonic()
-            return self._vault
-
-        # Bootstrap from Authority
         from tollbooth.bootstrap import ensure_bootstrapped
         result = await ensure_bootstrapped()
         if not result.success or not result.neon_database_url:
