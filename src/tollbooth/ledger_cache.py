@@ -259,20 +259,6 @@ class LedgerCache:
                     "Flushed ledger for %s to vault (v%s, %d bytes).",
                     user_id[:20], version, len(ledger_json),
                 )
-                # Verify write — read back to confirm Neon persisted it
-                try:
-                    verify = await self._vault.fetch_ledger(user_id)
-                    if verify is None:
-                        logger.error(
-                            "WRITE VERIFICATION FAILED for %s: store_ledger returned v%s "
-                            "but fetch_ledger returned None. Possible Neon pooler "
-                            "read-replica lag or schema mismatch.",
-                            user_id[:20], version,
-                        )
-                    else:
-                        logger.info("Write verified for %s — read-back OK.", user_id[:20])
-                except Exception as verify_exc:
-                    logger.warning("Write verify read-back failed for %s: %s", user_id[:20], verify_exc)
                 entry.dirty = False
                 entry.dirty_count = 0
                 entry.last_flush_time = time.monotonic()

@@ -30,10 +30,14 @@ class PricingModelStore:
     def __init__(self, *, neon_vault: Any) -> None:
         self._neon = neon_vault
 
+    def _t(self, table: str) -> str:
+        """Schema-qualified table name via the underlying NeonVault."""
+        return self._neon._t(table)
+
     async def ensure_schema(self) -> None:
         """Create the ``operator_pricing_models`` table and indexes."""
         await self._neon._execute(
-            "CREATE TABLE IF NOT EXISTS operator_pricing_models ("
+            f"CREATE TABLE IF NOT EXISTS {self._t('operator_pricing_models')} ("
             "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
             "    operator TEXT NOT NULL,"
             "    name TEXT NOT NULL,"
@@ -45,18 +49,18 @@ class PricingModelStore:
         )
         await self._neon._execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS one_active_per_operator "
-            "ON operator_pricing_models (operator) WHERE is_active = true"
+            f"ON {self._t('operator_pricing_models')} (operator) WHERE is_active = true"
         )
         await self._neon._execute(
             "CREATE INDEX IF NOT EXISTS idx_pricing_models_operator "
-            "ON operator_pricing_models (operator)"
+            f"ON {self._t('operator_pricing_models')} (operator)"
         )
 
     async def fetch_active_model(self, operator: str) -> PricingModel | None:
         """Return the active pricing model for an operator, or ``None``."""
         result = await self._neon._execute(
-            "SELECT id, operator, name, model_json, is_active "
-            "FROM operator_pricing_models "
+            f"SELECT id, operator, name, model_json, is_active "
+            f"FROM {self._t('operator_pricing_models')} "
             "WHERE operator = $1 AND is_active = true "
             "LIMIT 1",
             [operator],
@@ -69,8 +73,8 @@ class PricingModelStore:
     async def list_models(self, operator: str) -> list[PricingModel]:
         """List all pricing models for an operator (newest first)."""
         result = await self._neon._execute(
-            "SELECT id, operator, name, model_json, is_active "
-            "FROM operator_pricing_models "
+            f"SELECT id, operator, name, model_json, is_active "
+            f"FROM {self._t('operator_pricing_models')} "
             "WHERE operator = $1 "
             "ORDER BY created_at DESC",
             [operator],
@@ -81,7 +85,7 @@ class PricingModelStore:
     async def create_model(self, model: PricingModel) -> str:
         """Insert a new pricing model. Returns the UUID as a string."""
         result = await self._neon._execute(
-            "INSERT INTO operator_pricing_models "
+            f"INSERT INTO {self._t('operator_pricing_models')} "
             "(operator, name, model_json, is_active) "
             "VALUES ($1, $2, $3::jsonb, false) "
             "RETURNING id",
@@ -95,7 +99,7 @@ class PricingModelStore:
     async def update_model(self, model_id: str, model_json: str) -> None:
         """Replace the ``model_json`` blob for an existing model."""
         await self._neon._execute(
-            "UPDATE operator_pricing_models "
+            f"UPDATE {self._t('operator_pricing_models')} "
             "SET model_json = $1::jsonb, updated_at = now() "
             "WHERE id = $2::uuid",
             [model_json, model_id],
@@ -107,13 +111,13 @@ class PricingModelStore:
         Two UPDATEs: deactivate all for operator, then activate the target.
         """
         await self._neon._execute(
-            "UPDATE operator_pricing_models "
+            f"UPDATE {self._t('operator_pricing_models')} "
             "SET is_active = false, updated_at = now() "
             "WHERE operator = $1 AND is_active = true",
             [operator],
         )
         await self._neon._execute(
-            "UPDATE operator_pricing_models "
+            f"UPDATE {self._t('operator_pricing_models')} "
             "SET is_active = true, updated_at = now() "
             "WHERE id = $1::uuid AND operator = $2",
             [model_id, operator],
@@ -126,7 +130,7 @@ class PricingModelStore:
         """
         # Check if active first
         check = await self._neon._execute(
-            "SELECT is_active FROM operator_pricing_models WHERE id = $1::uuid",
+            f"SELECT is_active FROM {self._t('operator_pricing_models')} WHERE id = $1::uuid",
             [model_id],
         )
         rows = check.get("rows", [])
@@ -137,7 +141,7 @@ class PricingModelStore:
             return False
 
         result = await self._neon._execute(
-            "DELETE FROM operator_pricing_models WHERE id = $1::uuid",
+            f"DELETE FROM {self._t('operator_pricing_models')} WHERE id = $1::uuid",
             [model_id],
         )
         return (result.get("rowCount", 0) or 0) > 0

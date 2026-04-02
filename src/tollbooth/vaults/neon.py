@@ -68,8 +68,6 @@ class NeonVault:
         else:
             self._endpoint = f"https://{hostname}/sql"
 
-        self._connection_string = database_url  # exposed for diagnostics
-
         # Resolve operator schema prefix for schema-qualified queries.
         # The Neon HTTP SQL API doesn't honor the options search_path from
         # the connection string, so ALL table references must be explicit.
@@ -135,26 +133,6 @@ class NeonVault:
         Raises ``NeonQueryError`` on SQL errors, ``httpx.HTTPStatusError``
         on transport errors.
         """
-        # Apply schema prefix to all known table names in the query.
-        # The Neon HTTP SQL API ignores the search_path from the connection
-        # options, so we must qualify table names explicitly.
-        if self._schema_prefix:
-            import re as _re
-            # Only tables that were historically created in public and need
-            # explicit schema qualification. Do NOT include credentials or
-            # session_bindings — those are managed by NeonCredentialVault
-            # and were always created in the operator schema correctly.
-            _tables = (
-                "balances", "transactions", "tool_demand", "anchors",
-                "operator_pricing_models", "tool_acls", "authority_config",
-            )
-            for _tbl in _tables:
-                # Replace unqualified table names but not already-qualified ones
-                query = _re.sub(
-                    rf"(?<![.\w]){_tbl}(?![.\w])",
-                    f"{self._schema_prefix}{_tbl}",
-                    query,
-                )
         body = {"query": query, "params": params or []}
         resp = await self._client.post(self._endpoint, json=body)
         resp.raise_for_status()
@@ -182,7 +160,7 @@ class NeonVault:
 
         if cached_version is not None:
             result = await self._execute(
-                "UPDATE balances "
+                f"UPDATE {self._t('balances')} "
                 "SET ledger_json = $1, version = version + 1, last_flush = now() "
                 "WHERE npub = $2 AND version = $3 "
                 "RETURNING version",
@@ -202,11 +180,11 @@ class NeonVault:
 
         # Full UPSERT — handles both first-time inserts and conflict recovery
         result = await self._execute(
-            "INSERT INTO balances(npub, ledger_json, version, last_flush, created_at) "
+            f"INSERT INTO {self._t('balances')}(npub, ledger_json, version, last_flush, created_at) "
             "VALUES ($1, $2, 1, now(), now()) "
             "ON CONFLICT (npub) DO UPDATE "
-            "SET ledger_json = EXCLUDED.ledger_json, "
-            "    version = balances.version + 1, "
+            f"SET ledger_json = EXCLUDED.ledger_json, "
+            f"    version = {self._t('balances')}.version + 1, "
             "    last_flush = now() "
             "RETURNING version",
             [user_id, ledger_json],
@@ -226,7 +204,7 @@ class NeonVault:
         Also caches the version for subsequent optimistic updates.
         """
         result = await self._execute(
-            "SELECT ledger_json, version FROM balances WHERE npub = $1",
+            f"SELECT ledger_json, version FROM {self._t('balances')} WHERE npub = $1",
             [user_id],
         )
         rows = result.get("rows", [])
@@ -252,7 +230,7 @@ class NeonVault:
         try:
             balance = self._extract_balance(ledger_json)
             result = await self._execute(
-                "INSERT INTO transactions "
+                f"INSERT INTO {self._t('transactions')} "
                 "(npub, tx_type, amount_api_sats, detail, balance_after, created_at) "
                 "VALUES ($1, 'snapshot', 0, $2, $3, $4::timestamptz) "
                 "RETURNING id",
@@ -268,32 +246,6 @@ class NeonVault:
 
     # -- Schema management ---------------------------------------------------
 
-    async def _resolve_target_schema(self) -> str | None:
-        """Return the operator's schema from the connection URL, or None.
-
-        Parses the ``search_path`` from the connection string's ``options``
-        parameter directly — does NOT use ``SHOW search_path`` because
-        the Neon HTTP SQL API doesn't reflect per-connection options in
-        session variables.
-
-        If the search_path is ``op_xxx`` or ``op_xxx,public``, returns ``op_xxx``.
-        If there's no search_path or it's just ``public``, returns None.
-        """
-        try:
-            from urllib.parse import parse_qs, unquote
-            conn_parsed = urlparse(self._connection_string)
-            params = parse_qs(conn_parsed.query)
-            options = params.get("options", [""])[0]
-            # options is like "-c search_path=op_xxx" or "-c search_path=op_xxx,public"
-            if "search_path=" in options:
-                sp = options.split("search_path=", 1)[1].split("&")[0].split()[0]
-                first = sp.split(",")[0].strip()
-                if first and first != "public":
-                    return first
-        except Exception:
-            pass
-        return None
-
     async def ensure_schema(self) -> None:
         """Create the ``balances`` and ``transactions`` tables if they don't exist.
 
@@ -304,20 +256,16 @@ class NeonVault:
         CREATE TABLE IF NOT EXISTS sees the table in ``public`` and skips,
         leaving the operator's schema without its own tables.
         """
-        # Determine the target schema: first entry in search_path, or default
-        target_schema = await self._resolve_target_schema()
-
-        if target_schema and target_schema != "public":
-            # Ensure the operator's schema exists
-            await self._execute(f"CREATE SCHEMA IF NOT EXISTS {target_schema}")
-            prefix = f"{target_schema}."
-            idx_prefix = f"{target_schema}_"
+        # Ensure the operator's schema exists if we have one
+        if self._schema_prefix:
+            schema_name = self._schema_prefix.rstrip(".")
+            await self._execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name}")
+            idx_prefix = f"{schema_name}_"
         else:
-            prefix = ""
             idx_prefix = ""
 
         await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {prefix}balances ("
+            f"CREATE TABLE IF NOT EXISTS {self._t('balances')} ("
             "    npub TEXT PRIMARY KEY,"
             "    ledger_json TEXT NOT NULL,"
             "    version INTEGER NOT NULL DEFAULT 1,"
@@ -326,7 +274,7 @@ class NeonVault:
             ")"
         )
         await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {prefix}transactions ("
+            f"CREATE TABLE IF NOT EXISTS {self._t('transactions')} ("
             "    id BIGSERIAL PRIMARY KEY,"
             "    npub TEXT NOT NULL,"
             "    tx_type TEXT NOT NULL,"
@@ -340,15 +288,15 @@ class NeonVault:
         )
         await self._execute(
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_transactions_npub "
-            f"ON {prefix}transactions(npub)"
+            f"ON {self._t('transactions')}(npub)"
         )
         await self._execute(
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_transactions_created "
-            f"ON {prefix}transactions(created_at)"
+            f"ON {self._t('transactions')}(created_at)"
         )
         # -- Anchors table (OTS Bitcoin anchoring) --
         await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {prefix}anchors ("
+            f"CREATE TABLE IF NOT EXISTS {self._t('anchors')} ("
             "    id BIGSERIAL PRIMARY KEY,"
             "    root_hash TEXT NOT NULL UNIQUE,"
             "    leaf_count INTEGER NOT NULL,"
@@ -362,15 +310,15 @@ class NeonVault:
         )
         await self._execute(
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_anchors_created "
-            f"ON {prefix}anchors(created_at)"
+            f"ON {self._t('anchors')}(created_at)"
         )
         await self._execute(
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_anchors_status "
-            f"ON {prefix}anchors(status)"
+            f"ON {self._t('anchors')}(status)"
         )
         # -- Global demand counters (surge pricing) --
         await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {prefix}tool_demand ("
+            f"CREATE TABLE IF NOT EXISTS {self._t('tool_demand')} ("
             "    tool_name TEXT NOT NULL,"
             "    window_key TEXT NOT NULL,"
             "    count INTEGER NOT NULL DEFAULT 0,"
@@ -379,7 +327,7 @@ class NeonVault:
         )
         # -- Authority configuration (curator npub, onboarding state) --
         await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {prefix}authority_config ("
+            f"CREATE TABLE IF NOT EXISTS {self._t('authority_config')} ("
             "    key TEXT PRIMARY KEY,"
             "    value TEXT NOT NULL,"
             "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()"
@@ -387,7 +335,7 @@ class NeonVault:
         )
         # -- Operator pricing models (runtime-configurable tool pricing) --
         await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {prefix}operator_pricing_models ("
+            f"CREATE TABLE IF NOT EXISTS {self._t('operator_pricing_models')} ("
             "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
             "    operator TEXT NOT NULL,"
             "    name TEXT NOT NULL,"
@@ -399,15 +347,15 @@ class NeonVault:
         )
         await self._execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS {idx_prefix}one_active_per_operator "
-            f"ON {prefix}operator_pricing_models (operator) WHERE is_active = true"
+            f"ON {self._t('operator_pricing_models')} (operator) WHERE is_active = true"
         )
         await self._execute(
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_pricing_models_operator "
-            f"ON {prefix}operator_pricing_models (operator)"
+            f"ON {self._t('operator_pricing_models')} (operator)"
         )
         # -- Tool ACLs (Nostr-signed per-tool authorization) --
         await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {prefix}tool_acls ("
+            f"CREATE TABLE IF NOT EXISTS {self._t('tool_acls')} ("
             "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
             "    operator TEXT NOT NULL,"
             "    tool_pattern TEXT NOT NULL,"
@@ -419,7 +367,7 @@ class NeonVault:
         )
         await self._execute(
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_tool_acls_operator "
-            f"ON {prefix}tool_acls (operator)"
+            f"ON {self._t('tool_acls')} (operator)"
         )
 
     # -- Global demand counters (surge pricing) --------------------------------
@@ -432,7 +380,7 @@ class NeonVault:
         """
         try:
             result = await self._execute(
-                "SELECT count FROM tool_demand "
+                f"SELECT count FROM {self._t('tool_demand')} "
                 "WHERE tool_name = $1 AND window_key = $2",
                 [tool_name, window_key],
             )
@@ -450,10 +398,10 @@ class NeonVault:
         """
         try:
             await self._execute(
-                "INSERT INTO tool_demand (tool_name, window_key, count) "
+                f"INSERT INTO {self._t('tool_demand')} (tool_name, window_key, count) "
                 "VALUES ($1, $2, 1) "
                 "ON CONFLICT (tool_name, window_key) "
-                "DO UPDATE SET count = tool_demand.count + 1",
+                f"DO UPDATE SET count = {self._t('tool_demand')}.count + 1",
                 [tool_name, window_key],
             )
         except Exception:
@@ -470,7 +418,7 @@ class NeonVault:
         ledger balances.
         """
         result = await self._execute(
-            "SELECT npub, ledger_json FROM balances ORDER BY npub"
+            f"SELECT npub, ledger_json FROM {self._t('balances')} ORDER BY npub"
         )
         rows = result.get("rows", [])
         return [(row["npub"], row["ledger_json"]) for row in rows]
@@ -487,7 +435,7 @@ class NeonVault:
     ) -> str:
         """Store an anchor record. Returns the anchor ID as a string."""
         result = await self._execute(
-            "INSERT INTO anchors "
+            f"INSERT INTO {self._t('anchors')} "
             "(root_hash, leaf_count, status, ots_receipts_json, "
             " snapshot_json, leaf_hashes_json, created_at) "
             "VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz) "
@@ -503,9 +451,9 @@ class NeonVault:
     async def fetch_anchor(self, anchor_id: str) -> dict[str, Any] | None:
         """Fetch a single anchor record by ID."""
         result = await self._execute(
-            "SELECT id, root_hash, leaf_count, status, ots_receipts_json, "
-            "snapshot_json, leaf_hashes_json, created_at, confirmed_at "
-            "FROM anchors WHERE id = $1",
+            f"SELECT id, root_hash, leaf_count, status, ots_receipts_json, "
+            f"snapshot_json, leaf_hashes_json, created_at, confirmed_at "
+            f"FROM {self._t('anchors')} WHERE id = $1",
             [int(anchor_id)],
         )
         rows = result.get("rows", [])
@@ -519,17 +467,17 @@ class NeonVault:
         """List recent anchor records, optionally filtered by status."""
         if status:
             result = await self._execute(
-                "SELECT id, root_hash, leaf_count, status, ots_receipts_json, "
-                "created_at, confirmed_at "
-                "FROM anchors WHERE status = $1 "
+                f"SELECT id, root_hash, leaf_count, status, ots_receipts_json, "
+                f"created_at, confirmed_at "
+                f"FROM {self._t('anchors')} WHERE status = $1 "
                 "ORDER BY created_at DESC LIMIT $2",
                 [status, limit],
             )
         else:
             result = await self._execute(
-                "SELECT id, root_hash, leaf_count, status, ots_receipts_json, "
-                "created_at, confirmed_at "
-                "FROM anchors ORDER BY created_at DESC LIMIT $1",
+                f"SELECT id, root_hash, leaf_count, status, ots_receipts_json, "
+                f"created_at, confirmed_at "
+                f"FROM {self._t('anchors')} ORDER BY created_at DESC LIMIT $1",
                 [limit],
             )
         return result.get("rows", [])
@@ -543,13 +491,13 @@ class NeonVault:
         """Update an anchor's status (e.g., 'submitted' → 'confirmed')."""
         if confirmed_at:
             await self._execute(
-                "UPDATE anchors SET status = $1, confirmed_at = $2::timestamptz "
+                f"UPDATE {self._t('anchors')} SET status = $1, confirmed_at = $2::timestamptz "
                 "WHERE id = $3",
                 [status, confirmed_at, int(anchor_id)],
             )
         else:
             await self._execute(
-                "UPDATE anchors SET status = $1 WHERE id = $2",
+                f"UPDATE {self._t('anchors')} SET status = $1 WHERE id = $2",
                 [status, int(anchor_id)],
             )
 
@@ -560,7 +508,7 @@ class NeonVault:
     ) -> None:
         """Update an anchor's OTS receipts (e.g., after upgrade)."""
         await self._execute(
-            "UPDATE anchors SET ots_receipts_json = $1 WHERE id = $2",
+            f"UPDATE {self._t('anchors')} SET ots_receipts_json = $1 WHERE id = $2",
             [ots_receipts_json, int(anchor_id)],
         )
 
@@ -573,7 +521,7 @@ class NeonVault:
         """
         try:
             result = await self._execute(
-                "SELECT value FROM authority_config WHERE key = $1",
+                f"SELECT value FROM {self._t('authority_config')} WHERE key = $1",
                 [key],
             )
             rows = result.get("rows", [])
@@ -584,7 +532,7 @@ class NeonVault:
     async def set_config(self, key: str, value: str) -> None:
         """Upsert a value into the ``authority_config`` table."""
         await self._execute(
-            "INSERT INTO authority_config (key, value, updated_at) "
+            f"INSERT INTO {self._t('authority_config')} (key, value, updated_at) "
             "VALUES ($1, $2, now()) "
             "ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()",
             [key, value],

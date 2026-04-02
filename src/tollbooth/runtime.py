@@ -1073,83 +1073,7 @@ def register_standard_tools(
         except ValueError as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        result = await credits.check_balance_tool(cache, npub)
-        result["_diag_runtime_id"] = id(rt)
-        result["_diag_vault_id"] = id(rt._vault) if rt._vault else None
-        result["_diag_cache_id"] = id(cache)
-        result["_diag_cache_size"] = len(cache._entries)
-        result["_diag_npub_cached"] = npub in cache._entries
-        # Raw Neon diagnostic — bypass cache and search_path
-        try:
-            v = await rt.vault()
-            raw = await v._execute(
-                "SELECT npub, version, last_flush, "
-                "left(ledger_json, 20) as json_prefix, "
-                "length(ledger_json) as json_len "
-                "FROM public.balances WHERE npub = $1",
-                [npub],
-            )
-            rows = raw.get("rows", [])
-            result["_diag_neon_raw_rows"] = len(rows)
-            if rows:
-                result["_diag_neon_version"] = rows[0].get("version")
-                result["_diag_neon_last_flush"] = rows[0].get("last_flush")
-                result["_diag_neon_json_len"] = rows[0].get("json_len")
-                prefix = rows[0].get("json_prefix", "")
-                result["_diag_neon_encrypted"] = not prefix.startswith("{")
-                result["_diag_vault_has_cipher"] = v._cipher is not None
-                try:
-                    target_schema = await v._resolve_target_schema()
-                    result["_diag_resolved_schema"] = target_schema
-                except Exception as ts_exc:
-                    result["_diag_resolved_schema"] = f"ERROR: {ts_exc}"
-                # Key fingerprint — first 8 chars of SHA256 of the derived key (safe to expose)
-                if v._cipher is not None:
-                    import hashlib
-                    key_fp = hashlib.sha256(v._cipher._key).hexdigest()[:8]
-                    result["_diag_key_fingerprint"] = key_fp
-                # Which path created this vault?
-                result["_diag_vault_from_env"] = bool(os.environ.get("NEON_DATABASE_URL", ""))
-                # nsec source fingerprint — first 8 chars of SHA256 of nsec hex
-                try:
-                    nsec_hex = rt._get_nsec_hex()
-                    nsec_fp = hashlib.sha256(nsec_hex.encode()).hexdigest()[:8] if nsec_hex else "none"
-                    result["_diag_nsec_fingerprint"] = nsec_fp
-                except Exception:
-                    result["_diag_nsec_fingerprint"] = "error"
-                # Try fetch_ledger to see what it returns
-                try:
-                    fetched = await v.fetch_ledger(npub)
-                    result["_diag_fetch_ledger"] = "OK" if fetched else "None"
-                    if fetched:
-                        result["_diag_fetch_len"] = len(fetched)
-                except Exception as fetch_exc:
-                    result["_diag_fetch_ledger"] = f"ERROR({type(fetch_exc).__name__}): {fetch_exc}"
-                # Round-trip test: can this process encrypt and decrypt?
-                if v._cipher is not None:
-                    try:
-                        test_ct = v._cipher.encrypt('{"test":true}')
-                        test_pt = v._cipher.decrypt(test_ct)
-                        result["_diag_roundtrip"] = "OK" if test_pt == '{"test":true}' else "MISMATCH"
-                    except Exception as rt_exc:
-                        result["_diag_roundtrip"] = f"ERROR: {rt_exc}"
-
-                # Also try unqualified SELECT to see if search_path resolves
-                try:
-                    raw2 = await v._execute(
-                        "SELECT version FROM balances WHERE npub = $1", [npub]
-                    )
-                    result["_diag_unqualified_rows"] = len(raw2.get("rows", []))
-                except Exception as uq_exc:
-                    result["_diag_unqualified_error"] = f"{type(uq_exc).__name__}: {uq_exc}"
-        except Exception as exc:
-            result["_diag_neon_error"] = str(exc)
-        if npub in cache._entries:
-            entry = cache._entries[npub]
-            result["_diag_entry_dirty"] = entry.dirty
-            result["_diag_entry_balance"] = entry.ledger.balance_api_sats
-            result["_diag_entry_deposited"] = entry.ledger.total_deposited_api_sats
-        return result
+        return await credits.check_balance_tool(cache, npub)
 
     @tool
     async def purchase_credits(amount_sats: int = 1000, npub: str = "") -> dict[str, Any]:
@@ -1326,20 +1250,6 @@ def register_standard_tools(
         except Exception:
             courier_ok = False
 
-        # Vault diagnostic: endpoint hostname and search_path (no credentials)
-        vault_endpoint = None
-        vault_search_path = None
-        if rt._vault is not None and hasattr(rt._vault, '_endpoint'):
-            from urllib.parse import urlparse, parse_qs, unquote
-            parsed = urlparse(rt._vault._endpoint)
-            vault_endpoint = parsed.hostname
-            if hasattr(rt._vault, '_connection_string'):
-                conn_parsed = urlparse(rt._vault._connection_string)
-                params = parse_qs(conn_parsed.query)
-                options = params.get("options", [""])[0]
-                if "search_path=" in options:
-                    vault_search_path = options.split("search_path=", 1)[1].split("&")[0]
-
         wheel_version = "unknown"
         try:
             import importlib.metadata
@@ -1365,10 +1275,6 @@ def register_standard_tools(
             "tollbooth_dpyc_version": wheel_version,
             "vault_configured": vault_ok,
             "courier_has_vault": courier_ok,
-            "vault_endpoint": vault_endpoint,
-            "vault_search_path": vault_search_path,
-            "runtime_id": id(rt),
-            "vault_id": id(rt._vault) if rt._vault else None,
             "process_id": os.getpid(),
             "build_info": build_info or None,
         }

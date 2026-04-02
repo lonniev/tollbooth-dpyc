@@ -27,10 +27,14 @@ class ToolAclStore:
     def __init__(self, *, neon_vault: Any) -> None:
         self._neon = neon_vault
 
+    def _t(self, table: str) -> str:
+        """Schema-qualified table name via the underlying NeonVault."""
+        return self._neon._t(table)
+
     async def ensure_schema(self) -> None:
         """Create the ``tool_acls`` table and indexes."""
         await self._neon._execute(
-            "CREATE TABLE IF NOT EXISTS tool_acls ("
+            f"CREATE TABLE IF NOT EXISTS {self._t('tool_acls')} ("
             "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
             "    operator TEXT NOT NULL,"
             "    tool_pattern TEXT NOT NULL,"
@@ -42,7 +46,7 @@ class ToolAclStore:
         )
         await self._neon._execute(
             "CREATE INDEX IF NOT EXISTS idx_tool_acls_operator "
-            "ON tool_acls (operator)"
+            f"ON {self._t('tool_acls')} (operator)"
         )
 
     async def store_acl(
@@ -53,7 +57,7 @@ class ToolAclStore:
     ) -> str:
         """Store or update a signed ACL event. Returns the row ID."""
         result = await self._neon._execute(
-            "INSERT INTO tool_acls (operator, tool_pattern, signed_event_json) "
+            f"INSERT INTO {self._t('tool_acls')} (operator, tool_pattern, signed_event_json) "
             "VALUES ($1, $2, $3::jsonb) "
             "ON CONFLICT (operator, tool_pattern) DO UPDATE "
             "SET signed_event_json = EXCLUDED.signed_event_json, "
@@ -76,7 +80,7 @@ class ToolAclStore:
         Returns the signed_event_json string, or ``None`` if not found.
         """
         result = await self._neon._execute(
-            "SELECT signed_event_json FROM tool_acls "
+            f"SELECT signed_event_json FROM {self._t('tool_acls')} "
             "WHERE operator = $1 AND tool_pattern = $2",
             [operator, tool_pattern],
         )
@@ -96,8 +100,8 @@ class ToolAclStore:
         Returns ``[{tool_pattern, signed_event_json, updated_at}]``.
         """
         result = await self._neon._execute(
-            "SELECT tool_pattern, signed_event_json, updated_at "
-            "FROM tool_acls WHERE operator = $1 "
+            f"SELECT tool_pattern, signed_event_json, updated_at "
+            f"FROM {self._t('tool_acls')} WHERE operator = $1 "
             "ORDER BY tool_pattern",
             [operator],
         )
@@ -106,7 +110,7 @@ class ToolAclStore:
     async def delete_acl(self, operator: str, tool_pattern: str) -> bool:
         """Delete an ACL. Returns ``True`` if found and deleted."""
         result = await self._neon._execute(
-            "DELETE FROM tool_acls "
+            f"DELETE FROM {self._t('tool_acls')} "
             "WHERE operator = $1 AND tool_pattern = $2",
             [operator, tool_pattern],
         )
