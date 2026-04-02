@@ -1077,6 +1077,13 @@ def register_standard_tools(
         result["_diag_runtime_id"] = id(rt)
         result["_diag_vault_id"] = id(rt._vault) if rt._vault else None
         result["_diag_cache_id"] = id(cache)
+        result["_diag_cache_size"] = len(cache._entries)
+        result["_diag_npub_cached"] = npub in cache._entries
+        if npub in cache._entries:
+            entry = cache._entries[npub]
+            result["_diag_entry_dirty"] = entry.dirty
+            result["_diag_entry_balance"] = entry.ledger.balance_api_sats
+            result["_diag_entry_deposited"] = entry.ledger.total_deposited_api_sats
         return result
 
     @tool
