@@ -228,19 +228,26 @@ class NeonVault:
     # -- Schema management ---------------------------------------------------
 
     async def _resolve_target_schema(self) -> str | None:
-        """Return the first schema in the connection's search_path, or None.
+        """Return the operator's schema from the connection URL, or None.
 
-        Queries ``SHOW search_path`` to discover the effective schema.
-        If the search_path is ``op_xxx,public``, returns ``op_xxx``.
-        If it's just ``public`` or the default, returns None.
+        Parses the ``search_path`` from the connection string's ``options``
+        parameter directly — does NOT use ``SHOW search_path`` because
+        the Neon HTTP SQL API doesn't reflect per-connection options in
+        session variables.
+
+        If the search_path is ``op_xxx`` or ``op_xxx,public``, returns ``op_xxx``.
+        If there's no search_path or it's just ``public``, returns None.
         """
         try:
-            result = await self._execute("SHOW search_path")
-            rows = result.get("rows", [])
-            if rows:
-                sp = rows[0].get("search_path", "")
-                first = sp.split(",")[0].strip().strip('"')
-                if first and first != "public" and first != '"$user"':
+            from urllib.parse import parse_qs, unquote
+            conn_parsed = urlparse(self._connection_string)
+            params = parse_qs(conn_parsed.query)
+            options = params.get("options", [""])[0]
+            # options is like "-c search_path=op_xxx" or "-c search_path=op_xxx,public"
+            if "search_path=" in options:
+                sp = options.split("search_path=", 1)[1].split("&")[0].split()[0]
+                first = sp.split(",")[0].strip()
+                if first and first != "public":
                     return first
         except Exception:
             pass
