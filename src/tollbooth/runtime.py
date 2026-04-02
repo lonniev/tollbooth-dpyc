@@ -498,6 +498,12 @@ class OperatorRuntime:
         2. Bootstrap: can we reach the vault (Authority-provisioned Neon URL)?
         3. Operator credentials: are all operator_credential_template fields in vault?
         """
+        # Ensure courier has its credential vault (triggers late-attach on cold start)
+        try:
+            await self.courier()
+        except Exception:
+            pass
+
         # 1. Identity check
         identity_ok = False
         try:
@@ -611,6 +617,12 @@ class OperatorRuntime:
                 "credential_type": "none_or_dynamic",
                 "credential_service": "",
             }
+
+        # Ensure courier has its credential vault (triggers late-attach on cold start)
+        try:
+            await self.courier()
+        except Exception:
+            pass
 
         vault_creds = await self._load_vault_creds(
             self._patron_credential_template.service,
