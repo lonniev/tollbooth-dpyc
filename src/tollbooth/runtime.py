@@ -1098,6 +1098,11 @@ def register_standard_tools(
                 prefix = rows[0].get("json_prefix", "")
                 result["_diag_neon_encrypted"] = not prefix.startswith("{")
                 result["_diag_vault_has_cipher"] = v._cipher is not None
+                try:
+                    target_schema = await v._resolve_target_schema()
+                    result["_diag_resolved_schema"] = target_schema
+                except Exception as ts_exc:
+                    result["_diag_resolved_schema"] = f"ERROR: {ts_exc}"
                 # Key fingerprint — first 8 chars of SHA256 of the derived key (safe to expose)
                 if v._cipher is not None:
                     import hashlib
