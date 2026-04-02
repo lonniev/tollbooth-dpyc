@@ -1250,6 +1250,13 @@ def register_standard_tools(
         except Exception:
             courier_ok = False
 
+        # Vault diagnostic: endpoint hostname (safe to expose, no credentials)
+        vault_endpoint = None
+        if rt._vault is not None and hasattr(rt._vault, '_endpoint'):
+            from urllib.parse import urlparse
+            parsed = urlparse(rt._vault._endpoint)
+            vault_endpoint = parsed.hostname
+
         wheel_version = "unknown"
         try:
             import importlib.metadata
@@ -1268,16 +1275,18 @@ def register_standard_tools(
             if val:
                 build_info[key.lower()] = val
 
-        return {
+        result: dict[str, Any] = {
             "success": True,
             "service": service_name or slug,
             "version": service_version,
             "tollbooth_dpyc_version": wheel_version,
             "vault_configured": vault_ok,
             "courier_has_vault": courier_ok,
+            "vault_endpoint": vault_endpoint,
             "process_id": os.getpid(),
             "build_info": build_info or None,
         }
+        return result
 
     # -- Onboarding ----------------------------------------------------
 
