@@ -1261,12 +1261,19 @@ def register_standard_tools(
         except Exception:
             courier_ok = False
 
-        # Vault diagnostic: endpoint hostname (safe to expose, no credentials)
+        # Vault diagnostic: endpoint hostname and search_path (no credentials)
         vault_endpoint = None
+        vault_search_path = None
         if rt._vault is not None and hasattr(rt._vault, '_endpoint'):
-            from urllib.parse import urlparse
+            from urllib.parse import urlparse, parse_qs, unquote
             parsed = urlparse(rt._vault._endpoint)
             vault_endpoint = parsed.hostname
+            if hasattr(rt._vault, '_connection_string'):
+                conn_parsed = urlparse(rt._vault._connection_string)
+                params = parse_qs(conn_parsed.query)
+                options = params.get("options", [""])[0]
+                if "search_path=" in options:
+                    vault_search_path = options.split("search_path=", 1)[1].split("&")[0]
 
         wheel_version = "unknown"
         try:
@@ -1294,6 +1301,7 @@ def register_standard_tools(
             "vault_configured": vault_ok,
             "courier_has_vault": courier_ok,
             "vault_endpoint": vault_endpoint,
+            "vault_search_path": vault_search_path,
             "runtime_id": id(rt),
             "vault_id": id(rt._vault) if rt._vault else None,
             "process_id": os.getpid(),

@@ -85,6 +85,7 @@ class NeonVault:
         else:
             self._endpoint = f"https://{direct_hostname}/sql"
 
+        self._connection_string = direct_url  # exposed for diagnostics
         self._client = httpx.AsyncClient(
             headers={
                 "Neon-Connection-String": direct_url,
