@@ -59,43 +59,23 @@ class NeonVault:
     ) -> None:
         parsed = urlparse(database_url)
 
-        # Use the direct (non-pooler) endpoint for consistent read-after-write.
+        # Keep the pooler endpoint — Neon HTTP SQL API requires it.
+        # The direct (non-pooler) endpoint only supports Postgres wire protocol.
         hostname = parsed.hostname or ""
-        direct_hostname = hostname.replace("-pooler", "")
-        direct_url = database_url.replace(hostname, direct_hostname) if hostname != direct_hostname else database_url
-
-        # Ensure search_path includes 'public' as fallback. Operator schemas
-        # have credentials/anchors but balances/transactions live in public
-        # (created before per-schema isolation). Without this fallback,
-        # SELECT FROM balances fails with "relation does not exist".
-        from urllib.parse import parse_qs, urlencode, urlunparse
-        direct_parsed = urlparse(direct_url)
-        params = parse_qs(direct_parsed.query)
-        options_list = params.get("options", [])
-        if options_list:
-            opt = options_list[0]
-            if "search_path=" in opt and ",public" not in opt:
-                params["options"] = [opt + ",public"]
-                new_query = urlencode(params, doseq=True)
-                direct_url = urlunparse(direct_parsed._replace(query=new_query))
-                logger.info("Neon: appended public to search_path")
 
         if http_endpoint:
             self._endpoint = http_endpoint.rstrip("/")
         else:
-            self._endpoint = f"https://{direct_hostname}/sql"
+            self._endpoint = f"https://{hostname}/sql"
 
-        self._connection_string = direct_url  # exposed for diagnostics
+        self._connection_string = database_url  # exposed for diagnostics
         self._client = httpx.AsyncClient(
             headers={
-                "Neon-Connection-String": direct_url,
+                "Neon-Connection-String": database_url,
                 "Content-Type": "application/json",
             },
             timeout=30.0,
         )
-
-        if hostname != direct_hostname:
-            logger.info("Neon: using direct endpoint %s (stripped pooler from %s)", direct_hostname, hostname)
         self._version_cache: dict[str, int] = {}
 
         # Field encryption — if nsec provided, all stored values are AES-256-GCM encrypted.
