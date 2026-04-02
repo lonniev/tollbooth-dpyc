@@ -140,10 +140,13 @@ class NeonVault:
         # options, so we must qualify table names explicitly.
         if self._schema_prefix:
             import re as _re
+            # Only tables that were historically created in public and need
+            # explicit schema qualification. Do NOT include credentials or
+            # session_bindings — those are managed by NeonCredentialVault
+            # and were always created in the operator schema correctly.
             _tables = (
                 "balances", "transactions", "tool_demand", "anchors",
                 "operator_pricing_models", "tool_acls", "authority_config",
-                "credentials", "session_bindings",
             )
             for _tbl in _tables:
                 # Replace unqualified table names but not already-qualified ones
