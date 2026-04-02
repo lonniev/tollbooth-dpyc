@@ -247,13 +247,49 @@ class NeonVault:
 
     # -- Schema management ---------------------------------------------------
 
+    async def _resolve_target_schema(self) -> str | None:
+        """Return the first schema in the connection's search_path, or None.
+
+        Queries ``SHOW search_path`` to discover the effective schema.
+        If the search_path is ``op_xxx,public``, returns ``op_xxx``.
+        If it's just ``public`` or the default, returns None.
+        """
+        try:
+            result = await self._execute("SHOW search_path")
+            rows = result.get("rows", [])
+            if rows:
+                sp = rows[0].get("search_path", "")
+                first = sp.split(",")[0].strip().strip('"')
+                if first and first != "public" and first != '"$user"':
+                    return first
+        except Exception:
+            pass
+        return None
+
     async def ensure_schema(self) -> None:
         """Create the ``balances`` and ``transactions`` tables if they don't exist.
 
         Safe to call on every startup — uses ``IF NOT EXISTS``.
+
+        When the connection uses a per-operator schema (search_path=op_xxx,public),
+        tables must be created in the operator's schema explicitly. Otherwise
+        CREATE TABLE IF NOT EXISTS sees the table in ``public`` and skips,
+        leaving the operator's schema without its own tables.
         """
+        # Determine the target schema: first entry in search_path, or default
+        target_schema = await self._resolve_target_schema()
+
+        if target_schema and target_schema != "public":
+            # Ensure the operator's schema exists
+            await self._execute(f"CREATE SCHEMA IF NOT EXISTS {target_schema}")
+            prefix = f"{target_schema}."
+            idx_prefix = f"{target_schema}_"
+        else:
+            prefix = ""
+            idx_prefix = ""
+
         await self._execute(
-            "CREATE TABLE IF NOT EXISTS balances ("
+            f"CREATE TABLE IF NOT EXISTS {prefix}balances ("
             "    npub TEXT PRIMARY KEY,"
             "    ledger_json TEXT NOT NULL,"
             "    version INTEGER NOT NULL DEFAULT 1,"
@@ -262,7 +298,7 @@ class NeonVault:
             ")"
         )
         await self._execute(
-            "CREATE TABLE IF NOT EXISTS transactions ("
+            f"CREATE TABLE IF NOT EXISTS {prefix}transactions ("
             "    id BIGSERIAL PRIMARY KEY,"
             "    npub TEXT NOT NULL,"
             "    tx_type TEXT NOT NULL,"
@@ -275,16 +311,16 @@ class NeonVault:
             ")"
         )
         await self._execute(
-            "CREATE INDEX IF NOT EXISTS idx_transactions_npub "
-            "ON transactions(npub)"
+            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_transactions_npub "
+            f"ON {prefix}transactions(npub)"
         )
         await self._execute(
-            "CREATE INDEX IF NOT EXISTS idx_transactions_created "
-            "ON transactions(created_at)"
+            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_transactions_created "
+            f"ON {prefix}transactions(created_at)"
         )
         # -- Anchors table (OTS Bitcoin anchoring) --
         await self._execute(
-            "CREATE TABLE IF NOT EXISTS anchors ("
+            f"CREATE TABLE IF NOT EXISTS {prefix}anchors ("
             "    id BIGSERIAL PRIMARY KEY,"
             "    root_hash TEXT NOT NULL UNIQUE,"
             "    leaf_count INTEGER NOT NULL,"
@@ -297,16 +333,16 @@ class NeonVault:
             ")"
         )
         await self._execute(
-            "CREATE INDEX IF NOT EXISTS idx_anchors_created "
-            "ON anchors(created_at)"
+            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_anchors_created "
+            f"ON {prefix}anchors(created_at)"
         )
         await self._execute(
-            "CREATE INDEX IF NOT EXISTS idx_anchors_status "
-            "ON anchors(status)"
+            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_anchors_status "
+            f"ON {prefix}anchors(status)"
         )
         # -- Global demand counters (surge pricing) --
         await self._execute(
-            "CREATE TABLE IF NOT EXISTS tool_demand ("
+            f"CREATE TABLE IF NOT EXISTS {prefix}tool_demand ("
             "    tool_name TEXT NOT NULL,"
             "    window_key TEXT NOT NULL,"
             "    count INTEGER NOT NULL DEFAULT 0,"
@@ -315,7 +351,7 @@ class NeonVault:
         )
         # -- Authority configuration (curator npub, onboarding state) --
         await self._execute(
-            "CREATE TABLE IF NOT EXISTS authority_config ("
+            f"CREATE TABLE IF NOT EXISTS {prefix}authority_config ("
             "    key TEXT PRIMARY KEY,"
             "    value TEXT NOT NULL,"
             "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()"
@@ -323,7 +359,7 @@ class NeonVault:
         )
         # -- Operator pricing models (runtime-configurable tool pricing) --
         await self._execute(
-            "CREATE TABLE IF NOT EXISTS operator_pricing_models ("
+            f"CREATE TABLE IF NOT EXISTS {prefix}operator_pricing_models ("
             "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
             "    operator TEXT NOT NULL,"
             "    name TEXT NOT NULL,"
@@ -334,16 +370,16 @@ class NeonVault:
             ")"
         )
         await self._execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS one_active_per_operator "
-            "ON operator_pricing_models (operator) WHERE is_active = true"
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {idx_prefix}one_active_per_operator "
+            f"ON {prefix}operator_pricing_models (operator) WHERE is_active = true"
         )
         await self._execute(
-            "CREATE INDEX IF NOT EXISTS idx_pricing_models_operator "
-            "ON operator_pricing_models (operator)"
+            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_pricing_models_operator "
+            f"ON {prefix}operator_pricing_models (operator)"
         )
         # -- Tool ACLs (Nostr-signed per-tool authorization) --
         await self._execute(
-            "CREATE TABLE IF NOT EXISTS tool_acls ("
+            f"CREATE TABLE IF NOT EXISTS {prefix}tool_acls ("
             "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
             "    operator TEXT NOT NULL,"
             "    tool_pattern TEXT NOT NULL,"
@@ -354,8 +390,8 @@ class NeonVault:
             ")"
         )
         await self._execute(
-            "CREATE INDEX IF NOT EXISTS idx_tool_acls_operator "
-            "ON tool_acls (operator)"
+            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_tool_acls_operator "
+            f"ON {prefix}tool_acls (operator)"
         )
 
     # -- Global demand counters (surge pricing) --------------------------------
