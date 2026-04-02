@@ -59,18 +59,28 @@ class NeonVault:
     ) -> None:
         parsed = urlparse(database_url)
 
+        # Use the direct (non-pooler) endpoint for consistent read-after-write.
+        # Neon pooler endpoints use PgBouncer in transaction mode which can
+        # route reads to stale replicas. Strip "-pooler" to hit the primary.
+        hostname = parsed.hostname or ""
+        direct_hostname = hostname.replace("-pooler", "")
+        direct_url = database_url.replace(hostname, direct_hostname) if hostname != direct_hostname else database_url
+
         if http_endpoint:
             self._endpoint = http_endpoint.rstrip("/")
         else:
-            self._endpoint = f"https://{parsed.hostname}/sql"
+            self._endpoint = f"https://{direct_hostname}/sql"
 
         self._client = httpx.AsyncClient(
             headers={
-                "Neon-Connection-String": database_url,
+                "Neon-Connection-String": direct_url,
                 "Content-Type": "application/json",
             },
             timeout=30.0,
         )
+
+        if hostname != direct_hostname:
+            logger.info("Neon: using direct endpoint %s (stripped pooler from %s)", direct_hostname, hostname)
         self._version_cache: dict[str, int] = {}
 
         # Field encryption — if nsec provided, all stored values are AES-256-GCM encrypted.
