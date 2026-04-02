@@ -1073,7 +1073,11 @@ def register_standard_tools(
         except ValueError as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        return await credits.check_balance_tool(cache, npub)
+        result = await credits.check_balance_tool(cache, npub)
+        result["_diag_runtime_id"] = id(rt)
+        result["_diag_vault_id"] = id(rt._vault) if rt._vault else None
+        result["_diag_cache_id"] = id(cache)
+        return result
 
     @tool
     async def purchase_credits(amount_sats: int = 1000, npub: str = "") -> dict[str, Any]:
@@ -1283,6 +1287,8 @@ def register_standard_tools(
             "vault_configured": vault_ok,
             "courier_has_vault": courier_ok,
             "vault_endpoint": vault_endpoint,
+            "runtime_id": id(rt),
+            "vault_id": id(rt._vault) if rt._vault else None,
             "process_id": os.getpid(),
             "build_info": build_info or None,
         }
