@@ -1098,6 +1098,20 @@ def register_standard_tools(
                 prefix = rows[0].get("json_prefix", "")
                 result["_diag_neon_encrypted"] = not prefix.startswith("{")
                 result["_diag_vault_has_cipher"] = v._cipher is not None
+                # Key fingerprint — first 8 chars of SHA256 of the derived key (safe to expose)
+                if v._cipher is not None:
+                    import hashlib
+                    key_fp = hashlib.sha256(v._cipher._key).hexdigest()[:8]
+                    result["_diag_key_fingerprint"] = key_fp
+                # Which path created this vault?
+                result["_diag_vault_from_env"] = bool(os.environ.get("NEON_DATABASE_URL", ""))
+                # nsec source fingerprint — first 8 chars of SHA256 of nsec hex
+                try:
+                    nsec_hex = rt._get_nsec_hex()
+                    nsec_fp = hashlib.sha256(nsec_hex.encode()).hexdigest()[:8] if nsec_hex else "none"
+                    result["_diag_nsec_fingerprint"] = nsec_fp
+                except Exception:
+                    result["_diag_nsec_fingerprint"] = "error"
                 # Try fetch_ledger to see what it returns
                 try:
                     fetched = await v.fetch_ledger(npub)
@@ -1106,6 +1120,15 @@ def register_standard_tools(
                         result["_diag_fetch_len"] = len(fetched)
                 except Exception as fetch_exc:
                     result["_diag_fetch_ledger"] = f"ERROR({type(fetch_exc).__name__}): {fetch_exc}"
+                # Round-trip test: can this process encrypt and decrypt?
+                if v._cipher is not None:
+                    try:
+                        test_ct = v._cipher.encrypt('{"test":true}')
+                        test_pt = v._cipher.decrypt(test_ct)
+                        result["_diag_roundtrip"] = "OK" if test_pt == '{"test":true}' else "MISMATCH"
+                    except Exception as rt_exc:
+                        result["_diag_roundtrip"] = f"ERROR: {rt_exc}"
+
                 # Also try unqualified SELECT to see if search_path resolves
                 try:
                     raw2 = await v._execute(
