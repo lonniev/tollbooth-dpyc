@@ -330,8 +330,14 @@ class OperatorRuntime:
                     await cv.ensure_schema()
                     self._courier._exchange._credential_vault = cv
                     logger.info("Attached credential vault to courier (late init)")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Credential vault late-attach failed: %s", exc)
+            elif (hasattr(self._courier, '_exchange')
+                    and self._courier._exchange._credential_vault is None):
+                logger.debug(
+                    "Courier has no credential vault; vault ready=%s",
+                    self._vault is not None,
+                )
             return self._courier
 
         nsec = self._get_nsec()
@@ -353,8 +359,9 @@ class OperatorRuntime:
             from tollbooth.vaults.neon import NeonCredentialVault
             credential_vault = NeonCredentialVault(neon_vault=v)
             await credential_vault.ensure_schema()
+            logger.info("Credential vault initialized (NeonCredentialVault)")
         except Exception as exc:
-            logger.warning("No persistent credential vault: %s", exc)
+            logger.warning("No persistent credential vault (%s): %s", type(exc).__name__, exc)
 
         templates = {}
         if self._operator_credential_template:
@@ -649,9 +656,28 @@ class OperatorRuntime:
         try:
             from tollbooth.tools.onboarding import load_vault_credentials
             courier = await self.courier()
+            if courier is None:
+                logger.debug("No courier available for credential load (service=%s)", service)
+                return {}
+            has_vault = (hasattr(courier, '_exchange')
+                         and courier._exchange._credential_vault is not None)
+            if not has_vault:
+                logger.warning(
+                    "Courier has no credential vault — cannot load credentials "
+                    "(service=%s, npub=%s)",
+                    service, (npub_override or "operator")[:20],
+                )
+                return {}
             npub = npub_override or self.operator_npub()
-            return await load_vault_credentials(courier, service, npub) or {}
-        except Exception:
+            result = await load_vault_credentials(courier, service, npub)
+            if result:
+                logger.info("Loaded %d credential fields for %s (service=%s)",
+                            len(result), npub[:20], service)
+            else:
+                logger.info("No credentials found for %s (service=%s)", npub[:20], service)
+            return result or {}
+        except Exception as exc:
+            logger.warning("Credential vault load failed (%s): %s", type(exc).__name__, exc)
             return {}
 
     async def load_credentials(
@@ -1203,9 +1229,14 @@ def register_standard_tools(
         """Check the health and configuration of this service. Free."""
         import os
         vault_ok = rt._vault is not None
-        courier_ok = (rt._courier is not None
-                      and hasattr(rt._courier, '_exchange')
-                      and rt._courier._exchange._credential_vault is not None)
+        # Trigger late-attach of credential vault if courier exists without one
+        try:
+            c = await rt.courier()
+            courier_ok = (c is not None
+                          and hasattr(c, '_exchange')
+                          and c._exchange._credential_vault is not None)
+        except Exception:
+            courier_ok = False
 
         wheel_version = "unknown"
         try:
