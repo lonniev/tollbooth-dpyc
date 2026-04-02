@@ -1105,7 +1105,15 @@ def register_standard_tools(
                     if fetched:
                         result["_diag_fetch_len"] = len(fetched)
                 except Exception as fetch_exc:
-                    result["_diag_fetch_ledger"] = f"ERROR: {fetch_exc}"
+                    result["_diag_fetch_ledger"] = f"ERROR({type(fetch_exc).__name__}): {fetch_exc}"
+                # Also try unqualified SELECT to see if search_path resolves
+                try:
+                    raw2 = await v._execute(
+                        "SELECT version FROM balances WHERE npub = $1", [npub]
+                    )
+                    result["_diag_unqualified_rows"] = len(raw2.get("rows", []))
+                except Exception as uq_exc:
+                    result["_diag_unqualified_error"] = f"{type(uq_exc).__name__}: {uq_exc}"
         except Exception as exc:
             result["_diag_neon_error"] = str(exc)
         if npub in cache._entries:
