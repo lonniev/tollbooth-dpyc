@@ -270,14 +270,18 @@ async def check_payment_tool(
                 btcpay_status=status,
             )
             cache.mark_dirty(user_id)
-            if not await cache.flush_user(user_id):
+            flush_ok = await cache.flush_user(user_id)
+            if not flush_ok:
                 logger.error(
                     "CRITICAL: Failed to flush %d credits for %s (invoice %s). "
                     "Credits are in memory but may be lost on restart.",
                     credited, user_id, invoice_id,
                 )
             result["credits_granted"] = credited
+            result["persisted"] = flush_ok
             result["message"] = f"Payment settled! {credited:,} credits added to your balance."
+            if not flush_ok:
+                result["warning"] = "Credits added but vault flush failed — may not survive restart."
 
     elif status == "Expired":
         if invoice_id in ledger.pending_invoices:
@@ -393,15 +397,17 @@ async def restore_credits_tool(
         credited = vault_record.api_sats_credited
         ledger.credit_deposit(credited, invoice_id, ttl_seconds=default_credit_ttl_seconds)
         cache.mark_dirty(user_id)
-        if not await cache.flush_user(user_id):
+        flush_ok = await cache.flush_user(user_id)
+        if not flush_ok:
             logger.error(
                 "CRITICAL: Failed to flush vault-restored %d credits for %s (invoice %s).",
                 credited, user_id, invoice_id,
             )
         return {
-            "success": True,
+            "success": flush_ok,
             "invoice_id": invoice_id,
             "source": "vault_record",
+            "persisted": flush_ok,
             "amount_sats": vault_record.amount_sats,
             "credits_granted": credited,
             "balance_api_sats": ledger.balance_api_sats,
@@ -440,6 +446,17 @@ async def restore_credits_tool(
             "CRITICAL: Failed to flush restored %d credits for %s (invoice %s).",
             credited, user_id, invoice_id,
         )
+        return {
+            "success": False,
+            "error": (
+                f"Credits restored in memory but failed to persist to vault. "
+                f"The {credited:,} credits will be lost on next restart. "
+                f"Retry restore_credits to attempt the vault write again."
+            ),
+            "invoice_id": invoice_id,
+            "credits_granted": credited,
+            "persisted": False,
+        }
 
     return {
         "success": True,
@@ -448,6 +465,7 @@ async def restore_credits_tool(
         "amount_sats": amount_sats,
         "credits_granted": credited,
         "balance_api_sats": ledger.balance_api_sats,
+        "persisted": True,
         "message": f"Restored {credited:,} credits from invoice {invoice_id}.",
     }
 
