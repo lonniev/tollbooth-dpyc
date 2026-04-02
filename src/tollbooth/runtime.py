@@ -1079,6 +1079,20 @@ def register_standard_tools(
         result["_diag_cache_id"] = id(cache)
         result["_diag_cache_size"] = len(cache._entries)
         result["_diag_npub_cached"] = npub in cache._entries
+        # Raw Neon diagnostic — bypass cache and search_path
+        try:
+            v = await rt.vault()
+            raw = await v._execute(
+                "SELECT npub, version, last_flush FROM public.balances WHERE npub = $1",
+                [npub],
+            )
+            rows = raw.get("rows", [])
+            result["_diag_neon_raw_rows"] = len(rows)
+            if rows:
+                result["_diag_neon_version"] = rows[0].get("version")
+                result["_diag_neon_last_flush"] = rows[0].get("last_flush")
+        except Exception as exc:
+            result["_diag_neon_error"] = str(exc)
         if npub in cache._entries:
             entry = cache._entries[npub]
             result["_diag_entry_dirty"] = entry.dirty
