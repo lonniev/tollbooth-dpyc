@@ -69,6 +69,23 @@ class NeonVault:
             self._endpoint = f"https://{hostname}/sql"
 
         self._connection_string = database_url  # exposed for diagnostics
+
+        # Resolve operator schema prefix for schema-qualified queries.
+        # The Neon HTTP SQL API doesn't honor the options search_path from
+        # the connection string, so ALL table references must be explicit.
+        self._schema_prefix = ""
+        try:
+            from urllib.parse import parse_qs as _pqs
+            _params = _pqs(parsed.query)
+            _options = _params.get("options", [""])[0]
+            if "search_path=" in _options:
+                _sp = _options.split("search_path=", 1)[1].split("&")[0].split()[0]
+                _first = _sp.split(",")[0].strip()
+                if _first and _first != "public":
+                    self._schema_prefix = f"{_first}."
+                    logger.info("Neon: schema prefix = %s", self._schema_prefix)
+        except Exception:
+            pass
         self._client = httpx.AsyncClient(
             headers={
                 "Neon-Connection-String": database_url,
@@ -101,6 +118,10 @@ class NeonVault:
         """Close the underlying HTTP client."""
         await self._client.aclose()
 
+    def _t(self, table: str) -> str:
+        """Return schema-qualified table name."""
+        return f"{self._schema_prefix}{table}"
+
     # -- SQL helpers ---------------------------------------------------------
 
     async def _execute(
@@ -114,6 +135,23 @@ class NeonVault:
         Raises ``NeonQueryError`` on SQL errors, ``httpx.HTTPStatusError``
         on transport errors.
         """
+        # Apply schema prefix to all known table names in the query.
+        # The Neon HTTP SQL API ignores the search_path from the connection
+        # options, so we must qualify table names explicitly.
+        if self._schema_prefix:
+            import re as _re
+            _tables = (
+                "balances", "transactions", "tool_demand", "anchors",
+                "operator_pricing_models", "tool_acls", "authority_config",
+                "credentials", "session_bindings",
+            )
+            for _tbl in _tables:
+                # Replace unqualified table names but not already-qualified ones
+                query = _re.sub(
+                    rf"(?<![.\w]){_tbl}(?![.\w])",
+                    f"{self._schema_prefix}{_tbl}",
+                    query,
+                )
         body = {"query": query, "params": params or []}
         resp = await self._client.post(self._endpoint, json=body)
         resp.raise_for_status()
@@ -161,7 +199,7 @@ class NeonVault:
 
         # Full UPSERT — handles both first-time inserts and conflict recovery
         result = await self._execute(
-            "INSERT INTO balances (npub, ledger_json, version, last_flush, created_at) "
+            "INSERT INTO balances(npub, ledger_json, version, last_flush, created_at) "
             "VALUES ($1, $2, 1, now(), now()) "
             "ON CONFLICT (npub) DO UPDATE "
             "SET ledger_json = EXCLUDED.ledger_json, "
