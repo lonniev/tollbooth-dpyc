@@ -106,11 +106,13 @@ class OperatorRuntime:
 
         # Lazy singletons
         self._vault: Any | None = None
+        self._vault_ready_at: float = 0.0  # time.monotonic() when vault first became ready
         self._ledger_cache: Any | None = None
         self._courier: Any | None = None
         self._cashier: Any | None = None
         self._operator_npub: str | None = None
         self._nsec: str | None = None
+        self._reconciled_npubs: set[str] = set()  # dedup auto-reconciliation
 
         # Shutdown state
         self._shutdown_triggered: bool = False
@@ -267,6 +269,7 @@ class OperatorRuntime:
         if self._vault is not None:
             return self._vault
 
+        import time as _time
         from tollbooth.vaults import NeonVault
 
         # Try env var first (legacy)
@@ -278,6 +281,7 @@ class OperatorRuntime:
                 encryption_nsec_hex=nsec_hex,
             )
             await self._vault.ensure_schema()
+            self._vault_ready_at = _time.monotonic()
             return self._vault
 
         # Bootstrap from Authority
@@ -294,6 +298,7 @@ class OperatorRuntime:
             encryption_nsec_hex=result.encryption_nsec_hex,
         )
         await self._vault.ensure_schema()
+        self._vault_ready_at = _time.monotonic()
         logger.info("Vault bootstrapped from Authority (encrypted)")
         return self._vault
 
@@ -421,6 +426,31 @@ class OperatorRuntime:
                 return denial
 
         ledger = await cache.get(npub)
+
+        # Auto-reconcile pending invoices on first access per npub
+        # (settles paid invoices that were lost on cold start)
+        if npub not in self._reconciled_npubs and ledger.pending_invoices:
+            self._reconciled_npubs.add(npub)
+            try:
+                cashier = await self.ensure_cashier()
+                ttl = await self.resolve_credit_ttl()
+                from tollbooth.tools.credits import reconcile_pending_invoices
+                recon = await reconcile_pending_invoices(
+                    cashier, cache, npub,
+                    default_credit_ttl_seconds=ttl,
+                )
+                if recon.get("reconciled", 0) > 0:
+                    logger.info(
+                        "Auto-reconciled %d invoice(s) for %s on cold start",
+                        recon["reconciled"], npub[:20],
+                    )
+                    # Re-read ledger after reconciliation
+                    ledger = await cache.get(npub)
+            except Exception as exc:
+                logger.debug("Auto-reconciliation skipped for %s: %s", npub[:20], exc)
+        elif npub not in self._reconciled_npubs:
+            self._reconciled_npubs.add(npub)
+
         if ledger.balance_api_sats < effective_cost:
             return {
                 "success": False,
@@ -1286,7 +1316,19 @@ def register_standard_tools(
                     "detail": exc_str,
                 }
 
-        # 3. Fully ready
+        # 3. Check if vault just finished bootstrapping (< 15s ago)
+        import time as _time
+        if rt._vault_ready_at > 0 and (_time.monotonic() - rt._vault_ready_at) < 15:
+            return {
+                "success": True,
+                "lifecycle": "warming_up",
+                "operator_npub": npub,
+                "message": "Operator vault just came online. Credential "
+                           "and ledger caches are still hydrating. "
+                           "Try a tool call — it will complete the warm-up.",
+            }
+
+        # 4. Fully ready
         return {
             "success": True,
             "lifecycle": "ready",
