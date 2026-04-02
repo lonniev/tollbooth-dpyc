@@ -1083,7 +1083,10 @@ def register_standard_tools(
         try:
             v = await rt.vault()
             raw = await v._execute(
-                "SELECT npub, version, last_flush FROM public.balances WHERE npub = $1",
+                "SELECT npub, version, last_flush, "
+                "left(ledger_json, 20) as json_prefix, "
+                "length(ledger_json) as json_len "
+                "FROM public.balances WHERE npub = $1",
                 [npub],
             )
             rows = raw.get("rows", [])
@@ -1091,6 +1094,18 @@ def register_standard_tools(
             if rows:
                 result["_diag_neon_version"] = rows[0].get("version")
                 result["_diag_neon_last_flush"] = rows[0].get("last_flush")
+                result["_diag_neon_json_len"] = rows[0].get("json_len")
+                prefix = rows[0].get("json_prefix", "")
+                result["_diag_neon_encrypted"] = not prefix.startswith("{")
+                result["_diag_vault_has_cipher"] = v._cipher is not None
+                # Try fetch_ledger to see what it returns
+                try:
+                    fetched = await v.fetch_ledger(npub)
+                    result["_diag_fetch_ledger"] = "OK" if fetched else "None"
+                    if fetched:
+                        result["_diag_fetch_len"] = len(fetched)
+                except Exception as fetch_exc:
+                    result["_diag_fetch_ledger"] = f"ERROR: {fetch_exc}"
         except Exception as exc:
             result["_diag_neon_error"] = str(exc)
         if npub in cache._entries:
