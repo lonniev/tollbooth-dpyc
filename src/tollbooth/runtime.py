@@ -1605,6 +1605,32 @@ def register_standard_tools(
         """Get active network advisories from the Oracle. Free."""
         return await _call_oracle(rt, "network_advisory")
 
+    # -- Authority delegation -------------------------------------------
+
+    @tool
+    async def check_authority_balance() -> dict[str, Any]:
+        """Check this operator's tax balance at the Authority.
+
+        Returns the sats available for certifying patron credit purchases.
+        When this balance reaches zero, patron top-ups cannot be certified
+        and the operator must call purchase_credits on the Authority.
+
+        This is the operator's own funding — not a patron balance. Free.
+        """
+        try:
+            from tollbooth.authority_client import AuthorityCertifier
+            from tollbooth.registry import resolve_authority_service
+            auth_info = await resolve_authority_service(rt.operator_npub())
+            certifier = AuthorityCertifier(
+                auth_info["url"], rt.operator_npub(),
+            )
+            return await certifier.check_balance()
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Authority balance check failed: {e}",
+            }
+
     # -- Pricing CRUD --------------------------------------------------
 
     @tool

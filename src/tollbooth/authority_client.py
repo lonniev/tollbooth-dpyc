@@ -116,3 +116,47 @@ class AuthorityCertifier:
         raise AuthorityCertifyError(
             f"Authority returned unexpected response format: {result}"
         )
+
+    async def check_balance(self) -> dict[str, Any]:
+        """Call the Authority's check_balance tool for this operator.
+
+        Returns the operator's tax balance at the Authority — the sats
+        available for certifying patron purchases.
+        """
+        if Client is None:
+            raise AuthorityCertifyError("fastmcp package required")
+
+        try:
+            async with Client(self._authority_url, auth="oauth") as client:
+                result = await client.call_tool(
+                    "authority_check_balance",
+                    {"npub": self._operator_npub},
+                )
+        except Exception as e:
+            raise AuthorityCertifyError(
+                f"Failed to check balance at Authority: {e}"
+            ) from e
+
+        return self._parse_balance(result)
+
+    def _parse_balance(self, result: Any) -> dict[str, Any]:
+        """Extract the balance dict from the MCP tool result."""
+        import json
+
+        if isinstance(result, list):
+            for block in result:
+                if hasattr(block, "text"):
+                    try:
+                        data = json.loads(block.text)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if isinstance(data, dict) and "success" in data:
+                        return data
+
+        if hasattr(result, "content") and isinstance(result.content, list):
+            return self._parse_balance(result.content)
+
+        if isinstance(result, dict):
+            return result
+
+        return {"success": False, "error": f"Unexpected response: {result}"}
