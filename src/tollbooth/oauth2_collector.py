@@ -34,6 +34,31 @@ class OAuthCollectorError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# PKCE helpers
+# ---------------------------------------------------------------------------
+
+
+def generate_pkce_pair() -> tuple[str, str]:
+    """Generate a PKCE code_verifier and code_challenge (S256).
+
+    Returns:
+        (code_verifier, code_challenge) tuple. The verifier is a
+        cryptographically random 128-char URL-safe string. The challenge
+        is its SHA-256 hash, base64url-encoded without padding.
+    """
+    import secrets
+    verifier = secrets.token_urlsafe(96)[:128]
+    challenge = (
+        base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode("ascii")).digest()
+        )
+        .decode("ascii")
+        .rstrip("=")
+    )
+    return verifier, challenge
+
+
+# ---------------------------------------------------------------------------
 # URL builder
 # ---------------------------------------------------------------------------
 
@@ -135,6 +160,8 @@ async def exchange_code_for_token(
     client_secret: str,
     redirect_uri: str,
     token_endpoint: str,
+    *,
+    code_verifier: str | None = None,
 ) -> dict:
     """Exchange an authorization code for an access/refresh token pair.
 
@@ -148,12 +175,57 @@ async def exchange_code_for_token(
         client_secret: OAuth2 client secret.
         redirect_uri: Redirect URI used during authorization.
         token_endpoint: Provider's token endpoint URL.
+        code_verifier: PKCE code_verifier (required for PKCE flows).
 
     Returns:
         Token dict with ``access_token``, ``refresh_token``, ``expires_at``, etc.
 
     Raises:
         httpx.HTTPStatusError: If the token endpoint returns an error status.
+    """
+    credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+
+    body: dict[str, str] = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    if code_verifier:
+        body["code_verifier"] = code_verifier
+
+    async with httpx.AsyncClient() as http:
+        resp = await http.post(
+            token_endpoint,
+            headers={
+                "Authorization": f"Basic {credentials}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            content=urllib.parse.urlencode(body),
+        )
+        resp.raise_for_status()
+        token = resp.json()
+
+    token["expires_at"] = time.time() + token.get("expires_in", 1800)
+    return token
+
+
+async def refresh_access_token(
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+    token_endpoint: str,
+) -> dict:
+    """Refresh an expired access token using a refresh token.
+
+    Args:
+        client_id: OAuth2 client / app key.
+        client_secret: OAuth2 client secret.
+        refresh_token: The refresh token from the original authorization.
+        token_endpoint: Provider's token endpoint URL.
+
+    Returns:
+        New token dict with ``access_token``, ``expires_at``, and
+        optionally a rotated ``refresh_token``.
     """
     credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
 
@@ -165,9 +237,8 @@ async def exchange_code_for_token(
                 "Content-Type": "application/x-www-form-urlencoded",
             },
             content=urllib.parse.urlencode({
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
             }),
         )
         resp.raise_for_status()
