@@ -1046,12 +1046,17 @@ def register_standard_tools(
 
     @tool
     async def check_balance(npub: str = "") -> dict[str, Any]:
-        """Check your current credit balance and usage summary.
+        """Check a patron's credit balance at this operator.
+
+        This is the patron's spending balance — credits purchased via
+        Lightning for tool calls at this operator. For the operator's
+        own balance at the Authority (needed to certify patron purchases),
+        use authority_check_balance instead.
 
         Free — no credits required.
 
         Args:
-            npub: Required. Your Nostr public key (npub1...).
+            npub: Required. The patron's Nostr public key (npub1...).
         """
         try:
             npub = resolve_npub(npub)
@@ -1166,14 +1171,17 @@ def register_standard_tools(
 
     @tool
     async def account_statement(npub: str = "", days: int = 30) -> dict[str, Any]:
-        """Generate a customer-facing account statement with purchase history and usage.
+        """Generate a patron's account statement at this operator.
 
-        Returns account summary, invoice line items, active credit tranches,
-        all-time per-tool usage breakdown, and recent daily usage logs.
+        Returns the patron's purchase history, active credit tranches,
+        per-tool usage breakdown, and recent daily usage logs. This is
+        the patron's spending account — not the operator's Authority
+        tax balance.
+
         Free — no credits consumed.
 
         Args:
-            npub: Required. Your Nostr public key (npub1...).
+            npub: Required. The patron's Nostr public key (npub1...).
             days: Number of days of daily usage history to include (default 30).
         """
         try:
