@@ -38,6 +38,7 @@ from tollbooth.constraints.pricing import (
     HappyHourConstraint,
     LoyaltyDiscountConstraint,
 )
+from tollbooth.constraints.patron_proof import PatronProofConstraint
 from tollbooth.constraints.supply import FiniteSupplyConstraint
 from tollbooth.constraints.surge import SurgePricingConstraint
 from tollbooth.constraints.temporal import TemporalWindowConstraint
@@ -64,6 +65,7 @@ __all__ = [
     "HappyHourConstraint",
     "JsonExpressionConstraint",
     "SurgePricingConstraint",
+    "PatronProofConstraint",
     "DemurrageConstraint",
     # Engine
     "ConstraintEngine",

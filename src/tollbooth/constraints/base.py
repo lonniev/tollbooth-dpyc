@@ -61,6 +61,7 @@ class ConstraintContext:
     ledger: LedgerSnapshot
     patron: PatronIdentity
     env: EnvironmentSnapshot
+    patron_proof: str = ""  # Signed Nostr event JSON for identity verification
 
 
 # ---------------------------------------------------------------------------

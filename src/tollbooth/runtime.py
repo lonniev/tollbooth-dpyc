@@ -373,6 +373,7 @@ class OperatorRuntime:
         npub: str,
         *,
         operator_proof: str = "",
+        patron_proof: str = "",
     ) -> dict[str, Any] | None:
         """Check balance and debit credits for a paid tool call.
 
@@ -414,6 +415,7 @@ class OperatorRuntime:
                 base_cost=cost,
                 ledger=ledger,
                 npub=npub,
+                patron_proof=patron_proof,
             )
             if denial:
                 return denial

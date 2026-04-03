@@ -22,6 +22,7 @@ from tollbooth.constraints.pricing import (
     LoyaltyDiscountConstraint,
 )
 from tollbooth.constraints.supply import FiniteSupplyConstraint
+from tollbooth.constraints.patron_proof import PatronProofConstraint
 from tollbooth.constraints.surge import SurgePricingConstraint
 from tollbooth.constraints.temporal import TemporalWindowConstraint
 
@@ -42,6 +43,7 @@ CONSTRAINT_REGISTRY: dict[str, type[ToolConstraint]] = {
     "json_expression": JsonExpressionConstraint,
     "surge_pricing": SurgePricingConstraint,
     "demurrage": DemurrageConstraint,
+    "patron_proof": PatronProofConstraint,
 }
 
 

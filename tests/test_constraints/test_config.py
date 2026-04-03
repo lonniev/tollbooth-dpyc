@@ -53,6 +53,7 @@ class TestConstraintRegistry:
             "json_expression",
             "surge_pricing",
             "demurrage",
+            "patron_proof",
         }
         assert set(CONSTRAINT_REGISTRY.keys()) == expected
 
