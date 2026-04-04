@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from tollbooth.tool_identity import (
-    DPYC_NAMESPACE,
     STANDARD_IDENTITIES,
     ToolIdentity,
     capability_uuid,
