@@ -1,8 +1,5 @@
 """Constants for Tollbooth micropayment gating."""
 
-from enum import IntEnum
-
-
 MAX_INVOICE_SATS = 1_000_000  # 0.01 BTC cap per invoice
 LOW_BALANCE_FLOOR_API_SATS = 100  # minimum warning threshold
 
@@ -19,19 +16,3 @@ ECOSYSTEM_LINKS: dict[str, str] = {
     "tollbooth_sample": "https://github.com/lonniev/tollbooth-sample",
     "dpyc_oracle_mcp": "https://dpyc-oracle.fastmcp.app/mcp",
 }
-
-
-class ToolTier(IntEnum):
-    """Cost tiers for tool-call metering (satoshis per call).
-
-    RESTRICTED is a special access tier (not a cost tier): the tool is
-    visible/listed but only callable by the operator npub.  Calls from
-    any other identity are rejected.  In STDIO mode (local dev) the
-    restriction is not enforced.
-    """
-
-    RESTRICTED = -1  # operator-only access; cost = 0 for the operator
-    FREE = 0
-    READ = 1
-    WRITE = 5
-    HEAVY = 10

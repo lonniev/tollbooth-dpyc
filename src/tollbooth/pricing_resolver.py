@@ -1,8 +1,10 @@
-"""Pricing resolver — runtime cost lookup with TTL cache and graceful fallback.
+"""Pricing resolver — runtime cost lookup with TTL cache.
 
 The resolver is the integration point MCP servers use to get dynamic tool
 pricing.  It checks the active pricing model from Neon, caches it in
-memory, and falls back to a static dict on cache miss or Neon failure.
+memory, and returns 0 on cache miss or Neon failure.
+
+All lookups are by ``tool_id`` (UUID), not tool name.
 """
 
 from __future__ import annotations
@@ -28,9 +30,6 @@ class PricingResolver:
         ``fetch_active_model(operator) -> PricingModel | None``).
     operator:
         The operator identifier (npub) whose active model to resolve.
-    fallback_costs:
-        Static ``{tool_name: cost}`` dict used when no active model
-        exists or Neon is unreachable.
     cache_ttl:
         Time-to-live in seconds for the in-memory cache (default 300).
     """
@@ -40,16 +39,15 @@ class PricingResolver:
         *,
         store: Any,
         operator: str,
-        fallback_costs: dict[str, int] | None = None,
         cache_ttl: float = 300.0,
     ) -> None:
         self._store = store
         self._operator = operator
-        self._fallback_costs = fallback_costs or {}
         self._cache_ttl = cache_ttl
 
         self._cached_model: PricingModel | None = None
         self._cached_cost_map: dict[str, int] | None = None
+        self._cached_tool_ids: set[str] | None = None
         self._cached_engine: ConstraintEngine | None = None
         # Initialize to negative infinity so the first _is_stale() always
         # returns True — even if time.monotonic() is small (fresh CI runner).
@@ -68,6 +66,7 @@ class PricingResolver:
             self._cached_model = model
             if model is not None:
                 self._cached_cost_map = model.tool_cost_map()
+                self._cached_tool_ids = model.tool_id_set()
                 constraint_cfg = model.to_constraint_config()
                 if constraint_cfg is not None:
                     self._cached_engine = load_constraints(constraint_cfg)
@@ -75,6 +74,7 @@ class PricingResolver:
                     self._cached_engine = None
             else:
                 self._cached_cost_map = None
+                self._cached_tool_ids = None
                 self._cached_engine = None
             self._cache_ts = time.monotonic()
         except Exception:
@@ -89,30 +89,39 @@ class PricingResolver:
                 # hammer Neon on every request
                 self._cache_ts = time.monotonic()
 
-    async def get_cost(self, tool_name: str) -> int:
-        """Return the cost for *tool_name*.
+    async def get_cost(self, tool_id: str) -> int:
+        """Return the cost for *tool_id*.
 
-        Resolution order: active model → fallback static dict → 0.
+        Returns 0 if the tool is not in the active model.
         """
         await self._ensure_fresh()
-        if self._cached_cost_map is not None and tool_name in self._cached_cost_map:
-            return self._cached_cost_map[tool_name]
-        return self._fallback_costs.get(tool_name, 0)
+        if self._cached_cost_map is not None and tool_id in self._cached_cost_map:
+            return self._cached_cost_map[tool_id]
+        return 0
 
-    async def get_tool_pricing(self, tool_name: str) -> "ToolPricing":
-        """Return a ToolPricing for *tool_name*, supporting ad valorem pricing.
+    async def has_tool(self, tool_id: str) -> bool:
+        """Return True if *tool_id* has an explicit entry in the pricing model.
 
-        Resolution order: active model's ToolPrice → fallback flat cost → free.
+        Distinguishes "intentionally priced at 0" from "not in model at all".
+        """
+        await self._ensure_fresh()
+        if self._cached_tool_ids is not None:
+            return tool_id in self._cached_tool_ids
+        return False
+
+    async def get_tool_pricing(self, tool_id: str) -> "ToolPricing":
+        """Return a ToolPricing for *tool_id*, supporting ad valorem pricing.
+
+        Returns a free ToolPricing if the tool is not in the active model.
         """
         from tollbooth.pricing import ToolPricing
 
         await self._ensure_fresh()
         if self._cached_model is not None:
             for tp in self._cached_model.tools:
-                if tp.tool_name == tool_name:
+                if tp.tool_id == tool_id:
                     return tp.to_tool_pricing()
-        flat = self._fallback_costs.get(tool_name, 0)
-        return ToolPricing(fixed=flat)
+        return ToolPricing(fixed=0)
 
     async def get_constraint_engine(self) -> ConstraintEngine | None:
         """Return the constraint engine from the active model's pipeline.

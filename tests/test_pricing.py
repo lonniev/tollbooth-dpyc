@@ -3,7 +3,6 @@
 import pytest
 
 from tollbooth.pricing import ToolPricing
-from tollbooth.constants import ToolTier
 
 
 class TestFixedPricing:
@@ -20,7 +19,7 @@ class TestFixedPricing:
         assert ToolPricing(fixed=10, min_cost=5).compute() == 10
 
     def test_composable_with_tool_tier(self):
-        p = ToolPricing(fixed=ToolTier.WRITE)
+        p = ToolPricing(fixed=5)  # WRITE tier was 5 sats
         assert p.compute() == 5
 
 

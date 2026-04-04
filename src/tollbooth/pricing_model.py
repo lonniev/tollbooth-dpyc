@@ -3,6 +3,10 @@
 A PricingModel is a named bundle of per-tool prices and an optional
 constraint pipeline that an operator can activate at runtime via the
 Pricing Studio.
+
+Tools are identified by a stable UUID (``tool_id``) derived from their
+canonical capability name.  The pricing model references UUIDs, not
+MCP-specific tool names, enabling portability across implementations.
 """
 
 from __future__ import annotations
@@ -11,11 +15,18 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from tollbooth.tool_identity import capability_uuid
+
 
 @dataclass
 class ToolPrice:
-    """Per-tool price entry within a pricing model."""
+    """Per-tool price entry within a pricing model.
 
+    ``tool_id`` is the canonical UUID for the capability.  ``tool_name``
+    is kept for display/debugging but is NOT the primary key.
+    """
+
+    tool_id: str
     tool_name: str
     price_sats: int
     category: str = ""
@@ -27,6 +38,7 @@ class ToolPrice:
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
+            "tool_id": self.tool_id,
             "tool_name": self.tool_name,
             "price_sats": self.price_sats,
         }
@@ -63,7 +75,12 @@ class ToolPrice:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ToolPrice:
+        # Legacy migration: if tool_id is missing, synthesize from tool_name
+        tool_id = data.get("tool_id")
+        if not tool_id:
+            tool_id = capability_uuid(data["tool_name"])
         return cls(
+            tool_id=tool_id,
             tool_name=data["tool_name"],
             price_sats=int(data["price_sats"]),
             category=data.get("category", ""),
@@ -110,8 +127,12 @@ class PricingModel:
     pipeline: list[PipelineStep] = field(default_factory=list)
 
     def tool_cost_map(self) -> dict[str, int]:
-        """Return a flat {tool_name: price_sats} lookup dict."""
-        return {tp.tool_name: tp.price_sats for tp in self.tools}
+        """Return a flat {tool_id: price_sats} lookup dict."""
+        return {tp.tool_id: tp.price_sats for tp in self.tools}
+
+    def tool_id_set(self) -> set[str]:
+        """Return the set of tool_ids that have explicit entries."""
+        return {tp.tool_id for tp in self.tools}
 
     def to_constraint_config(self) -> dict[str, Any] | None:
         """Convert pipeline to the format ``load_constraints()`` expects.

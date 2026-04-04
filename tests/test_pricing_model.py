@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-
+from tollbooth.tool_identity import capability_uuid
 from tollbooth.pricing_model import PipelineStep, PricingModel, ToolPrice
 
 
@@ -15,27 +15,40 @@ from tollbooth.pricing_model import PipelineStep, PricingModel, ToolPrice
 
 class TestToolPrice:
     def test_round_trip(self) -> None:
-        tp = ToolPrice(tool_name="search", price_sats=5, category="read", intent="query")
+        tp = ToolPrice(tool_id=capability_uuid("search"), tool_name="search", price_sats=5, category="read", intent="query")
         d = tp.to_dict()
         restored = ToolPrice.from_dict(d)
+        assert restored.tool_id == tp.tool_id
         assert restored.tool_name == "search"
         assert restored.price_sats == 5
         assert restored.category == "read"
         assert restored.intent == "query"
 
     def test_optional_fields_omitted(self) -> None:
-        tp = ToolPrice(tool_name="search", price_sats=5)
+        tp = ToolPrice(tool_id=capability_uuid("search"), tool_name="search", price_sats=5)
         d = tp.to_dict()
         assert "category" not in d
         assert "intent" not in d
+        assert "tool_id" in d  # tool_id is always emitted
 
     def test_from_dict_defaults(self) -> None:
         tp = ToolPrice.from_dict({"tool_name": "x", "price_sats": 1})
         assert tp.category == ""
         assert tp.intent == ""
 
+    def test_from_dict_legacy_synthesizes_tool_id(self) -> None:
+        """Legacy data without tool_id gets a synthesized UUID from tool_name."""
+        tp = ToolPrice.from_dict({"tool_name": "search", "price_sats": 5})
+        assert tp.tool_id == capability_uuid("search")
+
+    def test_from_dict_preserves_explicit_tool_id(self) -> None:
+        """Explicit tool_id in data is preserved, not overwritten."""
+        explicit_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        tp = ToolPrice.from_dict({"tool_id": explicit_id, "tool_name": "search", "price_sats": 5})
+        assert tp.tool_id == explicit_id
+
     def test_to_tool_pricing_flat(self) -> None:
-        tp = ToolPrice(tool_name="search", price_sats=5, min_cost=1, max_cost=100)
+        tp = ToolPrice(tool_id=capability_uuid("search"), tool_name="search", price_sats=5, min_cost=1, max_cost=100)
         pricing = tp.to_tool_pricing()
         assert pricing.fixed == 5
         assert pricing.rate_percent == 0.0
@@ -45,6 +58,7 @@ class TestToolPrice:
 
     def test_to_tool_pricing_percent(self) -> None:
         tp = ToolPrice(
+            tool_id=capability_uuid("certify_credits"),
             tool_name="certify_credits", price_sats=2,
             price_type="percent", price_formula="amount_sats", min_cost=10,
         )
@@ -96,8 +110,8 @@ class TestPricingModel:
             name="Launch Pricing",
             is_active=True,
             tools=[
-                ToolPrice(tool_name="search", price_sats=5),
-                ToolPrice(tool_name="create", price_sats=10),
+                ToolPrice(tool_id=capability_uuid("search"), tool_name="search", price_sats=5),
+                ToolPrice(tool_id=capability_uuid("create"), tool_name="create", price_sats=10),
             ],
             pipeline=[
                 PipelineStep(id="s1", type="free_trial", params={"first_n_free": 3}),
@@ -107,7 +121,16 @@ class TestPricingModel:
     def test_tool_cost_map(self) -> None:
         model = self._sample_model()
         costs = model.tool_cost_map()
-        assert costs == {"search": 5, "create": 10}
+        # Keyed by tool_id (UUID), not tool_name
+        search_id = capability_uuid("search")
+        create_id = capability_uuid("create")
+        assert costs == {search_id: 5, create_id: 10}
+
+    def test_tool_id_set(self) -> None:
+        model = self._sample_model()
+        ids = model.tool_id_set()
+        assert capability_uuid("search") in ids
+        assert capability_uuid("create") in ids
 
     def test_tool_cost_map_empty(self) -> None:
         model = PricingModel()
@@ -149,6 +172,7 @@ class TestPricingModel:
         assert restored.name == "Launch Pricing"
         assert len(restored.tools) == 2
         assert restored.tools[0].tool_name == "search"
+        assert restored.tools[0].tool_id == capability_uuid("search")
         assert len(restored.pipeline) == 1
         assert restored.pipeline[0].type == "free_trial"
 
@@ -169,6 +193,8 @@ class TestPricingModel:
         assert model.operator == "npub1op"
         assert model.is_active is True
         assert len(model.tools) == 1
+        # Legacy: tool_id synthesized from tool_name
+        assert model.tools[0].tool_id == capability_uuid("a")
 
     def test_from_row_with_dict_model_json(self) -> None:
         """Neon may return JSONB as a dict instead of string."""

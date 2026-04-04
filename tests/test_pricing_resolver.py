@@ -1,4 +1,4 @@
-"""Tests for PricingResolver — cache TTL, fallback, graceful failure."""
+"""Tests for PricingResolver — cache TTL, has_tool, graceful failure."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from tollbooth.tool_identity import capability_uuid
 from tollbooth.pricing_model import PipelineStep, PricingModel, ToolPrice
 from tollbooth.pricing_resolver import PricingResolver
 
@@ -13,6 +14,10 @@ from tollbooth.pricing_resolver import PricingResolver
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+SEARCH_ID = capability_uuid("search")
+CREATE_ID = capability_uuid("create")
+CERTIFY_ID = capability_uuid("certify_credits")
 
 
 def _active_model() -> PricingModel:
@@ -22,8 +27,8 @@ def _active_model() -> PricingModel:
         name="Active",
         is_active=True,
         tools=[
-            ToolPrice(tool_name="search", price_sats=3),
-            ToolPrice(tool_name="create", price_sats=7),
+            ToolPrice(tool_id=SEARCH_ID, tool_name="search", price_sats=3),
+            ToolPrice(tool_id=CREATE_ID, tool_name="create", price_sats=7),
         ],
         pipeline=[
             PipelineStep(id="s1", type="free_trial", params={"first_n_free": 5}),
@@ -55,36 +60,48 @@ class TestGetCost:
     @pytest.mark.asyncio
     async def test_returns_active_model_cost(self) -> None:
         store = _MockStore(model=_active_model())
-        resolver = PricingResolver(
-            store=store, operator="npub1op", fallback_costs={"search": 99},
-        )
-        cost = await resolver.get_cost("search")
-        assert cost == 3  # from model, not fallback
+        resolver = PricingResolver(store=store, operator="npub1op")
+        cost = await resolver.get_cost(SEARCH_ID)
+        assert cost == 3
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_static_dict(self) -> None:
-        store = _MockStore(model=None)
-        resolver = PricingResolver(
-            store=store, operator="npub1op", fallback_costs={"search": 99},
-        )
-        cost = await resolver.get_cost("search")
-        assert cost == 99
-
-    @pytest.mark.asyncio
-    async def test_falls_back_to_zero(self) -> None:
+    async def test_returns_zero_when_no_model(self) -> None:
         store = _MockStore(model=None)
         resolver = PricingResolver(store=store, operator="npub1op")
-        cost = await resolver.get_cost("unknown_tool")
+        cost = await resolver.get_cost(SEARCH_ID)
         assert cost == 0
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_with_active_model(self) -> None:
+    async def test_returns_zero_for_unknown_tool(self) -> None:
         store = _MockStore(model=_active_model())
-        resolver = PricingResolver(
-            store=store, operator="npub1op", fallback_costs={"other": 42},
-        )
-        cost = await resolver.get_cost("other")
-        assert cost == 42  # not in model, but in fallback
+        resolver = PricingResolver(store=store, operator="npub1op")
+        cost = await resolver.get_cost(capability_uuid("nonexistent"))
+        assert cost == 0
+
+
+# ---------------------------------------------------------------------------
+# has_tool
+# ---------------------------------------------------------------------------
+
+
+class TestHasTool:
+    @pytest.mark.asyncio
+    async def test_returns_true_for_known_tool(self) -> None:
+        store = _MockStore(model=_active_model())
+        resolver = PricingResolver(store=store, operator="npub1op")
+        assert await resolver.has_tool(SEARCH_ID) is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_for_unknown_tool(self) -> None:
+        store = _MockStore(model=_active_model())
+        resolver = PricingResolver(store=store, operator="npub1op")
+        assert await resolver.has_tool(capability_uuid("nonexistent")) is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_no_model(self) -> None:
+        store = _MockStore(model=None)
+        resolver = PricingResolver(store=store, operator="npub1op")
+        assert await resolver.has_tool(SEARCH_ID) is False
 
 
 # ---------------------------------------------------------------------------
@@ -96,39 +113,32 @@ class TestCache:
     @pytest.mark.asyncio
     async def test_caches_within_ttl(self) -> None:
         store = _MockStore(model=_active_model())
-        resolver = PricingResolver(
-            store=store, operator="npub1op", cache_ttl=60.0,
-        )
-        await resolver.get_cost("search")
-        await resolver.get_cost("search")
-        await resolver.get_cost("search")
-        assert store.call_count == 1  # only one Neon call
+        resolver = PricingResolver(store=store, operator="npub1op", cache_ttl=60.0)
+        await resolver.get_cost(SEARCH_ID)
+        await resolver.get_cost(SEARCH_ID)
+        await resolver.get_cost(SEARCH_ID)
+        assert store.call_count == 1
 
     @pytest.mark.asyncio
     async def test_refresh_resets_cache(self) -> None:
         store = _MockStore(model=_active_model())
-        resolver = PricingResolver(
-            store=store, operator="npub1op", cache_ttl=60.0,
-        )
-        await resolver.get_cost("search")
+        resolver = PricingResolver(store=store, operator="npub1op", cache_ttl=60.0)
+        await resolver.get_cost(SEARCH_ID)
         assert store.call_count == 1
 
         resolver.refresh()
-        await resolver.get_cost("search")
+        await resolver.get_cost(SEARCH_ID)
         assert store.call_count == 2
 
     @pytest.mark.asyncio
     async def test_stale_cache_triggers_refresh(self) -> None:
         store = _MockStore(model=_active_model())
-        resolver = PricingResolver(
-            store=store, operator="npub1op", cache_ttl=0.01,
-        )
-        await resolver.get_cost("search")
+        resolver = PricingResolver(store=store, operator="npub1op", cache_ttl=0.01)
+        await resolver.get_cost(SEARCH_ID)
         assert store.call_count == 1
 
-        # Wait for cache to expire
         time.sleep(0.02)
-        await resolver.get_cost("search")
+        await resolver.get_cost(SEARCH_ID)
         assert store.call_count == 2
 
 
@@ -139,32 +149,24 @@ class TestCache:
 
 class TestGracefulFailure:
     @pytest.mark.asyncio
-    async def test_neon_failure_uses_fallback(self) -> None:
+    async def test_neon_failure_returns_zero(self) -> None:
         store = _MockStore(fail=True)
-        resolver = PricingResolver(
-            store=store, operator="npub1op", fallback_costs={"search": 50},
-        )
-        cost = await resolver.get_cost("search")
-        assert cost == 50  # fallback
+        resolver = PricingResolver(store=store, operator="npub1op")
+        cost = await resolver.get_cost(SEARCH_ID)
+        assert cost == 0
 
     @pytest.mark.asyncio
     async def test_neon_failure_after_cache_keeps_stale(self) -> None:
-        """If Neon was reachable before but fails now, use stale cache."""
         store = _MockStore(model=_active_model())
-        resolver = PricingResolver(
-            store=store, operator="npub1op", cache_ttl=0.01,
-        )
-        # First call succeeds and caches
-        cost = await resolver.get_cost("search")
+        resolver = PricingResolver(store=store, operator="npub1op", cache_ttl=0.01)
+        cost = await resolver.get_cost(SEARCH_ID)
         assert cost == 3
 
-        # Make store fail and expire cache
         store._fail = True
         time.sleep(0.02)
 
-        # Should use stale cache
-        cost = await resolver.get_cost("search")
-        assert cost == 3
+        cost = await resolver.get_cost(SEARCH_ID)
+        assert cost == 3  # stale cache
 
 
 # ---------------------------------------------------------------------------
@@ -211,9 +213,9 @@ def _model_with_percent() -> PricingModel:
         name="WithPercent",
         is_active=True,
         tools=[
-            ToolPrice(tool_name="search", price_sats=3),
+            ToolPrice(tool_id=SEARCH_ID, tool_name="search", price_sats=3),
             ToolPrice(
-                tool_name="certify_credits", price_sats=2,
+                tool_id=CERTIFY_ID, tool_name="certify_credits", price_sats=2,
                 price_type="percent", price_formula="amount_sats", min_cost=10,
             ),
         ],
@@ -225,7 +227,7 @@ class TestGetToolPricing:
     async def test_flat_tool(self) -> None:
         store = _MockStore(model=_model_with_percent())
         resolver = PricingResolver(store=store, operator="npub1op")
-        pricing = await resolver.get_tool_pricing("search")
+        pricing = await resolver.get_tool_pricing(SEARCH_ID)
         assert pricing.fixed == 3
         assert pricing.compute() == 3
 
@@ -233,23 +235,14 @@ class TestGetToolPricing:
     async def test_percent_tool(self) -> None:
         store = _MockStore(model=_model_with_percent())
         resolver = PricingResolver(store=store, operator="npub1op")
-        pricing = await resolver.get_tool_pricing("certify_credits")
+        pricing = await resolver.get_tool_pricing(CERTIFY_ID)
         assert pricing.rate_percent == 2.0
         assert pricing.compute(amount_sats=1000) == 20
         assert pricing.compute(amount_sats=100) == 10  # min_cost
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_falls_back(self) -> None:
-        store = _MockStore(model=_model_with_percent())
-        resolver = PricingResolver(
-            store=store, operator="npub1op", fallback_costs={"other": 42},
-        )
-        pricing = await resolver.get_tool_pricing("other")
-        assert pricing.fixed == 42
-
-    @pytest.mark.asyncio
     async def test_unknown_tool_defaults_free(self) -> None:
         store = _MockStore(model=_model_with_percent())
         resolver = PricingResolver(store=store, operator="npub1op")
-        pricing = await resolver.get_tool_pricing("nonexistent")
+        pricing = await resolver.get_tool_pricing(capability_uuid("nonexistent"))
         assert pricing.compute() == 0

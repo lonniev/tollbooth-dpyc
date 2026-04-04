@@ -28,7 +28,7 @@ def _make_runtime(
 ) -> OperatorRuntime:
     """Create a runtime with test defaults."""
     return OperatorRuntime(
-        tool_costs={},
+        tool_registry={},
         operator_credential_template=operator_template,
         patron_credential_template=patron_template,
         service_name="Test Operator",
@@ -213,7 +213,7 @@ class TestOnboardingStatus:
         """Without nsec, operator can't be ready."""
         rt = OperatorRuntime(
             nsec_env_var="NONEXISTENT_NSEC_VAR",
-            tool_costs={},
+            tool_registry={},
             operator_credential_template=BTCPAY_TEMPLATE,
             service_name="Test",
         )
@@ -400,7 +400,7 @@ class TestOTSConfig:
 
     def test_ots_enabled(self) -> None:
         rt = OperatorRuntime(
-            tool_costs={},
+            tool_registry={},
             service_name="Test",
             ots_enabled=True,
             ots_calendars=["https://cal1.example.com"],
@@ -508,25 +508,11 @@ class TestCashier:
 
 class TestNpubEnforcement:
     @pytest.mark.asyncio
-    async def test_debit_or_error_rejects_empty_npub(self) -> None:
-        """Paid tools reject empty npub."""
-        rt = OperatorRuntime(
-            tool_costs={"paid_tool": 5},
-            service_name="Test",
-        )
-        rt._vault = MagicMock()
-        rt._ledger_cache = MagicMock()
-
-        result = await rt.debit_or_error("paid_tool", "")
-        assert result is not None
-        assert result["success"] is False
-        assert "npub" in result["error"].lower()
-
-    @pytest.mark.asyncio
     async def test_debit_or_error_passes_free_tools(self) -> None:
-        """Free tools (cost=0) pass without npub."""
+        """Free tools pass without npub."""
+        from tollbooth.tool_identity import ToolIdentity
         rt = OperatorRuntime(
-            tool_costs={"free_tool": 0},
+            tool_registry={"free_tool": ToolIdentity(capability="free_tool", category="free", intent="test")},
             service_name="Test",
         )
         result = await rt.debit_or_error("free_tool", "")
@@ -534,9 +520,9 @@ class TestNpubEnforcement:
 
     @pytest.mark.asyncio
     async def test_debit_or_error_passes_unknown_tools(self) -> None:
-        """Tools not in cost map default to 0 (free)."""
+        """Tools not in registry are allowed (not gated)."""
         rt = OperatorRuntime(
-            tool_costs={},
+            tool_registry={},
             service_name="Test",
         )
         result = await rt.debit_or_error("unknown_tool", "")
@@ -544,55 +530,45 @@ class TestNpubEnforcement:
 
 
 # ---------------------------------------------------------------------------
-# Auto-seed pricing model
+# Initial pricing model scaffold
 # ---------------------------------------------------------------------------
 
 
-class TestAutoSeedPricing:
-    def test_build_default_pricing_model(self) -> None:
-        """Generates a valid pricing model JSON from tool costs."""
-        from tollbooth.runtime import _build_default_pricing_model
+class TestInitialPricingModel:
+    def test_build_initial_pricing_model(self) -> None:
+        """Generates a scaffold with all tools at 0 sats."""
+        from tollbooth.runtime import _build_initial_pricing_model
+        from tollbooth.tool_identity import ToolIdentity
         import json
 
         rt = OperatorRuntime(
-            tool_costs={"search": 1, "write": 5, "heavy_op": 10, "free": 0},
+            tool_registry={
+                "search": ToolIdentity(capability="search", category="read", intent="Find stuff"),
+                "create": ToolIdentity(capability="create", category="write", intent="Make stuff"),
+            },
             service_name="Test Service",
         )
-        result = _build_default_pricing_model(rt, "Test Service")
+        result = _build_initial_pricing_model(rt, "Test Service")
 
-        assert result is not None
         model = json.loads(result)
-        assert model["name"] == "Test Service Default Pricing"
-        # Free tools excluded
+        assert model["name"] == "Test Service Initial Pricing"
         tool_names = {t["tool_name"] for t in model["tools"]}
-        assert "free" not in tool_names
         assert "search" in tool_names
-        assert "write" in tool_names
-        assert "heavy_op" in tool_names
-        # Prices match
-        prices = {t["tool_name"]: t["price_sats"] for t in model["tools"]}
-        assert prices["search"] == 1
-        assert prices["write"] == 5
-        assert prices["heavy_op"] == 10
+        assert "create" in tool_names
+        # All tools at 0 sats — no economic data from code
+        for t in model["tools"]:
+            assert t["price_sats"] == 0
+            assert "tool_id" in t
 
-    def test_build_default_no_paid_tools(self) -> None:
-        """Returns None when all tools are free."""
-        from tollbooth.runtime import _build_default_pricing_model
+    def test_build_initial_empty_registry(self) -> None:
+        """Empty registry produces an empty tools list."""
+        from tollbooth.runtime import _build_initial_pricing_model
+        import json
 
-        rt = OperatorRuntime(
-            tool_costs={"info": 0, "status": 0},
-            service_name="Free Service",
-        )
-        result = _build_default_pricing_model(rt, "Free Service")
-        assert result is None
-
-    def test_build_default_empty_costs(self) -> None:
-        """Returns None when no tools defined."""
-        from tollbooth.runtime import _build_default_pricing_model
-
-        rt = OperatorRuntime(tool_costs={}, service_name="Empty")
-        result = _build_default_pricing_model(rt, "Empty")
-        assert result is None
+        rt = OperatorRuntime(tool_registry={}, service_name="Empty")
+        result = _build_initial_pricing_model(rt, "Empty")
+        model = json.loads(result)
+        assert model["tools"] == []
 
 
 # ---------------------------------------------------------------------------

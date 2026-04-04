@@ -3,18 +3,60 @@
 import pytest
 
 from tollbooth.runtime import OperatorRuntime
+from tollbooth.tool_identity import ToolIdentity
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+class FakePricingResolver:
+    """In-memory pricing resolver for testing."""
+
+    def __init__(self, costs: dict[str, int]):
+        # costs keyed by tool_id
+        self._costs = costs
+
+    async def get_cost(self, tool_id: str) -> int:
+        return self._costs.get(tool_id, 0)
+
+    async def has_tool(self, tool_id: str) -> bool:
+        return tool_id in self._costs
+
+    async def get_tool_pricing(self, tool_id: str):
+        from tollbooth.pricing import ToolPricing
+        return ToolPricing(fixed=self._costs.get(tool_id, 0))
+
+    async def get_constraint_engine(self):
+        return None
+
+    def refresh(self):
+        pass
+
+
+def _make_registry(tool_costs: dict[str, int] | None = None) -> tuple[dict[str, ToolIdentity], dict[str, int]]:
+    """Build a tool_registry and a resolver cost map from {name: cost}."""
+    costs = tool_costs or {"my_tool": 1, "expensive_tool": 100}
+    registry: dict[str, ToolIdentity] = {}
+    resolver_costs: dict[str, int] = {}  # keyed by tool_id
+    for name, cost in costs.items():
+        category = "free" if cost == 0 else "read"
+        identity = ToolIdentity(capability=name, category=category, intent=f"Test tool {name}")
+        registry[name] = identity
+        resolver_costs[identity.tool_id] = cost
+    return registry, resolver_costs
+
+
 def _make_runtime(tool_costs: dict[str, int] | None = None) -> OperatorRuntime:
     """Create a minimal runtime for testing (no vault, no Nostr)."""
-    return OperatorRuntime(
-        tool_costs=tool_costs or {"my_tool": 1, "expensive_tool": 100},
+    registry, resolver_costs = _make_registry(tool_costs)
+    rt = OperatorRuntime(
+        tool_registry=registry,
         nsec_env_var="__UNUSED__",
     )
+    # Inject fake pricing resolver
+    rt._pricing_resolver = FakePricingResolver(resolver_costs)
+    return rt
 
 
 class FakeLedgerCache:
@@ -182,3 +224,21 @@ class TestPaidToolDecorator:
         assert result["data"] == "ok"
         # Warning may or may not be present depending on threshold,
         # but the decorator shouldn't crash
+
+    @pytest.mark.asyncio
+    async def test_unpriced_tool_blocked(self):
+        """A paid-category tool not in the pricing model should be blocked."""
+        registry = {
+            "unpriced": ToolIdentity(capability="unpriced", category="write", intent="test"),
+        }
+        rt = OperatorRuntime(tool_registry=registry, nsec_env_var="__UNUSED__")
+        # Resolver with empty costs — tool not in model
+        rt._pricing_resolver = FakePricingResolver({})
+
+        @rt.paid_tool("unpriced")
+        async def unpriced(npub: str = "") -> dict:
+            return {"should": "not reach"}
+
+        result = await unpriced(npub=VALID_NPUB)
+        assert result["success"] is False
+        assert "not yet priced" in result["error"]

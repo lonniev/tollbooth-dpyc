@@ -27,7 +27,8 @@ from tollbooth.operator_protocol import (
 from tollbooth.authority_protocol import AuthorityProtocol, AUTHORITY_BASE_CATALOG
 from tollbooth.oracle_protocol import OracleProtocol
 from tollbooth.ledger_cache import LedgerCache
-from tollbooth.constants import ToolTier, MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_API_SATS, ECOSYSTEM_LINKS
+from tollbooth.constants import MAX_INVOICE_SATS, LOW_BALANCE_FLOOR_API_SATS, ECOSYSTEM_LINKS
+from tollbooth.tool_identity import ToolIdentity, STANDARD_IDENTITIES, capability_uuid
 from tollbooth.pricing import ToolPricing
 from tollbooth.pricing_model import PricingModel, ToolPrice, PipelineStep
 from tollbooth.vaults import TheBrainVault, NeonVault, NeonQueryError
@@ -253,7 +254,9 @@ __all__ = [
     "PipelineStep",
     "PricingModelStore",
     "PricingResolver",
-    "ToolTier",
+    "ToolIdentity",
+    "STANDARD_IDENTITIES",
+    "capability_uuid",
     "MAX_INVOICE_SATS",
     "LOW_BALANCE_FLOOR_API_SATS",
     "ECOSYSTEM_LINKS",

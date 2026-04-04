@@ -19,7 +19,7 @@ Usage::
 
     runtime = OperatorRuntime(
         nsec_env_var="TOLLBOOTH_NOSTR_OPERATOR_NSEC",
-        tool_costs={"my_tool": ToolTier.READ, "free_tool": ToolTier.FREE},
+        tool_registry={"my_tool": ToolIdentity(capability="my_tool", category="read", intent="...")},
         operator_credential_template=CredentialTemplate(
             service="my-operator", ...
         ),
@@ -77,7 +77,7 @@ class OperatorRuntime:
         self,
         *,
         nsec_env_var: str = "TOLLBOOTH_NOSTR_OPERATOR_NSEC",
-        tool_costs: dict[str, int] | None = None,
+        tool_registry: dict[str, "ToolIdentity"] | None = None,
         operator_credential_template: Any | None = None,
         patron_credential_template: Any | None = None,
         operator_credential_greeting: str = "",
@@ -91,7 +91,13 @@ class OperatorRuntime:
         operator_settings: dict[str, Any] | None = None,
     ) -> None:
         self._nsec_env_var = nsec_env_var
-        self._tool_costs = tool_costs or {}
+        from tollbooth.tool_identity import ToolIdentity  # noqa: F811
+        self._tool_registry: dict[str, ToolIdentity] = tool_registry or {}
+        self._name_to_identity: dict[str, ToolIdentity] = dict(self._tool_registry)
+        self._name_to_id: dict[str, str] = {
+            name: identity.tool_id for name, identity in self._tool_registry.items()
+        }
+        self._pricing_resolver: Any | None = None  # lazily created after vault
         self._operator_credential_template = operator_credential_template
         self._patron_credential_template = patron_credential_template
         self._operator_credential_greeting = operator_credential_greeting
@@ -367,6 +373,19 @@ class OperatorRuntime:
     # Credit Gating
     # ------------------------------------------------------------------
 
+    async def pricing_resolver(self) -> Any:
+        """Lazy accessor for the PricingResolver (requires vault)."""
+        if self._pricing_resolver is None:
+            vault = await self.vault()
+            from tollbooth.pricing_store import PricingModelStore
+            from tollbooth.pricing_resolver import PricingResolver
+            store = PricingModelStore(neon_vault=vault)
+            self._pricing_resolver = PricingResolver(
+                store=store,
+                operator=self.operator_npub(),
+            )
+        return self._pricing_resolver
+
     async def debit_or_error(
         self,
         tool_name: str,
@@ -378,13 +397,20 @@ class OperatorRuntime:
         """Check balance and debit credits for a paid tool call.
 
         Returns None on success (proceed). Returns error dict on failure.
-        """
-        from tollbooth import ToolTier
 
-        cost = self._tool_costs.get(tool_name, 0)
+        Pricing is resolved from Neon via PricingResolver.  Tools with
+        category ``"free"`` or ``"restricted"`` are handled without
+        consulting Neon.  Paid tools not yet in the pricing model are
+        blocked with guidance.
+        """
+        identity = self._name_to_identity.get(tool_name)
+
+        # Unknown tool (not in registry) — allow without gating
+        if identity is None:
+            return None
 
         # RESTRICTED: operator-only
-        if cost == ToolTier.RESTRICTED:
+        if identity.category == "restricted":
             try:
                 caller = resolve_npub(npub)
             except ValueError as e:
@@ -397,6 +423,27 @@ class OperatorRuntime:
                 return {"success": False, "error": "This tool is restricted to the operator."}
             return None
 
+        # FREE: no charge
+        if identity.category == "free":
+            return None
+
+        # Paid tool — resolve cost from Neon
+        resolver = await self.pricing_resolver()
+        tool_id = identity.tool_id
+        cost = await resolver.get_cost(tool_id)
+        in_model = await resolver.has_tool(tool_id)
+
+        # Tool not yet in pricing model — block with guidance
+        if not in_model:
+            return {
+                "success": False,
+                "error": (
+                    f"Tool '{tool_name}' is not yet priced. "
+                    f"Add it to the pricing model before use."
+                ),
+            }
+
+        # Explicitly priced at 0 — intentionally free
         if cost == 0:
             return None
 
@@ -466,7 +513,11 @@ class OperatorRuntime:
         try:
             npub = resolve_npub(npub)
             cache = await self.ledger_cache()
-            cost = self._tool_costs.get(tool_name, 0)
+            identity = self._name_to_identity.get(tool_name)
+            if identity is None or identity.category in ("free", "restricted"):
+                return
+            resolver = await self.pricing_resolver()
+            cost = await resolver.get_cost(identity.tool_id)
             if cost > 0:
                 ledger = await cache.get(npub)
                 ledger.credit_deposit(cost, f"rollback:{tool_name}")
@@ -975,43 +1026,30 @@ class OperatorRuntime:
         return decorator
 
 
-def _build_default_pricing_model(
+def _build_initial_pricing_model(
     rt: OperatorRuntime,
     service_name: str,
-) -> str | None:
-    """Build a default pricing model JSON from the runtime's tool costs.
+) -> str:
+    """Build an initial pricing model from the tool registry.
 
-    Returns a JSON string suitable for ``set_pricing_model_tool``, or
-    None if no paid tools exist.
+    Every registered tool gets a 0-sat entry with its UUID, category,
+    and intent.  No economic data comes from code — this is a structural
+    scaffold for the operator/app/campaign to fill in.
     """
     import json as _json
-    from tollbooth.constants import ToolTier
-
-    tier_labels = {
-        ToolTier.FREE: ("free", "Informational"),
-        ToolTier.READ: ("read", "Data retrieval"),
-        ToolTier.WRITE: ("write", "State-changing operation"),
-        ToolTier.HEAVY: ("heavy", "Resource-intensive operation"),
-    }
 
     tools = []
-    for name, cost in rt._tool_costs.items():
-        cost_int = int(cost)
-        if cost_int <= 0:
-            continue
-        cat, intent = tier_labels.get(cost_int, ("custom", "Custom"))
+    for name, identity in rt._tool_registry.items():
         tools.append({
+            "tool_id": identity.tool_id,
             "tool_name": name,
-            "price_sats": cost_int,
-            "category": cat,
-            "intent": intent,
+            "price_sats": 0,
+            "category": identity.category,
+            "intent": identity.intent,
         })
 
-    if not tools:
-        return None
-
     model = {
-        "name": f"{service_name or 'Operator'} Default Pricing",
+        "name": f"{service_name or 'Operator'} Initial Pricing",
         "tools": tools,
     }
     return _json.dumps(model)
@@ -1639,8 +1677,8 @@ def register_standard_tools(
     async def get_pricing_model() -> dict[str, Any]:
         """Get the active pricing model for this operator. Free.
 
-        If no model exists but the operator has tool costs defined,
-        auto-seeds a default pricing model from the tool cost map.
+        If no model exists, self-initializes a scaffold with all
+        registered tools at 0 sats.  No economic data from code.
         """
         try:
             vault = await rt.vault()
@@ -1649,28 +1687,16 @@ def register_standard_tools(
             from tollbooth.tools.pricing import get_pricing_model_tool
             result = await get_pricing_model_tool(store, rt.operator_npub())
 
-            # Auto-seed from TOOL_COSTS if store is empty or stale
-            needs_seed = result.get("model_id") is None
-            if not needs_seed and rt._tool_costs:
-                # Check if stored model is missing tools
-                stored_tools = {
-                    t["tool_name"] for t in (result.get("tools") or [])
-                }
-                paid_tools = {
-                    n for n, c in rt._tool_costs.items() if int(c) > 0
-                }
-                needs_seed = not paid_tools.issubset(stored_tools)
-
-            if needs_seed and rt._tool_costs:
-                seed = _build_default_pricing_model(rt, service_name)
-                if seed:
-                    from tollbooth.tools.pricing import set_pricing_model_tool
-                    await set_pricing_model_tool(
-                        store, rt.operator_npub(), seed,
-                    )
-                    result = await get_pricing_model_tool(
-                        store, rt.operator_npub(),
-                    )
+            # Self-initialize if no model exists in Neon
+            if result.get("model_id") is None and rt._tool_registry:
+                seed = _build_initial_pricing_model(rt, service_name)
+                from tollbooth.tools.pricing import set_pricing_model_tool
+                await set_pricing_model_tool(
+                    store, rt.operator_npub(), seed,
+                )
+                result = await get_pricing_model_tool(
+                    store, rt.operator_npub(),
+                )
 
             return result
         except Exception as e:
@@ -1702,13 +1728,15 @@ def register_standard_tools(
         Shows the base cost and any constraint effects (discounts, free
         trials, surge pricing). Free — no credits required.
         """
-        base_cost = rt._tool_costs.get(tool_name)
-        if base_cost is None:
+        identity = rt._name_to_identity.get(tool_name)
+        if identity is None:
             return {
                 "success": False,
                 "error": f"Unknown tool: {tool_name}. "
-                f"Valid: {list(rt._tool_costs.keys())}",
+                f"Valid: {list(rt._tool_registry.keys())}",
             }
+        resolver = await rt.pricing_resolver()
+        base_cost = await resolver.get_cost(identity.tool_id)
 
         result: dict[str, Any] = {
             "success": True,
