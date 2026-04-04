@@ -1713,9 +1713,13 @@ def register_standard_tools(
             from tollbooth.pricing_store import PricingModelStore
             store = PricingModelStore(neon_vault=vault)
             from tollbooth.tools.pricing import set_pricing_model_tool
-            return await set_pricing_model_tool(
+            result = await set_pricing_model_tool(
                 store, rt.operator_npub(), model_json,
             )
+            # Invalidate pricing cache so debit_or_error sees updated prices
+            if rt._pricing_resolver is not None:
+                rt._pricing_resolver.refresh()
+            return result
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
