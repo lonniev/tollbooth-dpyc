@@ -53,15 +53,21 @@ class TestStandardIdentities:
         for name, identity in STANDARD_IDENTITIES.items():
             assert identity.intent, f"{name} is missing intent"
 
+    def test_keys_are_uuids(self) -> None:
+        """All keys in STANDARD_IDENTITIES are UUIDs matching the identity's tool_id."""
+        for key, identity in STANDARD_IDENTITIES.items():
+            assert key == identity.tool_id, f"Key mismatch: {key} != {identity.tool_id}"
+
     def test_all_uuids_unique(self) -> None:
-        ids = [identity.tool_id for identity in STANDARD_IDENTITIES.values()]
+        ids = list(STANDARD_IDENTITIES.keys())
         assert len(ids) == len(set(ids)), "Duplicate UUIDs in STANDARD_IDENTITIES"
 
-    def test_key_tools_present(self) -> None:
-        """Spot-check that critical tools are registered."""
-        for name in (
+    def test_key_capabilities_present(self) -> None:
+        """Spot-check that critical capabilities are registered."""
+        capabilities = {ti.capability for ti in STANDARD_IDENTITIES.values()}
+        for cap in (
             "check_balance", "purchase_credits", "check_payment",
             "service_status", "session_status", "get_pricing_model",
             "set_pricing_model", "check_price",
         ):
-            assert name in STANDARD_IDENTITIES, f"Missing standard identity: {name}"
+            assert cap in capabilities, f"Missing capability: {cap}"

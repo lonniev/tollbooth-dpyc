@@ -50,146 +50,78 @@ class ToolIdentity:
 # ======================================================================
 # Standard identities for all wheel-provided tools.
 #
-# Keyed by the short function name used in register_standard_tools().
-# Every operator inherits these via the wheel.
+# Keyed by UUID (tool_id). Every operator inherits these via the wheel.
 # ======================================================================
 
-STANDARD_IDENTITIES: dict[str, ToolIdentity] = {
+_STANDARD_LIST: list[ToolIdentity] = [
     # -- Credit tools --
-    "check_balance": ToolIdentity(
-        capability="check_balance",
-        category="free",
-        intent="Check a patron's credit balance.",
-    ),
-    "purchase_credits": ToolIdentity(
-        capability="purchase_credits",
-        category="free",
-        intent="Buy credits via Bitcoin Lightning.",
-    ),
-    "check_payment": ToolIdentity(
-        capability="check_payment",
-        category="free",
-        intent="Check payment status of a Lightning invoice.",
-    ),
-    "restore_credits": ToolIdentity(
-        capability="restore_credits",
-        category="free",
-        intent="Restore credits from a previously paid invoice.",
-    ),
-    "account_statement": ToolIdentity(
-        capability="account_statement",
-        category="free",
-        intent="Generate a patron's account statement.",
-    ),
-    "account_statement_infographic": ToolIdentity(
-        capability="account_statement_infographic",
-        category="read",
-        intent="Generate a visual SVG infographic of account statement.",
-    ),
+    ToolIdentity(capability="check_balance", category="free",
+                 intent="Check a patron's credit balance."),
+    ToolIdentity(capability="purchase_credits", category="free",
+                 intent="Buy credits via Bitcoin Lightning."),
+    ToolIdentity(capability="check_payment", category="free",
+                 intent="Check payment status of a Lightning invoice."),
+    ToolIdentity(capability="restore_credits", category="free",
+                 intent="Restore credits from a previously paid invoice."),
+    ToolIdentity(capability="account_statement", category="free",
+                 intent="Generate a patron's account statement."),
+    ToolIdentity(capability="account_statement_infographic", category="read",
+                 intent="Generate a visual SVG infographic of account statement."),
 
     # -- Service status --
-    "service_status": ToolIdentity(
-        capability="service_status",
-        category="free",
-        intent="Check health and configuration of this service.",
-    ),
+    ToolIdentity(capability="service_status", category="free",
+                 intent="Check health and configuration of this service."),
 
     # -- Onboarding --
-    "get_operator_onboarding_status": ToolIdentity(
-        capability="get_operator_onboarding_status",
-        category="free",
-        intent="Report operator configuration readiness.",
-    ),
-    "get_patron_onboarding_status": ToolIdentity(
-        capability="get_patron_onboarding_status",
-        category="free",
-        intent="Report a patron's credential readiness.",
-    ),
-    "session_status": ToolIdentity(
-        capability="session_status",
-        category="free",
-        intent="Check operator lifecycle state and readiness.",
-    ),
+    ToolIdentity(capability="get_operator_onboarding_status", category="free",
+                 intent="Report operator configuration readiness."),
+    ToolIdentity(capability="get_patron_onboarding_status", category="free",
+                 intent="Report a patron's credential readiness."),
+    ToolIdentity(capability="session_status", category="free",
+                 intent="Check operator lifecycle state and readiness."),
 
     # -- Secure Courier --
-    "request_credential_channel": ToolIdentity(
-        capability="request_credential_channel",
-        category="free",
-        intent="Open a Secure Courier channel for credential delivery.",
-    ),
-    "receive_credentials": ToolIdentity(
-        capability="receive_credentials",
-        category="free",
-        intent="Pick up credentials from the Secure Courier.",
-    ),
-    "forget_credentials": ToolIdentity(
-        capability="forget_credentials",
-        category="free",
-        intent="Delete vaulted credentials for a service.",
-    ),
-    "request_patron_credentials": ToolIdentity(
-        capability="request_patron_credentials",
-        category="free",
-        intent="Open a Secure Courier channel for patron credentials.",
-    ),
-    "receive_patron_credentials": ToolIdentity(
-        capability="receive_patron_credentials",
-        category="free",
-        intent="Pick up patron credentials from the Secure Courier.",
-    ),
+    ToolIdentity(capability="request_credential_channel", category="free",
+                 intent="Open a Secure Courier channel for credential delivery."),
+    ToolIdentity(capability="receive_credentials", category="free",
+                 intent="Pick up credentials from the Secure Courier."),
+    ToolIdentity(capability="forget_credentials", category="free",
+                 intent="Delete vaulted credentials for a service."),
+    ToolIdentity(capability="request_patron_credentials", category="free",
+                 intent="Open a Secure Courier channel for patron credentials."),
+    ToolIdentity(capability="receive_patron_credentials", category="free",
+                 intent="Pick up patron credentials from the Secure Courier."),
 
     # -- Oracle delegation --
     # Oracle tools are free and use the oracle_ namespace. They don't
     # need pricing entries or registry identities — they're never gated.
 
     # -- Authority delegation --
-    "check_authority_balance": ToolIdentity(
-        capability="check_authority_balance",
-        category="free",
-        intent="Check operator's tax balance at the Authority.",
-    ),
+    ToolIdentity(capability="check_authority_balance", category="free",
+                 intent="Check operator's tax balance at the Authority."),
 
     # -- Pricing CRUD --
-    "get_pricing_model": ToolIdentity(
-        capability="get_pricing_model",
-        category="free",
-        intent="Get the active pricing model.",
-    ),
-    "set_pricing_model": ToolIdentity(
-        capability="set_pricing_model",
-        category="restricted",
-        intent="Set the active pricing model. Operator only.",
-    ),
-    "reset_pricing_model": ToolIdentity(
-        capability="reset_pricing_model",
-        category="restricted",
-        intent="Delete all pricing models and re-initialize. Operator only.",
-    ),
-    "check_price": ToolIdentity(
-        capability="check_price",
-        category="free",
-        intent="Preview the effective cost of a tool call.",
-    ),
-    "list_constraint_types": ToolIdentity(
-        capability="list_constraint_types",
-        category="free",
-        intent="List available constraint types and parameter schemas.",
-    ),
+    ToolIdentity(capability="get_pricing_model", category="free",
+                 intent="Get the active pricing model."),
+    ToolIdentity(capability="set_pricing_model", category="restricted",
+                 intent="Set the active pricing model. Operator only."),
+    ToolIdentity(capability="reset_pricing_model", category="restricted",
+                 intent="Delete all pricing models and re-initialize. Operator only."),
+    ToolIdentity(capability="check_price", category="free",
+                 intent="Preview the effective cost of a tool call."),
+    ToolIdentity(capability="list_constraint_types", category="free",
+                 intent="List available constraint types and parameter schemas."),
 
     # -- OTS notarization --
-    "notarize_ledger": ToolIdentity(
-        capability="notarize_ledger",
-        category="restricted",
-        intent="Submit patron balance Merkle root to Bitcoin via OTS.",
-    ),
-    "get_notarization_proof": ToolIdentity(
-        capability="get_notarization_proof",
-        category="free",
-        intent="Generate a Merkle inclusion proof for a patron balance.",
-    ),
-    "list_notarizations": ToolIdentity(
-        capability="list_notarizations",
-        category="free",
-        intent="List recent Bitcoin notarization records.",
-    ),
+    ToolIdentity(capability="notarize_ledger", category="restricted",
+                 intent="Submit patron balance Merkle root to Bitcoin via OTS."),
+    ToolIdentity(capability="get_notarization_proof", category="free",
+                 intent="Generate a Merkle inclusion proof for a patron balance."),
+    ToolIdentity(capability="list_notarizations", category="free",
+                 intent="List recent Bitcoin notarization records."),
+]
+
+# Build the UUID-keyed dict from the list.
+STANDARD_IDENTITIES: dict[str, ToolIdentity] = {
+    ti.tool_id: ti for ti in _STANDARD_LIST
 }

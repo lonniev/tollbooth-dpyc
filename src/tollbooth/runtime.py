@@ -31,7 +31,7 @@ Usage::
     # In a tool function:
     npub = runtime.resolve_npub(npub)
     cache = await runtime.ledger_cache()
-    err = await runtime.debit_or_error("my_tool", npub)
+    err = await runtime.debit_or_error(my_tool_uuid, npub)
     if err:
         return err
     # ... do work ...
@@ -92,11 +92,9 @@ class OperatorRuntime:
     ) -> None:
         self._nsec_env_var = nsec_env_var
         from tollbooth.tool_identity import ToolIdentity  # noqa: F811
+        # Registry keyed by UUID — the sole economic key
         self._tool_registry: dict[str, ToolIdentity] = tool_registry or {}
-        self._name_to_identity: dict[str, ToolIdentity] = dict(self._tool_registry)
-        self._name_to_id: dict[str, str] = {
-            name: identity.tool_id for name, identity in self._tool_registry.items()
-        }
+        self._slug: str = ""  # set by register_standard_tools
         self._pricing_resolver: Any | None = None  # lazily created after vault
         self._operator_credential_template = operator_credential_template
         self._patron_credential_template = patron_credential_template
@@ -388,7 +386,7 @@ class OperatorRuntime:
 
     async def debit_or_error(
         self,
-        tool_name: str,
+        tool_id: str,
         npub: str,
         *,
         operator_proof: str = "",
@@ -396,18 +394,18 @@ class OperatorRuntime:
     ) -> dict[str, Any] | None:
         """Check balance and debit credits for a paid tool call.
 
+        Args:
+            tool_id: The tool's UUID (from ToolIdentity.tool_id).
+
         Returns None on success (proceed). Returns error dict on failure.
-
-        Pricing is resolved from Neon via PricingResolver.  Tools with
-        category ``"free"`` or ``"restricted"`` are handled without
-        consulting Neon.  Paid tools not yet in the pricing model are
-        blocked with guidance.
         """
-        identity = self._name_to_identity.get(tool_name)
+        identity = self._tool_registry.get(tool_id)
 
-        # Unknown tool (not in registry) — allow without gating
+        # Unknown UUID (not in registry) — allow without gating
         if identity is None:
             return None
+
+        cap = identity.capability  # for human-readable messages
 
         # RESTRICTED: operator-only
         if identity.category == "restricted":
@@ -418,7 +416,7 @@ class OperatorRuntime:
             if caller != self.operator_npub():
                 if operator_proof:
                     from tollbooth.operator_proof import verify_operator_proof
-                    if verify_operator_proof(operator_proof, self.operator_npub(), tool_name):
+                    if verify_operator_proof(operator_proof, self.operator_npub(), cap):
                         return None
                 return {"success": False, "error": "This tool is restricted to the operator."}
             return None
@@ -429,7 +427,6 @@ class OperatorRuntime:
 
         # Paid tool — resolve cost from Neon
         resolver = await self.pricing_resolver()
-        tool_id = identity.tool_id
         cost = await resolver.get_cost(tool_id)
         in_model = await resolver.has_tool(tool_id)
 
@@ -438,18 +435,17 @@ class OperatorRuntime:
             return {
                 "success": False,
                 "error": (
-                    f"Tool '{tool_name}' is not yet priced. "
+                    f"Tool '{cap}' is not yet priced. "
                     f"Add it to the pricing model before use."
                 ),
             }
 
         # Paid-category tool at 0 sats = TBD, not intentionally free.
-        # The operator must set a real price before this tool can be used.
         if cost == 0:
             return {
                 "success": False,
                 "error": (
-                    f"Tool '{tool_name}' has no price set yet (TBD). "
+                    f"Tool '{cap}' has no price set yet (TBD). "
                     f"Set a price in the pricing model before use."
                 ),
             }
@@ -465,7 +461,7 @@ class OperatorRuntime:
         if self._constraint_gate and self._constraint_gate.enabled:
             ledger = await cache.get(npub)
             denial, effective_cost = self._constraint_gate.check(
-                tool_name=tool_name,
+                tool_name=cap,
                 base_cost=cost,
                 ledger=ledger,
                 npub=npub,
@@ -477,7 +473,6 @@ class OperatorRuntime:
         ledger = await cache.get(npub)
 
         # Auto-reconcile pending invoices on first access per npub
-        # (settles paid invoices that were lost on cold start)
         if npub not in self._reconciled_npubs and ledger.pending_invoices:
             self._reconciled_npubs.add(npub)
             try:
@@ -493,7 +488,6 @@ class OperatorRuntime:
                         "Auto-reconciled %d invoice(s) for %s on cold start",
                         recon["reconciled"], npub[:20],
                     )
-                    # Re-read ledger after reconciliation
                     ledger = await cache.get(npub)
             except Exception as exc:
                 logger.debug("Auto-reconciliation skipped for %s: %s", npub[:20], exc)
@@ -505,29 +499,29 @@ class OperatorRuntime:
                 "success": False,
                 "error": (
                     f"Insufficient balance: {ledger.balance_api_sats} sats "
-                    f"available, {effective_cost} required for {tool_name}."
+                    f"available, {effective_cost} required for {cap}."
                 ),
                 "balance_sats": ledger.balance_api_sats,
                 "cost_sats": effective_cost,
             }
 
-        ledger.debit(tool_name, effective_cost)
+        ledger.debit(cap, effective_cost)
         cache.mark_dirty(npub)
         return None
 
-    async def rollback_debit(self, tool_name: str, npub: str) -> None:
+    async def rollback_debit(self, tool_id: str, npub: str) -> None:
         """Rollback a debit after a tool execution failure."""
         try:
             npub = resolve_npub(npub)
             cache = await self.ledger_cache()
-            identity = self._name_to_identity.get(tool_name)
+            identity = self._tool_registry.get(tool_id)
             if identity is None or identity.category in ("free", "restricted"):
                 return
             resolver = await self.pricing_resolver()
-            cost = await resolver.get_cost(identity.tool_id)
+            cost = await resolver.get_cost(tool_id)
             if cost > 0:
                 ledger = await cache.get(npub)
-                ledger.credit_deposit(cost, f"rollback:{tool_name}")
+                ledger.credit_deposit(cost, f"rollback:{identity.capability}")
                 cache.mark_dirty(npub)
         except Exception:
             pass  # best-effort rollback
@@ -973,28 +967,23 @@ class OperatorRuntime:
 
     def paid_tool(
         self,
-        tool_name: str,
+        tool_id: str,
         *,
         catch_errors: bool = True,
     ) -> Callable:
         """Decorator that wraps a domain function with debit/rollback/warning.
 
-        Eliminates the per-tool boilerplate that every operator repeats:
-        debit → try body → demand increment → low-balance warning → rollback.
-
-        The decorated function **must** accept ``npub`` as a keyword argument.
-        Any other parameters are passed through unchanged.
-
         Args:
-            tool_name: The tool cost key (must be in ``tool_costs``).
+            tool_id: The tool's UUID (from ToolIdentity.tool_id).
             catch_errors: If True (default), catch exceptions from the body
                 and return ``{"success": False, "error": ...}`` after rollback.
-                If False, re-raise after rollback (caller handles the error).
+
+        The decorated function **must** accept ``npub`` as a keyword argument.
 
         Example::
 
             @tool
-            @runtime.paid_tool("get_weather")
+            @runtime.paid_tool(TOOL_REGISTRY["get_weather"].tool_id)
             async def get_weather(lat: float, lon: float, npub: str = ""):
                 return await weather.get(lat, lon)
         """
@@ -1003,28 +992,26 @@ class OperatorRuntime:
         def decorator(fn: Callable) -> Callable:
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
-                # Extract npub from kwargs (or positional via signature)
                 sig = inspect.signature(fn)
                 bound = sig.bind(*args, **kwargs)
                 bound.apply_defaults()
                 npub = bound.arguments.get("npub", "")
 
-                # Debit
-                err = await rt.debit_or_error(tool_name, npub)
+                err = await rt.debit_or_error(tool_id, npub)
                 if err is not None:
                     return err
 
-                # Execute domain logic
                 try:
                     result = await fn(*args, **kwargs)
                 except Exception as exc:
-                    await rt.rollback_debit(tool_name, npub)
+                    await rt.rollback_debit(tool_id, npub)
                     if catch_errors:
                         return {"success": False, "error": str(exc)}
                     raise
 
-                # Demand tracking + low-balance warning
-                rt.fire_and_forget_demand_increment(tool_name)
+                identity = rt._tool_registry.get(tool_id)
+                cap = identity.capability if identity else tool_id
+                rt.fire_and_forget_demand_increment(cap)
                 if isinstance(result, dict):
                     result = await rt.inject_low_balance_warning(result, npub)
                 return result
@@ -1040,16 +1027,19 @@ def _build_initial_pricing_model(
     """Build an initial pricing model from the tool registry.
 
     Every registered tool gets a 0-sat entry with its UUID, category,
-    and intent.  No economic data comes from code — this is a structural
-    scaffold for the operator/app/campaign to fill in.
+    and intent.  The tool_name is the MCP-facing prefixed name
+    (e.g. ``weather_check_balance``).  No economic data from code.
     """
     import json as _json
 
+    slug = rt._slug
     tools = []
-    for name, identity in rt._tool_registry.items():
+    for tool_id, identity in rt._tool_registry.items():
+        # MCP-facing name: {slug}_{capability}
+        mcp_name = f"{slug}_{identity.capability}" if slug else identity.capability
         tools.append({
-            "tool_id": identity.tool_id,
-            "tool_name": name,
+            "tool_id": tool_id,
+            "tool_name": mcp_name,
             "price_sats": 0,
             "category": identity.category,
             "intent": identity.intent,
@@ -1089,6 +1079,7 @@ def register_standard_tools(
     from tollbooth.slug_tools import make_slug_tool
     tool = make_slug_tool(mcp, slug)
     oracle_tool = make_slug_tool(mcp, "oracle")
+    rt._slug = slug
 
     # -- Credit tools --------------------------------------------------
 
@@ -1256,7 +1247,8 @@ def register_standard_tools(
             npub = resolve_npub(npub)
         except ValueError as e:
             return {"success": False, "error": str(e)}
-        err = await rt.debit_or_error("account_statement_infographic", npub)
+        from tollbooth.tool_identity import capability_uuid
+        err = await rt.debit_or_error(capability_uuid("account_statement_infographic"), npub)
         if err:
             return err
         try:
@@ -1807,25 +1799,29 @@ def register_standard_tools(
     # -- Constraint Engine tools ---------------------------------------
 
     @tool
-    async def check_price(tool_name: str, npub: str = "") -> dict[str, Any]:
+    async def check_price(tool_id: str, npub: str = "") -> dict[str, Any]:
         """Preview the effective cost of a tool call.
 
         Shows the base cost and any constraint effects (discounts, free
         trials, surge pricing). Free — no credits required.
+
+        Args:
+            tool_id: The tool's UUID (from the pricing model).
         """
-        identity = rt._name_to_identity.get(tool_name)
+        identity = rt._tool_registry.get(tool_id)
         if identity is None:
             return {
                 "success": False,
-                "error": f"Unknown tool: {tool_name}. "
-                f"Valid: {list(rt._tool_registry.keys())}",
+                "error": f"Unknown tool_id: {tool_id}.",
             }
         resolver = await rt.pricing_resolver()
-        base_cost = await resolver.get_cost(identity.tool_id)
+        base_cost = await resolver.get_cost(tool_id)
 
+        cap = identity.capability
         result: dict[str, Any] = {
             "success": True,
-            "tool_name": tool_name,
+            "tool_id": tool_id,
+            "capability": cap,
             "base_cost_api_sats": int(base_cost),
             "effective_cost_api_sats": int(base_cost),
             "constraints_enabled": False,
@@ -1839,16 +1835,16 @@ def register_standard_tools(
                 resolved = resolve_npub(npub)
                 cache = await rt.ledger_cache()
                 ledger = await cache.get(resolved)
-                demand = await rt.get_global_demand(tool_name)
+                demand = await rt.get_global_demand(cap)
                 denial, effective = gate.check(
-                    tool_name=tool_name,
+                    tool_name=cap,
                     base_cost=int(base_cost),
                     ledger=ledger,
                     npub=resolved,
                     global_demand=demand,
                 )
-                if demand.get(tool_name, 0) > 0:
-                    result["current_demand"] = demand[tool_name]
+                if demand.get(cap, 0) > 0:
+                    result["current_demand"] = demand[cap]
                 if denial:
                     result["effective_cost_api_sats"] = 0
                     result["constraint_effects"].append({

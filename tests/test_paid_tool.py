@@ -3,7 +3,7 @@
 import pytest
 
 from tollbooth.runtime import OperatorRuntime
-from tollbooth.tool_identity import ToolIdentity
+from tollbooth.tool_identity import ToolIdentity, capability_uuid
 
 
 # ---------------------------------------------------------------------------
@@ -35,14 +35,14 @@ class FakePricingResolver:
 
 
 def _make_registry(tool_costs: dict[str, int] | None = None) -> tuple[dict[str, ToolIdentity], dict[str, int]]:
-    """Build a tool_registry and a resolver cost map from {name: cost}."""
+    """Build a tool_registry (keyed by UUID) and resolver cost map from {name: cost}."""
     costs = tool_costs or {"my_tool": 1, "expensive_tool": 100}
     registry: dict[str, ToolIdentity] = {}
-    resolver_costs: dict[str, int] = {}  # keyed by tool_id
+    resolver_costs: dict[str, int] = {}  # keyed by tool_id (UUID)
     for name, cost in costs.items():
         category = "free" if cost == 0 else "read"
         identity = ToolIdentity(capability=name, category=category, intent=f"Test tool {name}")
-        registry[name] = identity
+        registry[identity.tool_id] = identity
         resolver_costs[identity.tool_id] = cost
     return registry, resolver_costs
 
@@ -114,7 +114,7 @@ class TestPaidToolDecorator:
         rt = _make_runtime()
         await _inject_fake_cache(rt)
 
-        @rt.paid_tool("my_tool")
+        @rt.paid_tool(capability_uuid("my_tool"))
         async def my_tool(x: int, npub: str = "") -> dict:
             return {"value": x * 2}
 
@@ -126,7 +126,7 @@ class TestPaidToolDecorator:
         rt = _make_runtime({"my_tool": 9999})
         await _inject_fake_cache(rt, balance=10)
 
-        @rt.paid_tool("my_tool")
+        @rt.paid_tool(capability_uuid("my_tool"))
         async def my_tool(npub: str = "") -> dict:
             return {"should": "not reach"}
 
@@ -139,7 +139,7 @@ class TestPaidToolDecorator:
         rt = _make_runtime()
         await _inject_fake_cache(rt)
 
-        @rt.paid_tool("my_tool")
+        @rt.paid_tool(capability_uuid("my_tool"))
         async def my_tool(npub: str = "") -> dict:
             return {"should": "not reach"}
 
@@ -192,7 +192,7 @@ class TestPaidToolDecorator:
         rt = _make_runtime({"free_tool": 0})
         # No cache needed — free tools skip debit entirely
 
-        @rt.paid_tool("free_tool")
+        @rt.paid_tool(capability_uuid("free_tool"))
         async def free_tool(npub: str = "") -> dict:
             return {"free": True}
 
@@ -203,7 +203,7 @@ class TestPaidToolDecorator:
     async def test_preserves_function_metadata(self):
         rt = _make_runtime()
 
-        @rt.paid_tool("my_tool")
+        @rt.paid_tool(capability_uuid("my_tool"))
         async def my_tool(npub: str = "") -> dict:
             """My docstring."""
             return {}
@@ -216,7 +216,7 @@ class TestPaidToolDecorator:
         rt = _make_runtime({"my_tool": 1})
         await _inject_fake_cache(rt, balance=2)  # low balance after debit
 
-        @rt.paid_tool("my_tool")
+        @rt.paid_tool(capability_uuid("my_tool"))
         async def my_tool(npub: str = "") -> dict:
             return {"data": "ok"}
 
@@ -228,14 +228,15 @@ class TestPaidToolDecorator:
     @pytest.mark.asyncio
     async def test_unpriced_tool_blocked(self):
         """A paid-category tool not in the pricing model should be blocked."""
+        identity = ToolIdentity(capability="unpriced", category="write", intent="test")
         registry = {
-            "unpriced": ToolIdentity(capability="unpriced", category="write", intent="test"),
+            identity.tool_id: identity,
         }
         rt = OperatorRuntime(tool_registry=registry, nsec_env_var="__UNUSED__")
         # Resolver with empty costs — tool not in model
         rt._pricing_resolver = FakePricingResolver({})
 
-        @rt.paid_tool("unpriced")
+        @rt.paid_tool(identity.tool_id)
         async def unpriced(npub: str = "") -> dict:
             return {"should": "not reach"}
 

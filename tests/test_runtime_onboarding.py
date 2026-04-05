@@ -511,21 +511,22 @@ class TestNpubEnforcement:
     async def test_debit_or_error_passes_free_tools(self) -> None:
         """Free tools pass without npub."""
         from tollbooth.tool_identity import ToolIdentity
+        identity = ToolIdentity(capability="free_tool", category="free", intent="test")
         rt = OperatorRuntime(
-            tool_registry={"free_tool": ToolIdentity(capability="free_tool", category="free", intent="test")},
+            tool_registry={identity.tool_id: identity},
             service_name="Test",
         )
-        result = await rt.debit_or_error("free_tool", "")
+        result = await rt.debit_or_error(identity.tool_id, "")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_debit_or_error_passes_unknown_tools(self) -> None:
-        """Tools not in registry are allowed (not gated)."""
+        """Unknown UUIDs are allowed (not gated)."""
         rt = OperatorRuntime(
             tool_registry={},
             service_name="Test",
         )
-        result = await rt.debit_or_error("unknown_tool", "")
+        result = await rt.debit_or_error("unknown-uuid", "")
         assert result is None
 
 
@@ -536,26 +537,29 @@ class TestNpubEnforcement:
 
 class TestInitialPricingModel:
     def test_build_initial_pricing_model(self) -> None:
-        """Generates a scaffold with all tools at 0 sats."""
+        """Generates a scaffold with all tools at 0 sats, MCP-facing names."""
         from tollbooth.runtime import _build_initial_pricing_model
         from tollbooth.tool_identity import ToolIdentity
         import json
 
+        search = ToolIdentity(capability="search", category="read", intent="Find stuff")
+        create = ToolIdentity(capability="create", category="write", intent="Make stuff")
         rt = OperatorRuntime(
             tool_registry={
-                "search": ToolIdentity(capability="search", category="read", intent="Find stuff"),
-                "create": ToolIdentity(capability="create", category="write", intent="Make stuff"),
+                search.tool_id: search,
+                create.tool_id: create,
             },
             service_name="Test Service",
         )
+        rt._slug = "test"
         result = _build_initial_pricing_model(rt, "Test Service")
 
         model = json.loads(result)
         assert model["name"] == "Test Service Initial Pricing"
         tool_names = {t["tool_name"] for t in model["tools"]}
-        assert "search" in tool_names
-        assert "create" in tool_names
-        # All tools at 0 sats — no economic data from code
+        # Names should be MCP-facing (slug-prefixed)
+        assert "test_search" in tool_names
+        assert "test_create" in tool_names
         for t in model["tools"]:
             assert t["price_sats"] == 0
             assert "tool_id" in t
