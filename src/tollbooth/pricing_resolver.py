@@ -109,22 +109,6 @@ class PricingResolver:
             return tool_id in self._cached_tool_ids
         return False
 
-    async def has_tool_by_name(self, tool_name: str) -> bool:
-        """Fallback lookup by tool_name for legacy models with string tool_ids."""
-        await self._ensure_fresh()
-        if self._cached_model is not None:
-            return any(tp.tool_name == tool_name for tp in self._cached_model.tools)
-        return False
-
-    async def get_cost_by_name(self, tool_name: str) -> int:
-        """Fallback cost lookup by tool_name for legacy models."""
-        await self._ensure_fresh()
-        if self._cached_model is not None:
-            for tp in self._cached_model.tools:
-                if tp.tool_name == tool_name:
-                    return tp.price_sats
-        return 0
-
     async def get_tool_pricing(self, tool_id: str) -> "ToolPricing":
         """Return a ToolPricing for *tool_id*, supporting ad valorem pricing.
 

@@ -430,16 +430,8 @@ class OperatorRuntime:
         # Paid tool — resolve cost from Neon
         resolver = await self.pricing_resolver()
         tool_id = identity.tool_id
-
-        # Try UUID lookup first, fall back to tool_name for legacy models
+        cost = await resolver.get_cost(tool_id)
         in_model = await resolver.has_tool(tool_id)
-        if in_model:
-            cost = await resolver.get_cost(tool_id)
-        else:
-            # Legacy model may store MCP tool names instead of UUIDs
-            # Try both short name and common prefixed variants
-            in_model = await resolver.has_tool_by_name(tool_name)
-            cost = await resolver.get_cost_by_name(tool_name) if in_model else 0
 
         # Tool not yet in pricing model — block with guidance
         if not in_model:
@@ -525,10 +517,7 @@ class OperatorRuntime:
             if identity is None or identity.category in ("free", "restricted"):
                 return
             resolver = await self.pricing_resolver()
-            # Try UUID first, fall back to name for legacy models
             cost = await resolver.get_cost(identity.tool_id)
-            if cost == 0:
-                cost = await resolver.get_cost_by_name(tool_name)
             if cost > 0:
                 ledger = await cache.get(npub)
                 ledger.credit_deposit(cost, f"rollback:{tool_name}")
