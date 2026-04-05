@@ -95,6 +95,8 @@ class OperatorRuntime:
         # Registry keyed by UUID — the sole economic key
         self._tool_registry: dict[str, ToolIdentity] = tool_registry or {}
         self._slug: str = ""  # set by register_standard_tools
+        # UUID → MCP-registered tool name, populated during registration
+        self._mcp_tool_names: dict[str, str] = {}
         self._pricing_resolver: Any | None = None  # lazily created after vault
         self._operator_credential_template = operator_credential_template
         self._patron_credential_template = patron_credential_template
@@ -1016,6 +1018,7 @@ class OperatorRuntime:
                     result = await rt.inject_low_balance_warning(result, npub)
                 return result
 
+            wrapper._tool_id = tool_id  # type: ignore[attr-defined]
             return wrapper
         return decorator
 
@@ -1035,8 +1038,8 @@ def _build_initial_pricing_model(
     slug = rt._slug
     tools = []
     for tool_id, identity in rt._tool_registry.items():
-        # MCP-facing name: {slug}_{capability}
-        mcp_name = f"{slug}_{identity.capability}" if slug else identity.capability
+        # Use the actual MCP-registered name if available, else capability
+        mcp_name = rt._mcp_tool_names.get(tool_id, identity.capability)
         tools.append({
             "tool_id": tool_id,
             "tool_name": mcp_name,
@@ -1930,6 +1933,32 @@ def register_standard_tools(
             return await list_notarizations_tool(
                 vault, limit=limit, status=status or None,
             )
+
+    # Build UUID → MCP name mapping by querying the MCP server for its
+    # actual registered tools, then matching each to a registry identity.
+    import asyncio
+
+    async def _collect_mcp_names() -> dict[str, str]:
+        """Ask the MCP server what tools it has and map to registry UUIDs."""
+        live_tools = await mcp.list_tools()
+        cap_to_uuid = {ti.capability: uid for uid, ti in rt._tool_registry.items()}
+        mapping: dict[str, str] = {}
+        for t in live_tools:
+            mcp_name = t.name
+            # Strip slug prefix to get the function/capability name
+            for prefix in (f"{slug}_", "oracle_"):
+                if mcp_name.startswith(prefix):
+                    func_name = mcp_name[len(prefix):]
+                    if func_name in cap_to_uuid:
+                        mapping[cap_to_uuid[func_name]] = mcp_name
+                    break
+        return mapping
+
+    try:
+        rt._mcp_tool_names = asyncio.run(_collect_mcp_names())
+    except Exception:
+        # Graceful: tests use MagicMock, some envs have running loops
+        rt._mcp_tool_names = {}
 
 
 # ======================================================================

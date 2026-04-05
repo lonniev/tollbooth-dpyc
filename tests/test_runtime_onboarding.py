@@ -537,7 +537,7 @@ class TestNpubEnforcement:
 
 class TestInitialPricingModel:
     def test_build_initial_pricing_model(self) -> None:
-        """Generates a scaffold with all tools at 0 sats, MCP-facing names."""
+        """Generates a scaffold with all tools at 0 sats."""
         from tollbooth.runtime import _build_initial_pricing_model
         from tollbooth.tool_identity import ToolIdentity
         import json
@@ -552,12 +552,16 @@ class TestInitialPricingModel:
             service_name="Test Service",
         )
         rt._slug = "test"
+        # Simulate MCP name mapping (normally built from mcp.list_tools())
+        rt._mcp_tool_names = {
+            search.tool_id: "test_search",
+            create.tool_id: "test_create",
+        }
         result = _build_initial_pricing_model(rt, "Test Service")
 
         model = json.loads(result)
         assert model["name"] == "Test Service Initial Pricing"
         tool_names = {t["tool_name"] for t in model["tools"]}
-        # Names should be MCP-facing (slug-prefixed)
         assert "test_search" in tool_names
         assert "test_create" in tool_names
         for t in model["tools"]:
