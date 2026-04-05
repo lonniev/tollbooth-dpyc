@@ -430,8 +430,16 @@ class OperatorRuntime:
         # Paid tool — resolve cost from Neon
         resolver = await self.pricing_resolver()
         tool_id = identity.tool_id
-        cost = await resolver.get_cost(tool_id)
+
+        # Try UUID lookup first, fall back to tool_name for legacy models
         in_model = await resolver.has_tool(tool_id)
+        if in_model:
+            cost = await resolver.get_cost(tool_id)
+        else:
+            # Legacy model may store MCP tool names instead of UUIDs
+            # Try both short name and common prefixed variants
+            in_model = await resolver.has_tool_by_name(tool_name)
+            cost = await resolver.get_cost_by_name(tool_name) if in_model else 0
 
         # Tool not yet in pricing model — block with guidance
         if not in_model:
@@ -517,7 +525,10 @@ class OperatorRuntime:
             if identity is None or identity.category in ("free", "restricted"):
                 return
             resolver = await self.pricing_resolver()
+            # Try UUID first, fall back to name for legacy models
             cost = await resolver.get_cost(identity.tool_id)
+            if cost == 0:
+                cost = await resolver.get_cost_by_name(tool_name)
             if cost > 0:
                 ledger = await cache.get(npub)
                 ledger.credit_deposit(cost, f"rollback:{tool_name}")
@@ -1704,10 +1715,36 @@ def register_standard_tools(
 
     @tool
     async def set_pricing_model(model_json: str) -> dict[str, Any]:
-        """Set the active pricing model. RESTRICTED to operator."""
-        err = await rt.debit_or_error("set_pricing_model", rt.operator_npub())
-        if err:
-            return err
+        """Set the active pricing model. RESTRICTED to operator.
+
+        The model_json must contain an ``operator_proof`` field — a
+        Nostr-signed proof that the caller holds the operator's nsec.
+        Without a valid proof, the request is rejected.
+        """
+        import json as _json
+
+        # Extract and verify operator_proof from inside model_json
+        operator_proof = ""
+        try:
+            parsed = _json.loads(model_json)
+            if isinstance(parsed, dict):
+                operator_proof = parsed.pop("operator_proof", "")
+                model_json = _json.dumps(parsed)
+        except (ValueError, TypeError):
+            pass
+
+        if not operator_proof:
+            return {
+                "success": False,
+                "error": "Only the operator can modify pricing — provide operator_proof.",
+            }
+        from tollbooth.operator_proof import verify_operator_proof
+        if not verify_operator_proof(operator_proof, rt.operator_npub(), "set_pricing_model"):
+            return {
+                "success": False,
+                "error": "Invalid operator_proof — only the operator can modify pricing.",
+            }
+
         try:
             vault = await rt.vault()
             from tollbooth.pricing_store import PricingModelStore

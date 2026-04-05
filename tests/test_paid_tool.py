@@ -23,6 +23,12 @@ class FakePricingResolver:
     async def has_tool(self, tool_id: str) -> bool:
         return tool_id in self._costs
 
+    async def has_tool_by_name(self, tool_name: str) -> bool:
+        return False  # no legacy name fallback in tests
+
+    async def get_cost_by_name(self, tool_name: str) -> int:
+        return 0
+
     async def get_tool_pricing(self, tool_id: str):
         from tollbooth.pricing import ToolPricing
         return ToolPricing(fixed=self._costs.get(tool_id, 0))
