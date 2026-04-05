@@ -145,3 +145,17 @@ class PricingModelStore:
             [model_id],
         )
         return (result.get("rowCount", 0) or 0) > 0
+
+    async def reset_all_models(self, operator: str) -> int:
+        """Delete ALL pricing models for an operator. Returns count deleted.
+
+        This is a hard reset — the next ``get_pricing_model`` call will
+        trigger self-initialization with fresh UUIDs from the tool registry.
+        """
+        result = await self._neon._execute(
+            f"DELETE FROM {self._t('operator_pricing_models')} WHERE operator = $1",
+            [operator],
+        )
+        count = result.get("rowCount", 0) or 0
+        logger.info("Reset %d pricing model(s) for %s", count, operator[:20])
+        return count

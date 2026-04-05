@@ -183,6 +183,11 @@ STANDARD_IDENTITIES: dict[str, ToolIdentity] = {
         category="restricted",
         intent="Set the active pricing model. Operator only.",
     ),
+    "reset_pricing_model": ToolIdentity(
+        capability="reset_pricing_model",
+        category="restricted",
+        intent="Delete all pricing models and re-initialize. Operator only.",
+    ),
     "check_price": ToolIdentity(
         capability="check_price",
         category="free",

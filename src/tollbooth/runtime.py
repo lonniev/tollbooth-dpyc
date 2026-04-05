@@ -1749,6 +1749,41 @@ def register_standard_tools(
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    @tool
+    async def reset_pricing_model(operator_proof: str = "") -> dict[str, Any]:
+        """Delete all pricing models and re-initialize from the tool registry.
+
+        RESTRICTED to operator — requires operator_proof (nsec-signed).
+        After reset, the next get_pricing_model call will create a fresh
+        model with proper UUIDs for all registered tools at 0 sats.
+        """
+        if not operator_proof:
+            return {
+                "success": False,
+                "error": "Only the operator can reset pricing — provide operator_proof.",
+            }
+        from tollbooth.operator_proof import verify_operator_proof
+        if not verify_operator_proof(operator_proof, rt.operator_npub(), "reset_pricing_model"):
+            return {
+                "success": False,
+                "error": "Invalid operator_proof — only the operator can reset pricing.",
+            }
+        try:
+            vault = await rt.vault()
+            from tollbooth.pricing_store import PricingModelStore
+            store = PricingModelStore(neon_vault=vault)
+            deleted = await store.reset_all_models(rt.operator_npub())
+            # Invalidate pricing cache
+            if rt._pricing_resolver is not None:
+                rt._pricing_resolver.refresh()
+            return {
+                "success": True,
+                "deleted_count": deleted,
+                "message": "Pricing models deleted. Call get_pricing_model to initialize fresh.",
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     # -- Constraint Engine tools ---------------------------------------
 
     @tool
