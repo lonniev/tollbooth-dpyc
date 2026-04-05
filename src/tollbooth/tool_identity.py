@@ -139,31 +139,8 @@ STANDARD_IDENTITIES: dict[str, ToolIdentity] = {
     ),
 
     # -- Oracle delegation --
-    "how_to_join": ToolIdentity(
-        capability="how_to_join",
-        category="free",
-        intent="Get DPYC onboarding instructions.",
-    ),
-    "get_tax_rate": ToolIdentity(
-        capability="get_tax_rate",
-        category="free",
-        intent="Get the current DPYC certification tax rate.",
-    ),
-    "lookup_member": ToolIdentity(
-        capability="lookup_member",
-        category="free",
-        intent="Look up a DPYC community member by npub.",
-    ),
-    "about": ToolIdentity(
-        capability="about",
-        category="free",
-        intent="Describe the DPYC ecosystem.",
-    ),
-    "network_advisory": ToolIdentity(
-        capability="network_advisory",
-        category="free",
-        intent="Get active network advisories.",
-    ),
+    # Oracle tools are free and use the oracle_ namespace. They don't
+    # need pricing entries or registry identities — they're never gated.
 
     # -- Authority delegation --
     "check_authority_balance": ToolIdentity(
