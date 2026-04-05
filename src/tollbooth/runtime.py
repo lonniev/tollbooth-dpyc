@@ -1088,6 +1088,7 @@ def register_standard_tools(
     """
     from tollbooth.slug_tools import make_slug_tool
     tool = make_slug_tool(mcp, slug)
+    oracle_tool = make_slug_tool(mcp, "oracle")
 
     # -- Credit tools --------------------------------------------------
 
@@ -1625,29 +1626,29 @@ def register_standard_tools(
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
-    # -- Oracle delegation ---------------------------------------------
+    # -- Oracle delegation (oracle_ namespace) ----------------------------
 
-    @tool
+    @oracle_tool
     async def how_to_join() -> dict[str, Any]:
         """Get DPYC onboarding instructions from the Oracle. Free."""
         return await _call_oracle(rt, "how_to_join")
 
-    @tool
+    @oracle_tool
     async def get_tax_rate() -> dict[str, Any]:
         """Get the current DPYC certification tax rate. Free."""
         return await _call_oracle(rt, "get_tax_rate")
 
-    @tool
+    @oracle_tool
     async def lookup_member(npub: str) -> dict[str, Any]:
         """Look up a DPYC community member by npub. Free."""
         return await _call_oracle(rt, "lookup_member", {"npub": npub})
 
-    @tool
+    @oracle_tool
     async def about() -> dict[str, Any]:
         """Describe the DPYC ecosystem via the Oracle. Free."""
         return await _call_oracle(rt, "about")
 
-    @tool
+    @oracle_tool
     async def network_advisory() -> dict[str, Any]:
         """Get active network advisories from the Oracle. Free."""
         return await _call_oracle(rt, "network_advisory")
