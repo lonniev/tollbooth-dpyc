@@ -443,9 +443,16 @@ class OperatorRuntime:
                 ),
             }
 
-        # Explicitly priced at 0 — intentionally free
+        # Paid-category tool at 0 sats = TBD, not intentionally free.
+        # The operator must set a real price before this tool can be used.
         if cost == 0:
-            return None
+            return {
+                "success": False,
+                "error": (
+                    f"Tool '{tool_name}' has no price set yet (TBD). "
+                    f"Set a price in the pricing model before use."
+                ),
+            }
 
         try:
             npub = resolve_npub(npub)
