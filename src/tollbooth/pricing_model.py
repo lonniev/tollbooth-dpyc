@@ -41,11 +41,9 @@ class ToolPrice:
             "tool_id": self.tool_id,
             "tool_name": self.tool_name,
             "price_sats": self.price_sats,
+            "category": self.category,
+            "intent": self.intent,
         }
-        if self.category:
-            d["category"] = self.category
-        if self.intent:
-            d["intent"] = self.intent
         if self.price_type != "flat":
             d["price_type"] = self.price_type
         if self.price_formula is not None:

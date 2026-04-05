@@ -24,12 +24,12 @@ class TestToolPrice:
         assert restored.category == "read"
         assert restored.intent == "query"
 
-    def test_optional_fields_omitted(self) -> None:
+    def test_always_emits_core_fields(self) -> None:
         tp = ToolPrice(tool_id=capability_uuid("search"), tool_name="search", price_sats=5)
         d = tp.to_dict()
-        assert "category" not in d
-        assert "intent" not in d
-        assert "tool_id" in d  # tool_id is always emitted
+        assert "tool_id" in d
+        assert "category" in d  # always emitted, even when empty
+        assert "intent" in d    # always emitted, even when empty
 
     def test_from_dict_defaults(self) -> None:
         tp = ToolPrice.from_dict({"tool_name": "x", "price_sats": 1})
