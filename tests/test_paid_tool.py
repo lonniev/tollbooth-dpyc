@@ -13,15 +13,18 @@ from tollbooth.tool_identity import ToolIdentity, capability_uuid
 class FakePricingResolver:
     """In-memory pricing resolver for testing."""
 
-    def __init__(self, costs: dict[str, int]):
-        # costs keyed by tool_id
+    def __init__(self, costs: dict[str, int], priced: dict[str, bool] | None = None):
         self._costs = costs
+        self._priced = priced or {k: True for k in costs}
 
     async def get_cost(self, tool_id: str) -> int:
         return self._costs.get(tool_id, 0)
 
     async def has_tool(self, tool_id: str) -> bool:
         return tool_id in self._costs
+
+    async def is_priced(self, tool_id: str) -> bool:
+        return self._priced.get(tool_id, False)
 
     async def get_tool_pricing(self, tool_id: str):
         from tollbooth.pricing import ToolPricing
@@ -227,14 +230,15 @@ class TestPaidToolDecorator:
 
     @pytest.mark.asyncio
     async def test_unpriced_tool_blocked(self):
-        """A paid-category tool not in the pricing model should be blocked."""
+        """A tool in the model but not yet priced (TBD) should be blocked."""
         identity = ToolIdentity(capability="unpriced", category="write", intent="test")
-        registry = {
-            identity.tool_id: identity,
-        }
+        registry = {identity.tool_id: identity}
         rt = OperatorRuntime(tool_registry=registry, nsec_env_var="__UNUSED__")
-        # Resolver with empty costs — tool not in model
-        rt._pricing_resolver = FakePricingResolver({})
+        # Tool is in model at 0 sats but priced=False (TBD)
+        rt._pricing_resolver = FakePricingResolver(
+            costs={identity.tool_id: 0},
+            priced={identity.tool_id: False},
+        )
 
         @rt.paid_tool(identity.tool_id)
         async def unpriced(npub: str = "") -> dict:
@@ -242,4 +246,22 @@ class TestPaidToolDecorator:
 
         result = await unpriced(npub=VALID_NPUB)
         assert result["success"] is False
-        assert "not yet priced" in result["error"]
+        assert "not been priced" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_intentionally_free_tool_allowed(self):
+        """A tool priced at 0 sats with priced=True is intentionally free."""
+        identity = ToolIdentity(capability="promo", category="write", intent="test")
+        registry = {identity.tool_id: identity}
+        rt = OperatorRuntime(tool_registry=registry, nsec_env_var="__UNUSED__")
+        rt._pricing_resolver = FakePricingResolver(
+            costs={identity.tool_id: 0},
+            priced={identity.tool_id: True},
+        )
+
+        @rt.paid_tool(identity.tool_id)
+        async def promo(npub: str = "") -> dict:
+            return {"free": True}
+
+        result = await promo(npub=VALID_NPUB)
+        assert result["free"] is True

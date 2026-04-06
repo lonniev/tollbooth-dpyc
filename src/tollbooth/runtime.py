@@ -431,26 +431,31 @@ class OperatorRuntime:
         resolver = await self.pricing_resolver()
         cost = await resolver.get_cost(tool_id)
         in_model = await resolver.has_tool(tool_id)
+        priced = await resolver.is_priced(tool_id)
 
         # Tool not yet in pricing model — block with guidance
         if not in_model:
             return {
                 "success": False,
                 "error": (
-                    f"Tool '{cap}' is not yet priced. "
+                    f"Tool '{cap}' is not yet in the pricing model. "
                     f"Add it to the pricing model before use."
                 ),
             }
 
-        # Paid-category tool at 0 sats = TBD, not intentionally free.
-        if cost == 0:
+        # Tool in model but not yet priced (TBD) — block until operator sets a price
+        if not priced:
             return {
                 "success": False,
                 "error": (
-                    f"Tool '{cap}' has no price set yet (TBD). "
+                    f"Tool '{cap}' has not been priced yet (TBD). "
                     f"Set a price in the pricing model before use."
                 ),
             }
+
+        # Priced at 0 — intentionally free, no debit needed
+        if cost == 0:
+            return None
 
         try:
             npub = resolve_npub(npub)
@@ -1044,6 +1049,7 @@ def _build_initial_pricing_model(
             "tool_id": tool_id,
             "tool_name": mcp_name,
             "price_sats": 0,
+            "priced": identity.category in ("free", "restricted"),  # free/restricted are inherently priced
             "category": identity.category,
             "intent": identity.intent,
         })

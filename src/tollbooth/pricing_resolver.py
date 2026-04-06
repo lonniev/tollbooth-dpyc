@@ -48,6 +48,7 @@ class PricingResolver:
         self._cached_model: PricingModel | None = None
         self._cached_cost_map: dict[str, int] | None = None
         self._cached_tool_ids: set[str] | None = None
+        self._cached_priced_map: dict[str, bool] | None = None
         self._cached_engine: ConstraintEngine | None = None
         # Initialize to negative infinity so the first _is_stale() always
         # returns True — even if time.monotonic() is small (fresh CI runner).
@@ -67,6 +68,7 @@ class PricingResolver:
             if model is not None:
                 self._cached_cost_map = model.tool_cost_map()
                 self._cached_tool_ids = model.tool_id_set()
+                self._cached_priced_map = model.tool_priced_map()
                 constraint_cfg = model.to_constraint_config()
                 if constraint_cfg is not None:
                     self._cached_engine = load_constraints(constraint_cfg)
@@ -75,6 +77,7 @@ class PricingResolver:
             else:
                 self._cached_cost_map = None
                 self._cached_tool_ids = None
+                self._cached_priced_map = None
                 self._cached_engine = None
             self._cache_ts = time.monotonic()
         except Exception:
@@ -99,11 +102,18 @@ class PricingResolver:
             return self._cached_cost_map[tool_id]
         return 0
 
-    async def has_tool(self, tool_id: str) -> bool:
-        """Return True if *tool_id* has an explicit entry in the pricing model.
+    async def is_priced(self, tool_id: str) -> bool:
+        """Return True if the operator has explicitly set a price for this tool.
 
-        Distinguishes "intentionally priced at 0" from "not in model at all".
+        False means TBD — the tool exists in the model but hasn't been priced yet.
         """
+        await self._ensure_fresh()
+        if self._cached_priced_map is not None:
+            return self._cached_priced_map.get(tool_id, False)
+        return False
+
+    async def has_tool(self, tool_id: str) -> bool:
+        """Return True if *tool_id* has an explicit entry in the pricing model."""
         await self._ensure_fresh()
         if self._cached_tool_ids is not None:
             return tool_id in self._cached_tool_ids

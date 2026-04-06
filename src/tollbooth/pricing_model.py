@@ -31,6 +31,7 @@ class ToolPrice:
     price_sats: int
     category: str = ""
     intent: str = ""
+    priced: bool = False               # False = TBD, True = operator has set a price
     price_type: str = "flat"           # "flat" | "percent" | "formula"
     price_formula: str | None = None   # percent expression or formula string
     min_cost: int = 0                  # floor — minimum cost in sats
@@ -43,6 +44,7 @@ class ToolPrice:
             "price_sats": self.price_sats,
             "category": self.category,
             "intent": self.intent,
+            "priced": self.priced,
         }
         if self.price_type != "flat":
             d["price_type"] = self.price_type
@@ -83,6 +85,7 @@ class ToolPrice:
             price_sats=int(data["price_sats"]),
             category=data.get("category", ""),
             intent=data.get("intent", ""),
+            priced=bool(data.get("priced", True)),  # legacy models without field are considered priced
             price_type=data.get("price_type", "flat"),
             price_formula=data.get("price_formula", None),
             min_cost=int(data.get("min_cost", 0)),
@@ -131,6 +134,10 @@ class PricingModel:
     def tool_id_set(self) -> set[str]:
         """Return the set of tool_ids that have explicit entries."""
         return {tp.tool_id for tp in self.tools}
+
+    def tool_priced_map(self) -> dict[str, bool]:
+        """Return {tool_id: priced} — whether the operator has set a price."""
+        return {tp.tool_id: tp.priced for tp in self.tools}
 
     def to_constraint_config(self) -> dict[str, Any] | None:
         """Convert pipeline to the format ``load_constraints()`` expects.
