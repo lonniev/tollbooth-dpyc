@@ -314,6 +314,8 @@ async def check_balance_tool(
     ledger = await cache.get(user_id)
     today = date.today().isoformat()
 
+    vault_unavailable = getattr(ledger, "_vault_unavailable", False)
+
     result: dict[str, Any] = {
         "success": True,
         "balance_api_sats": ledger.balance_api_sats,
@@ -323,6 +325,13 @@ async def check_balance_tool(
         "pending_invoice_ids": list(ledger.pending_invoices),
         "last_deposit_at": ledger.last_deposit_at,
     }
+
+    if vault_unavailable:
+        result["vault_unavailable"] = True
+        result["warning"] = (
+            "Vault is not yet available — balance shown may be stale or zero. "
+            "Try again in a moment."
+        )
 
     if "seed_balance_v1" in ledger.credited_invoices:
         result["seed_balance_granted"] = True

@@ -108,6 +108,7 @@ class LedgerCache:
                 # Vault fetch failed (cold start, Neon not ready).
                 # Return the empty ledger but do NOT cache it — next call
                 # will retry the vault fetch after it has had time to connect.
+                ledger._vault_unavailable = True  # type: ignore[attr-defined]
                 return ledger
 
             # Belt-and-suspenders: migrate perpetual tranches even on fresh load

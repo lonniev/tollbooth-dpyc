@@ -394,92 +394,129 @@ class OperatorRuntime:
         operator_proof: str = "",
         patron_proof: str = "",
     ) -> dict[str, Any] | None:
-        """Check balance and debit credits for a paid tool call.
+        """Gate a tool call: identity → access → pricing → constraints → billing.
 
-        Args:
-            tool_id: The tool's UUID (from ToolIdentity.tool_id).
+        Returns ``None`` to proceed.  Returns an error dict to deny.
 
-        Returns None on success (proceed). Returns error dict on failure.
+        The code-declared *category* is the immutable floor for billing.
+        The constraint pipeline can add gates but never remove them.
         """
+        from tollbooth.operator_proof import verify_operator_proof
+
         identity = self._tool_registry.get(tool_id)
 
-        # Unknown UUID (not in registry) — allow without gating
+        # ── Identity ──────────────────────────────────────────
         if identity is None:
-            return None
+            return {
+                "success": False,
+                "error": f"Unknown tool '{tool_id}' — not registered with this operator.",
+            }
 
-        cap = identity.capability  # for human-readable messages
+        cap = identity.capability
+        category = identity.category          # set in code, never by the pricing model
 
-        # RESTRICTED: operator-only
-        if identity.category == "restricted":
+        # ── Access: operator-restricted ───────────────────────
+        # No billing, no constraints.  Only the operator's npub
+        # (or a valid operator_proof signer) may call these.
+        if category == "restricted":
             try:
                 caller = resolve_npub(npub)
             except ValueError as e:
                 return {"success": False, "error": str(e)}
-            if caller != self.operator_npub():
-                if operator_proof:
-                    from tollbooth.operator_proof import verify_operator_proof
-                    if verify_operator_proof(operator_proof, self.operator_npub(), cap):
-                        return None
-                return {"success": False, "error": "This tool is restricted to the operator."}
-            return None
+            if caller == self.operator_npub():
+                return None
+            if operator_proof and verify_operator_proof(
+                operator_proof, self.operator_npub(), cap,
+            ):
+                return None
+            return {"success": False, "error": "This tool is restricted to the operator."}
 
-        # FREE: no charge
-        if identity.category == "free":
-            return None
+        # ── Pricing ───────────────────────────────────────────
+        # Code says "free" → cost is 0, Neon not consulted.
+        # Everything else requires Neon, a model, and an explicit price.
+        cost = 0
+        if category != "free":
+            resolver = await self.pricing_resolver()
+            await resolver._ensure_fresh()
+            if not resolver.neon_available:
+                return {
+                    "success": False,
+                    "error": (
+                        "Service unavailable — persistence layer is unreachable. "
+                        "Only bootstrap tools are available."
+                    ),
+                }
 
-        # Paid tool — resolve cost from Neon
-        resolver = await self.pricing_resolver()
-        cost = await resolver.get_cost(tool_id)
-        in_model = await resolver.has_tool(tool_id)
-        priced = await resolver.is_priced(tool_id)
+            if not await resolver.has_tool(tool_id):
+                return {
+                    "success": False,
+                    "error": (
+                        f"Tool '{cap}' is not yet in the pricing model. "
+                        f"Add it to the pricing model before use."
+                    ),
+                }
+            if not await resolver.is_priced(tool_id):
+                return {
+                    "success": False,
+                    "error": (
+                        f"Tool '{cap}' has not been priced yet (TBD). "
+                        f"Set a price in the pricing model before use."
+                    ),
+                }
+            cost = await resolver.get_cost(tool_id)
 
-        # Tool not yet in pricing model — block with guidance
-        if not in_model:
-            return {
-                "success": False,
-                "error": (
-                    f"Tool '{cap}' is not yet in the pricing model. "
-                    f"Add it to the pricing model before use."
-                ),
-            }
-
-        # Tool in model but not yet priced (TBD) — block until operator sets a price
-        if not priced:
-            return {
-                "success": False,
-                "error": (
-                    f"Tool '{cap}' has not been priced yet (TBD). "
-                    f"Set a price in the pricing model before use."
-                ),
-            }
-
-        # Priced at 0 — intentionally free, no debit needed
-        if cost == 0:
-            return None
-
+        # ── Resolve caller ────────────────────────────────────
+        # Paid tools always require an npub.  Free tools work
+        # without one — but constraints won't evaluate.
         try:
             npub = resolve_npub(npub)
-            cache = await self.ledger_cache()
-        except ValueError as e:
-            return {"success": False, "error": str(e)}
+        except ValueError:
+            if category != "free":
+                return {
+                    "success": False,
+                    "error": (
+                        "npub is required. Pass your Nostr public key (npub1...) "
+                        "to identify yourself."
+                    ),
+                }
+            npub = ""
 
-        # Constraint gate
+        # ── Constraints ───────────────────────────────────────
+        # The pipeline applies to every non-restricted tool —
+        # including free ones.  patron_proof verification, rate
+        # limits, temporal windows, etc. can tighten access but
+        # never loosen the code-declared category floor.
+        # Without an npub, constraints cannot be evaluated.
         effective_cost = cost
-        if self._constraint_gate and self._constraint_gate.enabled:
-            ledger = await cache.get(npub)
-            denial, effective_cost = self._constraint_gate.check(
-                tool_name=cap,
-                base_cost=cost,
-                ledger=ledger,
-                npub=npub,
-                patron_proof=patron_proof,
-            )
-            if denial:
-                return denial
+        if npub and self._constraint_gate and self._constraint_gate.enabled:
+            try:
+                cache = await self.ledger_cache()
+                ledger = await cache.get(npub)
+                denial, effective_cost = self._constraint_gate.check(
+                    tool_name=cap,
+                    base_cost=cost,
+                    ledger=ledger,
+                    npub=npub,
+                    patron_proof=patron_proof,
+                )
+                if denial:
+                    return denial
+            except Exception:
+                if category != "free":
+                    return {
+                        "success": False,
+                        "error": "Service unavailable — cannot evaluate constraints.",
+                    }
+                logger.debug("Constraint evaluation skipped for free tool %s", cap)
 
+        # ── No charge ─────────────────────────────────────────
+        if effective_cost == 0:
+            return None
+
+        # ── Billing ───────────────────────────────────────────
+        cache = await self.ledger_cache()
         ledger = await cache.get(npub)
 
-        # Auto-reconcile pending invoices on first access per npub
         if npub not in self._reconciled_npubs and ledger.pending_invoices:
             self._reconciled_npubs.add(npub)
             try:
@@ -1003,8 +1040,14 @@ class OperatorRuntime:
                 bound = sig.bind(*args, **kwargs)
                 bound.apply_defaults()
                 npub = bound.arguments.get("npub", "")
+                operator_proof = bound.arguments.get("operator_proof", "")
+                patron_proof = bound.arguments.get("patron_proof", "")
 
-                err = await rt.debit_or_error(tool_id, npub)
+                err = await rt.debit_or_error(
+                    tool_id, npub,
+                    operator_proof=operator_proof,
+                    patron_proof=patron_proof,
+                )
                 if err is not None:
                     return err
 

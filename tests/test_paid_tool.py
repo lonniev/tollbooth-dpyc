@@ -16,6 +16,14 @@ class FakePricingResolver:
     def __init__(self, costs: dict[str, int], priced: dict[str, bool] | None = None):
         self._costs = costs
         self._priced = priced or {k: True for k in costs}
+        self._neon_available = True
+
+    @property
+    def neon_available(self) -> bool:
+        return self._neon_available
+
+    async def _ensure_fresh(self) -> None:
+        pass
 
     async def get_cost(self, tool_id: str) -> int:
         return self._costs.get(tool_id, 0)
@@ -155,7 +163,7 @@ class TestPaidToolDecorator:
         rt = _make_runtime()
         cache = await _inject_fake_cache(rt, balance=100)
 
-        @rt.paid_tool("my_tool", catch_errors=True)
+        @rt.paid_tool(capability_uuid("my_tool"), catch_errors=True)
         async def my_tool(npub: str = "") -> dict:
             raise RuntimeError("boom")
 
@@ -176,7 +184,7 @@ class TestPaidToolDecorator:
         rt = _make_runtime()
         cache = await _inject_fake_cache(rt, balance=100)
 
-        @rt.paid_tool("my_tool", catch_errors=False)
+        @rt.paid_tool(capability_uuid("my_tool"), catch_errors=False)
         async def my_tool(npub: str = "") -> dict:
             raise RuntimeError("boom")
 

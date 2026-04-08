@@ -50,6 +50,7 @@ class PricingResolver:
         self._cached_tool_ids: set[str] | None = None
         self._cached_priced_map: dict[str, bool] | None = None
         self._cached_engine: ConstraintEngine | None = None
+        self._neon_available: bool = False
         # Initialize to negative infinity so the first _is_stale() always
         # returns True — even if time.monotonic() is small (fresh CI runner).
         self._cache_ts: float = -self._cache_ttl - 1.0
@@ -57,13 +58,19 @@ class PricingResolver:
     def _is_stale(self) -> bool:
         return (time.monotonic() - self._cache_ts) > self._cache_ttl
 
+    @property
+    def neon_available(self) -> bool:
+        """True if we have successfully reached Neon at least once."""
+        return self._neon_available
+
     async def _ensure_fresh(self) -> None:
-        """Refresh the cache if stale.  Neon failure degrades gracefully."""
+        """Refresh the cache if stale.  Neon failure denies all paid tools."""
         if not self._is_stale():
             return
 
         try:
             model = await self._store.fetch_active_model(self._operator)
+            self._neon_available = True
             self._cached_model = model
             if model is not None:
                 self._cached_cost_map = model.tool_cost_map()
@@ -82,15 +89,18 @@ class PricingResolver:
             self._cache_ts = time.monotonic()
         except Exception:
             logger.warning(
-                "Failed to refresh pricing model for %s; using cached/fallback",
+                "Neon unreachable for %s — all paid tools denied",
                 self._operator,
                 exc_info=True,
             )
-            # Keep existing cache (stale > nothing)
-            if self._cache_ts < 0:
-                # First call ever failed — mark as attempted so we don't
-                # hammer Neon on every request
-                self._cache_ts = time.monotonic()
+            self._neon_available = False
+            self._cached_model = None
+            self._cached_cost_map = None
+            self._cached_tool_ids = None
+            self._cached_priced_map = None
+            self._cached_engine = None
+            # Retry on next call — don't cache the failure
+            self._cache_ts = -self._cache_ttl - 1.0
 
     async def get_cost(self, tool_id: str) -> int:
         """Return the cost for *tool_id*.

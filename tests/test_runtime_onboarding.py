@@ -520,14 +520,16 @@ class TestNpubEnforcement:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_debit_or_error_passes_unknown_tools(self) -> None:
-        """Unknown UUIDs are allowed (not gated)."""
+    async def test_debit_or_error_denies_unknown_tools(self) -> None:
+        """Unknown UUIDs are denied — no open doors."""
         rt = OperatorRuntime(
             tool_registry={},
             service_name="Test",
         )
         result = await rt.debit_or_error("unknown-uuid", "")
-        assert result is None
+        assert result is not None
+        assert result["success"] is False
+        assert "not registered" in result["error"]
 
 
 # ---------------------------------------------------------------------------

@@ -147,26 +147,47 @@ class TestCache:
 # ---------------------------------------------------------------------------
 
 
-class TestGracefulFailure:
+class TestNeonUnavailable:
     @pytest.mark.asyncio
-    async def test_neon_failure_returns_zero(self) -> None:
+    async def test_neon_failure_clears_cache_and_marks_unavailable(self) -> None:
+        """When Neon is unreachable, cache is cleared — no stale fallback."""
         store = _MockStore(fail=True)
         resolver = PricingResolver(store=store, operator="npub1op")
         cost = await resolver.get_cost(SEARCH_ID)
         assert cost == 0
+        assert resolver.neon_available is False
 
     @pytest.mark.asyncio
-    async def test_neon_failure_after_cache_keeps_stale(self) -> None:
+    async def test_neon_failure_after_cache_clears_stale(self) -> None:
+        """Neon going down after a successful fetch clears the cache."""
         store = _MockStore(model=_active_model())
         resolver = PricingResolver(store=store, operator="npub1op", cache_ttl=0.01)
         cost = await resolver.get_cost(SEARCH_ID)
         assert cost == 3
+        assert resolver.neon_available is True
 
         store._fail = True
         time.sleep(0.02)
 
         cost = await resolver.get_cost(SEARCH_ID)
-        assert cost == 3  # stale cache
+        assert cost == 0  # cache cleared, no stale fallback
+        assert resolver.neon_available is False
+
+    @pytest.mark.asyncio
+    async def test_neon_recovery_restores_availability(self) -> None:
+        """After Neon recovers, the resolver picks up the model again."""
+        store = _MockStore(fail=True)
+        resolver = PricingResolver(store=store, operator="npub1op", cache_ttl=0.01)
+        await resolver.get_cost(SEARCH_ID)
+        assert resolver.neon_available is False
+
+        store._fail = False
+        store._model = _active_model()
+        time.sleep(0.02)
+
+        cost = await resolver.get_cost(SEARCH_ID)
+        assert cost == 3
+        assert resolver.neon_available is True
 
 
 # ---------------------------------------------------------------------------
