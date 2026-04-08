@@ -46,7 +46,11 @@ class TestProbeRelayLiveness:
     def test_all_reachable_sorted_by_latency(self, mock_cc):
         """All relays connect — results sorted by latency (lowest first)."""
         relays = ["wss://a.example", "wss://b.example", "wss://c.example"]
-        mock_cc.side_effect = _mock_create_connection_factory({r: 0.01 for r in relays})
+        mock_cc.side_effect = _mock_create_connection_factory({
+            "wss://a.example": 0.01,
+            "wss://b.example": 0.05,
+            "wss://c.example": 0.10,
+        })
 
         results = probe_relay_liveness(relays, timeout=3)
 
