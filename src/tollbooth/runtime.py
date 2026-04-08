@@ -1083,7 +1083,6 @@ def _build_initial_pricing_model(
     """
     import json as _json
 
-    slug = rt._slug
     tools = []
     for tool_id, identity in rt._tool_registry.items():
         # Use the actual MCP-registered name if available, else capability
@@ -1828,7 +1827,7 @@ def register_standard_tools(
             store = PricingModelStore(neon_vault=vault)
 
             # Erase
-            deleted = await store.reset_all_models(rt.operator_npub())
+            await store.reset_all_models(rt.operator_npub())
 
             # Restore default
             if rt._tool_registry:
