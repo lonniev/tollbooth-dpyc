@@ -1353,6 +1353,16 @@ def register_standard_tools(
             if val:
                 build_info[key.lower()] = val
 
+        # Operator npub fingerprint — short hash for patron verification
+        import hashlib
+        op_npub = ""
+        op_npub_hash = ""
+        try:
+            op_npub = rt.operator_npub()
+            op_npub_hash = hashlib.sha256(op_npub.encode()).hexdigest()[:12]
+        except Exception:
+            pass
+
         result: dict[str, Any] = {
             "success": True,
             "service": service_name or slug,
@@ -1360,6 +1370,7 @@ def register_standard_tools(
             "tollbooth_dpyc_version": wheel_version,
             "vault_configured": vault_ok,
             "courier_has_vault": courier_ok,
+            "operator_npub_hash": op_npub_hash,
             "process_id": os.getpid(),
             "build_info": build_info or None,
         }
