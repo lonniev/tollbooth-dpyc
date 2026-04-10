@@ -15,8 +15,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from tollbooth.tool_identity import capability_uuid
-
 
 @dataclass
 class ToolPrice:
@@ -75,10 +73,12 @@ class ToolPrice:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ToolPrice:
-        # Legacy migration: if tool_id is missing, synthesize from tool_name
         tool_id = data.get("tool_id")
         if not tool_id:
-            tool_id = capability_uuid(data["tool_name"])
+            raise KeyError(
+                f"tool_id is required for tool '{data.get('tool_name', '?')}'. "
+                "Run reset_pricing_model to re-seed from the tool registry."
+            )
         return cls(
             tool_id=tool_id,
             tool_name=data["tool_name"],

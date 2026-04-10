@@ -2004,13 +2004,28 @@ def register_standard_tools(
         mapping: dict[str, str] = {}
         for t in live_tools:
             mcp_name = t.name
-            # Strip slug prefix to get the function/capability name
+            # Strip slug prefix to get the capability name
             for prefix in (f"{slug}_", "oracle_"):
                 if mcp_name.startswith(prefix):
                     func_name = mcp_name[len(prefix):]
                     if func_name in cap_to_uuid:
                         mapping[cap_to_uuid[func_name]] = mcp_name
                     break
+        # Warn about registry tools that couldn't be mapped to MCP names.
+        # This is diagnostic only — pricing lookups use UUIDs, not names.
+        unmapped = [
+            ti.capability
+            for uid, ti in rt._tool_registry.items()
+            if uid not in mapping
+        ]
+        if unmapped:
+            import logging
+            logging.getLogger("tollbooth.runtime").warning(
+                "Tool registry → MCP name mapping failed for: %s. "
+                "Each @tool function name (after slug strip) must match "
+                "its ToolIdentity capability exactly.",
+                ", ".join(sorted(unmapped)),
+            )
         return mapping
 
     try:

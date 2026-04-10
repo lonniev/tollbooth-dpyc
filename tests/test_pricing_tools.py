@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from tollbooth.pricing_store import PricingModelStore
+from tollbooth.tool_identity import capability_uuid
 from tollbooth.tools.pricing import get_pricing_model_tool, set_pricing_model_tool
 from tollbooth.vaults.neon import NeonVault
 
@@ -56,8 +57,8 @@ def _sample_model_json() -> str:
     return json.dumps({
         "name": "Test Model",
         "tools": [
-            {"tool_name": "search", "price_sats": 1, "category": "read"},
-            {"tool_name": "create", "price_sats": 5, "category": "write"},
+            {"tool_id": capability_uuid("search"), "tool_name": "search", "price_sats": 1, "category": "read"},
+            {"tool_id": capability_uuid("create"), "tool_name": "create", "price_sats": 5, "category": "write"},
         ],
         "pipeline": [],
     })
@@ -185,8 +186,8 @@ class TestSetPricingModelTool:
             "model_id": "uuid-existing",
             "name": "Test Model",
             "tools": [
-                {"tool_name": "search", "price_sats": 1, "category": "read"},
-                {"tool_name": "create", "price_sats": 5, "category": "write"},
+                {"tool_id": capability_uuid("search"), "tool_name": "search", "price_sats": 1, "category": "read"},
+                {"tool_id": capability_uuid("create"), "tool_name": "create", "price_sats": 5, "category": "write"},
             ],
             "pipeline": [],
         })

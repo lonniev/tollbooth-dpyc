@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tollbooth.tool_identity import capability_uuid
 from tollbooth.pricing_model import PipelineStep, PricingModel, ToolPrice
 
@@ -32,14 +34,14 @@ class TestToolPrice:
         assert "intent" in d    # always emitted, even when empty
 
     def test_from_dict_defaults(self) -> None:
-        tp = ToolPrice.from_dict({"tool_name": "x", "price_sats": 1})
+        tp = ToolPrice.from_dict({"tool_id": capability_uuid("x"), "tool_name": "x", "price_sats": 1})
         assert tp.category == ""
         assert tp.intent == ""
 
-    def test_from_dict_legacy_synthesizes_tool_id(self) -> None:
-        """Legacy data without tool_id gets a synthesized UUID from tool_name."""
-        tp = ToolPrice.from_dict({"tool_name": "search", "price_sats": 5})
-        assert tp.tool_id == capability_uuid("search")
+    def test_from_dict_rejects_missing_tool_id(self) -> None:
+        """Data without tool_id raises KeyError — no legacy synthesis."""
+        with pytest.raises(KeyError, match="tool_id is required"):
+            ToolPrice.from_dict({"tool_name": "search", "price_sats": 5})
 
     def test_from_dict_preserves_explicit_tool_id(self) -> None:
         """Explicit tool_id in data is preserved, not overwritten."""
@@ -183,7 +185,7 @@ class TestPricingModel:
             "name": "Test",
             "model_json": json.dumps({
                 "name": "Test",
-                "tools": [{"tool_name": "a", "price_sats": 1}],
+                "tools": [{"tool_id": capability_uuid("a"), "tool_name": "a", "price_sats": 1}],
                 "pipeline": [],
             }),
             "is_active": True,
@@ -193,8 +195,23 @@ class TestPricingModel:
         assert model.operator == "npub1op"
         assert model.is_active is True
         assert len(model.tools) == 1
-        # Legacy: tool_id synthesized from tool_name
         assert model.tools[0].tool_id == capability_uuid("a")
+
+    def test_from_row_rejects_missing_tool_id(self) -> None:
+        """Rows with tools missing tool_id raise KeyError."""
+        row = {
+            "id": "uuid-1",
+            "operator": "npub1op",
+            "name": "Test",
+            "model_json": json.dumps({
+                "name": "Test",
+                "tools": [{"tool_name": "a", "price_sats": 1}],
+                "pipeline": [],
+            }),
+            "is_active": True,
+        }
+        with pytest.raises(KeyError, match="tool_id is required"):
+            PricingModel.from_row(row)
 
     def test_from_row_with_dict_model_json(self) -> None:
         """Neon may return JSONB as a dict instead of string."""

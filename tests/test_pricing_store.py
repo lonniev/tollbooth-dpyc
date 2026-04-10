@@ -93,7 +93,7 @@ class TestFetchActiveModel:
         vault = _vault()
         model_json = json.dumps({
             "name": "Active Model",
-            "tools": [{"tool_name": "search", "price_sats": 5}],
+            "tools": [{"tool_id": "test-uuid-1", "tool_name": "search", "price_sats": 5}],
             "pipeline": [],
         })
         vault._client.post = AsyncMock(
