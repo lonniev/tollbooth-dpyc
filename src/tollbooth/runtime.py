@@ -1366,6 +1366,7 @@ def register_standard_tools(
         result: dict[str, Any] = {
             "success": True,
             "service": service_name or slug,
+            "slug": slug,
             "version": service_version,
             "tollbooth_dpyc_version": wheel_version,
             "vault_configured": vault_ok,
