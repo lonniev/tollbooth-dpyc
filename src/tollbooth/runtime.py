@@ -96,6 +96,7 @@ class OperatorRuntime:
         self._tool_registry: dict[str, ToolIdentity] = tool_registry or {}
         self._slug: str = ""  # set by register_standard_tools
         self._tool_func_names: dict[str, str] = {}  # UUID → Python function name, populated by paid_tool
+        self._mcp_name_cache: dict[str, str] = {}  # UUID → resolved MCP name, built lazily
         self._pricing_resolver: Any | None = None  # lazily created after vault
         self._operator_credential_template = operator_credential_template
         self._patron_credential_template = patron_credential_template
@@ -368,6 +369,39 @@ class OperatorRuntime:
         )
         return self._courier
 
+    def mcp_name_for(self, tool_id: str) -> str:
+        """Resolve the full MCP tool name for a tool UUID.
+
+        Uses _tool_func_names (recorded by paid_tool at decoration time)
+        to compute {slug}_{function_name}. Falls back to {slug}_{capability}
+        for standard tools where function names match capabilities.
+
+        Results are cached after first resolution.
+        """
+        if tool_id in self._mcp_name_cache:
+            return self._mcp_name_cache[tool_id]
+
+        identity = self._tool_registry.get(tool_id)
+        if identity is None:
+            return tool_id
+
+        # Explicit mcp_name on the identity takes precedence
+        if identity.mcp_name:
+            self._mcp_name_cache[tool_id] = identity.mcp_name
+            return identity.mcp_name
+
+        # Resolve from function name recording (populated by paid_tool)
+        func_name = self._tool_func_names.get(tool_id)
+        if func_name and self._slug:
+            name = f"{self._slug}_{func_name}"
+        elif self._slug:
+            name = f"{self._slug}_{identity.capability}"
+        else:
+            name = identity.capability
+
+        self._mcp_name_cache[tool_id] = name
+        return name
+
     # ------------------------------------------------------------------
     # Credit Gating
     # ------------------------------------------------------------------
@@ -411,7 +445,7 @@ class OperatorRuntime:
                 "error": f"Unknown tool '{tool_id}' — not registered with this operator.",
             }
 
-        name = identity.display_name            # full MCP name for display/logging
+        name = self.mcp_name_for(tool_id)        # full MCP name for display/logging
         cap = identity.capability              # short name for proof verification only
         category = identity.category           # set in code, never by the pricing model
 
@@ -565,7 +599,7 @@ class OperatorRuntime:
             cost = await resolver.get_cost(tool_id)
             if cost > 0:
                 ledger = await cache.get(npub)
-                ledger.credit_deposit(cost, f"rollback:{identity.display_name}")
+                ledger.credit_deposit(cost, f"rollback:{self.mcp_name_for(tool_id)}")
                 cache.mark_dirty(npub)
         except Exception:
             pass  # best-effort rollback
@@ -1059,10 +1093,7 @@ class OperatorRuntime:
                         return {"success": False, "error": str(exc)}
                     raise
 
-                identity = rt._tool_registry.get(tool_id)
-                rt.fire_and_forget_demand_increment(
-                    identity.display_name if identity else tool_id
-                )
+                rt.fire_and_forget_demand_increment(rt.mcp_name_for(tool_id))
                 if isinstance(result, dict):
                     result = await rt.inject_low_balance_warning(result, npub)
                 return result
@@ -1093,7 +1124,7 @@ def _build_initial_pricing_model(
     for tool_id, identity in rt._tool_registry.items():
         tools.append({
             "tool_id": tool_id,
-            "tool_name": identity.display_name,
+            "tool_name": rt.mcp_name_for(tool_id),
             "price_sats": 0,
             "priced": identity.category in ("free", "restricted"),  # free/restricted are inherently priced
             "category": identity.category,
@@ -1132,28 +1163,10 @@ def register_standard_tools(
         service_version: Version string for service_status.
     """
     from tollbooth.slug_tools import make_slug_tool
-    from tollbooth.tool_identity import ToolIdentity as _TI
     tool = make_slug_tool(mcp, slug)
     oracle_tool = make_slug_tool(mcp, "oracle")
     rt._slug = slug
-
-    # Stamp every registry entry with its full MCP name now that the slug
-    # is known.  ToolIdentity is frozen, so we replace entries in place.
-    # Priority: explicit mcp_name > recorded function name > capability.
-    # Domain tools use paid_tool which records the Python function name;
-    # the MCP tool name is {slug}_{function_name}.
-    rt._tool_registry = {
-        uid: _TI(
-            capability=ti.capability,
-            category=ti.category,
-            intent=ti.intent,
-            mcp_name=(
-                ti.mcp_name
-                or (f"{slug}_{rt._tool_func_names[uid]}" if uid in rt._tool_func_names else f"{slug}_{ti.capability}")
-            ),
-        )
-        for uid, ti in rt._tool_registry.items()
-    }
+    rt._mcp_name_cache.clear()  # invalidate any cached names
 
     # -- Credit tools --------------------------------------------------
 
@@ -1903,7 +1916,7 @@ def register_standard_tools(
         resolver = await rt.pricing_resolver()
         base_cost = await resolver.get_cost(tool_id)
 
-        name = identity.display_name
+        name = rt.mcp_name_for(tool_id)
         result: dict[str, Any] = {
             "success": True,
             "tool_id": tool_id,
