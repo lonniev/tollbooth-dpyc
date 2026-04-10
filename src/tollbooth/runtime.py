@@ -95,6 +95,7 @@ class OperatorRuntime:
         # Registry keyed by UUID — the sole economic key
         self._tool_registry: dict[str, ToolIdentity] = tool_registry or {}
         self._slug: str = ""  # set by register_standard_tools
+        self._tool_func_names: dict[str, str] = {}  # UUID → Python function name, populated by paid_tool
         self._pricing_resolver: Any | None = None  # lazily created after vault
         self._operator_credential_template = operator_credential_template
         self._patron_credential_template = patron_credential_template
@@ -1067,6 +1068,11 @@ class OperatorRuntime:
                 return result
 
             wrapper._tool_id = tool_id  # type: ignore[attr-defined]
+            # Record function name for MCP name stamping.
+            # The MCP tool name is {slug}_{fn.__name__}, but the slug
+            # isn't known until register_standard_tools runs. Store the
+            # function name so the stamping step can compute mcp_name.
+            rt._tool_func_names[tool_id] = fn.__name__
             return wrapper
         return decorator
 
@@ -1133,12 +1139,18 @@ def register_standard_tools(
 
     # Stamp every registry entry with its full MCP name now that the slug
     # is known.  ToolIdentity is frozen, so we replace entries in place.
+    # Priority: explicit mcp_name > recorded function name > capability.
+    # Domain tools use paid_tool which records the Python function name;
+    # the MCP tool name is {slug}_{function_name}.
     rt._tool_registry = {
         uid: _TI(
             capability=ti.capability,
             category=ti.category,
             intent=ti.intent,
-            mcp_name=ti.mcp_name or f"{slug}_{ti.capability}",
+            mcp_name=(
+                ti.mcp_name
+                or (f"{slug}_{rt._tool_func_names[uid]}" if uid in rt._tool_func_names else f"{slug}_{ti.capability}")
+            ),
         )
         for uid, ti in rt._tool_registry.items()
     }
