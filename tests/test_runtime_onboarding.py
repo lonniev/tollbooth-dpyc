@@ -544,8 +544,8 @@ class TestInitialPricingModel:
         from tollbooth.tool_identity import ToolIdentity
         import json
 
-        search = ToolIdentity(capability="search", category="read", intent="Find stuff")
-        create = ToolIdentity(capability="create", category="write", intent="Make stuff")
+        search = ToolIdentity(capability="search", category="read", intent="Find stuff", mcp_name="test_search")
+        create = ToolIdentity(capability="create", category="write", intent="Make stuff", mcp_name="test_create")
         rt = OperatorRuntime(
             tool_registry={
                 search.tool_id: search,
@@ -554,11 +554,6 @@ class TestInitialPricingModel:
             service_name="Test Service",
         )
         rt._slug = "test"
-        # Simulate MCP name mapping (normally built from mcp.list_tools())
-        rt._mcp_tool_names = {
-            search.tool_id: "test_search",
-            create.tool_id: "test_create",
-        }
         result = _build_initial_pricing_model(rt, "Test Service")
 
         model = json.loads(result)

@@ -95,8 +95,6 @@ class OperatorRuntime:
         # Registry keyed by UUID — the sole economic key
         self._tool_registry: dict[str, ToolIdentity] = tool_registry or {}
         self._slug: str = ""  # set by register_standard_tools
-        # UUID → MCP-registered tool name, populated during registration
-        self._mcp_tool_names: dict[str, str] = {}
         self._pricing_resolver: Any | None = None  # lazily created after vault
         self._operator_credential_template = operator_credential_template
         self._patron_credential_template = patron_credential_template
@@ -412,8 +410,9 @@ class OperatorRuntime:
                 "error": f"Unknown tool '{tool_id}' — not registered with this operator.",
             }
 
-        cap = identity.capability
-        category = identity.category          # set in code, never by the pricing model
+        name = identity.display_name            # full MCP name for display/logging
+        cap = identity.capability              # short name for proof verification only
+        category = identity.category           # set in code, never by the pricing model
 
         # ── Access: operator-restricted ───────────────────────
         # No billing, no constraints.  Only the operator's npub
@@ -451,7 +450,7 @@ class OperatorRuntime:
                 return {
                     "success": False,
                     "error": (
-                        f"Tool '{cap}' is not yet in the pricing model. "
+                        f"Tool '{name}' is not yet in the pricing model. "
                         f"Add it to the pricing model before use."
                     ),
                 }
@@ -459,7 +458,7 @@ class OperatorRuntime:
                 return {
                     "success": False,
                     "error": (
-                        f"Tool '{cap}' has not been priced yet (TBD). "
+                        f"Tool '{name}' has not been priced yet (TBD). "
                         f"Set a price in the pricing model before use."
                     ),
                 }
@@ -493,7 +492,7 @@ class OperatorRuntime:
                 cache = await self.ledger_cache()
                 ledger = await cache.get(npub)
                 denial, effective_cost = self._constraint_gate.check(
-                    tool_name=cap,
+                    tool_name=name,
                     base_cost=cost,
                     ledger=ledger,
                     npub=npub,
@@ -507,7 +506,7 @@ class OperatorRuntime:
                         "success": False,
                         "error": "Service unavailable — cannot evaluate constraints.",
                     }
-                logger.debug("Constraint evaluation skipped for free tool %s", cap)
+                logger.debug("Constraint evaluation skipped for free tool %s", name)
 
         # ── No charge ─────────────────────────────────────────
         if effective_cost == 0:
@@ -543,13 +542,13 @@ class OperatorRuntime:
                 "success": False,
                 "error": (
                     f"Insufficient balance: {ledger.balance_api_sats} sats "
-                    f"available, {effective_cost} required for {cap}."
+                    f"available, {effective_cost} required for {name}."
                 ),
                 "balance_sats": ledger.balance_api_sats,
                 "cost_sats": effective_cost,
             }
 
-        ledger.debit(cap, effective_cost)
+        ledger.debit(name, effective_cost)
         cache.mark_dirty(npub)
         return None
 
@@ -565,7 +564,7 @@ class OperatorRuntime:
             cost = await resolver.get_cost(tool_id)
             if cost > 0:
                 ledger = await cache.get(npub)
-                ledger.credit_deposit(cost, f"rollback:{identity.capability}")
+                ledger.credit_deposit(cost, f"rollback:{identity.display_name}")
                 cache.mark_dirty(npub)
         except Exception:
             pass  # best-effort rollback
@@ -1060,8 +1059,9 @@ class OperatorRuntime:
                     raise
 
                 identity = rt._tool_registry.get(tool_id)
-                cap = identity.capability if identity else tool_id
-                rt.fire_and_forget_demand_increment(cap)
+                rt.fire_and_forget_demand_increment(
+                    identity.display_name if identity else tool_id
+                )
                 if isinstance(result, dict):
                     result = await rt.inject_low_balance_warning(result, npub)
                 return result
@@ -1085,11 +1085,9 @@ def _build_initial_pricing_model(
 
     tools = []
     for tool_id, identity in rt._tool_registry.items():
-        # Use the actual MCP-registered name if available, else capability
-        mcp_name = rt._mcp_tool_names.get(tool_id, identity.capability)
         tools.append({
             "tool_id": tool_id,
-            "tool_name": mcp_name,
+            "tool_name": identity.display_name,
             "price_sats": 0,
             "priced": identity.category in ("free", "restricted"),  # free/restricted are inherently priced
             "category": identity.category,
@@ -1128,9 +1126,22 @@ def register_standard_tools(
         service_version: Version string for service_status.
     """
     from tollbooth.slug_tools import make_slug_tool
+    from tollbooth.tool_identity import ToolIdentity as _TI
     tool = make_slug_tool(mcp, slug)
     oracle_tool = make_slug_tool(mcp, "oracle")
     rt._slug = slug
+
+    # Stamp every registry entry with its full MCP name now that the slug
+    # is known.  ToolIdentity is frozen, so we replace entries in place.
+    rt._tool_registry = {
+        uid: _TI(
+            capability=ti.capability,
+            category=ti.category,
+            intent=ti.intent,
+            mcp_name=ti.mcp_name or f"{slug}_{ti.capability}",
+        )
+        for uid, ti in rt._tool_registry.items()
+    }
 
     # -- Credit tools --------------------------------------------------
 
@@ -1880,11 +1891,11 @@ def register_standard_tools(
         resolver = await rt.pricing_resolver()
         base_cost = await resolver.get_cost(tool_id)
 
-        cap = identity.capability
+        name = identity.display_name
         result: dict[str, Any] = {
             "success": True,
             "tool_id": tool_id,
-            "capability": cap,
+            "tool_name": name,
             "base_cost_api_sats": int(base_cost),
             "effective_cost_api_sats": int(base_cost),
             "constraints_enabled": False,
@@ -1898,16 +1909,16 @@ def register_standard_tools(
                 resolved = resolve_npub(npub)
                 cache = await rt.ledger_cache()
                 ledger = await cache.get(resolved)
-                demand = await rt.get_global_demand(cap)
+                demand = await rt.get_global_demand(name)
                 denial, effective = gate.check(
-                    tool_name=cap,
+                    tool_name=name,
                     base_cost=int(base_cost),
                     ledger=ledger,
                     npub=resolved,
                     global_demand=demand,
                 )
-                if demand.get(cap, 0) > 0:
-                    result["current_demand"] = demand[cap]
+                if demand.get(name, 0) > 0:
+                    result["current_demand"] = demand[name]
                 if denial:
                     result["effective_cost_api_sats"] = 0
                     result["constraint_effects"].append({
@@ -1993,47 +2004,6 @@ def register_standard_tools(
             return await list_notarizations_tool(
                 vault, limit=limit, status=status or None,
             )
-
-    # Build UUID → MCP name mapping by querying the MCP server for its
-    # actual registered tools, then matching each to a registry identity.
-    import asyncio
-
-    async def _collect_mcp_names() -> dict[str, str]:
-        """Ask the MCP server what tools it has and map to registry UUIDs."""
-        live_tools = await mcp.list_tools()
-        cap_to_uuid = {ti.capability: uid for uid, ti in rt._tool_registry.items()}
-        mapping: dict[str, str] = {}
-        for t in live_tools:
-            mcp_name = t.name
-            # Strip slug prefix to get the capability name
-            for prefix in (f"{slug}_", "oracle_"):
-                if mcp_name.startswith(prefix):
-                    func_name = mcp_name[len(prefix):]
-                    if func_name in cap_to_uuid:
-                        mapping[cap_to_uuid[func_name]] = mcp_name
-                    break
-        # Warn about registry tools that couldn't be mapped to MCP names.
-        # This is diagnostic only — pricing lookups use UUIDs, not names.
-        unmapped = [
-            ti.capability
-            for uid, ti in rt._tool_registry.items()
-            if uid not in mapping
-        ]
-        if unmapped:
-            import logging
-            logging.getLogger("tollbooth.runtime").warning(
-                "Tool registry → MCP name mapping failed for: %s. "
-                "Each @tool function name (after slug strip) must match "
-                "its ToolIdentity capability exactly.",
-                ", ".join(sorted(unmapped)),
-            )
-        return mapping
-
-    try:
-        rt._mcp_tool_names = asyncio.run(_collect_mcp_names())
-    except Exception:
-        # Graceful: tests use MagicMock, some envs have running loops
-        rt._mcp_tool_names = {}
 
 
 # ======================================================================

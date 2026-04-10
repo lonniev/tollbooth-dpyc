@@ -27,24 +27,35 @@ class ToolIdentity:
     """Declares what a tool IS — not what it costs.
 
     Attributes:
-        capability: Canonical name (e.g. ``"check_balance"``).
-            Two MCPs implementing the same capability use the same name
-            and therefore converge on the same UUID.
+        capability: Canonical short name (e.g. ``"check_balance"``).
+            Used only for UUID derivation — two MCPs implementing the
+            same capability converge on the same UUID.
         category: Access/billing category.
             ``"free"`` and ``"restricted"`` are gated by the runtime
             without consulting Neon.  All others (``"read"``, ``"write"``,
             ``"heavy"``, etc.) require a price entry in Neon.
         intent: Human-readable purpose.
+        mcp_name: Full namespace-scoped MCP tool name
+            (e.g. ``"taxsort_check_balance"``).  Set during
+            ``register_standard_tools`` when the slug is known.
+            This is the ONE display name used everywhere outside
+            the server process.
     """
 
     capability: str
     category: str  # "free" | "read" | "write" | "heavy" | "restricted"
     intent: str
+    mcp_name: str = ""
 
     @property
     def tool_id(self) -> str:
         """Deterministic UUID v5 for this capability."""
         return capability_uuid(self.capability)
+
+    @property
+    def display_name(self) -> str:
+        """The human-visible tool name — always the full MCP name."""
+        return self.mcp_name or self.capability
 
 
 # ======================================================================
