@@ -1684,7 +1684,7 @@ def register_standard_tools(
         try:
             if credential_card:
                 result = await courier._exchange.redeem_credential_card(
-                    credential_card, service,
+                    credential_card, service=service,
                 )
             else:
                 result = await courier.receive(sender_npub, service=service, force_relay=force_relay)
@@ -1818,7 +1818,7 @@ def register_standard_tools(
                 service = rt.patron_credential_service
                 if credential_card:
                     return await courier._exchange.redeem_credential_card(
-                        credential_card, service,
+                        credential_card, service=service,
                     )
                 return await courier.receive(sender_npub, service)
             except Exception as e:
