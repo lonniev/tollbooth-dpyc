@@ -1051,9 +1051,11 @@ class NostrCredentialExchange:
                 if msg_poison != expected_phrase:
                     reason = (
                         f"Rejected: wrong anti-replay token "
-                        f"(got \"{msg_poison or '<missing>'}\")"
+                        f"(got \"{msg_poison or '<missing>'}\", "
+                        f"expected \"{expected_phrase}\")"
                     ) if msg_poison else (
-                        "Rejected: anti-replay token missing from your message."
+                        f"Rejected: anti-replay token missing from your message. "
+                        f"Expected: \"{expected_phrase}\""
                     )
                     self._pop_event(event_id, sender_npub, reason)
                     pop_count += 1
@@ -1072,9 +1074,10 @@ class NostrCredentialExchange:
         )
 
         if dm is None:
+            token_hint = f" Expected token: \"{expected_phrase}\"." if expected_phrase else ""
             raise CourierValidationError(
-                f"Scanned {pop_count} DM(s) but none contained valid "
-                f"credentials with the expected anti-replay token. "
+                f"Scanned {pop_count} DM(s) from {sender_npub[:20]}... but none "
+                f"contained valid credentials with the expected anti-replay token.{token_hint} "
                 f"All have been acknowledged and deleted. "
                 f"Call request_credential_channel again for a fresh token."
             )
