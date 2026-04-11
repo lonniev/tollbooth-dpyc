@@ -936,6 +936,24 @@ class OperatorRuntime:
     # BTCPay client (from operator credential vault)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _validate_operator_creds_static(creds: dict[str, str]) -> list[str]:
+        """Validate operator credentials and return a list of error messages."""
+        errors: list[str] = []
+        host = (creds.get("btcpay_host") or "").strip()
+        if host and not host.startswith("https://"):
+            errors.append(
+                f"btcpay_host must start with 'https://' (got '{host[:30]}...'). "
+                "Check for typos like 'htps://' or 'http://'."
+            )
+        if not creds.get("btcpay_host"):
+            errors.append("btcpay_host is missing.")
+        if not creds.get("btcpay_api_key"):
+            errors.append("btcpay_api_key is missing.")
+        if not creds.get("btcpay_store_id"):
+            errors.append("btcpay_store_id is missing.")
+        return errors
+
     async def ensure_cashier(self) -> Any:
         """Return a BTCPayClient constructed from vault credentials.
 
@@ -1686,8 +1704,39 @@ def register_standard_tools(
                 )
             else:
                 result = await courier.receive(sender_npub, service=service, force_relay=force_relay)
-            # Invalidate cached BTCPay client when operator creds change
+
+            # Validate operator credentials before accepting
             if result.get("success") and service == rt.operator_credential_service:
+                creds = result.get("credentials", {})
+                errors = rt._validate_operator_creds_static(creds)
+                if errors:
+                    # Reject: forget the bad creds
+                    try:
+                        vault = courier._exchange._credential_vault
+                        if vault:
+                            await vault.store_credentials(service, rt.operator_npub(), "")
+                    except Exception:
+                        pass
+                    # DM the sender about the problem
+                    rejection_msg = (
+                        "Credential rejection from " + (service_name or slug) + ":\n\n"
+                        + "\n".join(f"  - {e}" for e in errors)
+                        + "\n\nPlease correct and resend."
+                    )
+                    try:
+                        await courier.send(
+                            recipient_npub=sender_npub,
+                            message=rejection_msg,
+                        )
+                        result["rejection_dm_sent"] = True
+                    except Exception:
+                        pass
+                    return {
+                        "success": False,
+                        "validation_errors": errors,
+                        "error": "Credentials received but failed validation: " + "; ".join(errors),
+                        "message": "A rejection DM has been sent. Please correct and resend.",
+                    }
                 rt._cashier = None
             return result
         except Exception as e:
