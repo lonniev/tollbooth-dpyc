@@ -959,6 +959,13 @@ class OperatorRuntime:
                 "BTCPay not configured. Deliver btcpay_host, btcpay_api_key, "
                 "btcpay_store_id via Secure Courier (request_credential_channel)."
             )
+        # Auto-fix common URL typos before rejecting
+        if host:
+            host = host.strip()
+            if host.startswith("htps://"):
+                host = "https://" + host[7:]
+            elif host.startswith("http://") and not host.startswith("https://"):
+                host = "https://" + host[7:]
         if host and not host.startswith("https://"):
             raise ValueError(
                 f"btcpay_host must start with 'https://' (got '{host[:20]}...'). "
