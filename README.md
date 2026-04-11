@@ -159,7 +159,7 @@ Implement the `VaultBackend` Protocol to add your own (Redis, S3, SQLite, etc.).
 | Module | Purpose |
 |--------|---------|
 | `ConstraintEngine` | Evaluates constraint lists with configurable logic: `ALL_MUST_PASS`, `ANY_MUST_PASS`, `FIRST_MATCH`. |
-| `ConstraintGate` | Drop-in middleware integrating constraints with the `_debit_or_error` pattern. |
+| `ConstraintGate` | Drop-in middleware integrating constraints with the `_debit_or_deny` pattern. |
 | `TemporalWindowConstraint` | Time-of-day / day-of-week access windows. |
 | `FiniteSupplyConstraint` | Total call quotas per patron or globally. |
 | `PeriodicRefreshConstraint` | ISO-8601 duration refresh windows (e.g., "10 calls per hour"). |

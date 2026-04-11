@@ -31,7 +31,7 @@ Usage::
     # In a tool function:
     npub = runtime.resolve_npub(npub)
     cache = await runtime.ledger_cache()
-    err = await runtime.debit_or_error(my_tool_uuid, npub)
+    err = await runtime.debit_or_deny(my_tool_uuid, npub)
     if err:
         return err
     # ... do work ...
@@ -68,7 +68,7 @@ class OperatorRuntime:
 
     Handles:
     - Bootstrap: nsec → Authority → Neon URL → vault → cache
-    - Credit gating: debit_or_error, rollback
+    - Credit gating: debit_or_deny, rollback
     - Secure Courier: persistent credential vault
     - Identity: resolve_npub (no OAuth coupling)
     """
@@ -89,6 +89,7 @@ class OperatorRuntime:
         ots_calendars: list[str] | None = None,
         on_forget: Any | None = None,
         operator_settings: dict[str, Any] | None = None,
+        purchase_mode: str = "certified",
     ) -> None:
         self._nsec_env_var = nsec_env_var
         from tollbooth.tool_identity import ToolIdentity  # noqa: F811
@@ -109,6 +110,7 @@ class OperatorRuntime:
         self._ots_calendars = ots_calendars
         self._on_forget = on_forget  # callback(service, npub) on credential forget
         self._operator_settings: dict[str, Any] = operator_settings or {}
+        self._purchase_mode = purchase_mode  # "certified" or "direct"
 
         # Lazy singletons
         self._vault: Any | None = None
@@ -419,13 +421,14 @@ class OperatorRuntime:
             )
         return self._pricing_resolver
 
-    async def debit_or_error(
+    async def debit_or_deny(
         self,
         tool_id: str,
         npub: str,
         *,
         operator_proof: str = "",
         patron_proof: str = "",
+        tool_kwargs: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Gate a tool call: identity → access → pricing → constraints → billing.
 
@@ -497,7 +500,8 @@ class OperatorRuntime:
                         f"Set a price in the pricing model before use."
                     ),
                 }
-            cost = await resolver.get_cost(tool_id)
+            pricing = await resolver.get_tool_pricing(tool_id)
+            cost = pricing.compute(**(tool_kwargs or {}))
 
         # ── Resolve caller ────────────────────────────────────
         # Paid tools always require an npub.  Free tools work
@@ -587,7 +591,10 @@ class OperatorRuntime:
         cache.mark_dirty(npub)
         return None
 
-    async def rollback_debit(self, tool_id: str, npub: str) -> None:
+    async def rollback_debit(
+        self, tool_id: str, npub: str,
+        *, tool_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         """Rollback a debit after a tool execution failure."""
         try:
             npub = resolve_npub(npub)
@@ -596,7 +603,8 @@ class OperatorRuntime:
             if identity is None or identity.category in ("free", "restricted"):
                 return
             resolver = await self.pricing_resolver()
-            cost = await resolver.get_cost(tool_id)
+            pricing = await resolver.get_tool_pricing(tool_id)
+            cost = pricing.compute(**(tool_kwargs or {}))
             if cost > 0:
                 ledger = await cache.get(npub)
                 ledger.credit_deposit(cost, f"rollback:{self.mcp_name_for(tool_id)}")
@@ -1077,10 +1085,12 @@ class OperatorRuntime:
                 operator_proof = bound.arguments.get("operator_proof", "")
                 patron_proof = bound.arguments.get("patron_proof", "")
 
-                err = await rt.debit_or_error(
+                call_kwargs = dict(bound.arguments)
+                err = await rt.debit_or_deny(
                     tool_id, npub,
                     operator_proof=operator_proof,
                     patron_proof=patron_proof,
+                    tool_kwargs=call_kwargs,
                 )
                 if err is not None:
                     return err
@@ -1088,7 +1098,7 @@ class OperatorRuntime:
                 try:
                     result = await fn(*args, **kwargs)
                 except Exception as exc:
-                    await rt.rollback_debit(tool_id, npub)
+                    await rt.rollback_debit(tool_id, npub, tool_kwargs=call_kwargs)
                     if catch_errors:
                         return {"success": False, "error": str(exc)}
                     raise
@@ -1114,22 +1124,29 @@ def _build_initial_pricing_model(
 ) -> str:
     """Build an initial pricing model from the tool registry.
 
-    Every registered tool gets a 0-sat entry with its UUID, category,
-    and intent.  The tool_name is the MCP-facing prefixed name
-    (e.g. ``weather_check_balance``).  No economic data from code.
+    Every registered tool gets an entry with its UUID, category, and
+    intent.  Pricing hints on ToolIdentity seed sensible defaults —
+    e.g. ad valorem tools start with their declared rate.
     """
     import json as _json
 
     tools = []
     for tool_id, identity in rt._tool_registry.items():
-        tools.append({
+        has_hint = identity.pricing_hint_value > 0
+        entry: dict[str, Any] = {
             "tool_id": tool_id,
             "tool_name": rt.mcp_name_for(tool_id),
-            "price_sats": 0,
-            "priced": identity.category in ("free", "restricted"),  # free/restricted are inherently priced
+            "price_sats": identity.pricing_hint_value,
+            "priced": identity.category in ("free", "restricted") or has_hint,
             "category": identity.category,
             "intent": identity.intent,
-        })
+            "price_type": identity.pricing_hint_type,
+        }
+        if identity.pricing_hint_param:
+            entry["price_formula"] = identity.pricing_hint_param
+        if identity.pricing_hint_min > 0:
+            entry["min_cost"] = identity.pricing_hint_min
+        tools.append(entry)
 
     model = {
         "name": f"{service_name or 'Operator'} Initial Pricing",
@@ -1210,6 +1227,19 @@ def register_standard_tools(
         except ValueError as e:
             return {"success": False, "error": str(e)}
 
+        if rt._purchase_mode == "direct":
+            # Trust-root mode: no upstream certificate needed.
+            try:
+                cashier = await rt.ensure_cashier()
+                cache = await rt.ledger_cache()
+                from tollbooth.tools.credits import direct_purchase_tool
+                return await direct_purchase_tool(
+                    cashier, cache, npub, amount_sats,
+                )
+            except ValueError as e:
+                return {"success": False, "error": str(e)}
+
+        # Certified mode: obtain Authority certificate first.
         try:
             from tollbooth.authority_client import AuthorityCertifier
             from tollbooth.registry import resolve_authority_service
@@ -1335,7 +1365,7 @@ def register_standard_tools(
         except ValueError as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tool_identity import capability_uuid
-        err = await rt.debit_or_error(capability_uuid("account_statement_infographic"), npub)
+        err = await rt.debit_or_deny(capability_uuid("account_statement_infographic"), npub)
         if err:
             return err
         try:
@@ -1848,7 +1878,7 @@ def register_standard_tools(
             result = await set_pricing_model_tool(
                 store, rt.operator_npub(), model_json,
             )
-            # Invalidate pricing cache so debit_or_error sees updated prices
+            # Invalidate pricing cache so debit_or_deny sees updated prices
             if rt._pricing_resolver is not None:
                 rt._pricing_resolver.refresh()
             return result
@@ -1905,7 +1935,7 @@ def register_standard_tools(
     # -- Constraint Engine tools ---------------------------------------
 
     @tool
-    async def check_price(tool_id: str, npub: str = "") -> dict[str, Any]:
+    async def check_price(tool_id: str, npub: str = "", tool_kwargs: str = "") -> dict[str, Any]:
         """Preview the effective cost of a tool call.
 
         Shows the base cost and any constraint effects (discounts, free
@@ -1913,6 +1943,8 @@ def register_standard_tools(
 
         Args:
             tool_id: The tool's UUID (from the pricing model).
+            tool_kwargs: Optional JSON object with tool call parameters
+                for ad valorem pricing preview (e.g. '{"amount_sats": 5000}').
         """
         identity = rt._tool_registry.get(tool_id)
         if identity is None:
@@ -1920,21 +1952,51 @@ def register_standard_tools(
                 "success": False,
                 "error": f"Unknown tool_id: {tool_id}.",
             }
+
+        import json as _json
+        parsed_kwargs: dict[str, Any] = {}
+        if tool_kwargs:
+            try:
+                parsed_kwargs = _json.loads(tool_kwargs)
+            except (ValueError, TypeError):
+                return {"success": False, "error": "tool_kwargs must be valid JSON."}
+
         resolver = await rt.pricing_resolver()
-        base_cost = await resolver.get_cost(tool_id)
+        pricing = await resolver.get_tool_pricing(tool_id)
 
         name = rt.mcp_name_for(tool_id)
         result: dict[str, Any] = {
             "success": True,
             "tool_id": tool_id,
             "tool_name": name,
-            "base_cost_api_sats": int(base_cost),
-            "effective_cost_api_sats": int(base_cost),
             "constraints_enabled": False,
             "constraint_effects": [],
         }
 
+        if pricing.rate_percent > 0:
+            result["pricing_type"] = "percent"
+            result["rate_percent"] = pricing.rate_percent
+            result["rate_param"] = pricing.rate_param
+            result["min_cost_sats"] = pricing.min_cost
+            if parsed_kwargs:
+                base_cost = pricing.compute(**parsed_kwargs)
+                result["base_cost_api_sats"] = base_cost
+                result["effective_cost_api_sats"] = base_cost
+            else:
+                result["base_cost_api_sats"] = None
+                result["effective_cost_api_sats"] = None
+                result["hint"] = (
+                    f"Pass tool_kwargs with '{pricing.rate_param}' "
+                    f"to preview the cost (e.g. '{{\"{pricing.rate_param}\": 1000}}')."
+                )
+        else:
+            base_cost = pricing.compute()
+            result["pricing_type"] = "flat"
+            result["base_cost_api_sats"] = base_cost
+            result["effective_cost_api_sats"] = base_cost
+
         gate = rt._constraint_gate
+        base_cost = result.get("base_cost_api_sats") or 0
         if gate and gate.enabled and base_cost > 0:
             result["constraints_enabled"] = True
             try:

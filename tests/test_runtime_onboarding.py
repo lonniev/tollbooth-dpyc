@@ -508,7 +508,7 @@ class TestCashier:
 
 class TestNpubEnforcement:
     @pytest.mark.asyncio
-    async def test_debit_or_error_passes_free_tools(self) -> None:
+    async def test_debit_or_deny_passes_free_tools(self) -> None:
         """Free tools pass without npub."""
         from tollbooth.tool_identity import ToolIdentity
         identity = ToolIdentity(capability="free_tool", category="free", intent="test")
@@ -516,17 +516,17 @@ class TestNpubEnforcement:
             tool_registry={identity.tool_id: identity},
             service_name="Test",
         )
-        result = await rt.debit_or_error(identity.tool_id, "")
+        result = await rt.debit_or_deny(identity.tool_id, "")
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_debit_or_error_denies_unknown_tools(self) -> None:
+    async def test_debit_or_deny_denies_unknown_tools(self) -> None:
         """Unknown UUIDs are denied — no open doors."""
         rt = OperatorRuntime(
             tool_registry={},
             service_name="Test",
         )
-        result = await rt.debit_or_error("unknown-uuid", "")
+        result = await rt.debit_or_deny("unknown-uuid", "")
         assert result is not None
         assert result["success"] is False
         assert "not registered" in result["error"]

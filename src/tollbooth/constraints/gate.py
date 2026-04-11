@@ -1,4 +1,4 @@
-"""Constraint gate — drop-in helper for operator _debit_or_error flows."""
+"""Constraint gate — drop-in helper for operator _debit_or_deny flows."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ class ConstraintGate:
 
         gate = ConstraintGate(config)
 
-        async def _debit_or_error(tool_name, user_id, cache):
+        async def _debit_or_deny(tool_name, user_id, cache):
             cost = TOOL_COSTS.get(tool_name, 0)
             if cost == 0:
                 return None, cost

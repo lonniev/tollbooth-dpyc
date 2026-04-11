@@ -47,6 +47,13 @@ class ToolIdentity:
     intent: str
     mcp_name: str = ""
 
+    # Pricing hints — seed defaults for _build_initial_pricing_model.
+    # Neon pricing model is the runtime source of truth.
+    pricing_hint_type: str = "flat"    # "flat" | "percent"
+    pricing_hint_value: int = 0        # flat sats or percent rate
+    pricing_hint_param: str = ""       # kwarg name for percent base (e.g. "amount_sats")
+    pricing_hint_min: int = 0          # floor in sats
+
     @property
     def tool_id(self) -> str:
         """Deterministic UUID v5 for this capability."""
