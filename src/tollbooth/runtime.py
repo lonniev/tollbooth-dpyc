@@ -959,6 +959,11 @@ class OperatorRuntime:
                 "BTCPay not configured. Deliver btcpay_host, btcpay_api_key, "
                 "btcpay_store_id via Secure Courier (request_credential_channel)."
             )
+        if host and not host.startswith("https://"):
+            raise ValueError(
+                f"btcpay_host must start with 'https://' (got '{host[:20]}...'). "
+                "Re-deliver corrected credentials via Secure Courier."
+            )
 
         self._cashier = BTCPayClient(
             host=host, api_key=api_key, store_id=store_id,
