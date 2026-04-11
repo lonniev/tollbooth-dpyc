@@ -90,8 +90,10 @@ class OperatorRuntime:
         on_forget: Any | None = None,
         operator_settings: dict[str, Any] | None = None,
         purchase_mode: str = "certified",
+        credential_validator: Any | None = None,
     ) -> None:
         self._nsec_env_var = nsec_env_var
+        self._credential_validator = credential_validator
         from tollbooth.tool_identity import ToolIdentity  # noqa: F811
         # Registry keyed by UUID — the sole economic key.
         # Exclude OTS tools when notarization is disabled so they
@@ -936,24 +938,6 @@ class OperatorRuntime:
     # BTCPay client (from operator credential vault)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _validate_operator_creds_static(creds: dict[str, str]) -> list[str]:
-        """Validate operator credentials and return a list of error messages."""
-        errors: list[str] = []
-        host = (creds.get("btcpay_host") or "").strip()
-        if host and not host.startswith("https://"):
-            errors.append(
-                f"btcpay_host must start with 'https://' (got '{host[:30]}...'). "
-                "Check for typos like 'htps://' or 'http://'."
-            )
-        if not creds.get("btcpay_host"):
-            errors.append("btcpay_host is missing.")
-        if not creds.get("btcpay_api_key"):
-            errors.append("btcpay_api_key is missing.")
-        if not creds.get("btcpay_store_id"):
-            errors.append("btcpay_store_id is missing.")
-        return errors
-
     async def ensure_cashier(self) -> Any:
         """Return a BTCPayClient constructed from vault credentials.
 
@@ -1705,10 +1689,10 @@ def register_standard_tools(
             else:
                 result = await courier.receive(sender_npub, service=service, force_relay=force_relay)
 
-            # Validate operator credentials before accepting
-            if result.get("success") and service == rt.operator_credential_service:
+            # Validate credentials via operator callback before accepting
+            if result.get("success") and service == rt.operator_credential_service and rt._credential_validator:
                 creds = result.get("credentials", {})
-                errors = rt._validate_operator_creds_static(creds)
+                errors = rt._credential_validator(creds)
                 if errors:
                     # Reject: forget the bad creds
                     try:
