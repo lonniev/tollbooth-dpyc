@@ -171,7 +171,7 @@ class TestRestoreSession:
         assert result == "npub1abc"
 
         # receive() was called on the exchange
-        exchange.receive.assert_called_once_with("npub1abc", service="thebrain")
+        exchange.receive.assert_called_once_with("npub1abc", service="thebrain", force_relay=False)
         # Callback fired
         callback.assert_called_once()
 

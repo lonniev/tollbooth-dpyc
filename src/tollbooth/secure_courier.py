@@ -205,6 +205,7 @@ class SecureCourierService:
         service: str = "x",
         *,
         caller_id: str | None = None,
+        force_relay: bool = False,
     ) -> dict[str, Any]:
         """Receive credentials from Secure Courier.
 
@@ -222,12 +223,13 @@ class SecureCourierService:
                 user_id).  When provided and the vault supports session
                 bindings, the ``(caller_id, service) → npub`` mapping is
                 persisted for silent cold-start restoration.
+            force_relay: Skip the vault cache and poll Nostr relays directly.
 
         Returns:
             Dict with success, service, field count, and any callback-added
             metadata.  **NEVER** returns credential values.
         """
-        result = await self._exchange.receive(sender_npub, service=service)
+        result = await self._exchange.receive(sender_npub, service=service, force_relay=force_relay)
 
         if result.get("success") and result.get("credentials"):
             credentials: dict[str, str] = result["credentials"]
