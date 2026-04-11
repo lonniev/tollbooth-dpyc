@@ -93,8 +93,14 @@ class OperatorRuntime:
     ) -> None:
         self._nsec_env_var = nsec_env_var
         from tollbooth.tool_identity import ToolIdentity  # noqa: F811
-        # Registry keyed by UUID — the sole economic key
-        self._tool_registry: dict[str, ToolIdentity] = tool_registry or {}
+        # Registry keyed by UUID — the sole economic key.
+        # Exclude OTS tools when notarization is disabled so they
+        # don't appear in the pricing model as stale entries.
+        _OTS_CAPABILITIES = {"notarize_ledger", "get_notarization_proof", "list_notarizations"}
+        registry = tool_registry or {}
+        if not ots_enabled:
+            registry = {k: v for k, v in registry.items() if v.capability not in _OTS_CAPABILITIES}
+        self._tool_registry: dict[str, ToolIdentity] = registry
         self._slug: str = ""  # set by register_standard_tools
         self._tool_func_names: dict[str, str] = {}  # UUID → Python function name, populated by paid_tool
         self._mcp_name_cache: dict[str, str] = {}  # UUID → resolved MCP name, built lazily
