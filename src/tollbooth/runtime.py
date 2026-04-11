@@ -1639,6 +1639,7 @@ def register_standard_tools(
         sender_npub: str = "",
         service: str = "",
         credential_card: str = "",
+        force_relay: bool = False,
     ) -> dict[str, Any]:
         """Pick up credentials from the Secure Courier.
 
@@ -1652,6 +1653,8 @@ def register_standard_tools(
             sender_npub: Required. The npub that sent the credentials.
             service: Required. The credential service name (must match
                 the service used in request_credential_channel).
+            force_relay: Skip the vault cache and poll Nostr relays
+                for new DMs. Use after resending corrected credentials.
         Free.
         """
         if not sender_npub:
@@ -1682,7 +1685,7 @@ def register_standard_tools(
                     credential_card, service,
                 )
             else:
-                result = await courier.receive(sender_npub, service)
+                result = await courier.receive(sender_npub, service=service, force_relay=force_relay)
             # Invalidate cached BTCPay client when operator creds change
             if result.get("success") and service == rt.operator_credential_service:
                 rt._cashier = None

@@ -798,12 +798,15 @@ class NostrCredentialExchange:
 
     async def receive(
         self, sender_npub: str, *, service: str | None = None,
+        force_relay: bool = False,
     ) -> dict[str, Any]:
         """Pick up and validate credentials from a sender.
 
         If a credential vault is configured, checks it first.  On a vault
         hit the credentials are returned immediately without any relay I/O.
         On a miss (or no vault), falls back to the relay DM flow.
+        Set force_relay=True to skip the vault and always poll relays
+        (e.g. after resending corrected credentials).
 
         After a successful relay pickup the validated credentials are
         encrypted and stored in the vault for future sessions.
@@ -831,8 +834,8 @@ class NostrCredentialExchange:
         # Resolve service for vault lookup
         vault_service = self._resolve_service(service)
 
-        # ── Vault-first lookup ──────────────────────────────────────
-        if self._credential_vault is not None and vault_service:
+        # ── Vault-first lookup (skipped when force_relay) ─────────
+        if self._credential_vault is not None and vault_service and not force_relay:
             vaulted = await self._vault_fetch(vault_service, sender_npub)
             if vaulted is not None:
                 template = self._templates[vault_service]
