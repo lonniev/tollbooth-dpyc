@@ -273,12 +273,35 @@ class OperatorRuntime:
     # ------------------------------------------------------------------
 
     async def vault(self) -> Any:
-        """Return the NeonVault, bootstrapping from Authority if needed."""
+        """Return the NeonVault, bootstrapping from Authority if needed.
+
+        Trust-root operators (purchase_mode="direct") read NEON_DATABASE_URL
+        from the environment — they have no upstream Authority to bootstrap
+        from.  All other operators discover their Neon URL from a Nostr
+        relay DM signed by their Authority.
+        """
         if self._vault is not None:
             return self._vault
 
+        import os
         import time as _time
         from tollbooth.vaults import NeonVault
+
+        if self._purchase_mode == "direct":
+            # Trust root: read Neon URL from env (set by deploy platform).
+            neon_url = os.environ.get("NEON_DATABASE_URL", "")
+            if not neon_url:
+                raise ValueError(
+                    "NEON_DATABASE_URL is required for trust-root operators "
+                    "(purchase_mode='direct')."
+                )
+            self._vault = NeonVault(database_url=neon_url)
+            await self._vault.ensure_schema()
+            self._vault_ready_at = _time.monotonic()
+            logger.info("Vault initialized from NEON_DATABASE_URL (trust root)")
+            return self._vault
+
+        # Certified operators: bootstrap from Authority relay DM.
         from tollbooth.bootstrap import ensure_bootstrapped
         result = await ensure_bootstrapped()
         if not result.success or not result.neon_database_url:
