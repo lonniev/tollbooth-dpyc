@@ -1689,9 +1689,14 @@ def register_standard_tools(
             else:
                 result = await courier.receive(sender_npub, service=service, force_relay=force_relay)
 
-            # Validate credentials via operator callback before accepting
+            # Validate credentials via operator callback before accepting.
+            # The courier strips credentials from the result for security,
+            # so reload them from the vault where they were just stored.
             if result.get("success") and service == rt.operator_credential_service and rt._credential_validator:
-                creds = result.get("credentials", {})
+                try:
+                    creds = await rt.load_credentials(list(rt._operator_credential_template.fields.keys()))
+                except Exception:
+                    creds = {}
                 errors = rt._credential_validator(creds)
                 if errors:
                     # Reject: forget the bad creds
