@@ -1717,6 +1717,13 @@ def register_standard_tools(
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
+    # Prune registry entries for conditionally-skipped tools so they
+    # don't appear in the pricing model or mismatch detection.
+    if rt._patron_credential_template is None:
+        from tollbooth.tool_identity import capability_uuid
+        for cap in ("request_patron_credentials", "receive_patron_credentials"):
+            rt._tool_registry.pop(capability_uuid(cap), None)
+
     # -- Oracle delegation (oracle_ namespace) ----------------------------
 
     @oracle_tool
