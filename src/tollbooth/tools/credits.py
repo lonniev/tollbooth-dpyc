@@ -344,7 +344,10 @@ async def check_balance_tool(
     next_exp = ledger.next_expiration()
     if next_exp:
         result["next_expiration_iso"] = next_exp
-    active = [t for t in ledger.tranches if t.remaining_sats > 0]
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    active = [t for t in ledger.tranches if t.remaining_sats > 0 and not t.is_expired_at(now)]
+    expired = [t for t in ledger.tranches if t.remaining_sats > 0 and t.is_expired_at(now)]
     result["active_tranches"] = len(active)
     result["tranches"] = [
         {
@@ -356,6 +359,17 @@ async def check_balance_tool(
         }
         for i, t in enumerate(active)
     ]
+    if expired:
+        result["expired_tranches"] = [
+            {
+                "id": t.invoice_id or str(i),
+                "amount_sats": t.original_sats,
+                "remaining_sats": t.remaining_sats,
+                "expires_at": t.expires_at,
+                "created_at": t.granted_at,
+            }
+            for i, t in enumerate(expired)
+        ]
 
     # Include today's usage if available
     today_log = ledger.daily_log.get(today)
