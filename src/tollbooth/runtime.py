@@ -1002,34 +1002,6 @@ class OperatorRuntime:
         return None
 
     # ------------------------------------------------------------------
-    # Horizon auth helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def get_current_user_id() -> str | None:
-        """Extract FastMCP Cloud user ID from request headers.
-
-        Returns None in STDIO mode or when no auth headers present.
-        """
-        try:
-            from fastmcp.server.dependencies import get_http_headers
-            headers = get_http_headers(include_all=True)
-            return headers.get("fastmcp-cloud-user")
-        except Exception:
-            return None
-
-    @staticmethod
-    def require_user_id() -> str:
-        """Extract FastMCP Cloud user ID or raise ValueError."""
-        user_id = OperatorRuntime.get_current_user_id()
-        if not user_id:
-            raise ValueError(
-                "Multi-tenant mode requires Horizon authentication. "
-                "Connect via the operator's MCP endpoint URL."
-            )
-        return user_id
-
-    # ------------------------------------------------------------------
     # Low-balance warning injection
     # ------------------------------------------------------------------
 

@@ -20,13 +20,13 @@ Usage::
     )
 
     # Get or restore session (checks memory, then vault)
-    session = await sessions.get_or_restore(user_id, npub)
+    session = await sessions.get_or_restore(npub)
 
     # Store session (memory + vault)
-    await sessions.store(user_id, npub, session, vault_data={"api_key": "..."})
+    await sessions.store(npub, session, vault_data={"api_key": "..."})
 
-    # Invalidate (memory + vault)
-    await sessions.invalidate(user_id, npub)
+    # Invalidate (memory only — vault cleanup via on_forget callback)
+    sessions.invalidate(npub)
 """
 
 from __future__ import annotations
@@ -66,31 +66,19 @@ class PatronSessionCache(Generic[T]):
         self._service = service
         self._restore = restore
         self._cache: SessionCache[T] = SessionCache(ttl_seconds=ttl_seconds)
-        self._npub_for_user: dict[str, str] = {}
 
-    async def get_or_restore(
-        self,
-        user_id: str,
-        npub: str = "",
-    ) -> T | None:
-        """Get session from memory, falling back to Neon vault restore.
+    async def get_or_restore(self, npub: str) -> T | None:
+        """Get session by npub from memory, falling back to Neon vault restore."""
+        if not npub:
+            return None
 
-        Returns None if no session exists in either location.
-        """
-        # Check memory first
-        session = self._cache.get(user_id)
+        session = self._cache.get(npub)
         if session is not None:
             return session
 
-        # Resolve npub for vault lookup
-        patron_npub = self._npub_for_user.get(user_id) or npub
-        if not patron_npub:
-            return None
-
-        # Try vault restore
         try:
             creds = await self._runtime.load_patron_session(
-                patron_npub, service=self._service,
+                npub, service=self._service,
             )
             if not creds:
                 return None
@@ -99,11 +87,10 @@ class PatronSessionCache(Generic[T]):
             if session is None:
                 return None
 
-            self._cache.set(user_id, session)
-            self._npub_for_user[user_id] = patron_npub
+            self._cache.set(npub, session)
             logger.info(
                 "Restored %s session for %s from vault.",
-                self._service, patron_npub[:20],
+                self._service, npub[:20],
             )
             return session
         except Exception as exc:
@@ -112,50 +99,33 @@ class PatronSessionCache(Generic[T]):
 
     async def store(
         self,
-        user_id: str,
         npub: str,
         session: T,
         vault_data: dict[str, Any],
     ) -> T:
-        """Store session in memory and persist credentials to Neon vault.
-
-        Args:
-            user_id: Horizon user ID.
-            npub: Patron's Nostr public key.
-            session: The domain session object to cache.
-            vault_data: Dict of credentials to persist in vault.
-        """
-        self._cache.set(user_id, session)
-        self._npub_for_user[user_id] = npub
+        """Store session in memory and persist credentials to Neon vault."""
+        self._cache.set(npub, session)
         await self._runtime.store_patron_session(
             npub, vault_data, service=self._service,
         )
         return session
 
-    def get(self, user_id: str) -> T | None:
+    def get(self, npub: str) -> T | None:
         """Get session from memory only (no vault restore)."""
-        return self._cache.get(user_id)
+        return self._cache.get(npub)
 
-    def set_local(self, user_id: str, session: T, npub: str = "") -> T:
+    def set_local(self, npub: str, session: T) -> T:
         """Store session in memory only (no vault persist)."""
-        self._cache.set(user_id, session)
-        if npub:
-            self._npub_for_user[user_id] = npub
+        self._cache.set(npub, session)
         return session
 
-    def invalidate(self, user_id: str) -> None:
-        """Remove session from memory.
+    def invalidate(self, npub: str) -> None:
+        """Remove session from memory."""
+        self._cache.clear(npub)
 
-        Vault cleanup is handled by the ``on_forget`` callback registered
-        with OperatorRuntime. Call this from your ``on_forget`` handler.
-        """
-        self._cache.clear(user_id)
-        self._npub_for_user.pop(user_id, None)
-
-    def clear_local(self, user_id: str) -> None:
+    def clear_local(self, npub: str) -> None:
         """Remove session from memory only (e.g., on forget callback)."""
-        self._cache.clear(user_id)
-        self._npub_for_user.pop(user_id, None)
+        self._cache.clear(npub)
 
     @property
     def cache(self) -> SessionCache[T]:
