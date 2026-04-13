@@ -517,7 +517,8 @@ class TestNpubEnforcement:
             service_name="Test",
         )
         result = await rt.debit_or_deny(identity.tool_id, "")
-        assert result is None
+        assert isinstance(result, int)  # cost, not a denial dict
+        assert result == 0
 
     @pytest.mark.asyncio
     async def test_debit_or_deny_denies_unknown_tools(self) -> None:

@@ -31,9 +31,10 @@ Usage::
     # In a tool function:
     npub = runtime.resolve_npub(npub)
     cache = await runtime.ledger_cache()
-    err = await runtime.debit_or_deny(my_tool_uuid, npub)
-    if err:
-        return err
+    result = await runtime.debit_or_deny(my_tool_uuid, npub)
+    if isinstance(result, dict):
+        return result  # denial
+    cost = result  # int — the computed cost
     # ... do work ...
 """
 
@@ -460,10 +461,11 @@ class OperatorRuntime:
         operator_proof: str = "",
         patron_proof: str = "",
         tool_kwargs: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any] | int:
         """Gate a tool call: identity → access → pricing → constraints → billing.
 
-        Returns ``None`` to proceed.  Returns an error dict to deny.
+        Returns the computed cost (int, 0 for free) to proceed.
+        Returns an error dict to deny.
 
         The code-declared *category* is the immutable floor for billing.
         The constraint pipeline can add gates but never remove them.
@@ -492,11 +494,11 @@ class OperatorRuntime:
             except ValueError as e:
                 return {"success": False, "error": str(e)}
             if caller == self.operator_npub():
-                return None
+                return 0
             if operator_proof and verify_operator_proof(
                 operator_proof, self.operator_npub(), cap,
             ):
-                return None
+                return 0
             return {"success": False, "error": "This tool is restricted to the operator."}
 
         # ── Pricing ───────────────────────────────────────────
@@ -580,7 +582,7 @@ class OperatorRuntime:
 
         # ── No charge ─────────────────────────────────────────
         if effective_cost == 0:
-            return None
+            return 0
 
         # ── Billing ───────────────────────────────────────────
         cache = await self.ledger_cache()
@@ -620,7 +622,7 @@ class OperatorRuntime:
 
         ledger.debit(name, effective_cost)
         cache.mark_dirty(npub)
-        return None
+        return effective_cost
 
     async def rollback_debit(
         self, tool_id: str, npub: str,
@@ -1101,14 +1103,18 @@ class OperatorRuntime:
                 patron_proof = bound.arguments.get("patron_proof", "")
 
                 call_kwargs = dict(bound.arguments)
-                err = await rt.debit_or_deny(
+                result_or_cost = await rt.debit_or_deny(
                     tool_id, npub,
                     operator_proof=operator_proof,
                     patron_proof=patron_proof,
                     tool_kwargs=call_kwargs,
                 )
-                if err is not None:
-                    return err
+                if isinstance(result_or_cost, dict):
+                    return result_or_cost  # denial
+
+                # Store the computed cost on the runtime so the body can
+                # read it without recomputing (e.g., certify_credits).
+                rt._last_debit_cost = result_or_cost
 
                 try:
                     result = await fn(*args, **kwargs)
@@ -1380,9 +1386,9 @@ def register_standard_tools(
         except ValueError as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tool_identity import capability_uuid
-        err = await rt.debit_or_deny(capability_uuid("account_statement_infographic"), npub)
-        if err:
-            return err
+        result_or_cost = await rt.debit_or_deny(capability_uuid("account_statement_infographic"), npub)
+        if isinstance(result_or_cost, dict):
+            return result_or_cost
         try:
             cache = await rt.ledger_cache()
         except (ValueError, RuntimeError) as e:
