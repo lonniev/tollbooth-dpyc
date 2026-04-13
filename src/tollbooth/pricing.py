@@ -35,6 +35,10 @@ class ToolPricing:
                     f"Parameter '{self.rate_param}' must be numeric, got {type(raw).__name__}"
                 )
             amount = float(raw)
+            if amount < 0:
+                raise ValueError(
+                    f"Parameter '{self.rate_param}' must be non-negative, got {amount}"
+                )
             rate_cost = ceil(amount * self.rate_percent / 100) if amount > 0 else 0
             rate_cost = max(rate_cost, self.min_cost)
             cost += rate_cost

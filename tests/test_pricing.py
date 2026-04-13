@@ -47,9 +47,10 @@ class TestRatePricing:
         p = ToolPricing(rate_percent=2.0, rate_param="amount", min_cost=10)
         assert p.compute(amount=0) == 10
 
-    def test_negative_amount_returns_min(self):
+    def test_negative_amount_raises(self):
         p = ToolPricing(rate_percent=2.0, rate_param="amount", min_cost=5)
-        assert p.compute(amount=-100) == 5
+        with pytest.raises(ValueError, match="non-negative"):
+            p.compute(amount=-100)
 
 
 class TestHybridPricing:
