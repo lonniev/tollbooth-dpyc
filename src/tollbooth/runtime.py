@@ -1917,24 +1917,26 @@ def register_standard_tools(
             return {"status": "error", "error": str(e)}
 
     @tool
-    async def set_pricing_model(model_json: str) -> dict[str, Any]:
+    async def set_pricing_model(model_json: str, proof: str = "") -> dict[str, Any]:
         """Set the active pricing model. RESTRICTED to operator.
 
-        The model_json must contain an ``proof`` field — a
-        Nostr-signed proof that the caller holds the operator's nsec.
-        Without a valid proof, the request is rejected.
+        Requires a valid proof (Schnorr-signed kind-27235 event)
+        proving the caller holds the operator's nsec.
         """
         import json as _json
 
-        # Extract and verify proof from inside model_json
-        proof = ""
-        try:
-            parsed = _json.loads(model_json)
-            if isinstance(parsed, dict):
-                proof = parsed.pop("proof", "")
-                model_json = _json.dumps(parsed)
-        except (ValueError, TypeError):
-            pass
+        # Legacy: also accept proof embedded in model_json (remove it from payload)
+        if not proof:
+            try:
+                parsed = _json.loads(model_json)
+                if isinstance(parsed, dict) and "proof" in parsed:
+                    proof = parsed.pop("proof", "")
+                    model_json = _json.dumps(parsed)
+                elif isinstance(parsed, dict) and "operator_proof" in parsed:
+                    proof = parsed.pop("operator_proof", "")
+                    model_json = _json.dumps(parsed)
+            except (ValueError, TypeError):
+                pass
 
         if not proof:
             return {
