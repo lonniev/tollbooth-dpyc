@@ -1096,13 +1096,13 @@ class OperatorRuntime:
             catch_errors: If True (default), catch exceptions from the body
                 and return ``{"success": False, "error": ...}`` after rollback.
 
-        The decorated function **must** accept ``npub`` as a keyword argument.
+        The decorated function **must** accept ``npub`` and ``proof`` as keyword arguments.
 
         Example::
 
             @tool
             @runtime.paid_tool(TOOL_REGISTRY["get_weather"].tool_id)
-            async def get_weather(lat: float, lon: float, npub: str = ""):
+            async def get_weather(lat: float, lon: float, npub: str = "", proof: str = ""):
                 return await weather.get(lat, lon)
         """
         rt = self
@@ -1222,7 +1222,7 @@ def register_standard_tools(
     # -- Credit tools --------------------------------------------------
 
     @tool
-    async def check_balance(npub: str = "") -> dict[str, Any]:
+    async def check_balance(npub: str = "", proof: str = "") -> dict[str, Any]:
         """Check a patron's credit balance at this operator.
 
         This is the patron's spending balance — credits purchased via
@@ -1244,7 +1244,7 @@ def register_standard_tools(
         return await credits.check_balance_tool(cache, npub)
 
     @tool
-    async def purchase_credits(amount_sats: int = 1000, npub: str = "") -> dict[str, Any]:
+    async def purchase_credits(amount_sats: int = 1000, npub: str = "", proof: str = "") -> dict[str, Any]:
         """Buy credits via Bitcoin Lightning.
 
         Creates a Lightning invoice. Pay it with any Lightning wallet,
@@ -1299,7 +1299,7 @@ def register_standard_tools(
             return {"success": False, "error": str(e)}
 
     @tool
-    async def check_payment(invoice_id: str, npub: str = "") -> dict[str, Any]:
+    async def check_payment(invoice_id: str, npub: str = "", proof: str = "") -> dict[str, Any]:
         """Check the payment status of a Lightning invoice.
 
         Call after paying the invoice from purchase_credits.
@@ -1340,7 +1340,7 @@ def register_standard_tools(
         return result
 
     @tool
-    async def restore_credits(invoice_id: str, npub: str = "") -> dict[str, Any]:
+    async def restore_credits(invoice_id: str, npub: str = "", proof: str = "") -> dict[str, Any]:
         """Restore credits from a previously paid invoice. Free.
 
         Args:
@@ -1360,7 +1360,7 @@ def register_standard_tools(
         )
 
     @tool
-    async def account_statement(npub: str = "", days: int = 30) -> dict[str, Any]:
+    async def account_statement(npub: str = "", proof: str = "", days: int = 30) -> dict[str, Any]:
         """Generate a patron's account statement at this operator.
 
         Returns the patron's purchase history, active credit tranches,
@@ -1383,7 +1383,7 @@ def register_standard_tools(
         return await credits.account_statement_tool(cache, npub, days=days)
 
     @tool
-    async def account_statement_infographic(npub: str = "", days: int = 30) -> dict[str, Any]:
+    async def account_statement_infographic(npub: str = "", proof: str = "", days: int = 30) -> dict[str, Any]:
         """Generate a visual SVG infographic of your account statement.
 
         Returns the same data as account_statement, rendered as a dark-themed
@@ -1490,7 +1490,7 @@ def register_standard_tools(
         return await rt.onboarding_status()
 
     @tool
-    async def get_patron_onboarding_status(patron_npub: str = "") -> dict[str, Any]:
+    async def get_patron_onboarding_status(patron_npub: str = "", proof: str = "") -> dict[str, Any]:
         """Report a patron's credential readiness for this operator.
 
         For set-once services (eXcalibur, TheBrain), shows which patron
@@ -1582,6 +1582,7 @@ def register_standard_tools(
     @tool
     async def request_credential_channel(
         sender_npub: str = "",
+        proof: str = "",
         service: str = "",
     ) -> dict[str, Any]:
         """Open a Secure Courier channel for credential delivery.
@@ -1630,6 +1631,7 @@ def register_standard_tools(
     @tool
     async def receive_credentials(
         sender_npub: str = "",
+        proof: str = "",
         service: str = "",
         credential_card: str = "",
         force_relay: bool = False,
@@ -1726,6 +1728,7 @@ def register_standard_tools(
     async def forget_credentials(
         service: str = "",
         npub: str = "",
+        proof: str = "",
     ) -> dict[str, Any]:
         """Delete vaulted credentials for a specific service and npub.
 
@@ -1775,6 +1778,7 @@ def register_standard_tools(
         @tool
         async def request_patron_credentials(
             sender_npub: str = "",
+            proof: str = "",
         ) -> dict[str, Any]:
             """Open a Secure Courier channel for patron credential delivery.
 
@@ -1798,6 +1802,7 @@ def register_standard_tools(
         @tool
         async def receive_patron_credentials(
             sender_npub: str = "",
+            proof: str = "",
             credential_card: str = "",
         ) -> dict[str, Any]:
             """Pick up patron credentials from the Secure Courier.
@@ -2008,7 +2013,7 @@ def register_standard_tools(
     # -- Constraint Engine tools ---------------------------------------
 
     @tool
-    async def check_price(tool_id: str, npub: str = "", tool_kwargs: str = "") -> dict[str, Any]:
+    async def check_price(tool_id: str, npub: str = "", proof: str = "", tool_kwargs: str = "") -> dict[str, Any]:
         """Preview the effective cost of a tool call.
 
         Shows the base cost and any constraint effects (discounts, free
