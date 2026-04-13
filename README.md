@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![PyPI version](https://img.shields.io/pypi/v/tollbooth-dpyc)](https://pypi.org/project/tollbooth-dpyc/)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/lonniev/tollbooth-dpyc/main/docs/tollbooth-hero.png" alt="Milo drives the Lightning Turnpike — Don't Pester Your Customer" width="800">
@@ -57,7 +57,9 @@ pip install tollbooth-dpyc[nostr,qr]
 | `VaultBackend` | Protocol for pluggable ledger persistence — implement `store_ledger`, `fetch_ledger`, `snapshot_ledger`. |
 | `LedgerCache` | In-memory LRU cache with write-behind flush, per-user asyncio locks, dirty tracking. |
 | `ToolTier` | Cost tiers for tool-call metering (FREE=0, READ=1, WRITE=5, HEAVY=10 sats per call). |
-| `ToolPricing` | Dynamic pricing: fixed + percentage-of-parameter pricing with min/max caps. |
+| `ToolPricing` | Dynamic pricing: fixed + percentage-of-parameter (ad valorem) pricing with min/max caps. `compute(**tool_kwargs)` returns the cost in sats. |
+| `ToolIdentity` | Capability-based tool identity with deterministic UUID v5. Declares `category`, `intent`, and pricing hints (`pricing_hint_type`, `pricing_hint_value`, `pricing_hint_param`, `pricing_hint_min`). |
+| `identity_proof` | Verifies Schnorr-signed kind-27235 Nostr events proving npub ownership. `verify_proof(proof_json, expected_npub, tool_name)` is the single entry point for all proof verification. |
 
 ### Actor Protocols
 
@@ -72,6 +74,16 @@ Three protocol interfaces define the DPYC ecosystem roles. Each declares the too
 | `OracleProtocol` | Oracle tool surface — community concierge (tax rates, membership, onboarding). |
 | `ActorRole` | Enum: OPERATOR, AUTHORITY, ORACLE. |
 | `ToolPath` / `ToolPathInfo` | HOT/COLD/DELEGATION path metadata for tool routing. |
+
+### OperatorRuntime
+
+`OperatorRuntime` is the main entry point for building a Tollbooth-powered MCP server. It wires together identity, billing, pricing, constraints, and tool registration.
+
+| Method / Feature | Purpose |
+|----------|---------|
+| `debit_or_deny(tool_id, npub, *, proof, tool_kwargs)` | Gate a tool call: identity, proof, access, pricing, constraints, billing. Returns `int` (cost in sats) on success, `dict` (error details) on denial. Every tool that takes `npub` requires `proof`. |
+| `purchase_mode="direct"` | Trust-root operators (Authority) read `NEON_DATABASE_URL` from env and skip relay bootstrap. Default `"certified"` uses Authority certification. |
+| `set_pricing_model(model_json, proof)` | Update the Neon pricing model. `proof` is a separate parameter (Schnorr-signed kind-27235 event). Restricted to operator. |
 
 ### Ready-Made Tool Implementations
 
@@ -90,6 +102,24 @@ The `tollbooth.tools` package provides functions your MCP server wraps as tools.
 | `anchor_ledger_tool` | Creates a Merkle tree of all ledgers and submits root hash to OTS calendar servers. |
 | `get_anchor_proof_tool` | Retrieves a Merkle inclusion proof for a specific user's ledger entry. |
 | `list_anchors_tool` | Lists all Bitcoin-anchored ledger snapshots with timestamps and verification status. |
+
+### Identity Proofs
+
+Every tool that accepts an `npub` also requires a `proof` parameter — a JSON-serialized Schnorr-signed kind-27235 Nostr event proving the caller owns that npub. No proof, no service. This applies to both operator-restricted tools (like `set_pricing_model`) and patron-facing tools (like `purchase_credits`).
+
+```python
+# Proof format (kind 27235, NIP-98 style)
+{
+    "pubkey": "<hex_pubkey>",
+    "kind": 27235,
+    "content": "",
+    "created_at": 1713000000,
+    "tags": [["u", "<tool_name>"]],
+    "sig": "<schnorr_signature>"
+}
+```
+
+Verify with `identity_proof.verify_proof(proof_json, expected_npub, tool_name)`. The proof must be less than 60 seconds old by default.
 
 ### Certificates & Verification
 
