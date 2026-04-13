@@ -148,7 +148,7 @@ async def check_acl_access(
 
     Returns ``True`` if the caller is authorized, ``False`` otherwise.
     """
-    from tollbooth.operator_proof import verify_identity_proof
+    from tollbooth.identity_proof import verify_proof as verify_identity_proof
 
     # 1. Fetch ACL — exact match first, then wildcard
     signed_event_json = await acl_store.fetch_acl(operator_npub, tool_name)

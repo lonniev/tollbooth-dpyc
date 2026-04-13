@@ -1923,21 +1923,6 @@ def register_standard_tools(
         Requires a valid proof (Schnorr-signed kind-27235 event)
         proving the caller holds the operator's nsec.
         """
-        import json as _json
-
-        # Legacy: also accept proof embedded in model_json (remove it from payload)
-        if not proof:
-            try:
-                parsed = _json.loads(model_json)
-                if isinstance(parsed, dict) and "proof" in parsed:
-                    proof = parsed.pop("proof", "")
-                    model_json = _json.dumps(parsed)
-                elif isinstance(parsed, dict) and "operator_proof" in parsed:
-                    proof = parsed.pop("operator_proof", "")
-                    model_json = _json.dumps(parsed)
-            except (ValueError, TypeError):
-                pass
-
         if not proof:
             return {
                 "success": False,

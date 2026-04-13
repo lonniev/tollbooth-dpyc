@@ -9,7 +9,7 @@ from pynostr.event import Event  # type: ignore[import-untyped]
 from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
 from tollbooth.acl_verify import ACL_EVENT_KIND, verify_acl_event, check_acl_access
-from tollbooth.operator_proof import OPERATOR_PROOF_KIND
+from tollbooth.identity_proof import PROOF_EVENT_KIND as OPERATOR_PROOF_KIND
 
 
 # ---------------------------------------------------------------------------
