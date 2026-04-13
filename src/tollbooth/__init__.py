@@ -79,11 +79,11 @@ except ImportError:
     AuditedVault = None  # type: ignore[assignment,misc]
 
 try:
-    from tollbooth.operator_proof import verify_operator_proof, verify_identity_proof, OPERATOR_PROOF_KIND
+    from tollbooth.identity_proof import verify_proof, create_proof, PROOF_EVENT_KIND
 except ImportError:
-    verify_operator_proof = None  # type: ignore[assignment,misc]
-    verify_identity_proof = None  # type: ignore[assignment,misc]
-    OPERATOR_PROOF_KIND = None  # type: ignore[assignment,misc]
+    verify_proof = None  # type: ignore[assignment,misc]
+    create_proof = None  # type: ignore[assignment,misc]
+    PROOF_EVENT_KIND = None  # type: ignore[assignment,misc]
 
 try:
     from tollbooth.acl_verify import verify_acl_event, check_acl_access, ACL_EVENT_KIND
@@ -310,9 +310,9 @@ __all__ = [
     "decode_credential_card",
     "render_qr",
     # Operator Proof
-    "verify_operator_proof",
-    "verify_identity_proof",
-    "OPERATOR_PROOF_KIND",
+    "verify_proof",
+    "create_proof",
+    "PROOF_EVENT_KIND",
     # ACL
     "verify_acl_event",
     "check_acl_access",

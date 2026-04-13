@@ -31,7 +31,7 @@ Usage::
     # In a tool function:
     npub = runtime.resolve_npub(npub)
     cache = await runtime.ledger_cache()
-    result = await runtime.debit_or_deny(my_tool_uuid, npub)
+    result = await runtime.debit_or_deny(my_tool_uuid, npub, proof=proof)
     if isinstance(result, dict):
         return result  # denial
     cost = result  # int — the computed cost
@@ -458,19 +458,18 @@ class OperatorRuntime:
         tool_id: str,
         npub: str,
         *,
-        operator_proof: str = "",
-        patron_proof: str = "",
+        proof: str = "",
         tool_kwargs: dict[str, Any] | None = None,
     ) -> dict[str, Any] | int:
-        """Gate a tool call: identity → access → pricing → constraints → billing.
+        """Gate a tool call: identity → proof → access → pricing → constraints → billing.
 
         Returns the computed cost (int, 0 for free) to proceed.
         Returns an error dict to deny.
 
-        The code-declared *category* is the immutable floor for billing.
-        The constraint pipeline can add gates but never remove them.
+        Every tool that takes an npub requires a proof (Schnorr-signed
+        kind-27235 event proving npub ownership). No proof, no service.
         """
-        from tollbooth.operator_proof import verify_operator_proof
+        from tollbooth.identity_proof import verify_proof
 
         identity = self._tool_registry.get(tool_id)
 
@@ -482,22 +481,38 @@ class OperatorRuntime:
             }
 
         name = self.mcp_name_for(tool_id)        # full MCP name for display/logging
-        cap = identity.capability              # short name for proof verification only
+        cap = identity.capability              # short name for proof verification
         category = identity.category           # set in code, never by the pricing model
 
+        # ── Proof verification ────────────────────────────────
+        # If an npub is provided, proof is required. No exceptions.
+        if npub:
+            if not proof:
+                return {
+                    "success": False,
+                    "error": "proof is required. Sign a kind-27235 Nostr event with your nsec.",
+                }
+            try:
+                resolved = resolve_npub(npub)
+            except ValueError as e:
+                return {"success": False, "error": str(e)}
+
+            # For restricted tools, verify against operator npub
+            verify_against = self.operator_npub() if category == "restricted" else resolved
+            if not verify_proof(proof, verify_against, cap):
+                return {
+                    "success": False,
+                    "error": "Invalid proof — Schnorr signature does not match npub.",
+                }
+
         # ── Access: operator-restricted ───────────────────────
-        # No billing, no constraints.  Only the operator's npub
-        # (or a valid operator_proof signer) may call these.
+        # Proof already verified above. Just check the npub is the operator.
         if category == "restricted":
             try:
                 caller = resolve_npub(npub)
             except ValueError as e:
                 return {"success": False, "error": str(e)}
             if caller == self.operator_npub():
-                return 0
-            if operator_proof and verify_operator_proof(
-                operator_proof, self.operator_npub(), cap,
-            ):
                 return 0
             return {"success": False, "error": "This tool is restricted to the operator."}
 
@@ -554,7 +569,7 @@ class OperatorRuntime:
 
         # ── Constraints ───────────────────────────────────────
         # The pipeline applies to every non-restricted tool —
-        # including free ones.  patron_proof verification, rate
+        # including free ones.  proof verification, rate
         # limits, temporal windows, etc. can tighten access but
         # never loosen the code-declared category floor.
         # Without an npub, constraints cannot be evaluated.
@@ -568,7 +583,7 @@ class OperatorRuntime:
                     base_cost=cost,
                     ledger=ledger,
                     npub=npub,
-                    patron_proof=patron_proof,
+                    proof=proof,
                 )
                 if denial:
                     return denial
@@ -1099,14 +1114,12 @@ class OperatorRuntime:
                 bound = sig.bind(*args, **kwargs)
                 bound.apply_defaults()
                 npub = bound.arguments.get("npub", "")
-                operator_proof = bound.arguments.get("operator_proof", "")
-                patron_proof = bound.arguments.get("patron_proof", "")
+                proof = bound.arguments.get("proof", "")
 
                 call_kwargs = dict(bound.arguments)
                 result_or_cost = await rt.debit_or_deny(
                     tool_id, npub,
-                    operator_proof=operator_proof,
-                    patron_proof=patron_proof,
+                    proof=proof,
                     tool_kwargs=call_kwargs,
                 )
                 if isinstance(result_or_cost, dict):
@@ -1902,32 +1915,32 @@ def register_standard_tools(
     async def set_pricing_model(model_json: str) -> dict[str, Any]:
         """Set the active pricing model. RESTRICTED to operator.
 
-        The model_json must contain an ``operator_proof`` field — a
+        The model_json must contain an ``proof`` field — a
         Nostr-signed proof that the caller holds the operator's nsec.
         Without a valid proof, the request is rejected.
         """
         import json as _json
 
-        # Extract and verify operator_proof from inside model_json
-        operator_proof = ""
+        # Extract and verify proof from inside model_json
+        proof = ""
         try:
             parsed = _json.loads(model_json)
             if isinstance(parsed, dict):
-                operator_proof = parsed.pop("operator_proof", "")
+                proof = parsed.pop("proof", "")
                 model_json = _json.dumps(parsed)
         except (ValueError, TypeError):
             pass
 
-        if not operator_proof:
+        if not proof:
             return {
                 "success": False,
-                "error": "Only the operator can modify pricing — provide operator_proof.",
+                "error": "Only the operator can modify pricing — provide proof.",
             }
-        from tollbooth.operator_proof import verify_operator_proof
-        if not verify_operator_proof(operator_proof, rt.operator_npub(), "set_pricing_model"):
+        from tollbooth.identity_proof import verify_proof
+        if not verify_proof(proof, rt.operator_npub(), "set_pricing_model"):
             return {
                 "success": False,
-                "error": "Invalid operator_proof — only the operator can modify pricing.",
+                "error": "Invalid proof — only the operator can modify pricing.",
             }
 
         try:
@@ -1946,25 +1959,25 @@ def register_standard_tools(
             return {"status": "error", "error": str(e)}
 
     @tool
-    async def reset_pricing_model(operator_proof: str = "") -> dict[str, Any]:
+    async def reset_pricing_model(proof: str = "") -> dict[str, Any]:
         """Erase all pricing models and restore a viable default.
 
         Deletes every stored model, then self-initializes a fresh one
         from the tool registry — all tools at 0 sats with proper UUIDs.
         Returns the new model.
 
-        RESTRICTED to operator — requires operator_proof (nsec-signed).
+        RESTRICTED to operator — requires proof (nsec-signed).
         """
-        if not operator_proof:
+        if not proof:
             return {
                 "success": False,
-                "error": "Only the operator can reset pricing — provide operator_proof.",
+                "error": "Only the operator can reset pricing — provide proof.",
             }
-        from tollbooth.operator_proof import verify_operator_proof
-        if not verify_operator_proof(operator_proof, rt.operator_npub(), "reset_pricing_model"):
+        from tollbooth.identity_proof import verify_proof
+        if not verify_proof(proof, rt.operator_npub(), "reset_pricing_model"):
             return {
                 "success": False,
-                "error": "Invalid operator_proof — only the operator can reset pricing.",
+                "error": "Invalid proof — only the operator can reset pricing.",
             }
         try:
             vault = await rt.vault()

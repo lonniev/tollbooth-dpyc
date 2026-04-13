@@ -103,7 +103,17 @@ class FakeLedgerCache:
         pass
 
 
-VALID_NPUB = "npub1" + "a" * 58  # 63 chars total
+# Generate a real keypair for proof tests
+from pynostr.key import PrivateKey as _PK
+_TEST_KEY = _PK()
+VALID_NPUB = _TEST_KEY.public_key.bech32()
+_TEST_NSEC = _TEST_KEY.bech32()
+
+
+def _make_proof(tool_name: str = "my_tool") -> str:
+    """Create a valid proof for the test keypair."""
+    from tollbooth.identity_proof import create_proof
+    return create_proof(_TEST_NSEC, tool_name)
 
 
 async def _inject_fake_cache(rt: OperatorRuntime, balance: int = 1000):
@@ -126,10 +136,10 @@ class TestPaidToolDecorator:
         await _inject_fake_cache(rt)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(x: int, npub: str = "") -> dict:
+        async def my_tool(x: int, npub: str = "", proof: str = "") -> dict:
             return {"value": x * 2}
 
-        result = await my_tool(21, npub=VALID_NPUB)
+        result = await my_tool(21, npub=VALID_NPUB, proof=_make_proof())
         assert result["value"] == 42
 
     @pytest.mark.asyncio
@@ -138,10 +148,10 @@ class TestPaidToolDecorator:
         await _inject_fake_cache(rt, balance=10)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "") -> dict:
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
             return {"should": "not reach"}
 
-        result = await my_tool(npub=VALID_NPUB)
+        result = await my_tool(npub=VALID_NPUB, proof=_make_proof())
         assert result["success"] is False
         assert "Insufficient balance" in result["error"]
 
@@ -151,7 +161,7 @@ class TestPaidToolDecorator:
         await _inject_fake_cache(rt)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "") -> dict:
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
             return {"should": "not reach"}
 
         result = await my_tool(npub="")
@@ -164,14 +174,14 @@ class TestPaidToolDecorator:
         cache = await _inject_fake_cache(rt, balance=100)
 
         @rt.paid_tool(capability_uuid("my_tool"), catch_errors=True)
-        async def my_tool(npub: str = "") -> dict:
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
             raise RuntimeError("boom")
 
         # Get initial balance
         ledger = await cache.get(VALID_NPUB)
         initial = ledger.balance_api_sats
 
-        result = await my_tool(npub=VALID_NPUB)
+        result = await my_tool(npub=VALID_NPUB, proof=_make_proof())
         assert result["success"] is False
         assert "boom" in result["error"]
 
@@ -185,14 +195,14 @@ class TestPaidToolDecorator:
         cache = await _inject_fake_cache(rt, balance=100)
 
         @rt.paid_tool(capability_uuid("my_tool"), catch_errors=False)
-        async def my_tool(npub: str = "") -> dict:
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
             raise RuntimeError("boom")
 
         ledger = await cache.get(VALID_NPUB)
         initial = ledger.balance_api_sats
 
         with pytest.raises(RuntimeError, match="boom"):
-            await my_tool(npub=VALID_NPUB)
+            await my_tool(npub=VALID_NPUB, proof=_make_proof())
 
         # Balance should be restored after rollback
         ledger = await cache.get(VALID_NPUB)
@@ -204,7 +214,7 @@ class TestPaidToolDecorator:
         # No cache needed — free tools skip debit entirely
 
         @rt.paid_tool(capability_uuid("free_tool"))
-        async def free_tool(npub: str = "") -> dict:
+        async def free_tool(npub: str = "", proof: str = "") -> dict:
             return {"free": True}
 
         result = await free_tool(npub="")
@@ -215,7 +225,7 @@ class TestPaidToolDecorator:
         rt = _make_runtime()
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "") -> dict:
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
             """My docstring."""
             return {}
 
@@ -228,10 +238,10 @@ class TestPaidToolDecorator:
         await _inject_fake_cache(rt, balance=2)  # low balance after debit
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "") -> dict:
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
             return {"data": "ok"}
 
-        result = await my_tool(npub=VALID_NPUB)
+        result = await my_tool(npub=VALID_NPUB, proof=_make_proof())
         assert result["data"] == "ok"
         # Warning may or may not be present depending on threshold,
         # but the decorator shouldn't crash
@@ -249,10 +259,10 @@ class TestPaidToolDecorator:
         )
 
         @rt.paid_tool(identity.tool_id)
-        async def unpriced(npub: str = "") -> dict:
+        async def unpriced(npub: str = "", proof: str = "") -> dict:
             return {"should": "not reach"}
 
-        result = await unpriced(npub=VALID_NPUB)
+        result = await unpriced(npub=VALID_NPUB, proof=_make_proof("unpriced"))
         assert result["success"] is False
         assert "not been priced" in result["error"]
 
@@ -268,8 +278,8 @@ class TestPaidToolDecorator:
         )
 
         @rt.paid_tool(identity.tool_id)
-        async def promo(npub: str = "") -> dict:
+        async def promo(npub: str = "", proof: str = "") -> dict:
             return {"free": True}
 
-        result = await promo(npub=VALID_NPUB)
+        result = await promo(npub=VALID_NPUB, proof=_make_proof("promo"))
         assert result["free"] is True

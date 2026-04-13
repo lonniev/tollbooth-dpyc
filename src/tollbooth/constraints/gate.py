@@ -87,7 +87,7 @@ class ConstraintGate:
         membership_tier: str = "default",
         invocation_count: int = 0,
         global_demand: dict[str, int] | None = None,
-        patron_proof: str = "",
+        proof: str = "",
     ) -> tuple[dict[str, Any] | None, int]:
         """Evaluate constraints for a tool call.
 
@@ -123,7 +123,7 @@ class ConstraintGate:
                     (global_demand or {}).items()
                 ),
             ),
-            patron_proof=patron_proof,
+            proof=proof,
         )
 
         result = self._engine.evaluate(tool_name, context)
