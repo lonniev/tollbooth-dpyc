@@ -2137,6 +2137,20 @@ def register_standard_tools(
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
 
+        # Purge stale DMs for this patron before sending a fresh challenge
+        try:
+            from tollbooth.nostr_credentials import _npub_to_hex
+            exchange = courier._exchange
+            patron_hex = _npub_to_hex(patron_npub)
+            exchange._fetch_dms_from_relays()
+            stale = exchange._find_dm_candidates(patron_hex)
+            for candidate in stale:
+                exchange._pop_event(candidate.get("id", ""))
+            if stale:
+                logger.info("Purged %d stale DM(s) for %s", len(stale), patron_npub[:20])
+        except Exception:
+            pass  # best-effort purge
+
         try:
             _greeting = rt._npub_proof_greeting or (
                 f"Hi — {service_name or 'this service'} needs to verify "
@@ -2217,18 +2231,24 @@ def register_standard_tools(
 
         expected_phrase = expected[0] if expected else None
 
-        # Fetch DMs from relays
-        candidates = exchange._find_dm_candidates(patron_hex)
-        if not candidates:
+        # Fetch DMs from relays — retry up to 4 times with short pauses
+        # because relay delivery is not instantaneous.
+        import asyncio as _aio
+        candidates = []
+        for _attempt in range(4):
             exchange._fetch_dms_from_relays()
             candidates = exchange._find_dm_candidates(patron_hex)
+            if candidates:
+                break
+            if _attempt < 3:
+                await _aio.sleep(2)
 
         if not candidates:
             return {
                 "success": False,
                 "error": (
-                    "No DMs from patron yet. Ensure PricingStudio or "
-                    "a Nostr client is running and the patron has replied."
+                    "No DMs from patron after 4 relay polls. "
+                    "Ensure the patron has replied, then try again."
                 ),
             }
 
