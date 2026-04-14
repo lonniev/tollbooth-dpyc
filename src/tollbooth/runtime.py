@@ -130,11 +130,21 @@ class OperatorRuntime:
         self._operator_npub: str | None = None
         self._nsec: str | None = None
         self._reconciled_npubs: set[str] = set()  # dedup auto-reconciliation
+        self._session_verifier: Callable[[str], bool] | None = None
 
         # Shutdown state
         self._shutdown_triggered: bool = False
         self._shutdown_handlers_registered: bool = False
         self._cleanup_callbacks: list[Callable[[], Any]] = []
+
+    def set_session_verifier(self, verifier: Callable[[str], bool]) -> None:
+        """Register a callback that checks if an npub has a verified session.
+
+        When set, ``debit_or_deny`` will waive the proof requirement for
+        npubs that return True — the session itself is proof of identity
+        (e.g., OAuth browser dance already verified the patron).
+        """
+        self._session_verifier = verifier
 
     @property
     def operator_credential_service(self) -> str:
@@ -485,25 +495,35 @@ class OperatorRuntime:
         category = identity.category           # set in code, never by the pricing model
 
         # ── Proof verification ────────────────────────────────
-        # If an npub is provided, proof is required. No exceptions.
+        # If an npub is provided, proof is required — unless the
+        # operator has registered a session verifier and the npub
+        # has an active verified session (e.g., OAuth browser dance).
         if npub:
-            if not proof:
-                return {
-                    "success": False,
-                    "error": "proof is required. Sign a kind-27235 Nostr event with your nsec.",
-                }
             try:
                 resolved = resolve_npub(npub)
             except ValueError as e:
                 return {"success": False, "error": str(e)}
 
-            # For restricted tools, verify against operator npub
-            verify_against = self.operator_npub() if category == "restricted" else resolved
-            if not verify_proof(proof, verify_against, cap):
+            session_verified = (
+                self._session_verifier is not None
+                and category != "restricted"
+                and self._session_verifier(resolved)
+            )
+
+            if not proof and not session_verified:
                 return {
                     "success": False,
-                    "error": "Invalid proof — Schnorr signature does not match npub.",
+                    "error": "proof is required. Sign a kind-27235 Nostr event with your nsec.",
                 }
+
+            if proof:
+                # For restricted tools, verify against operator npub
+                verify_against = self.operator_npub() if category == "restricted" else resolved
+                if not verify_proof(proof, verify_against, cap):
+                    return {
+                        "success": False,
+                        "error": "Invalid proof — Schnorr signature does not match npub.",
+                    }
 
         # ── Access: operator-restricted ───────────────────────
         # Proof already verified above. Just check the npub is the operator.
