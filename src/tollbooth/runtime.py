@@ -2345,6 +2345,33 @@ def register_standard_tools(
                 vault, limit=limit, status=status or None,
             )
 
+    # -- Append standard DPYC agent guidance to MCP instructions ----------
+
+    _DPYC_AGENT_GUIDANCE = (
+        "\n\n## Troubleshooting Tool Failures\n\n"
+        "When a tool call fails, **read the error message** — it tells you "
+        "what went wrong and what to do next. Common causes:\n\n"
+        "- **proof is required** → Call `request_npub_proof` then "
+        "`receive_npub_proof` to prove npub ownership. The cache expires "
+        "after ~1 hour; renew with a fresh request/receive cycle.\n"
+        "- **Insufficient credit balance** → Call `purchase_credits` to top up.\n"
+        "- **Operator credentials not configured** → Operator setup issue, "
+        "not the patron's problem.\n"
+        "- **Upstream API authentication failure** → Only if the error "
+        "explicitly mentions token expiry or an upstream auth error.\n\n"
+        "**IMPORTANT — Don't Pester Your Customer:** Do NOT ask the patron "
+        "to re-authenticate, re-authorize, or re-do OAuth unless the error "
+        "message specifically says the upstream token is expired or invalid. "
+        "Token expiry is only one of many possible causes. Speculatively "
+        "re-running OAuth or credential flows wastes the patron's time and "
+        "is the opposite of what DPYC stands for."
+    )
+
+    if hasattr(mcp, "instructions") and mcp.instructions:
+        mcp.instructions += _DPYC_AGENT_GUIDANCE
+    elif hasattr(mcp, "instructions"):
+        mcp.instructions = _DPYC_AGENT_GUIDANCE.lstrip()
+
 
 # ======================================================================
 # Oracle delegation helper
