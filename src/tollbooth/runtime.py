@@ -2137,6 +2137,8 @@ def register_standard_tools(
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
 
+        import time as _t
+
         # Purge stale DMs for this patron before sending a fresh challenge
         try:
             from tollbooth.nostr_credentials import _npub_to_hex
@@ -2150,6 +2152,9 @@ def register_standard_tools(
                 logger.info("Purged %d stale DM(s) for %s", len(stale), patron_npub[:20])
         except Exception:
             pass  # best-effort purge
+
+        # Record challenge timestamp — receive_npub_proof ignores DMs before this
+        challenge_ts = int(_t.time())
 
         try:
             _greeting = rt._npub_proof_greeting or (
@@ -2166,6 +2171,16 @@ def register_standard_tools(
                 return result
         except Exception as e:
             return {"success": False, "error": f"Failed to send proof request: {e}"}
+
+        # Store challenge timestamp in vault for receive_npub_proof
+        try:
+            await rt.store_patron_session(
+                patron_npub,
+                {"challenge_ts": str(challenge_ts)},
+                service=f"_proof_pending_{_PROOF_SERVICE}",
+            )
+        except Exception:
+            pass
 
         return {
             "success": True,
@@ -2231,6 +2246,17 @@ def register_standard_tools(
 
         expected_phrase = expected[0] if expected else None
 
+        # Load challenge timestamp — ignore DMs created before this
+        challenge_ts = 0
+        try:
+            pending_proof = await rt.load_patron_session(
+                resolved, service=f"_proof_pending_{_PROOF_SERVICE}",
+            )
+            if pending_proof:
+                challenge_ts = int(float(pending_proof.get("challenge_ts", "0")))
+        except Exception:
+            pass
+
         # Fetch DMs from relays — retry up to 4 times with short pauses
         # because relay delivery is not instantaneous.
         import asyncio as _aio
@@ -2253,14 +2279,23 @@ def register_standard_tools(
             }
 
         # Drain loop: pop ALL candidates, find the match if any.
+        # DMs created before the challenge timestamp are stale — pop and skip.
         # No per-DM rejection messages — one summary at the end.
         import time as _t
         matched_payload = None
         last_failure = None
         popped = 0
+        stale_popped = 0
         decrypt_key = exchange._privkey_hex
 
         for candidate in candidates:
+            # Pop pre-challenge DMs without processing
+            event_ts = candidate.get("created_at", 0)
+            if challenge_ts and event_ts < challenge_ts - 5:  # 5s grace
+                exchange._pop_event(candidate.get("id", ""))
+                stale_popped += 1
+                popped += 1
+                continue
             event_id = candidate.get("id", "")
             popped += 1
 

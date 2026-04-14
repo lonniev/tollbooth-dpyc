@@ -584,10 +584,14 @@ class NostrCredentialExchange:
         wrap_content = _nip44_encrypt(
             json.dumps(seal.to_dict()), ephemeral_sk.hex(), recipient_hex,
         )
+        expiry = str(int(time.time()) + 600)  # NIP-40: expire after 10 minutes
         wrap = Event(
             kind=_KIND_GIFT_WRAP,
             content=wrap_content,
-            tags=[["p", recipient_hex]],  # p-tag for relay routing
+            tags=[
+                ["p", recipient_hex],  # p-tag for relay routing
+                ["expiration", expiry],  # NIP-40 auto-delete
+            ],
             pubkey=ephemeral_sk.public_key.hex(),
             created_at=_randomize_timestamp(),
         )
@@ -627,12 +631,14 @@ class NostrCredentialExchange:
         encrypted = _nip04_encrypt(
             message_text, sender_privkey_hex, recipient_hex,
         )
+        now = int(time.time())
+        expiry = str(now + 600)  # NIP-40: expire after 10 minutes
         event = Event(
             kind=_KIND_ENCRYPTED_DM,
             content=encrypted,
-            tags=[["p", recipient_hex]],
+            tags=[["p", recipient_hex], ["expiration", expiry]],
             pubkey=sender_pubkey_hex,
-            created_at=int(time.time()),
+            created_at=now,
         )
         event.sign(sender_privkey_hex)
         return event.to_message()
