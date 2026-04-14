@@ -2180,6 +2180,8 @@ def register_standard_tools(
         """
         if not patron_npub:
             return {"success": False, "error": "patron_npub is required."}
+        import time as _time
+
         try:
             resolved = resolve_npub(patron_npub)
         except ValueError as e:
