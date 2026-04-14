@@ -1962,8 +1962,9 @@ def register_standard_tools(
 
         # Try each candidate — look for a valid proof JSON
         proof_json = None
-        for event_id, event in candidates:
+        for event in candidates:
             try:
+                event_id = event.get("id", "")
                 nsec_hex = courier._exchange._nsec_hex
                 plaintext = courier._exchange._decrypt_dm(
                     event, patron_hex, decrypt_privkey_hex=nsec_hex,
