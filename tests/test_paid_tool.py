@@ -1,6 +1,7 @@
 """Tests for the @runtime.paid_tool() decorator."""
 
 import pytest
+from pynostr.key import PrivateKey as _PK
 
 from tollbooth.runtime import OperatorRuntime
 from tollbooth.tool_identity import ToolIdentity, capability_uuid
@@ -104,7 +105,6 @@ class FakeLedgerCache:
 
 
 # Generate a real keypair for proof tests
-from pynostr.key import PrivateKey as _PK
 _TEST_KEY = _PK()
 VALID_NPUB = _TEST_KEY.public_key.bech32()
 _TEST_NSEC = _TEST_KEY.bech32()
