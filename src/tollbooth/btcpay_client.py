@@ -159,6 +159,34 @@ class BTCPayClient:
             "GET", f"/stores/{self._store_id}/invoices/{invoice_id}"
         )
 
+    async def get_invoice_payment_methods(self, invoice_id: str) -> list[dict[str, Any]]:
+        """GET /stores/{storeId}/invoices/{invoiceId}/payment-methods — payment method details.
+
+        Returns a list of payment method dicts. The Lightning entry contains
+        a ``destination`` field with the BOLT11 invoice string.
+        """
+        return await self._request(
+            "GET", f"/stores/{self._store_id}/invoices/{invoice_id}/payment-methods"
+        )
+
+    async def get_lightning_invoice(self, invoice_id: str) -> str | None:
+        """Extract the BOLT11 Lightning invoice string for a BTCPay invoice.
+
+        Returns the BOLT11 string (``lnbc...``) or None if no Lightning
+        payment method is available.
+        """
+        try:
+            methods = await self.get_invoice_payment_methods(invoice_id)
+        except BTCPayError:
+            return None
+        for method in methods:
+            pm_id = method.get("paymentMethodId", "") or method.get("paymentMethod", "")
+            if "LN" in pm_id.upper() or "LIGHTNING" in pm_id.upper():
+                dest = method.get("destination", "")
+                if dest and dest.lower().startswith("lnbc"):
+                    return dest
+        return None
+
     async def get_api_key_info(self) -> dict[str, Any]:
         """GET /api-keys/current — current API key metadata and permissions."""
         return await self._request("GET", "/api-keys/current")

@@ -74,6 +74,14 @@ async def _create_purchase_invoice(
     if not await cache.flush_user(user_id):
         logger.warning("Failed to flush pending invoice %s for %s.", invoice_id, user_id)
 
+    # Fetch BOLT11 Lightning invoice string for direct wallet payment
+    bolt11: str | None = None
+    if invoice_id:
+        try:
+            bolt11 = await btcpay.get_lightning_invoice(invoice_id)
+        except Exception:
+            logger.debug("Failed to fetch BOLT11 for invoice %s", invoice_id)
+
     result: dict[str, Any] = {
         "success": True,
         "invoice_id": invoice_id,
@@ -89,6 +97,8 @@ async def _create_purchase_invoice(
             f'After paying, call check_payment with invoice_id: "{invoice_id}"'
         ),
     }
+    if bolt11:
+        result["lightning_invoice"] = bolt11
     if default_credit_ttl_seconds is not None:
         result["credit_ttl_seconds"] = default_credit_ttl_seconds
 
