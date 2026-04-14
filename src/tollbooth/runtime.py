@@ -397,13 +397,15 @@ class OperatorRuntime:
         if self._patron_credential_template:
             templates[self._patron_credential_template.service] = self._patron_credential_template
 
-        # Built-in template for npub ownership proof exchange
+        # Built-in template for npub ownership proof exchange.
+        # The DM itself proves npub ownership (signed by the patron's nsec).
+        # The confirm field is just a human acknowledgment — the value is immaterial.
         from tollbooth.credential_templates import CredentialTemplate, FieldSpec
         templates["npub_ownership"] = CredentialTemplate(
             service="npub_ownership",
             version=1,
-            fields={"proof_json": FieldSpec(required=True, sensitive=False, description="Signed kind-27235 Nostr event JSON")},
-            description="Npub ownership proof — signed kind-27235 event with u=npub_ownership",
+            fields={"confirm": FieldSpec(required=True, sensitive=False, description="Any text — your signed DM is the proof")},
+            description="Npub ownership — the signed DM itself proves you own this npub",
         )
 
         self._courier = SecureCourierService(
@@ -1925,11 +1927,9 @@ def register_standard_tools(
             result = await courier.open_channel(
                 _PROOF_SERVICE,
                 greeting=(
-                    "NPUB_PROOF_REQUEST\n"
-                    f"operator: {rt.operator_npub()}\n"
-                    "Sign a kind-27235 Nostr event with tag "
-                    '[\"u\", \"npub_ownership\"] and reply with:\n'
-                    "proof_json = @@@<signed event JSON>@@@"
+                    f"Hi — {service_name or 'this service'} needs to verify "
+                    "you own this npub. Reply with any text to confirm. "
+                    "Your signed Nostr DM is the proof."
                 ),
                 recipient_npub=patron_npub,
             )
@@ -1950,11 +1950,11 @@ def register_standard_tools(
     async def receive_npub_proof(
         patron_npub: str = "",
     ) -> dict[str, Any]:
-        """Receive and verify npub ownership proof from a patron.
+        """Receive npub ownership confirmation from a patron.
 
-        Uses Secure Courier to pick up the patron's signed kind-27235
-        event from relays (or vault on repeat calls). On successful
-        Schnorr verification, caches the proven npub so subsequent
+        Uses Secure Courier to pick up the patron's reply DM. The
+        signed DM itself proves npub ownership (the patron's nsec
+        signed it). On success, caches the proven npub so subsequent
         paid tool calls skip inline proof. Free.
 
         Args:
@@ -1971,9 +1971,8 @@ def register_standard_tools(
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
 
-        # Use Secure Courier receive (public API, same as taxsort verify)
-        # — handles relay polling, decryption, vault-first lookup, and
-        # relay alignment automatically.
+        # Use Secure Courier receive (public API, same as taxsort verify).
+        # The DM itself proves npub ownership — the patron's nsec signed it.
         try:
             result = await courier.receive(
                 sender_npub=resolved, service=_PROOF_SERVICE,
@@ -1984,38 +1983,16 @@ def register_standard_tools(
         if not result.get("success"):
             return result
 
-        # courier.receive() stores credentials in vault and strips
-        # them from the response. Load proof_json from vault.
-        try:
-            creds = await rt.load_patron_session(
-                resolved, service=_PROOF_SERVICE,
-            )
-            proof_json = creds.get("proof_json", "") if creds else ""
-        except Exception:
-            proof_json = ""
-
-        if not proof_json:
-            return {
-                "success": False,
-                "error": (
-                    "Reply received but no proof_json field found. "
-                    "Reply with: proof_json = @@@<signed kind-27235 event JSON>@@@"
-                ),
-            }
-
-        # Verify and cache
+        # DM received and verified — cache the proven npub.
         cache = await rt.proven_npub_cache()
-        try:
-            record = await cache.prove(resolved, proof_json)
-        except ValueError as e:
-            return {"success": False, "error": str(e)}
+        record = await cache.mark_proven(resolved)
 
         return {
             "success": True,
             "proven_npub": resolved,
             "expires_in_seconds": int(record.expires_at - record.verified_at),
             "message": (
-                f"npub ownership verified and cached. "
+                f"npub ownership verified via signed DM. "
                 f"Paid tool calls for this npub will not require "
                 f"inline proof for {int(record.expires_at - record.verified_at)}s."
             ),

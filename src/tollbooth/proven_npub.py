@@ -27,7 +27,6 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from tollbooth.identity_proof import OWNERSHIP_SENTINEL, verify_proof
 from tollbooth.patron_session import PatronSessionCache
 
 logger = logging.getLogger(__name__)
@@ -37,10 +36,9 @@ DEFAULT_PROVEN_TTL = 3600  # 1 hour
 
 @dataclass(frozen=True)
 class ProvenNpub:
-    """Record that an npub has been Schnorr-verified."""
+    """Record that an npub owner replied via signed Nostr DM."""
 
     npub: str
-    proof_json: str
     verified_at: float
     expires_at: float
 
@@ -74,7 +72,6 @@ class ProvenNpubCache:
         try:
             record = ProvenNpub(
                 npub=creds["npub"],
-                proof_json=creds["proof_json"],
                 verified_at=float(creds["verified_at"]),
                 expires_at=float(creds["expires_at"]),
             )
@@ -96,30 +93,21 @@ class ProvenNpubCache:
             return False
         return True
 
-    async def prove(self, npub: str, proof_json: str) -> ProvenNpub:
-        """Verify a Schnorr proof and cache the proven npub.
+    async def mark_proven(self, npub: str) -> ProvenNpub:
+        """Cache an npub as ownership-proven.
+
+        Called after Secure Courier confirms a signed DM from the patron.
+        The DM itself is the proof — the patron's nsec signed it.
 
         Args:
             npub: The patron's npub (bech32).
-            proof_json: JSON string of a signed kind-27235 event with
-                ``u=npub_ownership``.
 
         Returns:
             The cached ``ProvenNpub`` record.
-
-        Raises:
-            ValueError: If the proof is invalid or does not match the npub.
         """
-        if not verify_proof(proof_json, npub, OWNERSHIP_SENTINEL):
-            raise ValueError(
-                "Invalid ownership proof — Schnorr signature does not match npub "
-                "or u tag does not contain 'npub_ownership'."
-            )
-
         now = time.time()
         record = ProvenNpub(
             npub=npub,
-            proof_json=proof_json,
             verified_at=now,
             expires_at=now + self._ttl,
         )
@@ -129,7 +117,6 @@ class ProvenNpubCache:
             record,
             vault_data={
                 "npub": npub,
-                "proof_json": proof_json,
                 "verified_at": str(now),
                 "expires_at": str(now + self._ttl),
             },
