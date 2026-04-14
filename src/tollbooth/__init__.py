@@ -34,6 +34,7 @@ from tollbooth.pricing_model import PricingModel, ToolPrice, PipelineStep
 from tollbooth.vaults import TheBrainVault, NeonVault, NeonQueryError
 from tollbooth.bootstrap import BootstrapClient, BootstrapResult, ensure_bootstrapped
 from tollbooth.runtime import OperatorRuntime, resolve_npub
+from tollbooth.oauth_config import OAuthProviderConfig
 from tollbooth.session_cache import SessionCache
 from tollbooth.patron_session import PatronSessionCache
 from tollbooth.shortlinks import create_shortlink
@@ -363,6 +364,7 @@ __all__ = [
     "BootstrapResult",
     "ensure_bootstrapped",
     "OperatorRuntime",
+    "OAuthProviderConfig",
     "resolve_npub",
     "VaultCipher",
     # Session Caches

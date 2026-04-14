@@ -110,6 +110,12 @@ _STANDARD_LIST: list[ToolIdentity] = [
     ToolIdentity(capability="receive_patron_credentials", category="free",
                  intent="Pick up patron credentials from the Secure Courier."),
 
+    # -- OAuth2 (conditional — only if oauth_provider is configured) --
+    ToolIdentity(capability="begin_oauth", category="free",
+                 intent="Start OAuth2 authorization flow."),
+    ToolIdentity(capability="check_oauth_status", category="free",
+                 intent="Check OAuth2 authorization status."),
+
     # -- Npub ownership proof --
     ToolIdentity(capability="request_npub_proof", category="free",
                  intent="Request npub ownership proof from patron via DM."),
