@@ -31,6 +31,9 @@ PROOF_EVENT_KIND = 27235
 DEFAULT_WINDOW_SECONDS = 60
 """Maximum age (in seconds) of a valid proof event."""
 
+OWNERSHIP_SENTINEL = "npub_ownership"
+"""Sentinel tool name for npub ownership proofs (not tied to a specific tool)."""
+
 
 def _npub_to_hex(npub: str) -> str:
     """Convert a bech32 npub to a hex pubkey string."""
@@ -66,6 +69,18 @@ def create_proof(nsec: str, tool_name: str) -> str:
     )
     event.sign(pk.hex())
     return json.dumps(event.to_dict())
+
+
+def create_ownership_proof(nsec: str) -> str:
+    """Create a kind-27235 proof for npub ownership (no specific tool).
+
+    Args:
+        nsec: Nostr private key (bech32 nsec1... or hex).
+
+    Returns:
+        JSON string of the signed Nostr event with ``u=npub_ownership``.
+    """
+    return create_proof(nsec, OWNERSHIP_SENTINEL)
 
 
 def verify_proof(

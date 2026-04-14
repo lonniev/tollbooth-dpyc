@@ -110,6 +110,12 @@ _STANDARD_LIST: list[ToolIdentity] = [
     ToolIdentity(capability="receive_patron_credentials", category="free",
                  intent="Pick up patron credentials from the Secure Courier."),
 
+    # -- Npub ownership proof --
+    ToolIdentity(capability="request_npub_proof", category="free",
+                 intent="Request npub ownership proof from patron via DM."),
+    ToolIdentity(capability="receive_npub_proof", category="free",
+                 intent="Receive and cache npub ownership proof."),
+
     # -- Oracle delegation --
     # Oracle tools are free and use the oracle_ namespace. They don't
     # need pricing entries or registry identities — they're never gated.

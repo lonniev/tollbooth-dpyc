@@ -92,6 +92,7 @@ class OperatorRuntime:
         operator_settings: dict[str, Any] | None = None,
         purchase_mode: str = "certified",
         credential_validator: Any | None = None,
+        proven_npub_ttl_seconds: int = 3600,
     ) -> None:
         self._nsec_env_var = nsec_env_var
         self._credential_validator = credential_validator
@@ -130,6 +131,8 @@ class OperatorRuntime:
         self._operator_npub: str | None = None
         self._nsec: str | None = None
         self._reconciled_npubs: set[str] = set()  # dedup auto-reconciliation
+        self._proven_npub_ttl = proven_npub_ttl_seconds
+        self._proven_npub_cache: Any | None = None  # lazy ProvenNpubCache
         # Shutdown state
         self._shutdown_triggered: bool = False
         self._shutdown_handlers_registered: bool = False
@@ -436,6 +439,20 @@ class OperatorRuntime:
         return name
 
     # ------------------------------------------------------------------
+    # Proven npub ownership cache
+    # ------------------------------------------------------------------
+
+    async def proven_npub_cache(self) -> Any:
+        """Lazy accessor for the ProvenNpubCache (memory + vault)."""
+        if self._proven_npub_cache is None:
+            from tollbooth.proven_npub import ProvenNpubCache
+            self._proven_npub_cache = ProvenNpubCache(
+                runtime=self,
+                ttl_seconds=self._proven_npub_ttl,
+            )
+        return self._proven_npub_cache
+
+    # ------------------------------------------------------------------
     # Credit Gating
     # ------------------------------------------------------------------
 
@@ -490,19 +507,38 @@ class OperatorRuntime:
             except ValueError as e:
                 return {"success": False, "error": str(e)}
 
-            if not proof:
-                return {
-                    "success": False,
-                    "error": "proof is required. Sign a kind-27235 Nostr event with your nsec.",
-                }
-
-            if proof:
-                # For restricted tools, verify against operator npub
-                verify_against = self.operator_npub() if category == "restricted" else resolved
+            if category == "restricted":
+                # Restricted tools always require inline proof (operator identity)
+                if not proof:
+                    return {
+                        "success": False,
+                        "error": "proof is required. Sign a kind-27235 Nostr event with your nsec.",
+                    }
+                verify_against = self.operator_npub()
                 if not verify_proof(proof, verify_against, cap):
                     return {
                         "success": False,
                         "error": "Invalid proof — Schnorr signature does not match npub.",
+                    }
+            else:
+                # Non-restricted: check proven npub cache before requiring inline proof
+                cache = await self.proven_npub_cache()
+                if await cache.is_proven(resolved):
+                    pass  # npub ownership already verified
+                elif proof:
+                    if not verify_proof(proof, resolved, cap):
+                        return {
+                            "success": False,
+                            "error": "Invalid proof — Schnorr signature does not match npub.",
+                        }
+                else:
+                    return {
+                        "success": False,
+                        "error": (
+                            "proof is required. Supply a kind-27235 Schnorr proof inline, "
+                            "or prove npub ownership once via request_npub_proof / "
+                            "receive_npub_proof."
+                        ),
                     }
 
         # ── Access: operator-restricted ───────────────────────
@@ -1831,6 +1867,143 @@ def register_standard_tools(
         from tollbooth.tool_identity import capability_uuid
         for cap in ("request_patron_credentials", "receive_patron_credentials"):
             rt._tool_registry.pop(capability_uuid(cap), None)
+
+    # -- Npub ownership proof tools ----------------------------------------
+
+    @tool
+    async def request_npub_proof(
+        patron_npub: str = "",
+    ) -> dict[str, Any]:
+        """Request npub ownership proof from a patron via Nostr DM.
+
+        Sends a DM asking the patron to sign a kind-27235 event with
+        ``u=npub_ownership``. PricingStudio auto-signs and replies.
+
+        After the patron responds, call ``receive_npub_proof`` to
+        verify and cache the proof. Free.
+
+        Args:
+            patron_npub: Required. The patron's npub to request proof from.
+        """
+        if not patron_npub:
+            return {"success": False, "error": "patron_npub is required."}
+        try:
+            resolve_npub(patron_npub)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+        courier = await rt.courier()
+        if courier is None:
+            return {"success": False, "error": "Secure Courier not configured."}
+
+        op_npub = rt.operator_npub()
+        message = (
+            f"NPUB_PROOF_REQUEST\n"
+            f"operator: {op_npub}\n"
+            f"Sign a kind-27235 Nostr event with tag "
+            f'["u", "npub_ownership"] and reply with the JSON.'
+        )
+        try:
+            courier._exchange.send_dm(patron_npub, message)
+        except Exception as e:
+            return {"success": False, "error": f"Failed to send proof request DM: {e}"}
+
+        return {
+            "success": True,
+            "message": (
+                "Proof request sent via Nostr DM. "
+                "Call receive_npub_proof to complete."
+            ),
+        }
+
+    @tool
+    async def receive_npub_proof(
+        patron_npub: str = "",
+    ) -> dict[str, Any]:
+        """Receive and verify npub ownership proof from a patron.
+
+        Polls Nostr relays for a reply DM containing a signed kind-27235
+        event. On successful Schnorr verification, caches the proven npub
+        so subsequent paid tool calls skip inline proof. Free.
+
+        Args:
+            patron_npub: Required. The patron's npub to receive proof from.
+        """
+        if not patron_npub:
+            return {"success": False, "error": "patron_npub is required."}
+        try:
+            resolved = resolve_npub(patron_npub)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+        courier = await rt.courier()
+        if courier is None:
+            return {"success": False, "error": "Secure Courier not configured."}
+
+        # Read latest DM from the patron
+        try:
+            from tollbooth.nostr_credentials import _npub_to_hex
+            patron_hex = _npub_to_hex(resolved)
+            candidates = courier._exchange._find_dm_candidates(patron_hex)
+            if not candidates:
+                courier._exchange._fetch_dms_from_relays()
+                candidates = courier._exchange._find_dm_candidates(patron_hex)
+        except Exception as e:
+            return {"success": False, "error": f"Relay fetch failed: {e}"}
+
+        if not candidates:
+            return {
+                "success": False,
+                "error": (
+                    "No reply from patron yet. "
+                    "Ensure PricingStudio is running and try again."
+                ),
+            }
+
+        # Try each candidate — look for a valid proof JSON
+        proof_json = None
+        for event_id, event in candidates:
+            try:
+                nsec_hex = courier._exchange._nsec_hex
+                plaintext = courier._exchange._decrypt_dm(
+                    event, patron_hex, decrypt_privkey_hex=nsec_hex,
+                )
+                if not plaintext:
+                    continue
+                import json
+                json.loads(plaintext)  # validate it's JSON
+                proof_json = plaintext
+                courier._exchange._pop_event(event_id)
+                break
+            except Exception:
+                continue
+
+        if not proof_json:
+            return {
+                "success": False,
+                "error": (
+                    "No valid proof found in patron's DMs. "
+                    "Ensure PricingStudio auto-responded with a signed event."
+                ),
+            }
+
+        # Verify and cache
+        cache = await rt.proven_npub_cache()
+        try:
+            record = await cache.prove(resolved, proof_json)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+        return {
+            "success": True,
+            "proven_npub": resolved,
+            "expires_in_seconds": int(record.expires_at - record.verified_at),
+            "message": (
+                f"npub ownership verified and cached. "
+                f"Paid tool calls for this npub will not require "
+                f"inline proof for {int(record.expires_at - record.verified_at)}s."
+            ),
+        }
 
     # -- Oracle delegation (oracle_ namespace) ----------------------------
 

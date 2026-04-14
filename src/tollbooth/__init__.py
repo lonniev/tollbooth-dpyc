@@ -79,11 +79,19 @@ except ImportError:
     AuditedVault = None  # type: ignore[assignment,misc]
 
 try:
-    from tollbooth.identity_proof import verify_proof, create_proof, PROOF_EVENT_KIND
+    from tollbooth.identity_proof import (
+        verify_proof, create_proof, create_ownership_proof,
+        PROOF_EVENT_KIND, OWNERSHIP_SENTINEL,
+    )
+    from tollbooth.proven_npub import ProvenNpubCache, ProvenNpub
 except ImportError:
     verify_proof = None  # type: ignore[assignment,misc]
     create_proof = None  # type: ignore[assignment,misc]
+    create_ownership_proof = None  # type: ignore[assignment,misc]
     PROOF_EVENT_KIND = None  # type: ignore[assignment,misc]
+    OWNERSHIP_SENTINEL = None  # type: ignore[assignment,misc]
+    ProvenNpubCache = None  # type: ignore[assignment,misc]
+    ProvenNpub = None  # type: ignore[assignment,misc]
 
 try:
     from tollbooth.acl_verify import verify_acl_event, check_acl_access, ACL_EVENT_KIND
@@ -309,10 +317,14 @@ __all__ = [
     "encode_credential_card",
     "decode_credential_card",
     "render_qr",
-    # Operator Proof
+    # Operator Proof & Npub Ownership
     "verify_proof",
     "create_proof",
+    "create_ownership_proof",
     "PROOF_EVENT_KIND",
+    "OWNERSHIP_SENTINEL",
+    "ProvenNpubCache",
+    "ProvenNpub",
     # ACL
     "verify_acl_event",
     "check_acl_access",
