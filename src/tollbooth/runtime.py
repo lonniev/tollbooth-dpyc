@@ -1952,8 +1952,11 @@ def register_standard_tools(
     ) -> dict[str, Any]:
         """Receive npub ownership confirmation from a patron.
 
-        Uses Secure Courier to pick up the patron's reply DM. The
-        signed DM itself proves npub ownership (the patron's nsec
+        Drains ALL DMs from the patron on the relay — popping every
+        one regardless of validity — and looks for the one with the
+        matching anti-replay token. Leaves the relay clean.
+
+        The signed DM itself proves npub ownership (the patron's nsec
         signed it). On success, caches the proven npub so subsequent
         paid tool calls skip inline proof. Free.
 
@@ -1971,32 +1974,156 @@ def register_standard_tools(
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
 
-        # Use Secure Courier receive (public API, same as taxsort verify).
-        # The DM itself proves npub ownership — the patron's nsec signed it.
-        try:
-            result = await courier.receive(
-                sender_npub=resolved, service=_PROOF_SERVICE,
+        exchange = courier._exchange
+        from tollbooth.nostr_credentials import (
+            _npub_to_hex, _parse_delimited_credentials,
+        )
+
+        # Resolve expected poison for this service + patron
+        patron_hex = _npub_to_hex(resolved)
+        resolved_service = exchange._resolve_service(_PROOF_SERVICE)
+        poison_key = (resolved, resolved_service) if resolved_service else None
+        expected = exchange._pending_poisons.get(poison_key) if poison_key else None
+
+        # Cold-start recovery
+        if expected is None and exchange._credential_vault is not None and poison_key:
+            pending = await exchange._vault_fetch(
+                f"__pending__{resolved_service}", resolved,
             )
-        except Exception as e:
-            return {"success": False, "error": f"Courier receive failed: {e}"}
+            if pending and "poison" in pending:
+                p_expiry = pending.get("expiry", 0)
+                if _time.time() <= p_expiry:
+                    exchange._pending_poisons[poison_key] = (
+                        pending["poison"], p_expiry,
+                    )
+                    expected = exchange._pending_poisons.get(poison_key)
 
-        if not result.get("success"):
-            return result
+        expected_phrase = expected[0] if expected else None
 
-        # DM received and verified — cache the proven npub.
-        cache = await rt.proven_npub_cache()
-        record = await cache.mark_proven(resolved)
+        # Fetch DMs from relays
+        candidates = exchange._find_dm_candidates(patron_hex)
+        if not candidates:
+            exchange._fetch_dms_from_relays()
+            candidates = exchange._find_dm_candidates(patron_hex)
 
-        return {
-            "success": True,
-            "proven_npub": resolved,
-            "expires_in_seconds": int(record.expires_at - record.verified_at),
-            "message": (
-                f"npub ownership verified via signed DM. "
-                f"Paid tool calls for this npub will not require "
-                f"inline proof for {int(record.expires_at - record.verified_at)}s."
-            ),
-        }
+        if not candidates:
+            return {
+                "success": False,
+                "error": (
+                    "No DMs from patron yet. Ensure PricingStudio or "
+                    "a Nostr client is running and the patron has replied."
+                ),
+            }
+
+        # Drain loop: pop ALL candidates, find the match if any.
+        # No per-DM rejection messages — one summary at the end.
+        import time as _t
+        matched_payload = None
+        last_failure = None
+        popped = 0
+        decrypt_key = exchange._nsec_hex
+
+        for candidate in candidates:
+            event_id = candidate.get("id", "")
+            popped += 1
+
+            # Decrypt
+            try:
+                plaintext = exchange._decrypt_dm(
+                    candidate, patron_hex,
+                    decrypt_privkey_hex=decrypt_key,
+                )
+            except Exception:
+                exchange._pop_event(event_id)  # pop without reply
+                last_failure = "undecryptable DM"
+                continue
+
+            if not plaintext:
+                exchange._pop_event(event_id)
+                last_failure = "empty DM"
+                continue
+
+            # Parse @@@ fields
+            payload = _parse_delimited_credentials(plaintext)
+            if payload is None:
+                exchange._pop_event(event_id)
+                last_failure = f"no @@@ fields: {plaintext[:60]}"
+                continue
+
+            # Poison check
+            if expected_phrase is not None:
+                msg_poison = payload.get("poison", "")
+                if msg_poison != expected_phrase:
+                    exchange._pop_event(event_id)
+                    last_failure = (
+                        f"wrong token (got '{msg_poison or '<missing>'}', "
+                        f"expected '{expected_phrase}')"
+                    )
+                    continue
+
+            # Match found — pop and stop
+            matched_payload = payload
+            exchange._pop_event(event_id)
+            break
+
+        # Pop any remaining candidates we didn't scan yet
+        # (drain the entire relay queue for this patron)
+        for candidate in candidates[popped:]:
+            exchange._pop_event(candidate.get("id", ""))
+
+        # Clean up poison state
+        if poison_key and poison_key in exchange._pending_poisons:
+            del exchange._pending_poisons[poison_key]
+
+        # One summary DM to patron
+        if matched_payload is not None:
+            try:
+                exchange.send_dm(resolved, "npub ownership confirmed.")
+            except Exception:
+                pass
+
+            # Store to vault (for cold-start recovery of proven status)
+            if exchange._credential_vault is not None:
+                try:
+                    await exchange._vault_store(
+                        _PROOF_SERVICE, resolved, matched_payload,
+                    )
+                except Exception:
+                    pass
+
+            cache = await rt.proven_npub_cache()
+            record = await cache.mark_proven(resolved)
+
+            return {
+                "success": True,
+                "proven_npub": resolved,
+                "popped_dms": popped,
+                "expires_in_seconds": int(record.expires_at - record.verified_at),
+                "message": (
+                    f"npub ownership verified via signed DM. "
+                    f"Cleaned {popped} DM(s) from relay. "
+                    f"Proof cached for {int(record.expires_at - record.verified_at)}s."
+                ),
+            }
+        else:
+            summary = f"Scanned and cleaned {popped} DM(s) but none matched."
+            if last_failure:
+                summary += f" Last: {last_failure}"
+            if expected_phrase:
+                summary += (
+                    f" Expected anti-replay token '{expected_phrase}'. "
+                    f"Call request_npub_proof for a fresh exchange."
+                )
+            try:
+                exchange.send_dm(resolved, summary)
+            except Exception:
+                pass
+
+            return {
+                "success": False,
+                "popped_dms": popped,
+                "error": summary,
+            }
 
     # -- Oracle delegation (oracle_ namespace) ----------------------------
 
