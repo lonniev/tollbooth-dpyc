@@ -544,9 +544,10 @@ class OperatorRuntime:
                     return {
                         "success": False,
                         "error": (
-                            "proof is required. Supply a kind-27235 Schnorr proof inline, "
-                            "or prove npub ownership once via request_npub_proof / "
-                            "receive_npub_proof."
+                            "proof is required. Call request_npub_proof to "
+                            "start a fresh proof exchange, then receive_npub_proof "
+                            "to verify and cache it. The cache expires after ~1 hour "
+                            "and must be renewed with a new request/receive cycle."
                         ),
                     }
 
@@ -1895,7 +1896,16 @@ def register_standard_tools(
         auto-signs and replies.
 
         After the patron responds, call ``receive_npub_proof`` to
-        verify and cache the proof. Free.
+        verify and cache the proof.
+
+        **Lifecycle:** The cached proof expires after a fixed TTL
+        (default 1 hour). When it expires, you must call
+        ``request_npub_proof`` and ``receive_npub_proof`` again.
+        Relay DMs are ephemeral and may not survive server restarts
+        — do not assume a prior relay proof is still available.
+        Always start with ``request_npub_proof`` for a fresh exchange.
+
+        Free.
 
         Args:
             patron_npub: Required. The patron's npub to request proof from.
