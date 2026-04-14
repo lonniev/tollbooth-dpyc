@@ -397,6 +397,15 @@ class OperatorRuntime:
         if self._patron_credential_template:
             templates[self._patron_credential_template.service] = self._patron_credential_template
 
+        # Built-in template for npub ownership proof exchange
+        from tollbooth.credential_templates import CredentialTemplate, FieldSpec
+        templates["npub_ownership"] = CredentialTemplate(
+            service="npub_ownership",
+            version=1,
+            fields={"proof_json": FieldSpec(required=True, sensitive=False, description="Signed kind-27235 Nostr event JSON")},
+            description="Npub ownership proof — signed kind-27235 event with u=npub_ownership",
+        )
+
         self._courier = SecureCourierService(
             operator_nsec=nsec,
             relays=relays,
@@ -1869,6 +1878,11 @@ def register_standard_tools(
             rt._tool_registry.pop(capability_uuid(cap), None)
 
     # -- Npub ownership proof tools ----------------------------------------
+    #
+    # Uses Secure Courier infrastructure (open_channel / receive) so relay
+    # alignment, vault-first lookup, and DM decryption all come for free.
+
+    _PROOF_SERVICE = "npub_ownership"
 
     @tool
     async def request_npub_proof(
@@ -1876,8 +1890,9 @@ def register_standard_tools(
     ) -> dict[str, Any]:
         """Request npub ownership proof from a patron via Nostr DM.
 
-        Sends a DM asking the patron to sign a kind-27235 event with
-        ``u=npub_ownership``. PricingStudio auto-signs and replies.
+        Sends a Secure Courier channel with instructions to sign a
+        kind-27235 event with ``u=npub_ownership``. PricingStudio
+        auto-signs and replies.
 
         After the patron responds, call ``receive_npub_proof`` to
         verify and cache the proof. Free.
@@ -1896,22 +1911,27 @@ def register_standard_tools(
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
 
-        op_npub = rt.operator_npub()
-        message = (
-            f"NPUB_PROOF_REQUEST\n"
-            f"operator: {op_npub}\n"
-            f"Sign a kind-27235 Nostr event with tag "
-            f'["u", "npub_ownership"] and reply with the JSON.'
-        )
         try:
-            courier._exchange.send_dm(patron_npub, message)
+            result = await courier.open_channel(
+                _PROOF_SERVICE,
+                greeting=(
+                    "NPUB_PROOF_REQUEST\n"
+                    f"operator: {rt.operator_npub()}\n"
+                    "Sign a kind-27235 Nostr event with tag "
+                    '[\"u\", \"npub_ownership\"] and reply with:\n'
+                    "proof_json = @@@<signed event JSON>@@@"
+                ),
+                recipient_npub=patron_npub,
+            )
+            if not result.get("success"):
+                return result
         except Exception as e:
-            return {"success": False, "error": f"Failed to send proof request DM: {e}"}
+            return {"success": False, "error": f"Failed to send proof request: {e}"}
 
         return {
             "success": True,
             "message": (
-                "Proof request sent via Nostr DM. "
+                "Proof request sent via Secure Courier. "
                 "Call receive_npub_proof to complete."
             ),
         }
@@ -1922,9 +1942,10 @@ def register_standard_tools(
     ) -> dict[str, Any]:
         """Receive and verify npub ownership proof from a patron.
 
-        Polls Nostr relays for a reply DM containing a signed kind-27235
-        event. On successful Schnorr verification, caches the proven npub
-        so subsequent paid tool calls skip inline proof. Free.
+        Uses Secure Courier to pick up the patron's signed kind-27235
+        event from relays (or vault on repeat calls). On successful
+        Schnorr verification, caches the proven npub so subsequent
+        paid tool calls skip inline proof. Free.
 
         Args:
             patron_npub: Required. The patron's npub to receive proof from.
@@ -1940,51 +1961,27 @@ def register_standard_tools(
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
 
-        # Read latest DM from the patron
+        # Use Secure Courier receive — handles relay polling, decryption,
+        # vault-first lookup, and relay alignment automatically.
         try:
-            from tollbooth.nostr_credentials import _npub_to_hex
-            patron_hex = _npub_to_hex(resolved)
-            candidates = courier._exchange._find_dm_candidates(patron_hex)
-            if not candidates:
-                courier._exchange._fetch_dms_from_relays()
-                candidates = courier._exchange._find_dm_candidates(patron_hex)
+            result = await courier._exchange.receive(
+                resolved, service=_PROOF_SERVICE,
+            )
         except Exception as e:
-            return {"success": False, "error": f"Relay fetch failed: {e}"}
+            return {"success": False, "error": f"Courier receive failed: {e}"}
 
-        if not candidates:
-            return {
-                "success": False,
-                "error": (
-                    "No reply from patron yet. "
-                    "Ensure PricingStudio is running and try again."
-                ),
-            }
+        if not result.get("success"):
+            return result
 
-        # Try each candidate — look for a valid proof JSON
-        proof_json = None
-        for event in candidates:
-            try:
-                event_id = event.get("id", "")
-                nsec_hex = courier._exchange._nsec_hex
-                plaintext = courier._exchange._decrypt_dm(
-                    event, patron_hex, decrypt_privkey_hex=nsec_hex,
-                )
-                if not plaintext:
-                    continue
-                import json
-                json.loads(plaintext)  # validate it's JSON
-                proof_json = plaintext
-                courier._exchange._pop_event(event_id)
-                break
-            except Exception:
-                continue
-
+        # Extract proof_json from the credentials
+        creds = result.get("credentials", {})
+        proof_json = creds.get("proof_json", "")
         if not proof_json:
             return {
                 "success": False,
                 "error": (
-                    "No valid proof found in patron's DMs. "
-                    "Ensure PricingStudio auto-responded with a signed event."
+                    "Reply received but no proof_json field found. "
+                    "Ensure PricingStudio sends: proof_json = @@@<signed event>@@@"
                 ),
             }
 
