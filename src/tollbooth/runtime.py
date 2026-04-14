@@ -1279,7 +1279,7 @@ def register_standard_tools(
             from tollbooth.registry import resolve_authority_service
             auth_info = await resolve_authority_service(rt.operator_npub())
             cert_result = await AuthorityCertifier(
-                auth_info["url"], rt.operator_npub(),
+                auth_info["url"], rt.operator_npub(), rt._get_nsec(),
             ).certify_credits(amount_sats)
             certificate = cert_result.get("certificate", "")
         except Exception as e:
@@ -1876,7 +1876,7 @@ def register_standard_tools(
             from tollbooth.registry import resolve_authority_service
             auth_info = await resolve_authority_service(rt.operator_npub())
             certifier = AuthorityCertifier(
-                auth_info["url"], rt.operator_npub(),
+                auth_info["url"], rt.operator_npub(), rt._get_nsec(),
             )
             return await certifier.check_balance()
         except Exception as e:

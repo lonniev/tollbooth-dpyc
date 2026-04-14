@@ -24,20 +24,29 @@ class AuthorityCertifyError(Exception):
 class AuthorityCertifier:
     """Server-to-server MCP client for obtaining Authority certificates.
 
-    Opens a short-lived ``fastmcp.Client`` SSE connection with Horizon OAuth
-    auto-negotiation. One connection per ``certify()`` call (credit-critical
-    path — correctness over connection pooling).
+    Opens a short-lived ``fastmcp.Client`` SSE connection. One connection
+    per ``certify()`` call (credit-critical path — correctness over
+    connection pooling).
     """
 
     def __init__(
         self,
         authority_url: str,
         operator_npub: str,
+        operator_nsec: str = "",
         certify_tool_name: str = "authority_certify_credits",
     ) -> None:
         self._authority_url = authority_url
         self._operator_npub = operator_npub
+        self._operator_nsec = operator_nsec
         self._certify_tool_name = certify_tool_name
+
+    def _make_proof(self, tool_name: str) -> str:
+        """Create a kind-27235 proof for the given tool."""
+        if not self._operator_nsec:
+            return ""
+        from tollbooth.identity_proof import create_proof
+        return create_proof(self._operator_nsec, tool_name)
 
     async def certify_credits(self, amount_sats: int) -> dict[str, Any]:
         """Call the Authority's certify_credits tool and return the certificate dict.
@@ -60,6 +69,7 @@ class AuthorityCertifier:
                     {
                         "npub": self._operator_npub,
                         "amount_sats": amount_sats,
+                        "proof": self._make_proof("certify_credits"),
                     },
                 )
         except AuthorityCertifyError:
@@ -130,7 +140,10 @@ class AuthorityCertifier:
             async with Client(self._authority_url, auth="oauth") as client:
                 result = await client.call_tool(
                     "authority_check_balance",
-                    {"npub": self._operator_npub},
+                    {
+                        "npub": self._operator_npub,
+                        "proof": self._make_proof("check_balance"),
+                    },
                 )
         except Exception as e:
             raise AuthorityCertifyError(

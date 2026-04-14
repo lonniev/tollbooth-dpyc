@@ -56,7 +56,7 @@ async def test_certify_success():
     assert result["net_sats"] == 90
     mock_client.call_tool.assert_awaited_once_with(
         "authority_certify_credits",
-        {"npub": "npub1operator", "amount_sats": 100},
+        {"npub": "npub1operator", "amount_sats": 100, "proof": ""},
     )
 
 
@@ -141,7 +141,7 @@ async def test_certify_custom_tool_name():
 
     mock_client.call_tool.assert_awaited_once_with(
         "custom_certify",
-        {"npub": "npub1operator", "amount_sats": 50},
+        {"npub": "npub1operator", "amount_sats": 50, "proof": ""},
     )
 
 
