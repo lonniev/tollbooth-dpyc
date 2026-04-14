@@ -93,6 +93,9 @@ class OperatorRuntime:
         purchase_mode: str = "certified",
         credential_validator: Any | None = None,
         proven_npub_ttl_seconds: int = 3600,
+        npub_proof_field: str = "confirm",
+        npub_proof_greeting: str = "",
+        on_npub_proven: Any | None = None,
     ) -> None:
         self._nsec_env_var = nsec_env_var
         self._credential_validator = credential_validator
@@ -133,6 +136,9 @@ class OperatorRuntime:
         self._reconciled_npubs: set[str] = set()  # dedup auto-reconciliation
         self._proven_npub_ttl = proven_npub_ttl_seconds
         self._proven_npub_cache: Any | None = None  # lazy ProvenNpubCache
+        self._npub_proof_field = npub_proof_field
+        self._npub_proof_greeting = npub_proof_greeting
+        self._on_npub_proven = on_npub_proven  # async callback(npub, payload)
         # Shutdown state
         self._shutdown_triggered: bool = False
         self._shutdown_handlers_registered: bool = False
@@ -399,12 +405,14 @@ class OperatorRuntime:
 
         # Built-in template for npub ownership proof exchange.
         # The DM itself proves npub ownership (signed by the patron's nsec).
-        # The confirm field is just a human acknowledgment — the value is immaterial.
+        # The payload field is operator-configurable (e.g., "passphrase" for
+        # taxsort, "confirm" for schwab) — the value is immaterial.
         from tollbooth.credential_templates import CredentialTemplate, FieldSpec
+        _proof_field = self._npub_proof_field
         templates["npub_ownership"] = CredentialTemplate(
             service="npub_ownership",
             version=1,
-            fields={"confirm": FieldSpec(required=True, sensitive=False, description="Any text — your signed DM is the proof")},
+            fields={_proof_field: FieldSpec(required=True, sensitive=False, description="Any text — your signed DM is the proof")},
             description="Npub ownership — the signed DM itself proves you own this npub",
         )
 
@@ -1924,13 +1932,14 @@ def register_standard_tools(
             return {"success": False, "error": "Secure Courier not configured."}
 
         try:
+            _greeting = rt._npub_proof_greeting or (
+                f"Hi — {service_name or 'this service'} needs to verify "
+                "you own this npub. Reply with any text to confirm. "
+                "Your signed Nostr DM is the proof."
+            )
             result = await courier.open_channel(
                 _PROOF_SERVICE,
-                greeting=(
-                    f"Hi — {service_name or 'this service'} needs to verify "
-                    "you own this npub. Reply with any text to confirm. "
-                    "Your signed Nostr DM is the proof."
-                ),
+                greeting=_greeting,
                 recipient_npub=patron_npub,
             )
             if not result.get("success"):
@@ -2090,6 +2099,13 @@ def register_standard_tools(
                     )
                 except Exception:
                     pass
+
+            # Operator callback (e.g., taxsort stores passphrase hash)
+            if rt._on_npub_proven is not None:
+                try:
+                    await rt._on_npub_proven(resolved, matched_payload)
+                except Exception as exc:
+                    logger.warning("on_npub_proven callback failed: %s", exc)
 
             cache = await rt.proven_npub_cache()
             record = await cache.mark_proven(resolved)
