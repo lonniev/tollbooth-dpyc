@@ -464,14 +464,19 @@ class OperatorRuntime:
     # ------------------------------------------------------------------
 
     async def proven_npub_cache(self) -> Any:
-        """Lazy accessor for the ProvenNpubCache (memory + vault)."""
+        """Lazy accessor for the ProvenNpubCache."""
         if self._proven_npub_cache is None:
             from tollbooth.proven_npub import ProvenNpubCache
             self._proven_npub_cache = ProvenNpubCache(
-                runtime=self,
                 ttl_seconds=self._proven_npub_ttl,
             )
         return self._proven_npub_cache
+
+    @staticmethod
+    def _get_session_id() -> str:
+        """Get the MCP transport session ID from FastMCP context."""
+        from fastmcp.server.dependencies import get_context
+        return get_context().session_id
 
     # ------------------------------------------------------------------
     # Credit Gating
@@ -542,10 +547,15 @@ class OperatorRuntime:
                         "error": "Invalid proof — Schnorr signature does not match npub.",
                     }
             else:
-                # Non-restricted: check proven npub cache before requiring inline proof
+                # Non-restricted: check proven npub cache before requiring inline proof.
+                # Proof is bound to the MCP session — different sessions must prove independently.
                 cache = await self.proven_npub_cache()
-                if await cache.is_proven(resolved):
-                    pass  # npub ownership already verified
+                try:
+                    sid = self._get_session_id()
+                except Exception:
+                    sid = ""
+                if sid and await cache.is_proven(sid, resolved):
+                    pass  # npub ownership already verified on this session
                 elif proof:
                     if not verify_proof(proof, resolved, cap):
                         return {
@@ -2371,17 +2381,28 @@ def register_standard_tools(
                     logger.warning("on_npub_proven callback failed: %s", exc)
 
             cache = await rt.proven_npub_cache()
-            record = await cache.mark_proven(resolved)
+            try:
+                sid = rt._get_session_id()
+            except Exception:
+                sid = ""
+            if not sid:
+                return {
+                    "success": False,
+                    "error": "No MCP session ID available — cannot bind proof to channel.",
+                }
+            record = await cache.mark_proven(sid, resolved)
 
             return {
                 "success": True,
                 "proven_npub": resolved,
+                "session_id": sid[:12] + "...",
                 "popped_dms": popped,
                 "expires_in_seconds": int(record.expires_at - record.verified_at),
                 "message": (
                     f"npub ownership verified via signed DM. "
+                    f"Proof bound to this session. "
                     f"Cleaned {popped} DM(s) from relay. "
-                    f"Proof cached for {int(record.expires_at - record.verified_at)}s."
+                    f"Cached for {int(record.expires_at - record.verified_at)}s."
                 ),
             }
         else:
