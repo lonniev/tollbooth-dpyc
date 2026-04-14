@@ -1971,11 +1971,12 @@ def register_standard_tools(
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
 
-        # Use Secure Courier receive — handles relay polling, decryption,
-        # vault-first lookup, and relay alignment automatically.
+        # Use Secure Courier receive (public API, same as taxsort verify)
+        # — handles relay polling, decryption, vault-first lookup, and
+        # relay alignment automatically.
         try:
-            result = await courier._exchange.receive(
-                resolved, service=_PROOF_SERVICE,
+            result = await courier.receive(
+                sender_npub=resolved, service=_PROOF_SERVICE,
             )
         except Exception as e:
             return {"success": False, "error": f"Courier receive failed: {e}"}
@@ -1983,15 +1984,22 @@ def register_standard_tools(
         if not result.get("success"):
             return result
 
-        # Extract proof_json from the credentials
-        creds = result.get("credentials", {})
-        proof_json = creds.get("proof_json", "")
+        # courier.receive() stores credentials in vault and strips
+        # them from the response. Load proof_json from vault.
+        try:
+            creds = await rt.load_patron_session(
+                resolved, service=_PROOF_SERVICE,
+            )
+            proof_json = creds.get("proof_json", "") if creds else ""
+        except Exception:
+            proof_json = ""
+
         if not proof_json:
             return {
                 "success": False,
                 "error": (
                     "Reply received but no proof_json field found. "
-                    "Ensure PricingStudio sends: proof_json = @@@<signed event>@@@"
+                    "Reply with: proof_json = @@@<signed kind-27235 event JSON>@@@"
                 ),
             }
 
