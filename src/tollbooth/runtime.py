@@ -1399,7 +1399,7 @@ def register_standard_tools(
         except ValueError as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tool_identity import capability_uuid
-        result_or_cost = await rt.debit_or_deny(capability_uuid("account_statement_infographic"), npub)
+        result_or_cost = await rt.debit_or_deny(capability_uuid("account_statement_infographic"), npub, proof=proof)
         if isinstance(result_or_cost, dict):
             return result_or_cost
         try:
