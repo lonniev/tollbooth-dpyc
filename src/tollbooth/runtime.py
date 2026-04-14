@@ -2236,7 +2236,7 @@ def register_standard_tools(
         matched_payload = None
         last_failure = None
         popped = 0
-        decrypt_key = exchange._nsec_hex
+        decrypt_key = exchange._privkey_hex
 
         for candidate in candidates:
             event_id = candidate.get("id", "")
