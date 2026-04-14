@@ -2352,10 +2352,13 @@ def register_standard_tools(
         "is the opposite of what DPYC stands for."
     )
 
-    if hasattr(mcp, "instructions") and mcp.instructions:
-        mcp.instructions += _DPYC_AGENT_GUIDANCE
-    elif hasattr(mcp, "instructions"):
-        mcp.instructions = _DPYC_AGENT_GUIDANCE.lstrip()
+    # FastMCP exposes instructions as a read-only property backed by
+    # _mcp_server.instructions. Write through the internal server object.
+    try:
+        current = mcp.instructions or ""
+        mcp._mcp_server.instructions = current + _DPYC_AGENT_GUIDANCE
+    except AttributeError:
+        logger.debug("Could not append DPYC agent guidance to MCP instructions")
 
 
 # ======================================================================
