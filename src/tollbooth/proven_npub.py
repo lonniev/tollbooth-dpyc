@@ -51,12 +51,33 @@ class ProvenNpubCache:
 
     async def is_proven(self, session_id: str, npub: str) -> bool:
         """Check if an npub is proven on this session."""
-        record = self._cache.get(_cache_key(session_id, npub))
+        key = _cache_key(session_id, npub)
+        record = self._cache.get(key)
         if record is None:
+            cached_keys = list(self._cache._entries.keys())
+            logger.warning(
+                "Proof cache MISS for session=%s npub=%s — "
+                "key=%s not found. %d entries in cache: %s",
+                session_id[:16], npub[:20], key[:40],
+                len(cached_keys),
+                [k[:40] for k in cached_keys],
+            )
             return False
         if time.time() > record.expires_at:
-            self._cache.clear(_cache_key(session_id, npub))
+            logger.warning(
+                "Proof cache EXPIRED for session=%s npub=%s — "
+                "verified_at=%.0f expires_at=%.0f now=%.0f (%.0fs overdue)",
+                session_id[:16], npub[:20],
+                record.verified_at, record.expires_at,
+                time.time(), time.time() - record.expires_at,
+            )
+            self._cache.clear(key)
             return False
+        remaining = record.expires_at - time.time()
+        logger.debug(
+            "Proof cache HIT for session=%s npub=%s (%.0fs remaining)",
+            session_id[:16], npub[:20], remaining,
+        )
         return True
 
     async def mark_proven(self, session_id: str, npub: str) -> ProvenNpub:

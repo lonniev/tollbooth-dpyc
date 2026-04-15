@@ -552,7 +552,11 @@ class OperatorRuntime:
                 cache = await self.proven_npub_cache()
                 try:
                     sid = self._get_session_id()
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "session_id unavailable for proof cache lookup: %s",
+                        exc,
+                    )
                     sid = ""
                 if sid and await cache.is_proven(sid, resolved):
                     pass  # npub ownership already verified on this session
