@@ -464,11 +464,13 @@ class OperatorRuntime:
     # ------------------------------------------------------------------
 
     async def proven_npub_cache(self) -> Any:
-        """Lazy accessor for the ProvenNpubCache."""
+        """Lazy accessor for the ProvenNpubCache (vault-backed)."""
         if self._proven_npub_cache is None:
             from tollbooth.proven_npub import ProvenNpubCache
+            v = await self.vault()
             self._proven_npub_cache = ProvenNpubCache(
                 ttl_seconds=self._proven_npub_ttl,
+                vault=v,
             )
         return self._proven_npub_cache
 
