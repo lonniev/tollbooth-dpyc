@@ -2358,7 +2358,6 @@ def register_standard_tools(
         # Drain loop: pop ALL candidates, find the match if any.
         # DMs created before the challenge timestamp are stale — pop and skip.
         # No per-DM rejection messages — one summary at the end.
-        import time as _t
         matched_payload = None
         last_failure = None
         popped = 0
