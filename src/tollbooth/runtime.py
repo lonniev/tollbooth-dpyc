@@ -2011,17 +2011,19 @@ def register_standard_tools(
             except ValueError as e:
                 return {"success": False, "error": str(e)}
 
-            # Load operator credentials (client_id, client_secret)
+            # Load operator credentials using vendor field names
+            _id_field = oauth_cfg.client_id_field
+            _secret_field = oauth_cfg.client_secret_field
             try:
                 creds = await rt.load_credentials(
-                    ["client_id", "client_secret"],
+                    [_id_field, _secret_field],
                 )
             except Exception as e:
                 return {"success": False, "error": f"Operator credentials not configured: {e}"}
 
-            client_id = creds.get("client_id", "")
+            client_id = creds.get(_id_field, "")
             if not client_id:
-                return {"success": False, "error": "Operator client_id not configured."}
+                return {"success": False, "error": f"Operator {_id_field} not configured."}
 
             # Resolve collector redirect URI
             try:
@@ -2110,16 +2112,18 @@ def register_standard_tools(
             redirect_uri = pending["redirect_uri"]
             verifier = pending.get("pkce_verifier")
 
-            # Load operator credentials
+            # Load operator credentials (vendor field names → OAuth protocol names)
+            _cid_field = _opc.client_id_field
+            _csec_field = _opc.client_secret_field
             try:
                 creds = await rt.load_credentials(
-                    ["client_id", "client_secret"],
+                    [_cid_field, _csec_field],
                 )
             except Exception as e:
                 return {"success": False, "error": f"Operator credentials: {e}"}
 
-            client_id = creds.get("client_id", "")
-            client_secret = creds.get("client_secret", "")
+            client_id = creds.get(_cid_field, "")
+            client_secret = creds.get(_csec_field, "")
 
             # Poll collector for the authorization code
             try:

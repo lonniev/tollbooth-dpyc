@@ -47,3 +47,5 @@ class OAuthProviderConfig:
     on_token_received: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None
     refresh_enabled: bool = True
     service_name: str = "oauth"
+    client_id_field: str = "client_id"
+    client_secret_field: str = "client_secret"
