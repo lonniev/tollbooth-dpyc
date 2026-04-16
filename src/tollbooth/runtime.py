@@ -2144,7 +2144,7 @@ def register_standard_tools(
             # Poll collector for the authorization code
             try:
                 from tollbooth.registry import resolve_service_by_name
-                svc = await resolve_service_by_name("tollbooth-oauth2-callback")
+                svc = await resolve_service_by_name("tollbooth-oauth2-collector")
                 collector_url = svc["url"]
             except Exception as e:
                 return {"success": False, "error": f"OAuth2 collector: {e}"}
