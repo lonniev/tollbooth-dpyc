@@ -1154,6 +1154,68 @@ class OperatorRuntime:
         asyncio.create_task(_increment())
 
     # ------------------------------------------------------------------
+    # Opportunistic OTS notarization
+    # ------------------------------------------------------------------
+
+    _OTS_INTERVAL_SECONDS = 3600  # 60 minutes between notarizations
+    _ots_last_check: float = 0.0  # monotonic timestamp of last check
+    _ots_running: bool = False     # prevent concurrent notarizations
+
+    def fire_and_forget_notarize_if_stale(self) -> None:
+        """Trigger an OTS notarization if the last one is stale.
+
+        Piggybacks on tool calls — checked on every paid_tool invocation.
+        Uses monotonic time to rate-limit vault queries to once per interval.
+        Non-blocking: notarization runs as a background task.
+        """
+        if not self._ots_enabled or self._ots_running:
+            return
+
+        import asyncio
+        import time as _time
+
+        now = _time.monotonic()
+        if (now - self._ots_last_check) < self._OTS_INTERVAL_SECONDS:
+            return  # checked recently, skip
+        self._ots_last_check = now
+
+        async def _maybe_notarize() -> None:
+            self._ots_running = True
+            try:
+                vault = await self.vault()
+                anchors = await vault.list_anchors(limit=1)
+                if anchors:
+                    from datetime import datetime, timezone
+                    created = anchors[0].get("created_at", "")
+                    if isinstance(created, str) and created:
+                        last_ts = datetime.fromisoformat(created).timestamp()
+                    elif hasattr(created, "timestamp"):
+                        last_ts = created.timestamp()
+                    else:
+                        last_ts = 0.0
+                    age = datetime.now(timezone.utc).timestamp() - last_ts
+                    if age < self._OTS_INTERVAL_SECONDS:
+                        return  # recent enough
+
+                from tollbooth.tools.notarization import notarize_ledger_tool
+                result = await notarize_ledger_tool(vault, self._ots_calendars)
+                if result.get("success"):
+                    logger.info(
+                        "Opportunistic OTS notarization: %s (%d leaves, %d calendars)",
+                        result.get("root_hash", "")[:16],
+                        result.get("leaf_count", 0),
+                        result.get("calendars_submitted", 0),
+                    )
+                else:
+                    logger.warning("Opportunistic OTS notarization failed: %s", result.get("error"))
+            except Exception as exc:
+                logger.debug("Opportunistic OTS notarization skipped: %s", exc)
+            finally:
+                self._ots_running = False
+
+        asyncio.create_task(_maybe_notarize())
+
+    # ------------------------------------------------------------------
     # Paid tool decorator
     # ------------------------------------------------------------------
 
@@ -1212,6 +1274,7 @@ class OperatorRuntime:
                     raise
 
                 rt.fire_and_forget_demand_increment(rt.mcp_name_for(tool_id))
+                rt.fire_and_forget_notarize_if_stale()
                 if isinstance(result, dict):
                     result = await rt.inject_low_balance_warning(result, npub)
                 return result
