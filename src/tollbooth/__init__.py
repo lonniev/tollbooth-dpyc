@@ -94,18 +94,6 @@ except ImportError:
     ProvenNpub = None  # type: ignore[assignment,misc]
 
 try:
-    from tollbooth.acl_verify import verify_acl_event, check_acl_access, ACL_EVENT_KIND
-except ImportError:
-    verify_acl_event = None  # type: ignore[assignment,misc]
-    check_acl_access = None  # type: ignore[assignment,misc]
-    ACL_EVENT_KIND = None  # type: ignore[assignment,misc]
-
-try:
-    from tollbooth.acl_store import ToolAclStore
-except ImportError:
-    ToolAclStore = None  # type: ignore[assignment,misc]
-
-try:
     from tollbooth.nostr_credentials import (
         NostrCredentialExchange,
         NostrProfile,
@@ -324,11 +312,6 @@ __all__ = [
     "OWNERSHIP_SENTINEL",
     "ProvenNpubCache",
     "ProvenNpub",
-    # ACL
-    "verify_acl_event",
-    "check_acl_access",
-    "ACL_EVENT_KIND",
-    "ToolAclStore",
     "courier_health",
     "courier_ping",
     "probe_relay_liveness",

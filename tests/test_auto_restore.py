@@ -21,6 +21,7 @@ def _make_neon_vault_mock(execute_return=None):
     """Create a mock NeonVault with a controllable _execute."""
     neon = MagicMock()
     neon._execute = AsyncMock(return_value=execute_return or {})
+    neon._t = lambda table: table  # no schema prefix in tests
     return neon
 
 

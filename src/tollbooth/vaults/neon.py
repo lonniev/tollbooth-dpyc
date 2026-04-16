@@ -353,22 +353,6 @@ class NeonVault:
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_pricing_models_operator "
             f"ON {self._t('operator_pricing_models')} (operator)"
         )
-        # -- Tool ACLs (Nostr-signed per-tool authorization) --
-        await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('tool_acls')} ("
-            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
-            "    operator TEXT NOT NULL,"
-            "    tool_pattern TEXT NOT NULL,"
-            "    signed_event_json JSONB NOT NULL,"
-            "    created_at TIMESTAMPTZ DEFAULT now(),"
-            "    updated_at TIMESTAMPTZ DEFAULT now(),"
-            "    UNIQUE (operator, tool_pattern)"
-            ")"
-        )
-        await self._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_tool_acls_operator "
-            f"ON {self._t('tool_acls')} (operator)"
-        )
 
     # -- Global demand counters (surge pricing) --------------------------------
 
@@ -567,10 +551,14 @@ class NeonCredentialVault:
     def __init__(self, *, neon_vault: NeonVault) -> None:
         self._neon = neon_vault
 
+    def _t(self, table: str) -> str:
+        """Schema-qualified table name, delegated to the underlying NeonVault."""
+        return self._neon._t(table)
+
     async def ensure_schema(self) -> None:
         """Create the ``credentials`` and ``session_bindings`` tables if they don't exist."""
         await self._neon._execute(
-            "CREATE TABLE IF NOT EXISTS credentials ("
+            f"CREATE TABLE IF NOT EXISTS {self._t('credentials')} ("
             "    service TEXT NOT NULL,"
             "    npub TEXT NOT NULL,"
             "    encrypted_blob TEXT NOT NULL,"
@@ -585,7 +573,7 @@ class NeonCredentialVault:
     ) -> None:
         """Store an encrypted credential blob. Overwrites existing."""
         await self._neon._execute(
-            "INSERT INTO credentials (service, npub, encrypted_blob, updated_at) "
+            f"INSERT INTO {self._t('credentials')} (service, npub, encrypted_blob, updated_at) "
             "VALUES ($1, $2, $3, now()) "
             "ON CONFLICT (service, npub) DO UPDATE "
             "SET encrypted_blob = EXCLUDED.encrypted_blob, "
@@ -598,7 +586,7 @@ class NeonCredentialVault:
     ) -> str | None:
         """Fetch an encrypted credential blob. Returns None if not found."""
         result = await self._neon._execute(
-            "SELECT encrypted_blob FROM credentials "
+            f"SELECT encrypted_blob FROM {self._t('credentials')} "
             "WHERE service = $1 AND npub = $2",
             [service, npub],
         )
@@ -610,7 +598,7 @@ class NeonCredentialVault:
     ) -> bool:
         """Delete stored credentials. Returns True if found and deleted."""
         result = await self._neon._execute(
-            "DELETE FROM credentials WHERE service = $1 AND npub = $2",
+            f"DELETE FROM {self._t('credentials')} WHERE service = $1 AND npub = $2",
             [service, npub],
         )
         return (result.get("rowCount", 0) or 0) > 0
@@ -620,7 +608,7 @@ class NeonCredentialVault:
     async def ensure_session_bindings_schema(self) -> None:
         """Create the ``session_bindings`` table if it doesn't exist."""
         await self._neon._execute(
-            "CREATE TABLE IF NOT EXISTS session_bindings ("
+            f"CREATE TABLE IF NOT EXISTS {self._t('session_bindings')} ("
             "    caller_id TEXT NOT NULL,"
             "    service TEXT NOT NULL,"
             "    npub TEXT NOT NULL,"
@@ -634,7 +622,7 @@ class NeonCredentialVault:
     ) -> None:
         """Persist a session binding (upserts on conflict)."""
         await self._neon._execute(
-            "INSERT INTO session_bindings (caller_id, service, npub, updated_at) "
+            f"INSERT INTO {self._t('session_bindings')} (caller_id, service, npub, updated_at) "
             "VALUES ($1, $2, $3, now()) "
             "ON CONFLICT (caller_id, service) DO UPDATE "
             "SET npub = EXCLUDED.npub, "
@@ -647,7 +635,7 @@ class NeonCredentialVault:
     ) -> str | None:
         """Look up the npub for a caller+service pair."""
         result = await self._neon._execute(
-            "SELECT npub FROM session_bindings "
+            f"SELECT npub FROM {self._t('session_bindings')} "
             "WHERE caller_id = $1 AND service = $2",
             [caller_id, service],
         )
@@ -659,7 +647,7 @@ class NeonCredentialVault:
     ) -> bool:
         """Remove a session binding. Returns True if found and deleted."""
         result = await self._neon._execute(
-            "DELETE FROM session_bindings "
+            f"DELETE FROM {self._t('session_bindings')} "
             "WHERE caller_id = $1 AND service = $2",
             [caller_id, service],
         )
