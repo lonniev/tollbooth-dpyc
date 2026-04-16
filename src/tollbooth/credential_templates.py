@@ -18,6 +18,7 @@ class FieldSpec:
     sensitive: bool = True
     description: str = ""
     lifecycle: str = "set_once"  # "set_once" | "dynamic"
+    default: str = ""  # pre-populated value in the welcome DM
 
 
 @dataclass(frozen=True)
@@ -97,9 +98,9 @@ def render_credential_payload_lines(template: CredentialTemplate) -> list[str]:
     header that :func:`render_delimited_instructions` includes.
     """
     lines: list[str] = []
-    for name in template.fields:
-        placeholder = f"PASTE_YOUR_{name.upper()}_HERE"
-        lines.append(f"  {name} = @@@{placeholder}@@@")
+    for name, spec in template.fields.items():
+        value = spec.default if spec.default else f"PASTE_YOUR_{name.upper()}_HERE"
+        lines.append(f"  {name} = @@@{value}@@@")
     return lines
 
 

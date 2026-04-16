@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -24,7 +25,69 @@ from tollbooth.session_cache import SessionCache
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PROVEN_TTL = 3600  # 1 hour
+DEFAULT_PROVEN_TTL = 7200  # 2 hours
+
+# Sentinel: "patron did not specify a duration"
+_UNSET: Any = object()
+
+# ---------------------------------------------------------------------------
+# Human-friendly duration parser
+# ---------------------------------------------------------------------------
+
+_WORD_NUMBERS: dict[str, int] = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20,
+    "thirty": 30, "sixty": 60,
+}
+
+_UNIT_SECONDS: dict[str, int] = {
+    "s": 1, "sec": 1, "second": 1, "seconds": 1,
+    "m": 60, "min": 60, "minute": 60, "minutes": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+    "w": 604800, "week": 604800, "weeks": 604800,
+}
+
+_DURATION_RE = re.compile(
+    r"^\s*(\d+|[a-z]+)\s*(s|sec|seconds?|m|min|minutes?|h|hr|hrs|hours?|d|days?|w|weeks?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_duration(text: str) -> int | None:
+    """Parse a human-friendly duration string into seconds.
+
+    Returns ``None`` for unlimited/never-expiring. Raises ``ValueError``
+    for unrecognizable input.
+
+    Examples::
+
+        parse_duration("2h")         → 7200
+        parse_duration("two days")   → 172800
+        parse_duration("  30  min ") → 1800
+        parse_duration("unlimited")  → None
+        parse_duration("forever")    → None
+    """
+    cleaned = text.strip().lower()
+    if not cleaned:
+        raise ValueError(f"Empty duration string")
+    if cleaned in ("unlimited", "never", "forever", "none", "no expiry", "no expiration"):
+        return None
+    m = _DURATION_RE.match(cleaned)
+    if not m:
+        raise ValueError(f"Cannot parse duration: {text!r}")
+    amount_str, unit_str = m.group(1), m.group(2).lower()
+    if amount_str.isdigit():
+        amount = int(amount_str)
+    else:
+        amount = _WORD_NUMBERS.get(amount_str)
+        if amount is None:
+            raise ValueError(f"Cannot parse number: {amount_str!r} in {text!r}")
+    unit_secs = _UNIT_SECONDS.get(unit_str)
+    if unit_secs is None:
+        raise ValueError(f"Unknown time unit: {unit_str!r} in {text!r}")
+    return amount * unit_secs
 
 _VAULT_KEY_PREFIX = "proven_npub:"
 
@@ -82,7 +145,7 @@ class ProvenNpubCache:
         record = self._cache.get(key)
 
         if record is not None:
-            if time.time() > record.expires_at:
+            if record.expires_at > 0 and time.time() > record.expires_at:
                 logger.warning(
                     "Proof cache EXPIRED for session=%s npub=%s — "
                     "verified_at=%.0f expires_at=%.0f now=%.0f (%.0fs overdue)",
@@ -102,7 +165,7 @@ class ProvenNpubCache:
         # In-memory miss — try vault restore
         if self._vault:
             record = await self._vault_fetch(session_id, npub)
-            if record is not None and time.time() < record.expires_at:
+            if record is not None and (record.expires_at == 0 or time.time() < record.expires_at):
                 self._cache.set(key, record)
                 remaining = record.expires_at - time.time()
                 logger.info(
@@ -127,7 +190,9 @@ class ProvenNpubCache:
         )
         return False
 
-    async def mark_proven(self, session_id: str, npub: str) -> ProvenNpub:
+    async def mark_proven(
+        self, session_id: str, npub: str, ttl_override: Any = _UNSET,
+    ) -> ProvenNpub:
         """Cache an npub as ownership-proven on this session.
 
         Writes to both in-memory cache and vault (if configured).
@@ -135,21 +200,26 @@ class ProvenNpubCache:
         Args:
             session_id: The MCP transport session ID.
             npub: The patron's npub (bech32).
+            ttl_override: Seconds until expiry. ``None`` = unlimited.
+                Omit (or pass ``_UNSET``) to use the cache default.
 
         Returns:
             The cached ``ProvenNpub`` record.
         """
+        ttl = self._ttl if ttl_override is _UNSET else ttl_override
         now = time.time()
+        expires_at = (now + ttl) if ttl is not None else 0.0
         record = ProvenNpub(
             session_id=session_id,
             npub=npub,
             verified_at=now,
-            expires_at=now + self._ttl,
+            expires_at=expires_at,
         )
         self._cache.set(_cache_key(session_id, npub), record)
+        label = f"{ttl}s" if ttl is not None else "unlimited"
         logger.info(
-            "Cached proven npub %s on session %s (expires in %ds)",
-            npub[:20], session_id[:12], self._ttl,
+            "Cached proven npub %s on session %s (expires in %s)",
+            npub[:20], session_id[:12], label,
         )
 
         if self._vault:

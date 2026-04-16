@@ -414,7 +414,16 @@ class OperatorRuntime:
         templates["npub_ownership"] = CredentialTemplate(
             service="npub_ownership",
             version=1,
-            fields={_proof_field: FieldSpec(required=True, sensitive=False, description="Any text — your signed DM is the proof")},
+            fields={
+                _proof_field: FieldSpec(
+                    required=True, sensitive=False,
+                    description="Any text — your signed DM is the proof",
+                ),
+                "cache_duration": FieldSpec(
+                    required=False, sensitive=False, default="2h",
+                    description="How long to cache this proof (e.g. 2h, 1d, 3 days, unlimited)",
+                ),
+            },
             description="Npub ownership — the signed DM itself proves you own this npub",
         )
 
@@ -2470,19 +2479,37 @@ def register_standard_tools(
                     "success": False,
                     "error": "No MCP session ID available — cannot bind proof to channel.",
                 }
-            record = await cache.mark_proven(sid, resolved)
+            # Parse patron's chosen cache duration (default: 2h)
+            raw_duration = (matched_payload or {}).get("cache_duration", "").strip()
+            ttl_seconds: int | None = None
+            if raw_duration:
+                try:
+                    from tollbooth.proven_npub import parse_duration
+                    ttl_seconds = parse_duration(raw_duration)
+                except ValueError:
+                    pass  # unparseable → use cache default
+
+            from tollbooth.proven_npub import _UNSET
+            record = await cache.mark_proven(sid, resolved, ttl_override=ttl_seconds if raw_duration else _UNSET)
+
+            if record.expires_at > 0:
+                ttl_display = int(record.expires_at - record.verified_at)
+                expires_msg = f"Cached for {ttl_display}s."
+            else:
+                ttl_display = 0
+                expires_msg = "Cached with no expiration."
 
             return {
                 "success": True,
                 "proven_npub": resolved,
                 "session_id": sid[:12] + "...",
                 "popped_dms": popped,
-                "expires_in_seconds": int(record.expires_at - record.verified_at),
+                "expires_in_seconds": ttl_display,
                 "message": (
                     f"npub ownership verified via signed DM. "
                     f"Proof bound to this session. "
                     f"Cleaned {popped} DM(s) from relay. "
-                    f"Cached for {int(record.expires_at - record.verified_at)}s."
+                    f"{expires_msg}"
                 ),
             }
         else:
