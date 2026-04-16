@@ -677,15 +677,18 @@ class OperatorRuntime:
         cache = await self.ledger_cache()
         ledger = await cache.get(npub)
 
+        # Apply tranche lifetime retroactively to any unstamped tranches
+        ttl = await self.resolve_tranche_lifetime()
+        ledger.apply_tranche_lifetime(ttl)
+
         if npub not in self._reconciled_npubs and ledger.pending_invoices:
             self._reconciled_npubs.add(npub)
             try:
                 cashier = await self.ensure_cashier()
-                ttl = await self.resolve_credit_ttl()
                 from tollbooth.tools.credits import reconcile_pending_invoices
                 recon = await reconcile_pending_invoices(
                     cashier, cache, npub,
-                    default_credit_ttl_seconds=ttl,
+                    tranche_lifetime_seconds=ttl,
                 )
                 if recon.get("reconciled", 0) > 0:
                     logger.info(
@@ -1070,24 +1073,19 @@ class OperatorRuntime:
         )
         return self._cashier
 
-    async def resolve_credit_ttl(self) -> int | None:
-        """Return the effective credit TTL in seconds from the demurrage constraint.
+    async def resolve_tranche_lifetime(self) -> int | None:
+        """Return the tranche lifetime in seconds, or None if credits never expire.
 
-        Scans the active pricing model's pipeline for a demurrage
-        step and returns ttl_days * 86400. Returns None if no such constraint
-        exists (credits never expire).
+        Reads the ``tranche_lifetime`` field from the active pricing model.
         """
         try:
             store = await self.ensure_pricing_store()
             from tollbooth.tools.pricing import get_pricing_model_tool
             result = await get_pricing_model_tool(store, self.operator_npub())
             if result.get("status") == "ok":
-                for step in result.get("pipeline", []):
-                    step_data = step if isinstance(step, dict) else step.to_dict()
-                    if step_data.get("type") == "demurrage":
-                        params = step_data.get("params", step_data)
-                        days = int(params.get("ttl_days", step_data.get("ttl_days", 15)))
-                        return days * 86400
+                tl = result.get("tranche_lifetime")
+                if isinstance(tl, dict) and tl.get("ttl_days") is not None:
+                    return int(tl["ttl_days"]) * 86400
         except Exception:
             pass
         return None
@@ -1426,11 +1424,11 @@ def register_standard_tools(
             cashier = await rt.ensure_cashier()
             cache = await rt.ledger_cache()
             from tollbooth.tools import credits
-            ttl = await rt.resolve_credit_ttl()
+            ttl = await rt.resolve_tranche_lifetime()
             return await credits.purchase_credits_tool(
                 cashier, cache, npub, amount_sats, certificate,
                 authority_npub=auth_info.get("npub", ""),
-                default_credit_ttl_seconds=ttl,
+                tranche_lifetime_seconds=ttl,
             )
         except ValueError as e:
             return {"success": False, "error": str(e)}
@@ -1452,10 +1450,10 @@ def register_standard_tools(
         except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        ttl = await rt.resolve_credit_ttl()
+        ttl = await rt.resolve_tranche_lifetime()
         result = await credits.check_payment_tool(
             cashier, cache, npub, invoice_id,
-            default_credit_ttl_seconds=ttl,
+            tranche_lifetime_seconds=ttl,
         )
 
         # Send a thank-you DM on successful settlement
@@ -1490,10 +1488,10 @@ def register_standard_tools(
         except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        ttl = await rt.resolve_credit_ttl()
+        ttl = await rt.resolve_tranche_lifetime()
         return await credits.restore_credits_tool(
             cashier, cache, npub, invoice_id,
-            default_credit_ttl_seconds=ttl,
+            tranche_lifetime_seconds=ttl,
         )
 
     @tool

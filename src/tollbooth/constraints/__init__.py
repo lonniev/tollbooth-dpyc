@@ -27,7 +27,6 @@ from tollbooth.constraints.config import (
     validate_config,
 )
 from tollbooth.constraints.engine import ConstraintEngine
-from tollbooth.constraints.demurrage import DemurrageConstraint
 from tollbooth.constraints.expression import JsonExpressionConstraint
 from tollbooth.constraints.gate import ConstraintGate
 from tollbooth.constraints.periodic import PeriodicRefreshConstraint, parse_iso_duration
@@ -66,7 +65,6 @@ __all__ = [
     "JsonExpressionConstraint",
     "SurgePricingConstraint",
     "PatronProofConstraint",
-    "DemurrageConstraint",
     # Engine
     "ConstraintEngine",
     # Gate

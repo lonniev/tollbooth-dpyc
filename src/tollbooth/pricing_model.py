@@ -94,6 +94,49 @@ class ToolPrice:
 
 
 @dataclass
+class TrancheLifetime:
+    """How long a tranche of api_sats endures before expiring.
+
+    This is a property of the money, not a per-tool constraint.
+    ``None`` for ttl_days means credits never expire.
+    """
+
+    ttl_days: int | None = None
+    target_usage_pct: float = 0.75
+    min_days: int = 3
+    max_days: int = 90
+
+    def __post_init__(self) -> None:
+        if self.ttl_days is not None:
+            self.ttl_days = max(self.min_days, min(self.max_days, self.ttl_days))
+
+    @property
+    def ttl_seconds(self) -> int | None:
+        """Lifetime in seconds, or None if credits never expire."""
+        return self.ttl_days * 86400 if self.ttl_days is not None else None
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"target_usage_pct": self.target_usage_pct}
+        if self.ttl_days is not None:
+            d["ttl_days"] = self.ttl_days
+        if self.min_days != 3:
+            d["min_days"] = self.min_days
+        if self.max_days != 90:
+            d["max_days"] = self.max_days
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TrancheLifetime:
+        ttl_raw = data.get("ttl_days")
+        return cls(
+            ttl_days=int(ttl_raw) if ttl_raw is not None else None,
+            target_usage_pct=float(data.get("target_usage_pct", 0.75)),
+            min_days=int(data.get("min_days", 3)),
+            max_days=int(data.get("max_days", 90)),
+        )
+
+
+@dataclass
 class PipelineStep:
     """A single step in the constraint pipeline."""
 
@@ -126,6 +169,7 @@ class PricingModel:
     is_active: bool = False
     tools: list[ToolPrice] = field(default_factory=list)
     pipeline: list[PipelineStep] = field(default_factory=list)
+    tranche_lifetime: TrancheLifetime | None = None
 
     def tool_cost_map(self) -> dict[str, int]:
         """Return a flat {tool_id: price_sats} lookup dict."""
@@ -171,16 +215,23 @@ class PricingModel:
 
     def _to_model_dict(self) -> dict[str, Any]:
         """Internal dict for the ``model_json`` JSONB column."""
-        return {
+        d: dict[str, Any] = {
             "name": self.name,
             "tools": [tp.to_dict() for tp in self.tools],
             "pipeline": [ps.to_dict() for ps in self.pipeline],
         }
+        if self.tranche_lifetime is not None:
+            d["tranche_lifetime"] = self.tranche_lifetime.to_dict()
+        return d
 
     @classmethod
     def from_json(cls, raw: str, *, model_id: str = "", operator: str = "", is_active: bool = False) -> PricingModel:
         """Deserialize from a JSON string (``model_json`` column)."""
         data = json.loads(raw)
+
+        tl_data = data.get("tranche_lifetime")
+        tranche_lifetime = TrancheLifetime.from_dict(tl_data) if isinstance(tl_data, dict) else None
+
         return cls(
             model_id=model_id,
             operator=operator,
@@ -188,6 +239,7 @@ class PricingModel:
             is_active=is_active,
             tools=[ToolPrice.from_dict(t) for t in data.get("tools", [])],
             pipeline=[PipelineStep.from_dict(p) for p in data.get("pipeline", [])],
+            tranche_lifetime=tranche_lifetime,
         )
 
     @classmethod

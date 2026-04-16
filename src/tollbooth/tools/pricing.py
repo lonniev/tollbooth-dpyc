@@ -51,7 +51,7 @@ def _validate_pipeline(pipeline: list) -> list[str]:
 
 def _model_to_response(model: PricingModel) -> dict[str, Any]:
     """Convert a PricingModel to a flat response dict matching PricingStudio's PricingModelResponse."""
-    return {
+    d: dict[str, Any] = {
         "status": "ok",
         "model_id": model.model_id,
         "name": model.name,
@@ -59,6 +59,9 @@ def _model_to_response(model: PricingModel) -> dict[str, Any]:
         "tools": [tp.to_dict() for tp in model.tools],
         "pipeline": [ps.to_dict() for ps in model.pipeline],
     }
+    if model.tranche_lifetime is not None:
+        d["tranche_lifetime"] = model.tranche_lifetime.to_dict()
+    return d
 
 
 async def get_pricing_model_tool(

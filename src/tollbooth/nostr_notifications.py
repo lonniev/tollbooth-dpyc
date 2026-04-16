@@ -171,7 +171,7 @@ def _render_expiration_message(
         f"Credits expiring: {expiring_sats:,} api-sats",
         f"Time remaining: ~{hours_int} hour{'s' if hours_int != 1 else ''}",
         "",
-        "Unused credits in expiring tranches are subject to demurrage.",
+        "Unused credits in expiring tranches will be collected when they reach their lifetime.",
         "Use them or top up before they expire.",
     ]
     return "\n".join(parts)

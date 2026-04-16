@@ -140,17 +140,12 @@ class Tranche:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Tranche:
-        expires_at = data.get("expires_at")
-        invoice_id = str(data.get("invoice_id", ""))
-        # Migrate any perpetual tranche → 7-day expiry from now
-        if expires_at is None:
-            expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
         return cls(
             granted_at=str(data.get("granted_at", "")),
             original_sats=int(data.get("original_sats", 0)),
             remaining_sats=int(data.get("remaining_sats", 0)),
-            invoice_id=invoice_id,
-            expires_at=expires_at,
+            invoice_id=str(data.get("invoice_id", "")),
+            expires_at=data.get("expires_at"),
         )
 
 
@@ -245,6 +240,29 @@ class UserLedger:
         if rec:
             rec.status = status
             rec.btcpay_status = btcpay_status
+
+    # -- tranche lifetime ------------------------------------------------------
+
+    def apply_tranche_lifetime(self, tranche_lifetime_seconds: int | None) -> None:
+        """Retroactively stamp ``expires_at`` on tranches that lack one.
+
+        When an operator introduces a tranche lifetime, existing tranches
+        that were minted without expiration acquire one based on their true
+        age: ``granted_at + tranche_lifetime_seconds``.  A tranche older
+        than the lifetime is already expired and will be collected on the
+        next debit.  This is a one-time mutation per tranche — once
+        ``expires_at`` is set, it is persisted and never recalculated.
+        """
+        if tranche_lifetime_seconds is None:
+            return
+        for t in self.tranches:
+            if t.expires_at is not None or t.remaining_sats <= 0 or not t.granted_at:
+                continue
+            try:
+                granted = datetime.fromisoformat(t.granted_at.replace("Z", "+00:00"))
+                t.expires_at = (granted + timedelta(seconds=tranche_lifetime_seconds)).isoformat()
+            except (ValueError, TypeError):
+                pass
 
     # -- mutations ------------------------------------------------------------
 

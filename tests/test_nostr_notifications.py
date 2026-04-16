@@ -134,7 +134,7 @@ class TestMessageTemplates:
         msg = _render_expiration_message("TestService", 2000, 36.5)
         assert "2,000" in msg
         assert "36 hour" in msg
-        assert "demurrage" in msg.lower()
+        assert "lifetime" in msg.lower()
         assert "TestService" in msg
 
     def test_expiration_message_singular_hour(self):

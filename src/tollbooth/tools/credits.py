@@ -25,7 +25,7 @@ async def _create_purchase_invoice(
     user_id: str,
     amount_sats: int,
     extra_metadata: dict[str, Any] | None = None,
-    default_credit_ttl_seconds: int | None = None,
+    tranche_lifetime_seconds: int | None = None,
     invoice_dm_callback: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Shared logic: validate amount, create BTCPay invoice, record in ledger.
@@ -99,8 +99,8 @@ async def _create_purchase_invoice(
     }
     if bolt11:
         result["lightning_invoice"] = bolt11
-    if default_credit_ttl_seconds is not None:
-        result["credit_ttl_seconds"] = default_credit_ttl_seconds
+    if tranche_lifetime_seconds is not None:
+        result["tranche_lifetime_seconds"] = tranche_lifetime_seconds
 
     # Fire-and-forget invoice DM — failure never blocks the purchase
     if invoice_dm_callback is not None:
@@ -128,7 +128,7 @@ async def purchase_credits_tool(
     amount_sats: int,
     certificate: str,
     authority_npub: str,
-    default_credit_ttl_seconds: int | None = None,
+    tranche_lifetime_seconds: int | None = None,
     ban_check_oracle_url: str | None = None,
     invoice_dm_callback: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
@@ -199,7 +199,7 @@ async def purchase_credits_tool(
     result = await _create_purchase_invoice(
         btcpay, cache, user_id, invoice_sats,
         extra_metadata={"certificate_jti": cert_claims["jti"]},
-        default_credit_ttl_seconds=default_credit_ttl_seconds,
+        tranche_lifetime_seconds=tranche_lifetime_seconds,
         invoice_dm_callback=invoice_dm_callback,
     )
     if result.get("success"):
@@ -212,7 +212,7 @@ async def direct_purchase_tool(
     cache: LedgerCache,
     user_id: str,
     amount_sats: int,
-    default_credit_ttl_seconds: int | None = None,
+    tranche_lifetime_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Create a BTCPay invoice for a direct credit purchase (no certificate).
 
@@ -222,7 +222,7 @@ async def direct_purchase_tool(
     return await _create_purchase_invoice(
         btcpay, cache, user_id, amount_sats,
         extra_metadata={"purpose": "direct_credit_purchase"},
-        default_credit_ttl_seconds=default_credit_ttl_seconds,
+        tranche_lifetime_seconds=tranche_lifetime_seconds,
     )
 
 
@@ -231,7 +231,7 @@ async def check_payment_tool(
     cache: LedgerCache,
     user_id: str,
     invoice_id: str,
-    default_credit_ttl_seconds: int | None = None,
+    tranche_lifetime_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Poll a BTCPay invoice and credit the user's balance on settlement.
 
@@ -272,7 +272,7 @@ async def check_payment_tool(
             amount_str = invoice.get("amount", "0")
             amount_sats = int(float(amount_str))
             credited = amount_sats
-            ledger.credit_deposit(credited, invoice_id, ttl_seconds=default_credit_ttl_seconds)
+            ledger.credit_deposit(credited, invoice_id, ttl_seconds=tranche_lifetime_seconds)
             ledger.record_invoice_settled(
                 invoice_id=invoice_id,
                 api_sats_credited=credited,
@@ -409,7 +409,7 @@ async def restore_credits_tool(
     cache: LedgerCache,
     user_id: str,
     invoice_id: str,
-    default_credit_ttl_seconds: int | None = None,
+    tranche_lifetime_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Restore credits from a paid invoice that was lost due to cache or vault issues."""
     # Check idempotency first
@@ -428,7 +428,7 @@ async def restore_credits_tool(
     if vault_record and vault_record.status == "Settled" and vault_record.api_sats_credited > 0:
         # Restore from vault record — no BTCPay call needed
         credited = vault_record.api_sats_credited
-        ledger.credit_deposit(credited, invoice_id, ttl_seconds=default_credit_ttl_seconds)
+        ledger.credit_deposit(credited, invoice_id, ttl_seconds=tranche_lifetime_seconds)
         cache.mark_dirty(user_id)
         flush_ok = await cache.flush_user(user_id)
         if not flush_ok:
@@ -466,7 +466,7 @@ async def restore_credits_tool(
     amount_sats = int(float(amount_str))
     credited = amount_sats
 
-    ledger.credit_deposit(credited, invoice_id, ttl_seconds=default_credit_ttl_seconds)
+    ledger.credit_deposit(credited, invoice_id, ttl_seconds=tranche_lifetime_seconds)
     ledger.record_invoice_settled(
         invoice_id=invoice_id,
         api_sats_credited=credited,
@@ -507,7 +507,7 @@ async def reconcile_pending_invoices(
     btcpay: BTCPayClient,
     cache: LedgerCache,
     user_id: str,
-    default_credit_ttl_seconds: int | None = None,
+    tranche_lifetime_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Reconcile pending invoices on startup: credit settled, remove terminal."""
     ledger = await cache.get(user_id)
@@ -531,7 +531,7 @@ async def reconcile_pending_invoices(
             amount_str = invoice.get("amount", "0")
             amount_sats = int(float(amount_str))
             credited = amount_sats
-            ledger.credit_deposit(credited, invoice_id, ttl_seconds=default_credit_ttl_seconds)
+            ledger.credit_deposit(credited, invoice_id, ttl_seconds=tranche_lifetime_seconds)
             ledger.record_invoice_settled(
                 invoice_id=invoice_id,
                 api_sats_credited=credited,
