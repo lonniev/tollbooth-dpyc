@@ -2019,11 +2019,27 @@ def register_standard_tools(
                     [_id_field, _secret_field],
                 )
             except Exception as e:
-                return {"success": False, "error": f"Operator credentials not configured: {e}"}
+                return {
+                    "success": False,
+                    "error": (
+                        f"Operator API credentials ({_id_field}) have not been delivered yet. "
+                        "This is not an error — the operator needs to deliver credentials "
+                        "via Secure Courier (request_credential_channel / receive_credentials) "
+                        "before OAuth can start."
+                    ),
+                }
 
             client_id = creds.get(_id_field, "")
             if not client_id:
-                return {"success": False, "error": f"Operator {_id_field} not configured."}
+                return {
+                    "success": False,
+                    "error": (
+                        f"Operator API credentials ({_id_field}) have not been delivered yet. "
+                        "This is not an error — the operator needs to deliver credentials "
+                        "via Secure Courier (request_credential_channel / receive_credentials) "
+                        "before OAuth can start."
+                    ),
+                }
 
             # Resolve collector redirect URI
             try:
@@ -2878,8 +2894,10 @@ def register_standard_tools(
         "`receive_npub_proof` to prove npub ownership. The cache expires "
         "after ~1 hour; renew with a fresh request/receive cycle.\n"
         "- **Insufficient credit balance** → Call `purchase_credits` to top up.\n"
-        "- **Operator credentials not configured** → Operator setup issue, "
-        "not the patron's problem.\n"
+        "- **Operator credentials not delivered yet** → This is a lifecycle state, "
+        "not an error. The operator needs to deliver API credentials via Secure Courier. "
+        "Do NOT tell the patron to 'fix the deployment' or 'inject environment variables' — "
+        "credential delivery is a Secure Courier flow, not a platform configuration issue.\n"
         "- **Upstream API authentication failure** → Only if the error "
         "explicitly mentions token expiry or an upstream auth error.\n\n"
         "**IMPORTANT — Don't Pester Your Customer:** Do NOT ask the patron "
