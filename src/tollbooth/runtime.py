@@ -2012,8 +2012,8 @@ def register_standard_tools(
                 return {"success": False, "error": str(e)}
 
             # Load operator credentials using vendor field names
-            _id_field = oauth_cfg.client_id_field
-            _secret_field = oauth_cfg.client_secret_field
+            _id_field = _opc.client_id_field
+            _secret_field = _opc.client_secret_field
             try:
                 creds = await rt.load_credentials(
                     [_id_field, _secret_field],
