@@ -1722,9 +1722,15 @@ def register_standard_tools(
     ) -> dict[str, Any]:
         """Open a Secure Courier channel for credential delivery.
 
-        Sends a welcome DM with a credential template. All fields must
-        be re-provided; there is no partial update. After the recipient
-        replies, call receive_credentials with the same service.
+        Sends a welcome DM with a credential template. The recipient
+        must read the DM in their Nostr client, fill in the fields,
+        and reply manually. **This is a human-in-the-loop flow.**
+
+        After calling this tool, STOP and tell the user what to do.
+        Wait for the user to confirm they have replied before calling
+        ``receive_credentials``. Do NOT poll or retry — each
+        ``receive_credentials`` call destructively drains the relay
+        mailbox.
 
         Args:
             sender_npub: Required. The npub to send the template to.
@@ -1773,9 +1779,14 @@ def register_standard_tools(
     ) -> dict[str, Any]:
         """Pick up credentials from the Secure Courier.
 
-        Checks the vault first (instant), then polls Nostr relays for
+        **Call this only after the user confirms they have replied.**
+        This tool destructively drains ALL DMs from the sender on the
+        relay. If called before the user replies, their message will
+        never be found. Do NOT poll, loop, or retry.
+
+        Checks the vault first (instant), then reads Nostr relays for
         encrypted DMs. If a credential_card (ncred1...) is provided,
-        redeems it directly without relay polling. On success, the
+        redeems it directly without relay access. On success, the
         payment processor client is reinitialized from the new
         credentials — no server restart needed.
 
@@ -1783,7 +1794,7 @@ def register_standard_tools(
             sender_npub: Required. The npub that sent the credentials.
             service: Required. The credential service name (must match
                 the service used in request_credential_channel).
-            force_relay: Skip the vault cache and poll Nostr relays
+            force_relay: Skip the vault cache and read Nostr relays
                 for new DMs. Use after resending corrected credentials.
         Free.
         """
@@ -2184,19 +2195,19 @@ def register_standard_tools(
     ) -> dict[str, Any]:
         """Request npub ownership proof from a patron via Nostr DM.
 
-        Sends a Secure Courier channel with instructions to sign a
-        kind-27235 event with ``u=npub_ownership``. PricingStudio
-        auto-signs and replies.
+        Sends a challenge DM that the patron must sign and reply to
+        using their Nostr client. **This is a human-in-the-loop flow.**
 
-        After the patron responds, call ``receive_npub_proof`` to
-        verify and cache the proof.
+        After calling this tool, STOP and tell the user to check their
+        Nostr client and reply to the challenge. Wait for the user to
+        confirm they have replied before calling ``receive_npub_proof``.
+        Do NOT poll or retry — each ``receive_npub_proof`` call
+        destructively drains the relay mailbox.
 
         **Lifecycle:** The cached proof expires after a fixed TTL
-        (default 1 hour). When it expires, you must call
-        ``request_npub_proof`` and ``receive_npub_proof`` again.
-        Relay DMs are ephemeral and may not survive server restarts
-        — do not assume a prior relay proof is still available.
-        Always start with ``request_npub_proof`` for a fresh exchange.
+        (default 1 hour). When it expires, call ``request_npub_proof``
+        again for a fresh challenge, then wait for the user, then
+        call ``receive_npub_proof``.
 
         Free.
 
@@ -2273,9 +2284,12 @@ def register_standard_tools(
     ) -> dict[str, Any]:
         """Receive npub ownership confirmation from a patron.
 
-        Drains ALL DMs from the patron on the relay — popping every
-        one regardless of validity — and looks for the one with the
-        matching anti-replay token. Leaves the relay clean.
+        **Call this only after the user confirms they have replied.**
+        This tool destructively drains ALL DMs from the patron on the
+        relay — popping every one regardless of validity — and looks
+        for the one with the matching anti-replay token. If called
+        before the user replies, their message will never be found.
+        Do NOT poll, loop, or retry.
 
         The signed DM itself proves npub ownership (the patron's nsec
         signed it). On success, caches the proven npub so subsequent
@@ -2842,7 +2856,16 @@ def register_standard_tools(
         "message specifically says the upstream token is expired or invalid. "
         "Token expiry is only one of many possible causes. Speculatively "
         "re-running OAuth or credential flows wastes the patron's time and "
-        "is the opposite of what DPYC stands for."
+        "is the opposite of what DPYC stands for.\n\n"
+        "## Secure Courier — Human in the Loop\n\n"
+        "All Secure Courier flows (`request_credential_channel` / "
+        "`receive_credentials`, `request_npub_proof` / `receive_npub_proof`) "
+        "require a human to read a Nostr DM and reply manually. "
+        "After calling a `request_*` tool, **STOP and wait** for the user "
+        "to confirm they have replied. Do NOT poll, retry, or speculatively "
+        "call `receive_*` — each receive call **destructively drains** all "
+        "DMs from the relay. If you call it before the human replies, their "
+        "message will be lost. One request, one wait, one receive."
     )
 
     # FastMCP exposes instructions as a read-only property backed by
