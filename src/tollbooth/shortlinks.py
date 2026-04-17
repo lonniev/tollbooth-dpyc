@@ -14,13 +14,21 @@ logger = logging.getLogger(__name__)
 _FALLBACK_URL = "https://tollbooth-shortlinks.fastmcp.app/mcp/"
 
 
+def _ensure_mcp_path(url: str) -> str:
+    """Ensure the URL ends with /mcp/ without doubling it."""
+    stripped = url.rstrip("/")
+    if stripped.endswith("/mcp"):
+        return stripped + "/"
+    return stripped + "/mcp/"
+
+
 async def _resolve_shortlinks_url() -> str:
     """Resolve the shortlinks service URL from the DPYC registry, falling back to hardcoded."""
     try:
         svc = await resolve_service_by_name("tollbooth-shortlinks")
         url = svc.get("url", "")
         if url:
-            return url.rstrip("/") + "/mcp/"
+            return _ensure_mcp_path(url)
     except Exception:
         pass
     return _FALLBACK_URL

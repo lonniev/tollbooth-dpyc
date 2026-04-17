@@ -300,7 +300,8 @@ async def retrieve_code_from_collector(
         OAuthCollectorError: If decryption fails.
         httpx.HTTPStatusError: If the collector returns an unexpected error.
     """
-    url = f"{collector_url.rstrip('/')}/mcp/"
+    stripped = collector_url.rstrip("/")
+    url = f"{stripped}/" if stripped.endswith("/mcp") else f"{stripped}/mcp/"
     payload = {
         "jsonrpc": "2.0",
         "method": "tools/call",
