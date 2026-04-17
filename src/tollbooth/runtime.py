@@ -2091,12 +2091,16 @@ def register_standard_tools(
                 "status": "pending",
                 "authorize_url": authorize_url,
                 "message": (
-                    "Open the URL in your browser and authorize. "
+                    "Open authorize_url in the browser (the full URL, not the "
+                    "short one — redirects may truncate query parameters). "
                     "Then call check_oauth_status with the same npub."
                 ),
             }
             if short_url:
                 result["authorize_url_short"] = short_url
+                result["message"] += (
+                    f" For display: {short_url}"
+                )
             return result
 
         @tool
