@@ -2045,7 +2045,7 @@ def register_standard_tools(
             try:
                 from tollbooth.registry import resolve_service_by_name
                 svc = await resolve_service_by_name("tollbooth-oauth2-callback")
-                redirect_uri = svc["url"].rstrip("/") + "/callback"
+                redirect_uri = svc["url"].rstrip("/")
             except Exception as e:
                 return {"success": False, "error": f"OAuth2 collector not found: {e}"}
 
