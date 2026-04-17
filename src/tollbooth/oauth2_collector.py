@@ -26,6 +26,8 @@ import urllib.parse
 
 import httpx
 
+from tollbooth.shortlinks import _ensure_mcp_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -300,7 +302,6 @@ async def retrieve_code_from_collector(
         OAuthCollectorError: If decryption fails.
         httpx.HTTPStatusError: If the collector returns an unexpected error.
     """
-    from tollbooth.shortlinks import _ensure_mcp_path
     url = _ensure_mcp_path(collector_url)
     payload = {
         "jsonrpc": "2.0",

@@ -108,7 +108,9 @@ class TrancheLifetime:
 
     def __post_init__(self) -> None:
         if self.min_days > self.max_days:
-            self.min_days, self.max_days = self.max_days, self.min_days
+            raise ValueError(
+                f"min_days ({self.min_days}) must be <= max_days ({self.max_days})"
+            )
         if self.ttl_days is not None:
             self.ttl_days = max(self.min_days, min(self.max_days, self.ttl_days))
 

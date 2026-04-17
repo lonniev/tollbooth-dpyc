@@ -255,6 +255,7 @@ class UserLedger:
         """
         if tranche_lifetime_seconds is None:
             return
+        now_iso = datetime.now(timezone.utc).isoformat()
         for t in self.tranches:
             if t.expires_at is not None or t.remaining_sats <= 0 or not t.granted_at:
                 continue
@@ -268,7 +269,7 @@ class UserLedger:
                     "Tranche with malformed granted_at=%r expired immediately",
                     t.granted_at,
                 )
-                t.expires_at = datetime.now(timezone.utc).isoformat()
+                t.expires_at = now_iso
 
     # -- mutations ------------------------------------------------------------
 

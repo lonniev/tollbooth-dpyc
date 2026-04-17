@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -80,15 +81,14 @@ class NeonVault:
                 _sp = _options.split("search_path=", 1)[1].split("&")[0].split()[0]
                 _first = _sp.split(",")[0].strip()
                 if _first and _first != "public":
-                    import re as _re
-                    if not _re.match(r"^[a-z][a-z0-9_]*$", _first):
+                    if not re.match(r"^[a-z][a-z0-9_]*$", _first):
                         raise ValueError(f"Unsafe schema name in search_path: {_first!r}")
                     self._schema_prefix = f"{_first}."
                     logger.info("Neon: schema prefix = %s", self._schema_prefix)
         except ValueError:
-            raise  # propagate validation errors
-        except Exception:
-            pass
+            raise
+        except Exception as exc:
+            logger.debug("Schema prefix parsing skipped (non-fatal): %s", exc)
         self._client = httpx.AsyncClient(
             headers={
                 "Neon-Connection-String": database_url,

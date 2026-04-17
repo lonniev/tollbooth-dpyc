@@ -2511,8 +2511,8 @@ def register_standard_tools(
                 except ValueError:
                     pass  # unparseable → use cache default
 
-            from tollbooth.proven_npub import UNSET as _UNSET
-            record = await cache.mark_proven(sid, resolved, ttl_override=ttl_seconds if raw_duration else _UNSET)
+            from tollbooth.proven_npub import UNSET
+            record = await cache.mark_proven(sid, resolved, ttl_override=ttl_seconds if raw_duration else UNSET)
 
             ttl_display = int(record.expires_at - record.verified_at)
 
