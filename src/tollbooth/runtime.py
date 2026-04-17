@@ -2136,7 +2136,8 @@ def register_standard_tools(
                     [_cid_field, _csec_field],
                 )
             except Exception as e:
-                return {"success": False, "error": f"Operator credentials: {e}"}
+                logger.error("Failed to load operator credentials: %s", e, exc_info=True)
+                return {"success": False, "error": "Operator credentials could not be loaded. Check operator logs."}
 
             client_id = creds.get(_cid_field, "")
             client_secret = creds.get(_csec_field, "")
@@ -2173,7 +2174,8 @@ def register_standard_tools(
                     code_verifier=verifier,
                 )
             except Exception as e:
-                return {"success": False, "error": f"Token exchange failed: {e}"}
+                logger.error("Token exchange failed for %s: %s", resolved[:16], e, exc_info=True)
+                return {"success": False, "error": "Token exchange failed. Check operator logs."}
 
             # Build vault data from token
             vault_data = {
@@ -2509,15 +2511,10 @@ def register_standard_tools(
                 except ValueError:
                     pass  # unparseable → use cache default
 
-            from tollbooth.proven_npub import _UNSET
+            from tollbooth.proven_npub import UNSET as _UNSET
             record = await cache.mark_proven(sid, resolved, ttl_override=ttl_seconds if raw_duration else _UNSET)
 
-            if record.expires_at > 0:
-                ttl_display = int(record.expires_at - record.verified_at)
-                expires_msg = f"Cached for {ttl_display}s."
-            else:
-                ttl_display = 0
-                expires_msg = "Cached with no expiration."
+            ttl_display = int(record.expires_at - record.verified_at)
 
             return {
                 "success": True,
@@ -2529,7 +2526,7 @@ def register_standard_tools(
                     f"npub ownership verified via signed DM. "
                     f"Proof bound to this session. "
                     f"Cleaned {popped} DM(s) from relay. "
-                    f"{expires_msg}"
+                    f"Cached for {ttl_display}s."
                 ),
             }
         else:

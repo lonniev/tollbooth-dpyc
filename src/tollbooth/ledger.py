@@ -262,7 +262,13 @@ class UserLedger:
                 granted = datetime.fromisoformat(t.granted_at.replace("Z", "+00:00"))
                 t.expires_at = (granted + timedelta(seconds=tranche_lifetime_seconds)).isoformat()
             except (ValueError, TypeError):
-                pass
+                # Malformed granted_at — expire immediately. An unverifiable
+                # tranche must not be trusted with a lifetime extension.
+                logger.warning(
+                    "Tranche with malformed granted_at=%r expired immediately",
+                    t.granted_at,
+                )
+                t.expires_at = datetime.now(timezone.utc).isoformat()
 
     # -- mutations ------------------------------------------------------------
 

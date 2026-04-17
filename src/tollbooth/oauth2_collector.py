@@ -300,8 +300,8 @@ async def retrieve_code_from_collector(
         OAuthCollectorError: If decryption fails.
         httpx.HTTPStatusError: If the collector returns an unexpected error.
     """
-    stripped = collector_url.rstrip("/")
-    url = f"{stripped}/" if stripped.endswith("/mcp") else f"{stripped}/mcp/"
+    from tollbooth.shortlinks import _ensure_mcp_path
+    url = _ensure_mcp_path(collector_url)
     payload = {
         "jsonrpc": "2.0",
         "method": "tools/call",

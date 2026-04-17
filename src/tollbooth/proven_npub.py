@@ -26,9 +26,10 @@ from tollbooth.session_cache import SessionCache
 logger = logging.getLogger(__name__)
 
 DEFAULT_PROVEN_TTL = 7200  # 2 hours
+MAX_PROVEN_TTL = 86400  # 24 hours — hard cap, patron cannot exceed
 
 # Sentinel: "patron did not specify a duration"
-_UNSET: Any = object()
+UNSET: Any = object()
 
 # ---------------------------------------------------------------------------
 # Human-friendly duration parser
@@ -145,7 +146,7 @@ class ProvenNpubCache:
         record = self._cache.get(key)
 
         if record is not None:
-            if record.expires_at > 0 and time.time() > record.expires_at:
+            if time.time() > record.expires_at:
                 logger.warning(
                     "Proof cache EXPIRED for session=%s npub=%s — "
                     "verified_at=%.0f expires_at=%.0f now=%.0f (%.0fs overdue)",
@@ -165,7 +166,7 @@ class ProvenNpubCache:
         # In-memory miss — try vault restore
         if self._vault:
             record = await self._vault_fetch(session_id, npub)
-            if record is not None and (record.expires_at == 0 or time.time() < record.expires_at):
+            if record is not None and time.time() < record.expires_at:
                 self._cache.set(key, record)
                 remaining = record.expires_at - time.time()
                 logger.info(
@@ -191,24 +192,29 @@ class ProvenNpubCache:
         return False
 
     async def mark_proven(
-        self, session_id: str, npub: str, ttl_override: Any = _UNSET,
+        self, session_id: str, npub: str, ttl_override: Any = UNSET,
     ) -> ProvenNpub:
         """Cache an npub as ownership-proven on this session.
 
         Writes to both in-memory cache and vault (if configured).
+        The TTL is capped at ``MAX_PROVEN_TTL`` (24 hours) regardless
+        of what the patron requests.
 
         Args:
             session_id: The MCP transport session ID.
             npub: The patron's npub (bech32).
-            ttl_override: Seconds until expiry. ``None`` = unlimited.
-                Omit (or pass ``_UNSET``) to use the cache default.
+            ttl_override: Seconds until expiry. ``None`` or values
+                exceeding the cap are clamped to ``MAX_PROVEN_TTL``.
+                Omit (or pass ``UNSET``) to use the cache default.
 
         Returns:
             The cached ``ProvenNpub`` record.
         """
-        ttl = self._ttl if ttl_override is _UNSET else ttl_override
+        ttl = self._ttl if ttl_override is UNSET else ttl_override
+        if ttl is None or ttl > MAX_PROVEN_TTL:
+            ttl = MAX_PROVEN_TTL
         now = time.time()
-        expires_at = (now + ttl) if ttl is not None else 0.0
+        expires_at = now + ttl
         record = ProvenNpub(
             session_id=session_id,
             npub=npub,
