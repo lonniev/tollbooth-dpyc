@@ -70,7 +70,9 @@ def load_constraint(data: dict[str, Any]) -> ToolConstraint:
             f"Known types: {sorted(CONSTRAINT_REGISTRY)}"
         )
 
-    return cls.from_dict(data)
+    constraint = cls.from_dict(data)
+    constraint._patron_npubs = data.get("_patron_npubs", [])
+    return constraint
 
 
 def load_constraints(config: dict[str, Any]) -> ConstraintEngine:

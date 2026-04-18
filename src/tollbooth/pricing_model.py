@@ -142,16 +142,36 @@ class TrancheLifetime:
 
 @dataclass
 class PipelineStep:
-    """A single step in the constraint pipeline."""
+    """A single step in the constraint pipeline.
+
+    Scope fields control which tools and patrons this step applies to:
+    - ``tool_ids``: empty = all tools (wildcard). Non-empty = only these tools.
+    - ``patron_npubs``: empty = all patrons. Non-empty = only these patrons (max 10).
+    """
 
     id: str
     type: str  # must match a key in CONSTRAINT_REGISTRY
     params: dict[str, Any] = field(default_factory=dict)
+    tool_ids: list[str] = field(default_factory=list)
+    patron_npubs: list[str] = field(default_factory=list)
+
+    _MAX_PATRON_GROUP = 10
+
+    def __post_init__(self) -> None:
+        if len(self.patron_npubs) > self._MAX_PATRON_GROUP:
+            raise ValueError(
+                f"patron_npubs exceeds max group size of {self._MAX_PATRON_GROUP}. "
+                "Clone the constraint for additional patron groups."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"id": self.id, "type": self.type}
         if self.params:
             d["params"] = self.params
+        if self.tool_ids:
+            d["tool_ids"] = self.tool_ids
+        if self.patron_npubs:
+            d["patron_npubs"] = self.patron_npubs
         return d
 
     @classmethod
@@ -160,6 +180,8 @@ class PipelineStep:
             id=data["id"],
             type=data["type"],
             params=dict(data.get("params", {})),
+            tool_ids=list(data.get("tool_ids", [])),
+            patron_npubs=list(data.get("patron_npubs", [])),
         )
 
 
@@ -192,24 +214,30 @@ class PricingModel:
 
         Returns ``None`` if the pipeline is empty.
 
-        The pipeline steps are applied as wildcard (``"*"``) constraints
-        so they affect all tools uniformly.  Each step's ``type`` and
-        ``params`` are merged into a single constraint dict.
+        Steps with ``tool_ids`` are grouped under each tool ID.
+        Steps without are grouped under the wildcard ``"*"`` key.
+        Patron scoping (``patron_npubs``) is embedded in the constraint
+        entry as metadata for the gate to filter at evaluation time.
         """
         if not self.pipeline:
             return None
 
-        constraints: list[dict[str, Any]] = []
+        by_scope: dict[str, list[dict[str, Any]]] = {}
         for step in self.pipeline:
             entry: dict[str, Any] = {"type": step.type}
             entry.update(step.params)
-            constraints.append(entry)
+            if step.patron_npubs:
+                entry["_patron_npubs"] = step.patron_npubs
+            if step.tool_ids:
+                for tid in step.tool_ids:
+                    by_scope.setdefault(tid, []).append(entry)
+            else:
+                by_scope.setdefault("*", []).append(entry)
 
         return {
             "tool_constraints": {
-                "*": {
-                    "constraints": constraints,
-                },
+                scope: {"constraints": steps}
+                for scope, steps in by_scope.items()
             },
         }
 

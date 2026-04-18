@@ -59,6 +59,15 @@ class ConstraintEngine:
         applicable = list(self.constraints.get(tool_name, []))
         applicable.extend(self.constraints.get("*", []))
 
+        # Filter by patron scope — constraints with _patron_npubs only
+        # apply to the listed patrons; others apply to everyone.
+        patron_npub = context.patron.npub
+        applicable = [
+            c for c in applicable
+            if not getattr(c, "_patron_npubs", None)
+            or patron_npub in c._patron_npubs
+        ]
+
         if not applicable:
             return ConstraintResult(allowed=True)
 
