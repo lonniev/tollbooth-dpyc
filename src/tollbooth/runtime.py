@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import json
 import logging
 import os
 import signal
@@ -2181,8 +2182,11 @@ def register_standard_tools(
                 logger.error("Token exchange failed for %s: %s", resolved[:16], e, exc_info=True)
                 return {"success": False, "error": "Token exchange failed. Check operator logs."}
 
-            # Build vault data from token
+            # Build vault data from token.
+            # Store both the raw token_json (for operators that expect the
+            # full blob) and individual fields (for direct access).
             vault_data = {
+                "token_json": json.dumps(token),
                 "access_token": token.get("access_token", ""),
                 "token_type": token.get("token_type", "Bearer"),
             }
