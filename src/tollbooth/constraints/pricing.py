@@ -393,6 +393,9 @@ class HappyHourConstraint(ToolConstraint):
     call is still allowed — just without the discount.
     """
 
+    # Valid recurrence values
+    RECURRENCE_OPTIONS = ("never", "weekly", "biweekly", "monthly", "annually")
+
     def __init__(
         self,
         schedule_start: str,
@@ -402,6 +405,8 @@ class HappyHourConstraint(ToolConstraint):
         discount_percent: float = 0.0,
         discount_sats: int = 0,
         free: bool = False,
+        repeats_when: str = "weekly",
+        starts_on: str | None = None,
     ) -> None:
         self.schedule_start = schedule_start
         self.schedule_end = schedule_end
@@ -410,6 +415,8 @@ class HappyHourConstraint(ToolConstraint):
         self.discount_percent = discount_percent
         self.discount_sats = discount_sats
         self.free = free
+        self.repeats_when = repeats_when if repeats_when in self.RECURRENCE_OPTIONS else "weekly"
+        self.starts_on = starts_on  # ISO date, e.g. "2026-04-18"
         self._window = TemporalWindowConstraint(
             schedule_start=schedule_start,
             schedule_end=schedule_end,
@@ -417,7 +424,41 @@ class HappyHourConstraint(ToolConstraint):
             days_of_week=days_of_week,
         )
 
+    def _is_active_recurrence(self, context: ConstraintContext) -> bool:
+        """Check if today falls within the recurrence schedule."""
+        if self.repeats_when == "weekly":
+            return True  # days_of_week handles weekly filtering
+        if self.repeats_when == "never":
+            # One-shot: only active on starts_on date
+            if not self.starts_on:
+                return True  # no start date = always (treat as weekly)
+            today = context.env.utc_now.astimezone(
+                __import__("zoneinfo").ZoneInfo(self.timezone)
+            ).date().isoformat()
+            return today == self.starts_on
+        if not self.starts_on:
+            return True  # can't compute recurrence without a start date
+        from datetime import date as _date
+        start = _date.fromisoformat(self.starts_on)
+        local_date = context.env.utc_now.astimezone(
+            __import__("zoneinfo").ZoneInfo(self.timezone)
+        ).date()
+        if self.repeats_when == "biweekly":
+            delta_days = (local_date - start).days
+            week_num = delta_days // 7
+            return week_num % 2 == 0
+        if self.repeats_when == "monthly":
+            return local_date.day == start.day
+        if self.repeats_when == "annually":
+            return local_date.month == start.month and local_date.day == start.day
+        return True
+
     def evaluate(self, context: ConstraintContext) -> ConstraintResult:
+        if not self._is_active_recurrence(context):
+            return ConstraintResult(
+                allowed=True,
+                metadata={"happy_hour_active": False, "recurrence_skip": True},
+            )
         window_result = self._window.evaluate(context)
         if window_result.allowed:
             # Inside the window — apply discount
@@ -461,6 +502,10 @@ class HappyHourConstraint(ToolConstraint):
             d["discount_sats"] = self.discount_sats
         if self.free:
             d["free"] = True
+        if self.repeats_when != "weekly":
+            d["repeats_when"] = self.repeats_when
+        if self.starts_on:
+            d["starts_on"] = self.starts_on
         return d
 
     @classmethod
@@ -473,6 +518,8 @@ class HappyHourConstraint(ToolConstraint):
             discount_percent=float(data.get("discount_percent", 0.0)),
             discount_sats=int(data.get("discount_sats", 0)),
             free=bool(data.get("free", False)),
+            repeats_when=data.get("repeats_when", "weekly"),
+            starts_on=data.get("starts_on"),
         )
 
     @classmethod
@@ -489,5 +536,7 @@ class HappyHourConstraint(ToolConstraint):
                 ParamSchema(name="discount_percent", type="float", required=False, default=0.0, description="Percentage discount (0-100)."),
                 ParamSchema(name="discount_sats", type="int", required=False, default=0, description="Absolute discount in api-sats."),
                 ParamSchema(name="free", type="bool", required=False, default=False, description="If true, the tool call is free during happy hour."),
+                ParamSchema(name="repeats_when", type="string", required=False, default="weekly", description="Recurrence: never, weekly, biweekly, monthly, annually."),
+                ParamSchema(name="starts_on", type="string", required=False, description="Start date (YYYY-MM-DD) for recurrence calculation. Required for never/biweekly/monthly/annually."),
             ],
         )
