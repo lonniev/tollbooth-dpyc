@@ -346,7 +346,7 @@ class TestBulkBonusSerialization:
 class TestHappyHourConstraint:
     def test_during_happy_hour(self):
         c = HappyHourConstraint(
-            schedule="11:00-14:00",
+            schedule_start="11:00", schedule_end="14:00",
             discount_percent=50.0,
         )
         result = c.evaluate(_ctx())  # 12:00 UTC
@@ -357,7 +357,7 @@ class TestHappyHourConstraint:
 
     def test_outside_happy_hour(self):
         c = HappyHourConstraint(
-            schedule="14:00-16:00",
+            schedule_start="14:00", schedule_end="16:00",
             discount_percent=50.0,
         )
         result = c.evaluate(_ctx())  # 12:00 UTC
@@ -367,7 +367,7 @@ class TestHappyHourConstraint:
 
     def test_free_happy_hour(self):
         c = HappyHourConstraint(
-            schedule="11:00-14:00",
+            schedule_start="11:00", schedule_end="14:00",
             free=True,
         )
         result = c.evaluate(_ctx())
@@ -376,7 +376,7 @@ class TestHappyHourConstraint:
     def test_with_timezone(self):
         # 12:00 UTC = 07:00 US/Eastern (EST)
         c = HappyHourConstraint(
-            schedule="08:00-17:00",
+            schedule_start="08:00", schedule_end="17:00",
             timezone="US/Eastern",
             discount_percent=25.0,
         )
@@ -386,7 +386,7 @@ class TestHappyHourConstraint:
     def test_with_days_of_week(self):
         # 2026-03-01 is Sunday (weekday=6)
         c = HappyHourConstraint(
-            schedule="00:00-23:59",
+            schedule_start="00:00", schedule_end="23:59",
             days_of_week=[0, 1, 2, 3, 4],  # Mon-Fri only
             discount_percent=30.0,
         )
@@ -398,30 +398,32 @@ class TestHappyHourConstraint:
 class TestHappyHourSerialization:
     def test_to_dict(self):
         c = HappyHourConstraint(
-            schedule="11:00-14:00",
+            schedule_start="11:00", schedule_end="14:00",
             timezone="US/Eastern",
             discount_percent=25.0,
         )
         d = c.to_dict()
         assert d["type"] == "happy_hour"
-        assert d["schedule"] == "11:00-14:00"
+        assert d["schedule_start"] == "11:00"
+        assert d["schedule_end"] == "14:00"
         assert d["discount_percent"] == 25.0
 
     def test_round_trip(self):
         c = HappyHourConstraint(
-            schedule="18:00-22:00",
+            schedule_start="18:00", schedule_end="22:00",
             timezone="Europe/Berlin",
             days_of_week=[4, 5],
             discount_sats=50,
         )
         restored = HappyHourConstraint.from_dict(c.to_dict())
-        assert restored.schedule == "18:00-22:00"
+        assert restored.schedule_start == "18:00"
+        assert restored.schedule_end == "22:00"
         assert restored.timezone == "Europe/Berlin"
         assert restored.days_of_week == [4, 5]
         assert restored.discount_sats == 50
 
     def test_describe(self):
-        c = HappyHourConstraint(schedule="17:00-19:00", discount_percent=40.0)
+        c = HappyHourConstraint(schedule_start="17:00", schedule_end="19:00", discount_percent=40.0)
         desc = c.describe()
         assert "17:00-19:00" in desc
         assert "40" in desc

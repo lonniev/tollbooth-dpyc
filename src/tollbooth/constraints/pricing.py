@@ -395,21 +395,24 @@ class HappyHourConstraint(ToolConstraint):
 
     def __init__(
         self,
-        schedule: str,
+        schedule_start: str,
+        schedule_end: str,
         timezone: str = "UTC",
         days_of_week: list[int] | None = None,
         discount_percent: float = 0.0,
         discount_sats: int = 0,
         free: bool = False,
     ) -> None:
-        self.schedule = schedule
+        self.schedule_start = schedule_start
+        self.schedule_end = schedule_end
         self.timezone = timezone
         self.days_of_week = days_of_week
         self.discount_percent = discount_percent
         self.discount_sats = discount_sats
         self.free = free
         self._window = TemporalWindowConstraint(
-            schedule=schedule,
+            schedule_start=schedule_start,
+            schedule_end=schedule_end,
             timezone=timezone,
             days_of_week=days_of_week,
         )
@@ -434,7 +437,7 @@ class HappyHourConstraint(ToolConstraint):
         )
 
     def describe(self) -> str:
-        parts = [f"Happy hour {self.schedule} {self.timezone}:"]
+        parts = [f"Happy hour {self.schedule_start}-{self.schedule_end} {self.timezone}:"]
         if self.free:
             parts.append("free")
         elif self.discount_percent:
@@ -446,7 +449,8 @@ class HappyHourConstraint(ToolConstraint):
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
             "type": "happy_hour",
-            "schedule": self.schedule,
+            "schedule_start": self.schedule_start,
+            "schedule_end": self.schedule_end,
             "timezone": self.timezone,
         }
         if self.days_of_week is not None:
@@ -461,13 +465,9 @@ class HappyHourConstraint(ToolConstraint):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HappyHourConstraint:
-        # Accept either "schedule" ("HH:MM-HH:MM") or separate
-        # "schedule_start"/"schedule_end" fields from the Pricing Studio.
-        schedule = data.get("schedule", "")
-        if not schedule and data.get("schedule_start") and data.get("schedule_end"):
-            schedule = f"{data['schedule_start']}-{data['schedule_end']}"
         return cls(
-            schedule=schedule,
+            schedule_start=data["schedule_start"],
+            schedule_end=data["schedule_end"],
             timezone=data.get("timezone", "UTC"),
             days_of_week=data.get("days_of_week"),
             discount_percent=float(data.get("discount_percent", 0.0)),
@@ -482,7 +482,8 @@ class HappyHourConstraint(ToolConstraint):
             category="Pricing",
             description="Apply a pricing discount during a temporal window. Outside the window, calls are still allowed at full price.",
             params=[
-                ParamSchema(name="schedule", type="schedule", description="HH:MM-HH:MM time range (24-hour)."),
+                ParamSchema(name="schedule_start", type="schedule", description="Start time HH:MM (24-hour)."),
+                ParamSchema(name="schedule_end", type="schedule", description="End time HH:MM (24-hour)."),
                 ParamSchema(name="timezone", type="timezone", required=False, default="UTC", description="IANA timezone name."),
                 ParamSchema(name="days_of_week", type="string", required=False, description="List of weekday numbers (0=Mon..6=Sun)."),
                 ParamSchema(name="discount_percent", type="float", required=False, default=0.0, description="Percentage discount (0-100)."),

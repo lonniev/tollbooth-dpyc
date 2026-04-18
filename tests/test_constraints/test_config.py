@@ -71,7 +71,8 @@ class TestLoadConstraint:
     def test_temporal_window(self):
         c = load_constraint({
             "type": "temporal_window",
-            "schedule": "08:00-21:00",
+            "schedule_start": "08:00",
+            "schedule_end": "21:00",
             "timezone": "UTC",
         })
         assert isinstance(c, TemporalWindowConstraint)
@@ -92,7 +93,7 @@ class TestLoadConstraint:
 
     def test_missing_type(self):
         with pytest.raises(ConfigError, match="missing 'type'"):
-            load_constraint({"schedule": "08:00-21:00"})
+            load_constraint({"schedule_start": "08:00", "schedule_end": "21:00"})
 
     def test_unknown_type(self):
         with pytest.raises(ConfigError, match="Unknown constraint type"):
@@ -110,7 +111,7 @@ class TestLoadConstraints:
             "tool_constraints": {
                 "fetch_whitepaper": {
                     "constraints": [
-                        {"type": "temporal_window", "schedule": "08:00-21:00"},
+                        {"type": "temporal_window", "schedule_start": "08:00", "schedule_end": "21:00"},
                         {"type": "free_trial", "first_n_free": 3},
                     ],
                     "logic": "ALL_MUST_PASS",
@@ -179,7 +180,7 @@ class TestLoadConstraints:
             "tool_constraints": {
                 "my_tool": {
                     "constraints": [
-                        {"type": "temporal_window", "schedule": "08:00-21:00"},
+                        {"type": "temporal_window", "schedule_start": "08:00", "schedule_end": "21:00"},
                         {"type": "free_trial", "first_n_free": 3},
                     ],
                     "logic": "ALL_MUST_PASS",
@@ -197,7 +198,7 @@ class TestLoadConstraints:
             "tool_constraints": {
                 "my_tool": {
                     "constraints": [
-                        {"type": "temporal_window", "schedule": "08:00-10:00"},
+                        {"type": "temporal_window", "schedule_start": "08:00", "schedule_end": "10:00"},
                     ],
                     "logic": "ALL_MUST_PASS",
                 }

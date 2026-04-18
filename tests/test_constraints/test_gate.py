@@ -66,7 +66,7 @@ def _coupon_config(discount_percent: float = 50.0) -> str:
     )
 
 
-def _temporal_window_config(schedule: str = "09:00-17:00") -> str:
+def _temporal_window_config(start: str = "09:00", end: str = "17:00") -> str:
     """Return a JSON config with a temporal window on 'search'."""
     return json.dumps(
         {
@@ -75,7 +75,8 @@ def _temporal_window_config(schedule: str = "09:00-17:00") -> str:
                     "constraints": [
                         {
                             "type": "temporal_window",
-                            "schedule": schedule,
+                            "schedule_start": start,
+                            "schedule_end": end,
                             "timezone": "UTC",
                         }
                     ]
@@ -262,7 +263,7 @@ class TestEnabledDeniesTemporalWindow:
         """Outside window returns (error_dict, 0) with retry_after."""
         config = TollboothConfig(
             constraints_enabled=True,
-            constraints_config=_temporal_window_config("09:00-17:00"),
+            constraints_config=_temporal_window_config("09:00", "17:00"),
         )
         gate = ConstraintGate(config)
 

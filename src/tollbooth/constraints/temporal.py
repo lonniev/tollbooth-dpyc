@@ -32,17 +32,17 @@ class TemporalWindowConstraint(ToolConstraint):
 
     def __init__(
         self,
-        schedule: str,
+        schedule_start: str,
+        schedule_end: str,
         timezone: str = "UTC",
         days_of_week: list[int] | None = None,
     ) -> None:
-        self.schedule = schedule
+        self.schedule_start = schedule_start
+        self.schedule_end = schedule_end
         self.timezone = timezone
         self.days_of_week = days_of_week
-        # pre-parse schedule
-        start_s, end_s = schedule.split("-")
-        sh, sm = (int(x) for x in start_s.strip().split(":"))
-        eh, em = (int(x) for x in end_s.strip().split(":"))
+        sh, sm = (int(x) for x in schedule_start.strip().split(":"))
+        eh, em = (int(x) for x in schedule_end.strip().split(":"))
         self._start_minutes = sh * 60 + sm
         self._end_minutes = eh * 60 + em
         self._tz = ZoneInfo(timezone)
@@ -69,12 +69,12 @@ class TemporalWindowConstraint(ToolConstraint):
         return ConstraintResult(
             allowed=False,
             reason="outside_window",
-            message=f"Tool available {self.schedule} {self.timezone}.",
+            message=f"Tool available {self.schedule_start}-{self.schedule_end} {self.timezone}.",
             retry_after=self._next_open(local_dt),
         )
 
     def describe(self) -> str:
-        parts = [f"Available {self.schedule} {self.timezone}"]
+        parts = [f"Available {self.schedule_start}-{self.schedule_end} {self.timezone}"]
         if self.days_of_week is not None:
             day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
             names = [day_names[d] for d in sorted(self.days_of_week)]
@@ -84,7 +84,8 @@ class TemporalWindowConstraint(ToolConstraint):
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
             "type": "temporal_window",
-            "schedule": self.schedule,
+            "schedule_start": self.schedule_start,
+            "schedule_end": self.schedule_end,
             "timezone": self.timezone,
         }
         if self.days_of_week is not None:
@@ -93,11 +94,9 @@ class TemporalWindowConstraint(ToolConstraint):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TemporalWindowConstraint:
-        schedule = data.get("schedule", "")
-        if not schedule and data.get("schedule_start") and data.get("schedule_end"):
-            schedule = f"{data['schedule_start']}-{data['schedule_end']}"
         return cls(
-            schedule=schedule,
+            schedule_start=data["schedule_start"],
+            schedule_end=data["schedule_end"],
             timezone=data.get("timezone", "UTC"),
             days_of_week=data.get("days_of_week"),
         )
@@ -109,7 +108,8 @@ class TemporalWindowConstraint(ToolConstraint):
             category="Access",
             description="Restrict tool access to a time-of-day window, optionally on specific days of the week.",
             params=[
-                ParamSchema(name="schedule", type="schedule", description="HH:MM-HH:MM time range (24-hour). Wraps midnight when end < start."),
+                ParamSchema(name="schedule_start", type="schedule", description="Start time HH:MM (24-hour)."),
+                ParamSchema(name="schedule_end", type="schedule", description="End time HH:MM (24-hour). Wraps midnight when end < start."),
                 ParamSchema(name="timezone", type="timezone", required=False, default="UTC", description="IANA timezone name (e.g. US/Eastern)."),
                 ParamSchema(name="days_of_week", type="string", required=False, description="List of weekday numbers (0=Mon..6=Sun). Omit for every day."),
             ],
