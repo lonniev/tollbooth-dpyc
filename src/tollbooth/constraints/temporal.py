@@ -93,8 +93,11 @@ class TemporalWindowConstraint(ToolConstraint):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TemporalWindowConstraint:
+        schedule = data.get("schedule", "")
+        if not schedule and data.get("schedule_start") and data.get("schedule_end"):
+            schedule = f"{data['schedule_start']}-{data['schedule_end']}"
         return cls(
-            schedule=data["schedule"],
+            schedule=schedule,
             timezone=data.get("timezone", "UTC"),
             days_of_week=data.get("days_of_week"),
         )

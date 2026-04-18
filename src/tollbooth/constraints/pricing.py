@@ -461,8 +461,13 @@ class HappyHourConstraint(ToolConstraint):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HappyHourConstraint:
+        # Accept either "schedule" ("HH:MM-HH:MM") or separate
+        # "schedule_start"/"schedule_end" fields from the Pricing Studio.
+        schedule = data.get("schedule", "")
+        if not schedule and data.get("schedule_start") and data.get("schedule_end"):
+            schedule = f"{data['schedule_start']}-{data['schedule_end']}"
         return cls(
-            schedule=data["schedule"],
+            schedule=schedule,
             timezone=data.get("timezone", "UTC"),
             days_of_week=data.get("days_of_week"),
             discount_percent=float(data.get("discount_percent", 0.0)),
