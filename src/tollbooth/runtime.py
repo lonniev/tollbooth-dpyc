@@ -2201,9 +2201,17 @@ def register_standard_tools(
                     return {"success": False, "error": f"Post-token callback: {e}"}
 
             # Persist tokens to vault
-            await rt.store_patron_session(
+            stored = await rt.store_patron_session(
                 resolved, vault_data, service=_OAUTH_SERVICE,
             )
+            if not stored:
+                return {
+                    "success": False,
+                    "error": (
+                        "OAuth tokens received but could not be persisted to the vault. "
+                        "This is a server-side storage issue — try again or check operator logs."
+                    ),
+                }
 
             return {
                 "success": True,
