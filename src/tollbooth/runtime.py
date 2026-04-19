@@ -655,32 +655,52 @@ class OperatorRuntime:
             npub = ""
 
         # ── Constraints ───────────────────────────────────────
-        # The pipeline applies to every non-restricted tool —
-        # including free ones.  proof verification, rate
-        # limits, temporal windows, etc. can tighten access but
-        # never loosen the code-declared category floor.
-        # Without an npub, constraints cannot be evaluated.
+        # The pipeline applies to every non-restricted tool.
+        # Constraints can modify the effective cost (discounts,
+        # free, surge) or deny access (temporal windows, rate
+        # limits). Without an npub, constraints cannot evaluate.
         effective_cost = cost
-        if npub and self._constraint_gate and self._constraint_gate.enabled:
+        if npub and category != "free":
             try:
-                cache = await self.ledger_cache()
-                ledger = await cache.get(npub)
-                denial, effective_cost = self._constraint_gate.check(
-                    tool_name=name,
-                    base_cost=cost,
-                    ledger=ledger,
-                    npub=npub,
-                    proof=proof,
-                )
-                if denial:
-                    return denial
-            except Exception:
-                if category != "free":
-                    return {
-                        "success": False,
-                        "error": "Service unavailable — cannot evaluate constraints.",
-                    }
-                logger.debug("Constraint evaluation skipped for free tool %s", name)
+                resolver = await self.pricing_resolver()
+                engine = resolver._cached_engine
+                if engine is not None:
+                    from tollbooth.constraints.base import (
+                        ConstraintContext, LedgerSnapshot, PatronIdentity, EnvironmentSnapshot,
+                    )
+                    cache = await self.ledger_cache()
+                    ledger = await cache.get(npub)
+                    demand = await self.get_global_demand(name)
+                    context = ConstraintContext(
+                        ledger=LedgerSnapshot(
+                            balance_api_sats=ledger.balance_api_sats,
+                            total_deposited_api_sats=ledger.total_deposited_api_sats,
+                            total_consumed_api_sats=ledger.total_consumed_api_sats,
+                            total_expired_api_sats=ledger.total_expired_api_sats,
+                        ),
+                        patron=PatronIdentity(npub=npub),
+                        env=EnvironmentSnapshot(
+                            utc_now=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+                            tool_name=name,
+                            global_demand=tuple(demand.items()),
+                        ),
+                        proof=proof,
+                    )
+                    result = engine.evaluate(name, context)
+                    if not result.allowed:
+                        error: dict[str, Any] = {
+                            "success": False,
+                            "error": result.message or f"Constraint denied: {result.reason}",
+                            "constraint_reason": result.reason,
+                        }
+                        if result.retry_after:
+                            error["retry_after"] = result.retry_after.isoformat()
+                        return error
+                    if result.price_modifier:
+                        effective_cost = result.price_modifier.apply_to(cost)
+            except Exception as exc:
+                logger.warning("Constraint evaluation failed for %s: %s", name, exc)
+                # Fall through with base cost — don't block the call
 
         # ── No charge ─────────────────────────────────────────
         if effective_cost == 0:
