@@ -119,7 +119,7 @@ Every tool that accepts an `npub` also requires a `proof` parameter — a JSON-s
 }
 ```
 
-Verify with `identity_proof.verify_proof(proof_json, expected_npub, tool_name)`. The proof must be less than 60 seconds old by default.
+Verify with `identity_proof.verify_proof(proof_json, expected_npub, tool_name)`. Inline proofs must be less than 60 seconds old. Cached proofs (via `ProvenNpubCache`) support patron-chosen TTL up to 24 hours via the `cache_duration` field in the proof DM. Consumed proof event IDs are tracked to prevent replay within the 60-second window.
 
 ### Certificates & Verification
 
@@ -158,8 +158,8 @@ Verify with `identity_proof.verify_proof(proof_json, expected_npub, tool_name)`.
 | Module | Purpose |
 |--------|---------|
 | `TheBrainVault` | Stores ledger state as thought notes in a TheBrain knowledge graph. Daily-child pattern with link-based member discovery. |
-| `NeonVault` | Neon serverless Postgres with ACID transactions, optimistic concurrency, and append-only audit journal. |
-| `NeonCredentialVault` | Credential storage on Neon Postgres (implements `CredentialVaultBackend`). |
+| `NeonVault` | Neon serverless Postgres with ACID transactions, optimistic concurrency, AES-256-GCM vault encryption (with AAD), and schema-qualified table names via `_t()`. |
+| `NeonCredentialVault` | Schema-aware credential storage on Neon Postgres (implements `CredentialVaultBackend`). Uses `_t()` for all table references. |
 | `CredentialVaultBackend` | Protocol for pluggable credential storage (store/fetch/delete by service+npub). |
 
 Implement the `VaultBackend` Protocol to add your own (Redis, S3, SQLite, etc.).
@@ -189,15 +189,17 @@ Implement the `VaultBackend` Protocol to add your own (Redis, S3, SQLite, etc.).
 | Module | Purpose |
 |--------|---------|
 | `ConstraintEngine` | Evaluates constraint lists with configurable logic: `ALL_MUST_PASS`, `ANY_MUST_PASS`, `FIRST_MATCH`. |
-| `ConstraintGate` | Drop-in middleware integrating constraints with the `_debit_or_deny` pattern. |
-| `TemporalWindowConstraint` | Time-of-day / day-of-week access windows. |
+| `ConstraintEngine` | Evaluates constraints with `ALL_MUST_PASS`, `ANY_MUST_PASS`, `FIRST_MATCH` logic. Used by `debit_or_deny` via the pricing resolver. |
+| `TemporalWindowConstraint` | Time-of-day / day-of-week access windows (`schedule_start`/`schedule_end`). |
 | `FiniteSupplyConstraint` | Total call quotas per patron or globally. |
 | `PeriodicRefreshConstraint` | ISO-8601 duration refresh windows (e.g., "10 calls per hour"). |
 | `CouponConstraint` | Code-based discounts with expiration and redemption limits. |
 | `FreeTrialConstraint` | First N invocations free per patron. |
 | `LoyaltyDiscountConstraint` | Spend-based tiered discounts. |
 | `BulkBonusConstraint` | Volume bonuses on credit purchases. |
-| `HappyHourConstraint` | Time-based discount windows. |
+| `HappyHourConstraint` | Time-windowed free/discount with recurrence (`in_effect`/`until`/`repeats`/`apply_on`). |
+| `SurgePricingConstraint` | Demand-elastic pricing via global demand counters. |
+| `PatronProofConstraint` | Per-call Schnorr proof for high-value tools. |
 | `JsonExpressionConstraint` | Safe tree-based boolean logic evaluator for custom rules. |
 
 ### OpenTimestamps Bitcoin Anchoring
@@ -247,9 +249,9 @@ async with BTCPayClient(config.btcpay_host, config.btcpay_api_key, config.btcpay
 | `btcpay_user_tiers` | `str \| None` | `None` | JSON string mapping user IDs to tier names |
 | `seed_balance_sats` | `int` | `0` | Free starter balance granted to new users (0 to disable) |
 | `authority_public_key` | `str \| None` | `None` | Authority's Nostr npub (Schnorr certificates) or Ed25519 public key (legacy JWT). Required for `purchase_credits`. |
-| `credit_ttl_seconds` | `int \| None` | `None` | Credit expiration in seconds. `None` = no expiration. |
-| `constraints_enabled` | `bool` | `False` | Enable constraint engine evaluation on tool calls. |
-| `constraints_config` | `str \| None` | `None` | JSON constraint configuration (see Constraint Engine section). |
+| `credit_ttl_seconds` | `int \| None` | `None` | Default tranche lifetime in seconds. Overridden by `TrancheLifetime` in the pricing model when set. |
+| `constraints_enabled` | `bool` | `False` | Enable static constraint engine (legacy). Modern operators use the pricing model pipeline instead. |
+| `constraints_config` | `str \| None` | `None` | Static constraint JSON (legacy). Modern operators configure constraints in the pricing model. |
 
 ## The Certification Fee Cascade
 
@@ -259,7 +261,7 @@ When a user purchases credits, the settlement involves a certification cascade:
 
 1. **Milo** pays the operator's Lightning invoice for the full requested amount
 2. **The operator** holds a pre-funded cert-sat balance at their Authority
-3. **The Authority** deducts a 2% certification fee from the operator's reserve when signing the purchase certificate
+3. **The Authority** deducts a configurable certification fee (default 2%) from the operator's reserve when signing the purchase certificate
 4. **Each Authority** is itself an operator of its upstream Authority — the same 2% fee cascades up through the chain to the Prime Authority
 
 The certification fee is the operator's cost of doing business — Milo always receives exactly the credits they paid for. The operator pre-funds their Authority reserve and treats the fee as overhead, just like payment processing costs.
@@ -268,7 +270,7 @@ The certification fee is the operator's cost of doing business — Milo always r
 
 **For Milo (the user):** Nothing changes. Buy credits, use tools, drive the turnpike. The invoice is always for the full amount requested.
 
-**For the operator:** A free, production-tested monetization framework. No license fee. The 2% certification fee is a cost of doing business — pre-fund your Authority reserve and forget about it.
+**For the operator:** A free, production-tested monetization framework. No license fee. The certification fee (configurable per Authority, default 2%) is a cost of doing business — pre-fund your Authority reserve and forget about it.
 
 **For the ecosystem:** Revenue scales with adoption, not effort. Every new MCP server that installs Tollbooth becomes a node in the Lightning economy. The fee cascade flows naturally through the Authority chain — no direct payouts, no separate settlement channels.
 
@@ -341,20 +343,27 @@ result = await client.call_tool("get_tax_rate")
 
 ## Constraint Engine
 
-The constraint engine lets operators define access rules and pricing modifiers for their tools. Constraints are evaluated before every tool call via `ConstraintGate`.
+The constraint engine lets operators define pricing rules and access controls. Constraints are configured in the pricing model's pipeline and evaluated by `debit_or_deny` on every paid tool call. The effective cost (after discounts, free trials, surge) is what the patron pays.
 
 **Evaluation modes:** `ALL_MUST_PASS` (default), `ANY_MUST_PASS`, `FIRST_MATCH`.
 
-Configure via JSON:
+**Scoping:** Each pipeline step can target specific tools (`tool_ids`) and/or specific patrons (`patron_npubs`, max 10 per step). Unscoped steps apply to all tools and patrons.
+
+Example pricing model pipeline:
 
 ```json
 {
-  "constraints": [
-    {"type": "free_trial", "max_free_calls": 5},
-    {"type": "temporal_window", "start_hour": 9, "end_hour": 17, "timezone": "US/Eastern"},
-    {"type": "happy_hour", "start_hour": 17, "end_hour": 19, "discount_percent": 50}
-  ],
-  "mode": "ALL_MUST_PASS"
+  "pipeline": [
+    {"id": "1", "type": "free_trial", "params": {"first_n_free": 5}},
+    {"id": "2", "type": "happy_hour", "params": {
+      "in_effect": "11:00", "until": "14:00",
+      "timezone": "America/New_York", "free": true,
+      "repeats": "weekly"
+    }},
+    {"id": "3", "type": "surge_pricing", "params": {
+      "max_capacity": 100, "tiers": [{"capacity_pct": 0.8, "multiplier": 1.5}]
+    }, "tool_ids": ["uuid-of-heavy-tool"]}
+  ]
 }
 ```
 
