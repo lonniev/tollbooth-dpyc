@@ -382,7 +382,7 @@ On first-time relay receipt, the service automatically sends the `ncred1...` cre
 
 Anchor ledger state to the Bitcoin blockchain for irrefutable, timestamped proofs. `MerkleTree` builds a SHA-256 tree over all `(npub, ledger_json)` entries. `OTSCalendarClient` submits the root hash to public OTS calendar servers (no API key required). `InclusionProof` provides verifiable Merkle proofs for individual patron entries.
 
-## DPYC Identity (Nostr npub)
+## DPYC Identity & Environment
 
 Every participant in the Tollbooth ecosystem — Authorities, Operators, and Users — is identified by a [Nostr](https://nostr.com/) keypair. The `npub` (public key) is your identity on the DPYC Honor Chain. The `nsec` (private key) stays with you — never shared, never sent to a service.
 
@@ -393,14 +393,33 @@ pip install nostr-sdk
 python scripts/generate_nostr_keypair.py
 ```
 
-Then set the appropriate environment variable in your `.env`:
+### Environment Variables
 
-| Role | Variable | Purpose |
-|------|----------|---------|
-| Authority | `DPYC_AUTHORITY_NPUB` | This Authority's identity on the Honor Chain |
-| Authority | `DPYC_UPSTREAM_AUTHORITY_NPUB` | The Authority above in the chain (empty for Prime) |
-| Operator | `DPYC_OPERATOR_NPUB` | This Operator's identity on the Honor Chain |
-| Operator | `DPYC_AUTHORITY_NPUB` | The Authority this Operator is registered with |
+| Variable | Who sets it | Purpose |
+|----------|------------|---------|
+| `TOLLBOOTH_NOSTR_OPERATOR_NSEC` | All operators & Authority | The single bootstrap key. Identity, Secure Courier DMs, audit signing. |
+| `NEON_DATABASE_URL` | Trust-root operators only (`purchase_mode="direct"`) | Neon Postgres URL. Authority reads this from env. |
+| `TOLLBOOTH_NOSTR_RELAYS` | Optional | Comma-separated relay URLs (overrides defaults) |
+
+Certified operators (`purchase_mode="certified"`, the default) do **not** read `NEON_DATABASE_URL` from the environment. They bootstrap it from the Authority via encrypted Nostr DM (`get_operator_config`). All operator and patron credentials (API keys, tokens, BTCPay connection) flow through Secure Courier — never env vars.
+
+FastMCP Cloud platform variables (like `PORT`, `HOST`) are injected by the platform and are not operator-configured.
+
+### Neon Schema Isolation
+
+The Authority uses the `authority` schema. Each certified operator receives an isolated schema (`op_{hash}`) with a dedicated Postgres LOGIN role, provisioned by `register_operator`. `NeonCredentialVault` is schema-aware via the `_t()` helper, which qualifies table names with the operator's schema prefix.
+
+### Key Runtime Conventions
+
+| Concept | Detail |
+|---------|--------|
+| **TrancheLifetime** | Credit expiry uses `tranche_lifetime` (not "demurrage"). Each purchase creates a tranche that expires after the configured lifetime. FIFO consumption. |
+| **Constraint scoping** | Constraints can target specific tools (`tool_ids` list) and/or specific patrons (`patron_npubs` list, max 10). |
+| **Schedule fields** | `schedule_start` and `schedule_end` are separate ISO-8601 fields (not a concatenated "schedule" string). |
+| **Happy Hour** | Fields: `in_effect`, `until`, `percent_off`, `max_discount`, `repeats`, `apply_on`. |
+| **ProvenNpubCache** | Patron-chosen TTL via `parse_duration`. Hard cap of 24 hours. `UNSET` sentinel distinguishes "never set" from "expired". |
+| **OAuth vendor mapping** | `client_id_field` / `client_secret_field` on credential templates map vendor-specific names (e.g., Schwab's `app_key`/`secret`) to OAuth `client_id`/`client_secret`. |
+| **Shortlinks** | `_ensure_mcp_path` prevents double `/mcp/` in URLs when constructing OAuth redirect URIs. |
 
 Users provide their npub via the Secure Courier credential exchange flow — no env var needed.
 
