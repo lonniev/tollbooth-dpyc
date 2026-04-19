@@ -63,43 +63,69 @@ class PricingResolver:
         """True if we have successfully reached Neon at least once."""
         return self._neon_available
 
+    _HYDRATION_RETRIES = 3
+    _HYDRATION_BACKOFF = 2.0  # seconds between retries
+
     async def _ensure_fresh(self) -> None:
-        """Refresh the cache if stale.  Neon failure denies all paid tools."""
+        """Refresh the cache if stale.
+
+        On cold start, retries up to 3 times with backoff to absorb
+        the Neon connection warm-up delay rather than rejecting the
+        caller's first request.
+        """
         if not self._is_stale():
             return
 
-        try:
-            model = await self._store.fetch_active_model(self._operator)
-            self._neon_available = True
-            self._cached_model = model
-            if model is not None:
-                self._cached_cost_map = model.tool_cost_map()
-                self._cached_tool_ids = model.tool_id_set()
-                self._cached_priced_map = model.tool_priced_map()
-                constraint_cfg = model.to_constraint_config()
-                if constraint_cfg is not None:
-                    self._cached_engine = load_constraints(constraint_cfg)
+        import asyncio
+        last_exc: Exception | None = None
+
+        for attempt in range(self._HYDRATION_RETRIES):
+            try:
+                model = await self._store.fetch_active_model(self._operator)
+                self._neon_available = True
+                self._cached_model = model
+                if model is not None:
+                    self._cached_cost_map = model.tool_cost_map()
+                    self._cached_tool_ids = model.tool_id_set()
+                    self._cached_priced_map = model.tool_priced_map()
+                    constraint_cfg = model.to_constraint_config()
+                    if constraint_cfg is not None:
+                        self._cached_engine = load_constraints(constraint_cfg)
+                    else:
+                        self._cached_engine = None
                 else:
+                    self._cached_cost_map = None
+                    self._cached_tool_ids = None
+                    self._cached_priced_map = None
                     self._cached_engine = None
-            else:
-                self._cached_cost_map = None
-                self._cached_tool_ids = None
-                self._cached_priced_map = None
-                self._cached_engine = None
-            self._cache_ts = time.monotonic()
-        except Exception as exc:
-            logger.warning(
-                "Pricing model load failed for %s (%s: %s) — paid tools denied until retry",
-                self._operator, type(exc).__name__, exc,
-            )
-            self._neon_available = False
-            self._cached_model = None
-            self._cached_cost_map = None
-            self._cached_tool_ids = None
-            self._cached_priced_map = None
-            self._cached_engine = None
-            # Retry on next call — don't cache the failure
-            self._cache_ts = -self._cache_ttl - 1.0
+                self._cache_ts = time.monotonic()
+                if attempt > 0:
+                    logger.info(
+                        "Pricing model loaded for %s on attempt %d",
+                        self._operator, attempt + 1,
+                    )
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self._HYDRATION_RETRIES - 1:
+                    logger.debug(
+                        "Pricing model load attempt %d failed for %s (%s) — retrying in %.0fs",
+                        attempt + 1, self._operator, exc, self._HYDRATION_BACKOFF,
+                    )
+                    await asyncio.sleep(self._HYDRATION_BACKOFF)
+
+        logger.warning(
+            "Pricing model load failed for %s after %d attempts (%s: %s)",
+            self._operator, self._HYDRATION_RETRIES,
+            type(last_exc).__name__, last_exc,
+        )
+        self._neon_available = False
+        self._cached_model = None
+        self._cached_cost_map = None
+        self._cached_tool_ids = None
+        self._cached_priced_map = None
+        self._cached_engine = None
+        self._cache_ts = -self._cache_ttl - 1.0
 
     async def get_cost(self, tool_id: str) -> int:
         """Return the cost for *tool_id*.
