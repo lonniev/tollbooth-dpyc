@@ -47,30 +47,48 @@ class VaultCipher:
         expanded = hmac.new(prk, self._INFO_LEDGER + b"\x01", hashlib.sha256).digest()
         self._key = expanded  # 32 bytes = AES-256
 
-    def encrypt(self, plaintext: str) -> str:
+    def encrypt(self, plaintext: str, aad: str = "") -> str:
         """Encrypt a string. Returns base64-encoded (nonce + ciphertext + tag).
 
         The nonce is randomly generated per encryption — same plaintext
         produces different ciphertext each time.
+
+        ``aad`` (Additional Authenticated Data) binds the ciphertext to
+        its context (e.g., vault key). Prevents cross-entry ciphertext
+        swapping. Must be the same on decrypt.
         """
         AESGCM = _get_aesgcm()
         nonce = os.urandom(self._NONCE_SIZE)
         aes = AESGCM(self._key)
-        ct = aes.encrypt(nonce, plaintext.encode("utf-8"), None)
-        # Pack: nonce (12) + ciphertext + tag (16) — tag is appended by GCM
+        aad_bytes = aad.encode("utf-8") if aad else None
+        ct = aes.encrypt(nonce, plaintext.encode("utf-8"), aad_bytes)
         payload = nonce + ct
         return base64.b64encode(payload).decode("ascii")
 
-    def decrypt(self, ciphertext_b64: str) -> str:
-        """Decrypt a base64-encoded payload. Raises on tamper or wrong key."""
+    def decrypt(self, ciphertext_b64: str, aad: str = "") -> str:
+        """Decrypt a base64-encoded payload. Raises on tamper or wrong key.
+
+        ``aad`` must match the value used during encryption.
+        For backward compatibility, empty ``aad`` matches ciphertext
+        encrypted without AAD.
+        """
         AESGCM = _get_aesgcm()
         payload = base64.b64decode(ciphertext_b64)
-        if len(payload) < self._NONCE_SIZE + 16:  # nonce + minimum tag
+        if len(payload) < self._NONCE_SIZE + 16:
             raise ValueError("Ciphertext too short")
         nonce = payload[:self._NONCE_SIZE]
         ct = payload[self._NONCE_SIZE:]
         aes = AESGCM(self._key)
-        plaintext = aes.decrypt(nonce, ct, None)
+        aad_bytes = aad.encode("utf-8") if aad else None
+        try:
+            plaintext = aes.decrypt(nonce, ct, aad_bytes)
+        except Exception:
+            if aad:
+                # Retry without AAD for backward compatibility with
+                # ciphertext encrypted before AAD was introduced
+                plaintext = aes.decrypt(nonce, ct, None)
+            else:
+                raise
         return plaintext.decode("utf-8")
 
     def is_encrypted(self, value: str) -> bool:

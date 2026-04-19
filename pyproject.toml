@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tollbooth-dpyc"
-version = "0.13.7"
+version = "0.14.0"
 description = "Don't Pester Your Customer™ — Bitcoin Lightning micropayments for MCP servers"
 readme = "README.md"
 license = "Apache-2.0"
@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "httpx==0.28.1",
-    "pynostr>=0.6.0",
+    "pynostr==0.7.0",
 ]
 
 [project.optional-dependencies]

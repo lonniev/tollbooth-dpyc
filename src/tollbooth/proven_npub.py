@@ -88,7 +88,10 @@ def parse_duration(text: str) -> int | None:
     unit_secs = _UNIT_SECONDS.get(unit_str)
     if unit_secs is None:
         raise ValueError(f"Unknown time unit: {unit_str!r} in {text!r}")
-    return amount * unit_secs
+    result = amount * unit_secs
+    if result > MAX_PROVEN_TTL:
+        result = MAX_PROVEN_TTL
+    return result
 
 _VAULT_KEY_PREFIX = "proven_npub:"
 

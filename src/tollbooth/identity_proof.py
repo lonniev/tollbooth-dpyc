@@ -83,6 +83,23 @@ def create_ownership_proof(nsec: str) -> str:
     return create_proof(nsec, OWNERSHIP_SENTINEL)
 
 
+# Replay protection: track consumed proof event IDs within the window
+_consumed_proofs: dict[str, float] = {}  # event_id → expiry time
+_CONSUMED_CLEANUP_INTERVAL = 120  # seconds between cleanups
+_last_cleanup: float = 0.0
+
+
+def _cleanup_consumed() -> None:
+    global _last_cleanup
+    now = time.time()
+    if now - _last_cleanup < _CONSUMED_CLEANUP_INTERVAL:
+        return
+    _last_cleanup = now
+    expired = [k for k, v in _consumed_proofs.items() if now > v]
+    for k in expired:
+        del _consumed_proofs[k]
+
+
 def verify_proof(
     proof_json: str,
     expected_npub: str,
@@ -152,5 +169,14 @@ def verify_proof(
     if age > window_seconds:
         logger.debug("identity_proof: expired (age=%.1fs, window=%ds)", age, window_seconds)
         return False
+
+    # Replay protection: reject reused proof event IDs
+    _cleanup_consumed()
+    event_id = getattr(event, "id", None) or event_dict.get("id", "")
+    if event_id and event_id in _consumed_proofs:
+        logger.debug("identity_proof: replay rejected (event_id=%s)", event_id[:16])
+        return False
+    if event_id:
+        _consumed_proofs[event_id] = now + window_seconds
 
     return True

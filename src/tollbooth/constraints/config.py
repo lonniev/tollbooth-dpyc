@@ -71,7 +71,13 @@ def load_constraint(data: dict[str, Any]) -> ToolConstraint:
         )
 
     constraint = cls.from_dict(data)
-    constraint._patron_npubs = data.get("_patron_npubs", [])
+    npubs = data.get("_patron_npubs", [])
+    if len(npubs) > 10:
+        raise ConfigError(
+            f"_patron_npubs exceeds max group size of 10 (got {len(npubs)}). "
+            "Clone the constraint for additional patron groups."
+        )
+    constraint._patron_npubs = npubs
     return constraint
 
 

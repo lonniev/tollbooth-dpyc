@@ -55,13 +55,19 @@ logger = logging.getLogger(__name__)
 def resolve_npub(npub: str) -> str:
     """Validate and return the npub. No fallback, no session cache.
 
-    Raises ValueError if npub is missing or malformed.
+    Validates prefix, length, and bech32 decode. Raises ValueError
+    if npub is missing or malformed.
     """
     if not npub or not npub.startswith("npub1") or len(npub) < 60:
         raise ValueError(
             "npub is required. Pass your Nostr public key (npub1...) "
             "to identify yourself."
         )
+    try:
+        from pynostr.key import PublicKey
+        PublicKey.from_npub(npub)
+    except Exception:
+        raise ValueError(f"Invalid npub: bech32 decode failed for {npub[:20]}...")
     return npub
 
 
@@ -1306,7 +1312,8 @@ class OperatorRuntime:
                 except Exception as exc:
                     await rt.rollback_debit(tool_id, npub, tool_kwargs=call_kwargs)
                     if catch_errors:
-                        return {"success": False, "error": str(exc)}
+                        logger.error("Tool %s failed: %s", tool_id, exc, exc_info=True)
+                        return {"success": False, "error": "Tool execution failed. Check operator logs."}
                     raise
 
                 rt.fire_and_forget_demand_increment(rt.mcp_name_for(tool_id))
