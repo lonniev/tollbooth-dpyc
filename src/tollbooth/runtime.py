@@ -611,8 +611,11 @@ class OperatorRuntime:
                 return {
                     "success": False,
                     "error": (
-                        "Service unavailable — persistence layer is unreachable. "
-                        "Only bootstrap tools are available."
+                        "Service is warming up — the pricing model could not be "
+                        "loaded from the database yet. This typically resolves in "
+                        "10-15 seconds after a cold start. Retry your request shortly. "
+                        "Free tools (check_balance, check_payment, proof exchange) "
+                        "remain available during warm-up."
                     ),
                 }
 

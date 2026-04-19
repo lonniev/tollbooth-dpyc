@@ -87,11 +87,10 @@ class PricingResolver:
                 self._cached_priced_map = None
                 self._cached_engine = None
             self._cache_ts = time.monotonic()
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "Neon unreachable for %s — all paid tools denied",
-                self._operator,
-                exc_info=True,
+                "Pricing model load failed for %s (%s: %s) — paid tools denied until retry",
+                self._operator, type(exc).__name__, exc,
             )
             self._neon_available = False
             self._cached_model = None
