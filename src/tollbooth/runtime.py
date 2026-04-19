@@ -704,6 +704,11 @@ class OperatorRuntime:
 
         # ── No charge ─────────────────────────────────────────
         if effective_cost == 0:
+            if npub:
+                cache = await self.ledger_cache()
+                ledger = await cache.get(npub)
+                ledger.debit(name, 0)
+                cache.mark_dirty(npub)
             return 0
 
         # ── Billing ───────────────────────────────────────────
