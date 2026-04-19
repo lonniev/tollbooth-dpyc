@@ -1,4 +1,4 @@
-# Tollbooth DPYC™
+# Tollbooth DPYC
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![PyPI version](https://img.shields.io/pypi/v/tollbooth-dpyc)](https://pypi.org/project/tollbooth-dpyc/)
@@ -8,7 +8,7 @@
   <img src="https://raw.githubusercontent.com/lonniev/tollbooth-dpyc/main/docs/tollbooth-hero.png" alt="Milo drives the Lightning Turnpike — Don't Pester Your Customer" width="800">
 </p>
 
-**Don't Pester Your Customer™** — Bitcoin Lightning micropayments for MCP servers.
+**Don't Pester Your Customer** — Bitcoin Lightning micropayments for MCP servers.
 
 > *The metaphors in this project are drawn with admiration from* The Phantom Tollbooth *by Norton Juster, illustrated by Jules Feiffer (1961). Milo, Tock, the Tollbooth, Dictionopolis, and Digitopolis are creations of Mr. Juster's extraordinary imagination. We just built the payment infrastructure.*
 
@@ -16,11 +16,11 @@
 
 ## The Problem
 
-Thousands of developers are building [MCP](https://modelcontextprotocol.io/) servers — services that let AI agents like Claude interact with the world. Knowledge graphs, financial data, code repositories, medical records. Each one is a city on the map. But the turnpike between them? Wide open. No toll collectors. No sustainable economics. Just a growing network of roads that nobody's figured out how to fund.
+Thousands of developers are building [MCP](https://modelcontextprotocol.io/) servers — services that let AI agents interact with the world. Knowledge graphs, financial data, social media, medical records. Each one is a city on the map. But the turnpike between them? Wide open. No toll collectors. No sustainable economics.
 
 Every MCP operator faces the same question: *how do I keep the lights on?*
 
-Traditional API keys with monthly billing? You're running a SaaS company now. The L402 protocol — Lightning-native pay-per-request? Every single API call requires a payment negotiation. Milo's toy car stops at every intersection to fumble for exact change.
+Traditional API keys with monthly billing? You're running a SaaS company now. L402 — Lightning-native pay-per-request? Every single API call requires a payment negotiation. Milo's toy car stops at every intersection to fumble for exact change.
 
 ## The Solution
 
@@ -30,82 +30,326 @@ Tollbooth DPYC takes a different approach — one that respects everyone's time:
 
 Prepaid credits over Bitcoin's Lightning Network, gated at the tool level, settled instantly, with no subscription management and no third-party payment processor taking a cut.
 
-## Install
+---
+
+## Quick Start: Build an Operator in 5 Minutes
+
+The canonical reference operator is [tollbooth-sample](https://github.com/lonniev/tollbooth-sample). Every production operator follows this pattern.
+
+### 1. Install
 
 ```bash
-pip install tollbooth-dpyc
-
-# With Nostr features (Secure Courier, audit trail, notifications, credential exchange)
-pip install tollbooth-dpyc[nostr]
-
-# With QR code rendering for credential cards
-pip install tollbooth-dpyc[qr]
-
-# Everything
-pip install tollbooth-dpyc[nostr,qr]
+pip install "tollbooth-dpyc[nostr]" fastmcp
 ```
 
-## What's in the Box
+### 2. Define Your Tools
 
-### Core
+```python
+from fastmcp import FastMCP
+from tollbooth.tool_identity import ToolIdentity, STANDARD_IDENTITIES, capability_uuid
+from tollbooth.runtime import OperatorRuntime, register_standard_tools
+from tollbooth.credential_templates import CredentialTemplate, FieldSpec
+from tollbooth.slug_tools import make_slug_tool
 
-| Module | Purpose |
-|--------|---------|
-| `TollboothConfig` | Plain frozen dataclass — no pydantic, no env-var reading. Your host constructs it. |
-| `UserLedger` | Per-user credit balance with FIFO debit/credit, tranches with TTL, daily usage logs, JSON serialization. |
-| `BTCPayClient` | Async HTTP client for BTCPay Server's Greenfield API — invoices, payouts, health checks, sats/BTC conversion. |
-| `VaultBackend` | Protocol for pluggable ledger persistence — implement `store_ledger`, `fetch_ledger`, `snapshot_ledger`. |
-| `LedgerCache` | In-memory LRU cache with write-behind flush, per-user asyncio locks, dirty tracking. |
-| `ToolTier` | Cost tiers for tool-call metering (FREE=0, READ=1, WRITE=5, HEAVY=10 sats per call). |
-| `ToolPricing` | Dynamic pricing: fixed + percentage-of-parameter (ad valorem) pricing with min/max caps. `compute(**tool_kwargs)` returns the cost in sats. |
-| `ToolIdentity` | Capability-based tool identity with deterministic UUID v5. Declares `category`, `intent`, and pricing hints (`pricing_hint_type`, `pricing_hint_value`, `pricing_hint_param`, `pricing_hint_min`). |
-| `identity_proof` | Verifies Schnorr-signed kind-27235 Nostr events proving npub ownership. `verify_proof(proof_json, expected_npub, tool_name)` is the single entry point for all proof verification. |
+mcp = FastMCP("My Service")
 
-### Actor Protocols
+# Domain tools — what your service actually does
+_DOMAIN_TOOLS = [
+    ToolIdentity(capability="get_weather", category="read", intent="Current weather data"),
+    ToolIdentity(capability="get_forecast", category="read", intent="5-day forecast"),
+]
 
-Three protocol interfaces define the DPYC ecosystem roles. Each declares the tool surface for its actor type.
+TOOL_REGISTRY = {t.id: t for t in _DOMAIN_TOOLS}
+```
 
-| Module | Purpose |
-|--------|---------|
-| `OperatorProtocol` | Operator tool surface — balance, statements, Secure Courier, delegation to Authority/Oracle. |
-| `OPERATOR_BASE_CATALOG` | Canonical `list[ToolPathInfo]` for all 19 Operator protocol tools. Single source of truth — operators inherit and extend. |
-| `AuthorityProtocol` | Authority tool surface — certification, operator registration, tax collection. |
-| `AUTHORITY_BASE_CATALOG` | Canonical `list[ToolPathInfo]` for all 11 Authority protocol tools. |
-| `OracleProtocol` | Oracle tool surface — community concierge (tax rates, membership, onboarding). |
-| `ActorRole` | Enum: OPERATOR, AUTHORITY, ORACLE. |
-| `ToolPath` / `ToolPathInfo` | HOT/COLD/DELEGATION path metadata for tool routing. |
+### 3. Create the Runtime
 
-### OperatorRuntime
+```python
+runtime = OperatorRuntime(
+    tool_registry={**STANDARD_IDENTITIES, **TOOL_REGISTRY},
+    operator_credential_template=CredentialTemplate(
+        service="my-operator",
+        fields={
+            "btcpay_host": FieldSpec(required=True, sensitive=False, description="BTCPay Server URL"),
+            "btcpay_api_key": FieldSpec(required=True, sensitive=True, description="BTCPay API key"),
+            "btcpay_store_id": FieldSpec(required=True, sensitive=True, description="BTCPay store ID"),
+        },
+    ),
+    service_name="My Weather Service",
+)
+```
 
-`OperatorRuntime` is the main entry point for building a Tollbooth-powered MCP server. It wires together identity, billing, pricing, constraints, and tool registration.
+### 4. Register Standard Tools + Domain Tools
 
-| Method / Feature | Purpose |
-|----------|---------|
-| `debit_or_deny(tool_id, npub, *, proof, tool_kwargs)` | Gate a tool call: identity, proof, access, pricing, constraints, billing. Returns `int` (cost in sats) on success, `dict` (error details) on denial. Every tool that takes `npub` requires `proof`. |
-| `purchase_mode="direct"` | Trust-root operators (Authority) read `NEON_DATABASE_URL` from env and skip relay bootstrap. Default `"certified"` uses Authority certification. |
-| `set_pricing_model(model_json, proof)` | Update the Neon pricing model. `proof` is a separate parameter (Schnorr-signed kind-27235 event). Restricted to operator. |
+```python
+# This single call registers all 21 standard DPYC tools
+register_standard_tools(mcp, "weather", runtime,
+    service_name="my-weather-service",
+    service_version="1.0.0",
+)
 
-### Ready-Made Tool Implementations
+# Domain tools use the paid_tool decorator
+tool = make_slug_tool(mcp, "weather")
 
-The `tollbooth.tools` package provides functions your MCP server wraps as tools. Each takes infrastructure objects (BTCPayClient, LedgerCache) as parameters — you wire them up, Tollbooth handles the logic.
+@tool
+@runtime.paid_tool(capability_uuid("get_weather"))
+async def get_weather(city: str, npub: str = "", proof: str = "") -> dict:
+    """Get current weather for a city. Costs 1 api_sat."""
+    # Your domain logic here
+    return {"city": city, "temp": 72, "conditions": "sunny"}
+```
 
-| Function | Purpose |
-|----------|---------|
-| `purchase_credits_tool` | Creates a BTCPay invoice, records it as pending, returns a checkout link. Validates Authority certificate when `authority_public_key` is configured. |
-| `direct_purchase_tool` | Invoice without certificate — for Authority self-purchases (trust anchor has no upstream). |
-| `check_payment_tool` | Polls an invoice, credits the balance on settlement. Idempotent. |
-| `check_balance_tool` | Returns current balance, usage summary, tier info, and invoice history. Read-only. |
-| `restore_credits_tool` | Recovers credits from a paid invoice lost to cache/vault issues. Checks vault first, falls back to BTCPay. |
-| `account_statement_tool` | 30-day purchase and usage history for a user. |
-| `btcpay_status_tool` | Diagnostics: BTCPay connectivity, store name, API key permissions. |
-| `compute_low_balance_warning` | Pure function — returns a warning dict if balance is below threshold, `None` if healthy. |
-| `anchor_ledger_tool` | Creates a Merkle tree of all ledgers and submits root hash to OTS calendar servers. |
-| `get_anchor_proof_tool` | Retrieves a Merkle inclusion proof for a specific user's ledger entry. |
-| `list_anchors_tool` | Lists all Bitcoin-anchored ledger snapshots with timestamps and verification status. |
+### 5. Deploy
 
-### Identity Proofs
+Set one environment variable and deploy:
 
-Every tool that accepts an `npub` also requires a `proof` parameter — a JSON-serialized Schnorr-signed kind-27235 Nostr event proving the caller owns that npub. No proof, no service. This applies to both operator-restricted tools (like `set_pricing_model`) and patron-facing tools (like `purchase_credits`).
+```bash
+export TOLLBOOTH_NOSTR_OPERATOR_NSEC=nsec1...
+fastmcp run server.py
+```
+
+That's it. The runtime bootstraps everything else from the Authority via encrypted Nostr DM.
+
+---
+
+## How It Works
+
+### The Deploy Flow
+
+1. **Set `TOLLBOOTH_NOSTR_OPERATOR_NSEC`** — the operator's Nostr private key. This is the only secret needed at boot.
+2. **Runtime bootstraps from Authority** — discovers its Neon Postgres URL from an encrypted DM on Nostr relays, signed by the upstream Authority.
+3. **Vault initializes** — AES-256-GCM encrypted credential and ledger storage on Neon Postgres, schema-isolated per operator (`op_{hash}`).
+4. **Deliver operator credentials via Secure Courier** — BTCPay connection details arrive via encrypted Nostr DM (human-in-the-loop, never in env vars).
+5. **Configure pricing** — set a pricing model via the Pricing Studio iOS app or the `set_pricing_model` tool.
+6. **Serve** — patrons purchase credits via Lightning, use tools, credits decrement automatically.
+
+### Credit Lifecycle
+
+1. **Patron calls `purchase_credits`** — the operator obtains an Authority certificate (Schnorr-signed Nostr event) and creates a Lightning invoice.
+2. **Patron pays** the Lightning invoice with any wallet.
+3. **Patron calls `check_payment`** — on settlement, credits are added as a tranche with optional expiry (`TrancheLifetime`).
+4. **Patron uses tools** — `debit_or_deny` gates every paid tool call: validates identity, proof, constraints, pricing, and debits the balance. FIFO tranche consumption.
+5. **Balance runs low** — patron buys more credits. No subscription, no interruption.
+
+### The Certification Fee Cascade
+
+When a patron purchases credits, the operator's upstream Authority deducts a small certification fee (default 2%, minimum 10 sats) from the operator's pre-funded reserve. The patron always receives exactly the credits they paid for — the fee is the operator's cost of doing business.
+
+Each Authority is itself an operator of its upstream Authority — the same fee cascades up through the chain to the Prime Authority.
+
+---
+
+## Standard Tools
+
+`register_standard_tools(mcp, slug, runtime)` registers these tools, prefixed with the operator's slug (e.g., `weather_check_balance`):
+
+### Credit & Billing (always registered)
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `check_balance` | Free | Current credit balance, tranches, usage summary |
+| `purchase_credits` | Free | Create a Lightning invoice for credit purchase |
+| `check_payment` | Free | Poll invoice status; credit balance on settlement |
+| `check_price` | Free | Preview the effective cost of a tool call (after constraints) |
+| `restore_credits` | Free | Recover credits from a paid invoice lost to cache issues |
+| `account_statement` | Free | 30-day purchase and usage history |
+| `account_statement_infographic` | 1 sat | SVG visual of account statement |
+
+### Identity & Lifecycle
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `service_status` | Free | Operator health, lifecycle state, version info |
+| `session_status` | Free | Operator readiness: ready / warming_up / not_registered / no_identity |
+| `get_operator_onboarding_status` | Free | Which operator credentials are configured vs missing |
+| `get_patron_onboarding_status` | Free | Which patron credentials are configured vs missing |
+
+### Secure Courier (credential exchange)
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `request_credential_channel` | Free | Send a credential template DM to a patron or operator |
+| `receive_credentials` | Free | Pick up credentials from vault (instant) or relay (DM) |
+| `forget_credentials` | Free | Delete vaulted credentials for a service |
+
+### Npub Proof
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `request_npub_proof` | Free | Send a proof challenge DM to a patron |
+| `receive_npub_proof` | Free | Verify the patron's Schnorr-signed proof response |
+
+### Authority Balance
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `check_authority_balance` | Free | Operator's cert-sat balance at the upstream Authority |
+
+### Oracle Delegation
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `oracle_*` | Free | Delegated calls to the DPYC Oracle (community info, tax rates, membership) |
+
+### Pricing Model
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `get_pricing_model` | Free | Current pricing model with tool registry and constraints |
+| `set_pricing_model` | Free | Update the pricing model (operator-restricted, requires proof) |
+| `list_constraint_types` | Free | Available constraint types and their parameters |
+
+### OpenTimestamps (when `ots_enabled=True`)
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `notarize_ledger` | Free | Anchor all ledger state to Bitcoin via Merkle tree + OTS |
+| `get_notarization_proof` | Free | Merkle inclusion proof for a specific patron |
+| `list_notarizations` | Free | All Bitcoin-anchored ledger snapshots |
+
+### Conditional Tools
+
+| Tool | Condition | Purpose |
+|------|-----------|---------|
+| `request_patron_credentials` | `patron_credential_template` set | Open Courier channel for patron-specific credentials |
+| `receive_patron_credentials` | `patron_credential_template` set | Pick up patron credentials |
+| `begin_oauth` | `oauth_provider` set | Start OAuth2 authorization flow |
+| `check_oauth_status` | `oauth_provider` set | Complete OAuth2 flow after browser authorization |
+
+---
+
+## OperatorRuntime
+
+`OperatorRuntime` is the core protocol engine. All DPYC operations — bootstrap, billing, credentials, pricing, constraints — are delegated to it.
+
+### Constructor Parameters
+
+```python
+OperatorRuntime(
+    # Required
+    tool_registry={**STANDARD_IDENTITIES, **YOUR_TOOLS},  # UUID-keyed ToolIdentity map
+
+    # Credential templates
+    operator_credential_template=CredentialTemplate(...),   # BTCPay + operator secrets
+    patron_credential_template=CredentialTemplate(...),     # Per-patron API keys (optional)
+    operator_credential_greeting="Welcome message...",
+    patron_credential_greeting="Welcome message...",
+    credential_validator=validate_fn,                       # Called on credential receipt
+
+    # Identity & network
+    nsec_env_var="TOLLBOOTH_NOSTR_OPERATOR_NSEC",          # Env var name (default)
+    service_name="My Service",
+    relays=["wss://relay.damus.io"],                       # Override default relays
+
+    # Billing
+    purchase_mode="certified",    # "certified" (default) or "direct" (trust-root only)
+    operator_settings={},         # Arbitrary operator config dict
+
+    # Constraints
+    constraint_gate=None,         # Legacy — use pricing model pipeline instead
+
+    # OpenTimestamps
+    ots_enabled=True,
+    ots_calendars=["https://a.pool.opentimestamps.org"],
+
+    # Npub proof
+    proven_npub_ttl_seconds=3600, # Default proof cache TTL
+    npub_proof_field="confirm",   # Field name in proof DM
+    npub_proof_greeting="...",
+    on_npub_proven=async_callback, # Called when proof verified
+
+    # OAuth2
+    oauth_provider=OAuthProviderConfig(...),  # Enables begin_oauth / check_oauth_status
+
+    # Lifecycle
+    on_forget=callback,           # Called when credentials are forgotten
+)
+```
+
+### Key Methods
+
+| Method | Returns | Purpose |
+|--------|---------|---------|
+| `debit_or_deny(tool_id, npub, *, proof, tool_kwargs)` | `int` (cost) or `dict` (denial) | Gate a tool call through identity, proof, constraints, pricing, and billing |
+| `paid_tool(tool_id)` | decorator | Decorator that wraps `debit_or_deny` around a tool function |
+| `vault()` | `NeonVault` | Bootstraps and returns the Neon vault (lazy) |
+| `ledger_cache()` | `LedgerCache` | Returns the write-behind ledger cache (lazy) |
+| `courier()` | `SecureCourierService` | Returns the Secure Courier (lazy) |
+| `operator_npub()` | `str` | Derives the operator's npub from nsec |
+| `resolve_npub(npub)` | `str` | Validates an npub (bech32 decode) |
+| `resolve_tranche_lifetime()` | `int \| None` | Reads tranche lifetime from the pricing model |
+| `load_credentials(fields)` | `dict` | Loads operator credentials from the vault |
+| `graceful_shutdown()` | — | Flushes caches and closes connections |
+
+---
+
+## Pricing & Constraints
+
+### Tool Pricing
+
+Every tool has a `ToolIdentity` that declares its pricing:
+
+```python
+ToolIdentity(
+    capability="get_weather",
+    category="read",          # read, write, heavy, free
+    intent="Current weather",
+    pricing_hint_type="ad_valorem",    # fixed or ad_valorem
+    pricing_hint_value=1,              # base cost in sats
+    pricing_hint_param="symbols",      # parameter for ad valorem scaling
+    pricing_hint_min=1,                # minimum cost
+)
+```
+
+The `ToolPricing` engine computes the final cost: `fixed + ceil(percentage * param_value)`, clamped to `[min, max]`.
+
+### Constraint Pipeline
+
+Operators configure constraints in the pricing model's `pipeline` array. Each step runs on every paid tool call via `debit_or_deny`. The effective cost (after discounts, free trials, surge) is what the patron pays.
+
+| Constraint | Purpose |
+|-----------|---------|
+| `free_trial` | First N invocations free per patron |
+| `happy_hour` | Time-windowed free/discount with recurrence |
+| `surge_pricing` | Demand-elastic pricing via global counters |
+| `temporal_window` | Time-of-day / day-of-week access windows |
+| `finite_supply` | Total call quotas (per patron or global) |
+| `periodic_refresh` | Rate limiting with ISO-8601 refresh windows |
+| `coupon` | Code-based discounts with expiration |
+| `loyalty_discount` | Spend-based tiered discounts |
+| `bulk_bonus` | Volume bonuses on credit purchases |
+| `patron_proof` | Require per-call Schnorr proof for high-value tools |
+| `json_expression` | Custom boolean logic rules |
+
+**Scoping:** Each pipeline step can target specific tools (`tool_ids`) and/or specific patrons (`patron_npubs`, max 10). Unscoped steps apply to all tools and patrons.
+
+### TrancheLifetime
+
+Credit expiry is a property of money, not a per-tool constraint. `TrancheLifetime` in the pricing model sets how long purchased credits remain valid. Each purchase creates a tranche; FIFO consumption.
+
+---
+
+## Credential Delivery
+
+All secrets — BTCPay keys, API tokens, OAuth credentials — are delivered via **Secure Courier**, not environment variables. This is a human-in-the-loop flow using NIP-44 encrypted Nostr DMs:
+
+1. AI agent calls `request_credential_channel(sender_npub=..., service=...)`
+2. Operator/patron receives a DM in their Nostr client with a credential template
+3. They fill in the fields and reply manually
+4. AI agent calls `receive_credentials(sender_npub=..., service=...)`
+5. Credentials are validated, encrypted (AES-256-GCM with AAD), and stored in the Neon vault
+
+Vault-first lookup means returning patrons activate instantly — no relay I/O needed.
+
+On first relay receipt, the service sends an `ncred1...` credential card back via DM. Patrons can scan or paste this card to reactivate later.
+
+---
+
+## Identity & Proofs
+
+Every participant is identified by a [Nostr](https://nostr.com/) keypair. The `npub` is your identity on the DPYC Honor Chain. The `nsec` stays with you — never shared, never sent to a service.
+
+Every tool that accepts `npub` also requires `proof` — a JSON-serialized Schnorr-signed kind-27235 Nostr event proving ownership. No proof, no service.
 
 ```python
 # Proof format (kind 27235, NIP-98 style)
@@ -119,318 +363,103 @@ Every tool that accepts an `npub` also requires a `proof` parameter — a JSON-s
 }
 ```
 
-Verify with `identity_proof.verify_proof(proof_json, expected_npub, tool_name)`. Inline proofs must be less than 60 seconds old. Cached proofs (via `ProvenNpubCache`) support patron-chosen TTL up to 24 hours via the `cache_duration` field in the proof DM. Consumed proof event IDs are tracked to prevent replay within the 60-second window.
+Inline proofs must be less than 60 seconds old. Cached proofs (via `ProvenNpubCache`) support patron-chosen TTL up to 24 hours. Consumed event IDs are tracked to prevent replay.
 
-### Certificates & Verification
-
-| Module | Purpose |
-|--------|---------|
-| `verify_certificate_auto` | Detects certificate format and verifies: Nostr kind-30079 Schnorr (preferred) or Ed25519 JWT (legacy). |
-| `verify_nostr_certificate` | Nostr event (kind 30079) certificate verification using Schnorr/BIP-340 via pynostr. |
-| Anti-replay JTI store | Built into certificate verification — prevents double-spend of purchase certificates. |
-
-### Authority Client
-
-| Module | Purpose |
-|--------|---------|
-| `AuthorityCertifier` | Server-to-server MCP client for auto-certifying credit purchases. Opens a short-lived `fastmcp.Client` SSE connection with Horizon OAuth auto-negotiation. |
-| `AuthorityCertifyError` | Raised when Authority certification fails (connection, auth, or tool error). |
-
-### Oracle Client
-
-| Module | Purpose |
-|--------|---------|
-| `OracleClient` | Server-to-server MCP client for delegating Oracle tool calls. Opens a short-lived `fastmcp.Client` SSE connection per call. Oracle tools are free and unauthenticated. |
-| `OracleClientError` | Raised when an Oracle delegation call fails (connection or parse error). |
-
-### DPYC Registry
-
-| Module | Purpose |
-|--------|---------|
-| `DPYCRegistry` | Cached HTTPS fetch of the [dpyc-community](https://github.com/lonniev/dpyc-community) `members.json` registry. Resolves membership, upstream authorities, and service URLs. |
-| `resolve_authority_service` | Convenience: finds an operator's upstream Authority service URL in one call. |
-| `resolve_authority_npub` | Finds an operator's upstream Authority npub from the registry. |
-| `resolve_oracle_service` | Walks the authority chain to the Prime Authority and returns the Oracle service URL. |
-| `resolve_service_by_name` | Finds a service by name across all active members (any role). Used for peer discovery of community services like OAuth2 collectors. |
-
-### Vault Backends
-
-| Module | Purpose |
-|--------|---------|
-| `TheBrainVault` | Stores ledger state as thought notes in a TheBrain knowledge graph. Daily-child pattern with link-based member discovery. |
-| `NeonVault` | Neon serverless Postgres with ACID transactions, optimistic concurrency, AES-256-GCM vault encryption (with AAD), and schema-qualified table names via `_t()`. |
-| `NeonCredentialVault` | Schema-aware credential storage on Neon Postgres (implements `CredentialVaultBackend`). Uses `_t()` for all table references. |
-| `CredentialVaultBackend` | Protocol for pluggable credential storage (store/fetch/delete by service+npub). |
-
-Implement the `VaultBackend` Protocol to add your own (Redis, S3, SQLite, etc.).
-
-### Nostr Integration (optional: `pip install tollbooth-dpyc[nostr]`)
-
-| Module | Purpose |
-|--------|---------|
-| `SecureCourierService` | High-level wrapper for 3 MCP tools: open channel, receive credentials, forget credentials. On first-time relay receipt, sends the `ncred1...` credential card back to the patron via Nostr DM for scan-and-paste reuse. |
-| `NostrCredentialExchange` | NIP-44/NIP-04 encrypted DM credential delivery with vault-first lookup. Relay copies deleted via NIP-09 after pickup. |
-| `CredentialTemplate` / `FieldSpec` | Schema and validation for credential payloads. |
-| `NostrAuditPublisher` | Publishes kind-30078 NIP-78 events on every vault write for tamper-evident audit trail. NIP-44v2 encrypted. |
-| `AuditedVault` | Wraps any `VaultBackend` to add the audit trail transparently. |
-| `NotificationManager` | Proactive NIP-44 DMs when patron balance crosses thresholds or tranches approach expiration. Fire-and-forget. |
-| `courier_health` / `courier_ping` | Relay diagnostics and outbound DM smoke tests. |
-
-### Credential Cards (optional: `pip install tollbooth-dpyc[qr]`)
-
-| Module | Purpose |
-|--------|---------|
-| `encode_credential_card` | Creates bech32-encoded `ncred1...` credential cards (kind 21420 Nostr events, NIP-44 encrypted). |
-| `decode_credential_card` | Decodes and verifies credential cards with expiration checking. |
-| `render_qr` | Renders credential cards as QR codes via segno. |
-
-### Constraint Engine
-
-| Module | Purpose |
-|--------|---------|
-| `ConstraintEngine` | Evaluates constraint lists with configurable logic: `ALL_MUST_PASS`, `ANY_MUST_PASS`, `FIRST_MATCH`. |
-| `ConstraintEngine` | Evaluates constraints with `ALL_MUST_PASS`, `ANY_MUST_PASS`, `FIRST_MATCH` logic. Used by `debit_or_deny` via the pricing resolver. |
-| `TemporalWindowConstraint` | Time-of-day / day-of-week access windows (`schedule_start`/`schedule_end`). |
-| `FiniteSupplyConstraint` | Total call quotas per patron or globally. |
-| `PeriodicRefreshConstraint` | ISO-8601 duration refresh windows (e.g., "10 calls per hour"). |
-| `CouponConstraint` | Code-based discounts with expiration and redemption limits. |
-| `FreeTrialConstraint` | First N invocations free per patron. |
-| `LoyaltyDiscountConstraint` | Spend-based tiered discounts. |
-| `BulkBonusConstraint` | Volume bonuses on credit purchases. |
-| `HappyHourConstraint` | Time-windowed free/discount with recurrence (`in_effect`/`until`/`repeats`/`apply_on`). |
-| `SurgePricingConstraint` | Demand-elastic pricing via global demand counters. |
-| `PatronProofConstraint` | Per-call Schnorr proof for high-value tools. |
-| `JsonExpressionConstraint` | Safe tree-based boolean logic evaluator for custom rules. |
-
-### OpenTimestamps Bitcoin Anchoring
-
-| Module | Purpose |
-|--------|---------|
-| `MerkleTree` | SHA-256 Merkle tree over all `(npub, ledger_json)` entries. |
-| `OTSCalendarClient` | Submits root hash to public OTS calendar servers (no API key required). |
-| `InclusionProof` | Verifiable Merkle proofs for individual patron entries. |
-
-### Utilities
-
-| Module | Purpose |
-|--------|---------|
-| `make_slug_tool` | Decorator for slug-prefixed MCP tool registration (e.g., `brain_check_balance`). |
-| `lnurl` | LUD-06/LUD-16 Lightning address resolution (parse → .well-known → callback → BOLT11). |
-
-## Quick Start
-
-```python
-from tollbooth import TollboothConfig, UserLedger, BTCPayClient, LedgerCache
-
-# Configure — your host reads env vars, Tollbooth gets a plain dataclass
-config = TollboothConfig(
-    btcpay_host="https://your-btcpay.example.com",
-    btcpay_store_id="your-store-id",
-    btcpay_api_key="your-api-key",
-)
-
-# Create a BTCPay client
-async with BTCPayClient(config.btcpay_host, config.btcpay_api_key, config.btcpay_store_id) as client:
-    # Create an invoice for 1000 sats
-    invoice = await client.create_invoice(1000, metadata={"user": "milo"})
-    print(f"Pay here: {invoice['checkoutLink']}")
-```
-
-## Configuration
-
-`TollboothConfig` is a plain frozen dataclass. Your host application constructs it from its own settings (env vars, pydantic-settings, YAML — whatever you prefer). Tollbooth never reads environment variables directly.
-
-| Field | Type | Default | Purpose |
-|-------|------|---------|---------|
-| `btcpay_host` | `str \| None` | `None` | BTCPay Server URL for creating invoices and checking payments |
-| `btcpay_store_id` | `str \| None` | `None` | BTCPay store ID — each operator runs their own store |
-| `btcpay_api_key` | `str \| None` | `None` | BTCPay API key — must have invoice + payout permissions |
-| `btcpay_tier_config` | `str \| None` | `None` | JSON string mapping tier names to credit multipliers |
-| `btcpay_user_tiers` | `str \| None` | `None` | JSON string mapping user IDs to tier names |
-| `seed_balance_sats` | `int` | `0` | Free starter balance granted to new users (0 to disable) |
-| `authority_public_key` | `str \| None` | `None` | Authority's Nostr npub (Schnorr certificates) or Ed25519 public key (legacy JWT). Required for `purchase_credits`. |
-| `credit_ttl_seconds` | `int \| None` | `None` | Default tranche lifetime in seconds. Overridden by `TrancheLifetime` in the pricing model when set. |
-| `constraints_enabled` | `bool` | `False` | Enable static constraint engine (legacy). Modern operators use the pricing model pipeline instead. |
-| `constraints_config` | `str \| None` | `None` | Static constraint JSON (legacy). Modern operators configure constraints in the pricing model. |
-
-## The Certification Fee Cascade
-
-We didn't build Tollbooth to sell. We built it to **give away** — like the Massachusetts Turnpike Authority. The Authority doesn't operate every toll plaza. Independent operators run the booths. What the Authority does is simpler: it certifies purchase orders and collects a small fee for each certification.
-
-When a user purchases credits, the settlement involves a certification cascade:
-
-1. **Milo** pays the operator's Lightning invoice for the full requested amount
-2. **The operator** holds a pre-funded cert-sat balance at their Authority
-3. **The Authority** deducts a configurable certification fee (default 2%) from the operator's reserve when signing the purchase certificate
-4. **Each Authority** is itself an operator of its upstream Authority — the same 2% fee cascades up through the chain to the Prime Authority
-
-The certification fee is the operator's cost of doing business — Milo always receives exactly the credits they paid for. The operator pre-funds their Authority reserve and treats the fee as overhead, just like payment processing costs.
-
-## The Economics
-
-**For Milo (the user):** Nothing changes. Buy credits, use tools, drive the turnpike. The invoice is always for the full amount requested.
-
-**For the operator:** A free, production-tested monetization framework. No license fee. The certification fee (configurable per Authority, default 2%) is a cost of doing business — pre-fund your Authority reserve and forget about it.
-
-**For the ecosystem:** Revenue scales with adoption, not effort. Every new MCP server that installs Tollbooth becomes a node in the Lightning economy. The fee cascade flows naturally through the Authority chain — no direct payouts, no separate settlement channels.
+---
 
 ## Architecture
 
-Tollbooth is a three-party ecosystem built on the [DPYC Honor Chain](https://github.com/lonniev/dpyc-community):
+```
+tollbooth-authority                 tollbooth-dpyc (this wheel)          your-mcp-server
+================================   ================================     ================================
+Schnorr signing + tax ledger       OperatorRuntime                      OperatorRuntime(tool_registry=...)
+certify_purchase -> Nostr cert     register_standard_tools(mcp, ...)    register_standard_tools(mcp, ...)
+Authority BTCPay                   debit_or_deny (gate + billing)       @runtime.paid_tool(uuid)
+                                   Secure Courier + vault               Domain-specific tools
+                                   Pricing resolver + constraints
+                                   DPYCRegistry (service discovery)
+```
+
+Dependency flows one way: `your-mcp-server --> tollbooth-dpyc`. Authority is a network peer, not a code dependency.
+
+### Ecosystem Repos
 
 | Repo | Role |
 |------|------|
-| [tollbooth-authority](https://github.com/lonniev/tollbooth-authority) | The institution — tax collection, Schnorr signing, purchase order certification |
-| **tollbooth-dpyc** (this package) | The booth — operator-side credit ledger, BTCPay client, tool gating, auto-certification |
-| [dpyc-community](https://github.com/lonniev/dpyc-community) | The registry — membership, governance, and service discovery |
-| [dpyc-oracle](https://github.com/lonniev/dpyc-oracle) | The concierge — community onboarding, tax rates, membership lookup |
-| [thebrain-mcp](https://github.com/lonniev/thebrain-mcp) | Reference operator — PersonalBrain knowledge graph, 40+ metered tools |
-| [excalibur-mcp](https://github.com/lonniev/excalibur-mcp) | Reference operator — social media posting via Tollbooth credits |
+| [tollbooth-sample](https://github.com/lonniev/tollbooth-sample) | **Canonical reference operator** — start here |
+| [tollbooth-authority](https://github.com/lonniev/tollbooth-authority) | Tax collection, Schnorr signing, purchase order certification |
+| [dpyc-community](https://github.com/lonniev/dpyc-community) | Membership registry, governance, service discovery |
+| [dpyc-oracle](https://github.com/lonniev/dpyc-oracle) | Community concierge — onboarding, tax rates, membership |
+| [thebrain-mcp](https://github.com/lonniev/thebrain-mcp) | Production operator — PersonalBrain knowledge graph |
+| [excalibur-mcp](https://github.com/lonniev/excalibur-mcp) | Production operator — social media posting |
+| [schwab-mcp](https://github.com/lonniev/schwab-mcp) | Production operator — brokerage data with OAuth2 |
+| [tollbooth-oauth2-collector](https://github.com/lonniev/tollbooth-oauth2-collector) | Community utility — OAuth2 callback mailbox |
 
-```
-tollbooth-authority               tollbooth-dpyc (this package)     your-mcp-server (consumer)
-================================  ================================  ================================
-Schnorr signing + tax ledger      TollboothConfig                   Settings ──constructs──> TollboothConfig
-certify_purchase → Nostr cert     UserLedger + LedgerCache          implements VaultBackend
-Authority BTCPay                  BTCPayClient                      TOOL_COSTS maps tools to ToolTier
-                                  VaultBackend (Protocol)           AuthorityCertifier (auto-certify)
-                                  DPYCRegistry (service discovery)
-                                  Constraint engine + pricing
-```
+---
 
-Dependency flows one way: `your-mcp-server --> tollbooth-dpyc`. Authority is a network peer, not a code dependency. Core runtime dependencies: `httpx`, `pynostr`. Nostr relay features require `websocket-client` (install with `pip install tollbooth-dpyc[nostr]`).
+## Install
 
-## Auto-Certification
+```bash
+# Standard install — includes Nostr relay support (Secure Courier, audit trail)
+pip install tollbooth-dpyc[nostr]
 
-`AuthorityCertifier` lets operator servers auto-obtain Authority certificates during `purchase_credits` — one tool call instead of two. Opens a short-lived `fastmcp.Client` SSE connection with Horizon OAuth, calls `certify_credits`, and returns the parsed certificate dict.
-
-```python
-from tollbooth import AuthorityCertifier
-
-certifier = AuthorityCertifier(
-    authority_url="https://authority.fastmcp.app/mcp",
-    operator_npub="npub1...",
-)
-cert = await certifier.certify(amount_sats=100)
-# cert["certificate"], cert["jti"], cert["net_sats"], ...
+# With QR code rendering for credential cards
+pip install tollbooth-dpyc[nostr,qr]
 ```
 
-The `DPYCRegistry` resolves service URLs automatically:
+Core dependencies (`httpx`, `pynostr`) handle identity, proofs, and HTTP. The `[nostr]` extra adds `websocket-client` for Nostr relay I/O — required by every real operator since Secure Courier credential delivery, audit publishing, and bootstrap all use relay DMs. The `[qr]` extra adds `segno` for credential card QR rendering.
 
-```python
-from tollbooth import resolve_authority_service
+---
 
-service = await resolve_authority_service("npub1operator...")
-# service["url"] → "https://authority.fastmcp.app/mcp"
-```
+## Environment Variables
 
-## Oracle Delegation
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `TOLLBOOTH_NOSTR_OPERATOR_NSEC` | Yes | The single bootstrap key. Identity, Secure Courier, audit signing. |
+| `NEON_DATABASE_URL` | Trust-root only | Neon Postgres URL. Only for `purchase_mode="direct"` (Authority). |
+| `TOLLBOOTH_NOSTR_RELAYS` | No | Comma-separated relay URLs (overrides defaults). |
 
-`OracleClient` lets operator servers delegate community queries to the DPYC Oracle — no separate MCP connection from the AI agent needed. Oracle tools are free and unauthenticated.
+Certified operators (the default) do **not** set `NEON_DATABASE_URL`. They discover it from the Authority via encrypted Nostr DM during bootstrap.
 
-```python
-from tollbooth import OracleClient, resolve_oracle_service
+All other secrets (BTCPay, API keys, OAuth tokens) flow through Secure Courier — never env vars.
 
-# Resolve Oracle URL via registry (walks authority chain to Prime Authority)
-service = await resolve_oracle_service("npub1operator...")
-# service["url"] → "https://dpyc-oracle.fastmcp.app/mcp"
+---
 
-# Call any Oracle tool
-client = OracleClient(service["url"])
-result = await client.call_tool("get_tax_rate")
-# result → {"rate_percent": 2, "min_sats": 10, ...}
-```
+## Vault & Persistence
 
-## Constraint Engine
+### Neon Postgres
 
-The constraint engine lets operators define pricing rules and access controls. Constraints are configured in the pricing model's pipeline and evaluated by `debit_or_deny` on every paid tool call. The effective cost (after discounts, free trials, surge) is what the patron pays.
+`NeonVault` provides ACID ledger storage with AES-256-GCM encryption (with AAD), optimistic concurrency, and schema-qualified table names via `_t()`.
 
-**Evaluation modes:** `ALL_MUST_PASS` (default), `ANY_MUST_PASS`, `FIRST_MATCH`.
+`NeonCredentialVault` stores credentials encrypted in schema-isolated Postgres (one `op_{hash}` schema per operator, provisioned by `register_operator`).
 
-**Scoping:** Each pipeline step can target specific tools (`tool_ids`) and/or specific patrons (`patron_npubs`, max 10 per step). Unscoped steps apply to all tools and patrons.
+### Schema Isolation
 
-Example pricing model pipeline:
+The Authority uses the `authority` schema. Each certified operator receives an isolated schema (`op_{hash}`) with a dedicated Postgres LOGIN role. `NeonCredentialVault` is schema-aware via `_t()`.
 
-```json
-{
-  "pipeline": [
-    {"id": "1", "type": "free_trial", "params": {"first_n_free": 5}},
-    {"id": "2", "type": "happy_hour", "params": {
-      "in_effect": "11:00", "until": "14:00",
-      "timezone": "America/New_York", "free": true,
-      "repeats": "weekly"
-    }},
-    {"id": "3", "type": "surge_pricing", "params": {
-      "max_capacity": 100, "tiers": [{"capacity_pct": 0.8, "multiplier": 1.5}]
-    }, "tool_ids": ["uuid-of-heavy-tool"]}
-  ]
-}
-```
+---
 
-## Secure Courier
+## Nostr Integration
 
-Credentials delivered via encrypted Nostr DMs — they never appear in the chat window. `SecureCourierService` wraps four MCP tools (session status, open channel, receive, forget) with NIP-44 encryption, template validation, and vault-first lookup.
+### Audit Trail
 
-On first-time relay receipt, the service automatically sends the `ncred1...` credential card back to the patron via Nostr DM. Patrons can scan or paste this card to reactivate their session later — no Courier exchange needed. Vault restores skip the DM (no spam on reconnect). Delivery is fire-and-forget; failures never block the credential flow.
+`NostrAuditPublisher` publishes a kind-30078 NIP-78 event on every vault write. Content is NIP-44v2 encrypted — only the patron's nsec can read it. Wrap any vault with `AuditedVault` to add the trail transparently.
 
-`CredentialVaultBackend` is a Protocol for pluggable credential storage. After first delivery, `receive()` checks the vault before touching relays. Relay copies are deleted via NIP-09 after pickup.
+### Low-Balance Notifications
 
-## Credential Cards
+`NotificationManager` sends proactive NIP-44 DMs when a patron's balance crosses thresholds or tranches approach expiration. Fire-and-forget — never blocks the tool path.
 
-`ncred1...` bech32-encoded credential cards package encrypted credentials into scannable QR codes. Built on kind-21420 Nostr events with NIP-44v2 encryption. Install with `pip install tollbooth-dpyc[qr]` for QR rendering.
+### Credential Cards
 
-## Nostr Audit Trail
+`ncred1...` bech32-encoded credential cards package encrypted credentials into scannable QR codes. Built on kind-21420 Nostr events with NIP-44v2 encryption.
 
-`NostrAuditPublisher` publishes a kind-30078 NIP-78 event on every vault write. Content is NIP-44v2 encrypted (ECDH + ChaCha20-Poly1305) so only the patron's nsec can read it. Wrap any `VaultBackend` with `AuditedVault` to add the audit trail transparently.
-
-## Low-Balance Notifications
-
-`NotificationManager` sends proactive NIP-44 DMs when a patron's balance crosses configurable thresholds (WARNING, CRITICAL) or when credit tranches approach expiration. Delivery is fire-and-forget on a daemon thread — never blocks the tool path.
+---
 
 ## OpenTimestamps Bitcoin Anchoring
 
-Anchor ledger state to the Bitcoin blockchain for irrefutable, timestamped proofs. `MerkleTree` builds a SHA-256 tree over all `(npub, ledger_json)` entries. `OTSCalendarClient` submits the root hash to public OTS calendar servers (no API key required). `InclusionProof` provides verifiable Merkle proofs for individual patron entries.
+Anchor ledger state to the Bitcoin blockchain for irrefutable, timestamped proofs. `MerkleTree` builds a SHA-256 tree over all `(npub, ledger_json)` entries. `OTSCalendarClient` submits the root hash to public OTS calendar servers (no API key required).
 
-## DPYC Identity & Environment
-
-Every participant in the Tollbooth ecosystem — Authorities, Operators, and Users — is identified by a [Nostr](https://nostr.com/) keypair. The `npub` (public key) is your identity on the DPYC Honor Chain. The `nsec` (private key) stays with you — never shared, never sent to a service.
-
-Generate a keypair:
-
-```bash
-pip install nostr-sdk
-python scripts/generate_nostr_keypair.py
-```
-
-### Environment Variables
-
-| Variable | Who sets it | Purpose |
-|----------|------------|---------|
-| `TOLLBOOTH_NOSTR_OPERATOR_NSEC` | All operators & Authority | The single bootstrap key. Identity, Secure Courier DMs, audit signing. |
-| `NEON_DATABASE_URL` | Trust-root operators only (`purchase_mode="direct"`) | Neon Postgres URL. Authority reads this from env. |
-| `TOLLBOOTH_NOSTR_RELAYS` | Optional | Comma-separated relay URLs (overrides defaults) |
-
-Certified operators (`purchase_mode="certified"`, the default) do **not** read `NEON_DATABASE_URL` from the environment. They bootstrap it from the Authority via encrypted Nostr DM (`get_operator_config`). All operator and patron credentials (API keys, tokens, BTCPay connection) flow through Secure Courier — never env vars.
-
-FastMCP Cloud platform variables (like `PORT`, `HOST`) are injected by the platform and are not operator-configured.
-
-### Neon Schema Isolation
-
-The Authority uses the `authority` schema. Each certified operator receives an isolated schema (`op_{hash}`) with a dedicated Postgres LOGIN role, provisioned by `register_operator`. `NeonCredentialVault` is schema-aware via the `_t()` helper, which qualifies table names with the operator's schema prefix.
-
-### Key Runtime Conventions
-
-| Concept | Detail |
-|---------|--------|
-| **TrancheLifetime** | Credit expiry uses `tranche_lifetime` (not "demurrage"). Each purchase creates a tranche that expires after the configured lifetime. FIFO consumption. |
-| **Constraint scoping** | Constraints can target specific tools (`tool_ids` list) and/or specific patrons (`patron_npubs` list, max 10). |
-| **Schedule fields** | `schedule_start` and `schedule_end` are separate ISO-8601 fields (not a concatenated "schedule" string). |
-| **Happy Hour** | Fields: `in_effect`, `until`, `percent_off`, `max_discount`, `repeats`, `apply_on`. |
-| **ProvenNpubCache** | Patron-chosen TTL via `parse_duration`. Hard cap of 24 hours. `UNSET` sentinel distinguishes "never set" from "expired". |
-| **OAuth vendor mapping** | `client_id_field` / `client_secret_field` on credential templates map vendor-specific names (e.g., Schwab's `app_key`/`secret`) to OAuth `client_id`/`client_secret`. |
-| **Shortlinks** | `_ensure_mcp_path` prevents double `/mcp/` in URLs when constructing OAuth redirect URIs. |
-
-Users provide their npub via the Secure Courier credential exchange flow — no env var needed.
+---
 
 ## Development
 
