@@ -258,27 +258,32 @@ async def refresh_access_token(
 def decrypt_collector_code(encrypted_b64: str, state: str) -> str:
     """Decrypt an authorization code encrypted by the collector.
 
-    XOR with SHA-256(state) keystream — symmetric with the collector's
-    ``_encrypt_code`` implementation.
+    AES-256-GCM with key = SHA-256(state), IV prepended to ciphertext.
 
     Args:
-        encrypted_b64: URL-safe base64-encoded encrypted code.
+        encrypted_b64: URL-safe base64-encoded (IV + ciphertext + tag).
         state: The same state token used during authorization (the npub).
 
     Returns:
         Plaintext authorization code.
 
     Raises:
-        OAuthCollectorError: If decryption produces invalid UTF-8.
+        OAuthCollectorError: If decryption fails.
     """
     key = hashlib.sha256(state.encode()).digest()
-    encrypted = base64.urlsafe_b64decode(encrypted_b64)
-    decrypted = bytes(c ^ key[i % 32] for i, c in enumerate(encrypted))
+    payload = base64.urlsafe_b64decode(encrypted_b64)
+    if len(payload) < 28:  # 12 IV + 16 tag minimum
+        raise OAuthCollectorError("Encrypted code too short.")
     try:
-        return decrypted.decode()
-    except UnicodeDecodeError as exc:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        iv = payload[:12]
+        ct = payload[12:]
+        aes = AESGCM(key)
+        plaintext = aes.decrypt(iv, ct, None)
+        return plaintext.decode()
+    except Exception as exc:
         raise OAuthCollectorError(
-            "Decryption produced invalid UTF-8 — state token may be wrong."
+            "Decryption failed — state token may be wrong or code tampered."
         ) from exc
 
 
