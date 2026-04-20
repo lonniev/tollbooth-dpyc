@@ -3,6 +3,23 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.14.2] — 2026-04-20
+
+### Added
+- FiniteSupplyConstraint global scope now backed by Neon persistence via shared `tool_demand` table (sentinel `window_key="__total__"`)
+- `EnvironmentSnapshot.supply_total_for()` helper for lifetime invocation lookups
+- `OperatorRuntime.fire_and_forget_supply_increment()` increments lifetime counter after each tool call
+- E2E tests for FiniteSupply (3-then-deny loop, independent per-tool counters, constraint removal, re-apply with higher cap)
+- E2E tests for SurgePricing (price steps with demand, volume discount with multiplier < 1.0, surge + supply composition)
+
+### Changed
+- `get_global_demand()` now returns both hourly demand and lifetime total in a single dict
+- `FiniteSupplyConstraint` no longer accepts `current_count` — global scope reads from `EnvironmentSnapshot`
+
+### Fixed
+- `test_paid_tool` suite: proof replay cache cleared between tests, missing fake caches injected, stale error assertion updated
+- `test_runtime_onboarding` demand tracking test updated for dual-fetch API
+
 ## [0.11.6] — 2026-04-16
 
 - fix shortlinks + collector URL: don't double /mcp/ path (v0.11.6)
