@@ -5,6 +5,13 @@ from pynostr.key import PrivateKey as _PK
 
 from tollbooth.runtime import OperatorRuntime
 from tollbooth.tool_identity import ToolIdentity, capability_uuid
+from tollbooth import identity_proof as _id_proof
+
+
+@pytest.fixture(autouse=True)
+def _clear_replay_cache():
+    """Clear the proof replay cache between tests to avoid false rejections."""
+    _id_proof._consumed_proofs.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -66,9 +73,20 @@ def _make_runtime(tool_costs: dict[str, int] | None = None) -> OperatorRuntime:
         tool_registry=registry,
         nsec_env_var="__UNUSED__",
     )
-    # Inject fake pricing resolver
+    # Inject fake pricing resolver and proven npub cache (avoids vault bootstrap)
     rt._pricing_resolver = FakePricingResolver(resolver_costs)
+    rt._proven_npub_cache = FakeProvenNpubCache()
     return rt
+
+
+class FakeProvenNpubCache:
+    """Stub proven npub cache — always forces inline proof verification."""
+
+    async def is_proven(self, session_id: str, npub: str) -> bool:
+        return False
+
+    async def mark_proven(self, session_id: str, npub: str) -> None:
+        pass
 
 
 class FakeLedgerCache:
@@ -183,7 +201,7 @@ class TestPaidToolDecorator:
 
         result = await my_tool(npub=VALID_NPUB, proof=_make_proof())
         assert result["success"] is False
-        assert "boom" in result["error"]
+        assert "Tool execution failed" in result["error"]
 
         # Balance should be restored after rollback
         ledger = await cache.get(VALID_NPUB)
@@ -257,6 +275,7 @@ class TestPaidToolDecorator:
             costs={identity.tool_id: 0},
             priced={identity.tool_id: False},
         )
+        rt._proven_npub_cache = FakeProvenNpubCache()
 
         @rt.paid_tool(identity.tool_id)
         async def unpriced(npub: str = "", proof: str = "") -> dict:
@@ -276,6 +295,8 @@ class TestPaidToolDecorator:
             costs={identity.tool_id: 0},
             priced={identity.tool_id: True},
         )
+        rt._proven_npub_cache = FakeProvenNpubCache()
+        rt._ledger_cache = FakeLedgerCache()
 
         @rt.paid_tool(identity.tool_id)
         async def promo(npub: str = "", proof: str = "") -> dict:

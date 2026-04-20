@@ -585,14 +585,14 @@ class TestInitialPricingModel:
 class TestDemandTracking:
     @pytest.mark.asyncio
     async def test_get_global_demand_returns_count(self) -> None:
-        """Returns demand count from vault."""
+        """Returns hourly demand and lifetime total from vault."""
         rt = _make_runtime()
         mock_vault = AsyncMock()
-        mock_vault.get_demand = AsyncMock(return_value=42)
+        mock_vault.get_demand = AsyncMock(side_effect=[42, 100])
         rt._vault = mock_vault
 
         result = await rt.get_global_demand("search")
-        assert result == {"search": 42}
+        assert result == {"search": 42, "search:__total__": 100}
 
     @pytest.mark.asyncio
     async def test_get_global_demand_empty_on_error(self) -> None:

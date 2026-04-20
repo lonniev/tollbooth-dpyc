@@ -20,12 +20,9 @@ class FiniteSupplyConstraint(ToolConstraint):
     ----------
     max_invocations:
         Total allowed invocations.
-    current_count:
-        Externally tracked current usage (or ``context.env.invocation_count``
-        when *scope* is ``"per_patron"``).
     scope:
-        ``"global"`` — *current_count* is the global total.
-        ``"per_patron"`` — uses ``context.env.invocation_count`` instead.
+        ``"global"`` — reads lifetime total from ``context.env.supply_total_for()``.
+        ``"per_patron"`` — reads ``context.env.invocation_count``.
     """
 
     def __init__(
