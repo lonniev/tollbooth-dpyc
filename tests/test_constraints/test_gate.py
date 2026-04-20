@@ -86,7 +86,7 @@ def _temporal_window_config(start: str = "09:00", end: str = "17:00") -> str:
     )
 
 
-def _supply_config(max_invocations: int = 5, current_count: int = 5) -> str:
+def _supply_config(max_invocations: int = 5) -> str:
     """Return a JSON config with a finite supply constraint on 'search'."""
     return json.dumps(
         {
@@ -96,7 +96,6 @@ def _supply_config(max_invocations: int = 5, current_count: int = 5) -> str:
                         {
                             "type": "finite_supply",
                             "max_invocations": max_invocations,
-                            "current_count": current_count,
                             "scope": "global",
                         }
                     ]
@@ -293,7 +292,7 @@ class TestEnabledDeniesSupplyExhausted:
         """Finite supply at cap returns (error_dict, 0)."""
         config = TollboothConfig(
             constraints_enabled=True,
-            constraints_config=_supply_config(max_invocations=5, current_count=5),
+            constraints_config=_supply_config(max_invocations=5),
         )
         gate = ConstraintGate(config)
 
@@ -301,6 +300,7 @@ class TestEnabledDeniesSupplyExhausted:
             tool_name="search",
             base_cost=100,
             ledger=_StubLedger(),
+            global_demand={"search:__total__": 5},
         )
 
         assert denial is not None

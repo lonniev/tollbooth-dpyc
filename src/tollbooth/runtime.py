@@ -1171,17 +1171,25 @@ class OperatorRuntime:
         from datetime import datetime, timezone
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00")
 
+    _SUPPLY_TOTAL_KEY = "__total__"
+
     async def get_global_demand(self, tool_name: str) -> dict[str, int]:
-        """Get current hourly demand count for a tool (for surge pricing)."""
+        """Get current hourly demand and lifetime total for a tool."""
+        result: dict[str, int] = {}
         try:
             vault = await self.vault()
-            count = await vault.get_demand(tool_name, self._demand_window_key())
-            return {tool_name: count}
+            hourly = await vault.get_demand(tool_name, self._demand_window_key())
+            if hourly:
+                result[tool_name] = hourly
+            total = await vault.get_demand(tool_name, self._SUPPLY_TOTAL_KEY)
+            if total:
+                result[f"{tool_name}:{self._SUPPLY_TOTAL_KEY}"] = total
         except Exception:
-            return {}
+            pass
+        return result
 
     def fire_and_forget_demand_increment(self, tool_name: str) -> None:
-        """Increment demand counter for a tool (non-blocking)."""
+        """Increment hourly demand counter for a tool (non-blocking)."""
         import asyncio
 
         async def _increment() -> None:
@@ -1189,6 +1197,21 @@ class OperatorRuntime:
                 vault = await self.vault()
                 await vault.increment_demand(
                     tool_name, self._demand_window_key(),
+                )
+            except Exception:
+                pass
+
+        asyncio.create_task(_increment())
+
+    def fire_and_forget_supply_increment(self, tool_name: str) -> None:
+        """Increment lifetime supply counter for a tool (non-blocking)."""
+        import asyncio
+
+        async def _increment() -> None:
+            try:
+                vault = await self.vault()
+                await vault.increment_demand(
+                    tool_name, self._SUPPLY_TOTAL_KEY,
                 )
             except Exception:
                 pass
@@ -1317,6 +1340,7 @@ class OperatorRuntime:
                     raise
 
                 rt.fire_and_forget_demand_increment(rt.mcp_name_for(tool_id))
+                rt.fire_and_forget_supply_increment(rt.mcp_name_for(tool_id))
                 rt.fire_and_forget_notarize_if_stale()
                 if isinstance(result, dict):
                     result = await rt.inject_low_balance_warning(result, npub)

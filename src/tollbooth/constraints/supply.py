@@ -31,18 +31,16 @@ class FiniteSupplyConstraint(ToolConstraint):
     def __init__(
         self,
         max_invocations: int,
-        current_count: int = 0,
         scope: str = "global",
     ) -> None:
         self.max_invocations = max_invocations
-        self.current_count = current_count
         self.scope = scope
 
     def evaluate(self, context: ConstraintContext) -> ConstraintResult:
         count = (
             context.env.invocation_count
             if self.scope == "per_patron"
-            else self.current_count
+            else context.env.supply_total_for(context.env.tool_name)
         )
         remaining = max(0, self.max_invocations - count)
 
@@ -68,7 +66,6 @@ class FiniteSupplyConstraint(ToolConstraint):
         return {
             "type": "finite_supply",
             "max_invocations": self.max_invocations,
-            "current_count": self.current_count,
             "scope": self.scope,
         }
 
@@ -76,7 +73,6 @@ class FiniteSupplyConstraint(ToolConstraint):
     def from_dict(cls, data: dict[str, Any]) -> FiniteSupplyConstraint:
         return cls(
             max_invocations=int(data["max_invocations"]),
-            current_count=int(data.get("current_count", 0)),
             scope=str(data.get("scope", "global")),
         )
 
@@ -88,7 +84,6 @@ class FiniteSupplyConstraint(ToolConstraint):
             description="Cap total invocations globally or per-patron.",
             params=[
                 ParamSchema(name="max_invocations", type="int", description="Total allowed invocations."),
-                ParamSchema(name="current_count", type="int", required=False, default=0, description="Externally tracked current usage count."),
                 ParamSchema(name="scope", type="string", required=False, default="global", description="'global' or 'per_patron'."),
             ],
         )

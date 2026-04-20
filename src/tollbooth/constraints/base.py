@@ -53,6 +53,14 @@ class EnvironmentSnapshot:
                 return count
         return 0
 
+    def supply_total_for(self, tool_name: str) -> int:
+        """Return the lifetime invocation total for *tool_name*, or 0."""
+        key = f"{tool_name}:__total__"
+        for name, count in self.global_demand:
+            if name == key:
+                return count
+        return 0
+
 
 @dataclass(frozen=True)
 class ConstraintContext:
