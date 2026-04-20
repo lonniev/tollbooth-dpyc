@@ -545,3 +545,379 @@ class TestCheckAsyncWithResolver:
         )
         assert denial is None
         assert cost == 0  # free trial from static engine
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: FiniteSupply global scope with simulated vault loop
+# ---------------------------------------------------------------------------
+
+
+class TestFiniteSupplyE2E:
+    """Simulate the runtime loop: fetch total -> gate.check -> increment -> repeat.
+
+    With max_invocations=3 and 4 attempts, expect 3 allowed then 1 denied.
+    """
+
+    def test_three_allowed_then_denied(self):
+        config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=_supply_config(max_invocations=3),
+        )
+        gate = ConstraintGate(config)
+
+        # Simulated vault: in-memory lifetime counter
+        vault_totals: dict[str, int] = {}
+        tool = "search"
+        results: list[tuple[bool, int]] = []
+
+        for _ in range(4):
+            # --- fetch phase (mirrors runtime.get_global_demand) ---
+            total = vault_totals.get(tool, 0)
+            demand = {f"{tool}:__total__": total} if total else {}
+
+            # --- gate phase ---
+            denial, cost = gate.check(
+                tool_name=tool,
+                base_cost=100,
+                ledger=_StubLedger(),
+                global_demand=demand,
+            )
+            allowed = denial is None
+            results.append((allowed, cost))
+
+            # --- increment phase (mirrors fire_and_forget_supply_increment) ---
+            if allowed:
+                vault_totals[tool] = vault_totals.get(tool, 0) + 1
+
+        # First 3 calls succeed at full price
+        assert results[0] == (True, 100)
+        assert results[1] == (True, 100)
+        assert results[2] == (True, 100)
+
+        # 4th call denied
+        allowed, cost = results[3]
+        assert allowed is False
+        assert cost == 0
+
+    def test_different_tools_have_independent_supply(self):
+        """Each tool tracks its own lifetime counter independently."""
+        config_json = json.dumps(
+            {
+                "tool_constraints": {
+                    "alpha": {
+                        "constraints": [
+                            {"type": "finite_supply", "max_invocations": 2, "scope": "global"}
+                        ]
+                    },
+                    "beta": {
+                        "constraints": [
+                            {"type": "finite_supply", "max_invocations": 1, "scope": "global"}
+                        ]
+                    },
+                }
+            }
+        )
+        config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=config_json,
+        )
+        gate = ConstraintGate(config)
+        vault_totals: dict[str, int] = {}
+
+        def call(tool: str) -> bool:
+            total = vault_totals.get(tool, 0)
+            demand = {f"{tool}:__total__": total} if total else {}
+            denial, _ = gate.check(
+                tool_name=tool,
+                base_cost=50,
+                ledger=_StubLedger(),
+                global_demand=demand,
+            )
+            if denial is None:
+                vault_totals[tool] = vault_totals.get(tool, 0) + 1
+                return True
+            return False
+
+        # alpha: 2 allowed, then denied
+        assert call("alpha") is True
+        assert call("alpha") is True
+        assert call("alpha") is False
+
+        # beta: 1 allowed, then denied -- independent of alpha
+        assert call("beta") is True
+        assert call("beta") is False
+
+    def test_removing_constraint_restores_access(self):
+        """Operator removes finite_supply constraint; previously denied tool is accessible."""
+        config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=_supply_config(max_invocations=2),
+        )
+        gate = ConstraintGate(config)
+        tool = "search"
+
+        # Exhaust supply
+        vault_total = 0
+        for _ in range(2):
+            demand = {f"{tool}:__total__": vault_total} if vault_total else {}
+            denial, _ = gate.check(
+                tool_name=tool, base_cost=100,
+                ledger=_StubLedger(), global_demand=demand,
+            )
+            assert denial is None
+            vault_total += 1
+
+        # Confirm denied
+        denial, cost = gate.check(
+            tool_name=tool, base_cost=100,
+            ledger=_StubLedger(),
+            global_demand={f"{tool}:__total__": vault_total},
+        )
+        assert denial is not None
+        assert denial["constraint_reason"] == "supply_exhausted"
+
+        # Operator removes the constraint — no constraints on "search"
+        new_config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=json.dumps({"tool_constraints": {}}),
+        )
+        gate = ConstraintGate(new_config)
+
+        # Same tool, same exhausted vault total — now passes at base cost
+        denial, cost = gate.check(
+            tool_name=tool, base_cost=100,
+            ledger=_StubLedger(),
+            global_demand={f"{tool}:__total__": vault_total},
+        )
+        assert denial is None
+        assert cost == 100
+
+    def test_reapply_with_higher_cap_grants_new_runway(self):
+        """Operator exhausts supply, then re-applies with a higher cap."""
+        tool = "search"
+
+        # Phase 1: cap at 2, exhaust it
+        config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=_supply_config(max_invocations=2),
+        )
+        gate = ConstraintGate(config)
+        vault_total = 0
+
+        for _ in range(2):
+            demand = {f"{tool}:__total__": vault_total} if vault_total else {}
+            denial, _ = gate.check(
+                tool_name=tool, base_cost=100,
+                ledger=_StubLedger(), global_demand=demand,
+            )
+            assert denial is None
+            vault_total += 1
+
+        # Confirm denied at cap
+        denial, _ = gate.check(
+            tool_name=tool, base_cost=100,
+            ledger=_StubLedger(),
+            global_demand={f"{tool}:__total__": vault_total},
+        )
+        assert denial is not None
+
+        # Phase 2: operator raises cap to 5 — vault_total is still 2,
+        # so 3 more calls should be allowed
+        config2 = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=_supply_config(max_invocations=5),
+        )
+        gate = ConstraintGate(config2)
+        results: list[bool] = []
+
+        for _ in range(4):
+            demand = {f"{tool}:__total__": vault_total} if vault_total else {}
+            denial, _ = gate.check(
+                tool_name=tool, base_cost=100,
+                ledger=_StubLedger(), global_demand=demand,
+            )
+            allowed = denial is None
+            results.append(allowed)
+            if allowed:
+                vault_total += 1
+
+        # 3 more allowed (totals 3, 4, 5), then denied at 5
+        assert results == [True, True, True, False]
+        assert vault_total == 5
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: SurgePricing with simulated demand accumulation
+# ---------------------------------------------------------------------------
+
+
+def _surge_config(
+    tool: str = "search",
+    max_capacity: int = 10,
+    tiers: list[dict] | None = None,
+) -> str:
+    """Return a JSON config with a surge pricing constraint."""
+    if tiers is None:
+        tiers = [
+            {"capacity_pct": 0.5, "multiplier": 1.5},
+            {"capacity_pct": 0.8, "multiplier": 2.0},
+        ]
+    return json.dumps(
+        {
+            "tool_constraints": {
+                tool: {
+                    "constraints": [
+                        {
+                            "type": "surge_pricing",
+                            "max_capacity": max_capacity,
+                            "tiers": tiers,
+                        }
+                    ]
+                }
+            }
+        }
+    )
+
+
+class TestSurgePricingE2E:
+    """Simulate the runtime loop: accumulate demand -> gate.check -> observe price changes."""
+
+    def test_price_increases_with_demand(self):
+        """As demand crosses tier thresholds, effective cost steps up."""
+        tool = "search"
+        base_cost = 100
+        # max_capacity=10, tiers at 50% (1.5x) and 80% (2.0x)
+        config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=_surge_config(tool=tool, max_capacity=10),
+        )
+        gate = ConstraintGate(config)
+
+        prices: list[int] = []
+        for demand in range(11):
+            demand_dict = {tool: demand} if demand else {}
+            denial, cost = gate.check(
+                tool_name=tool,
+                base_cost=base_cost,
+                ledger=_StubLedger(),
+                global_demand=demand_dict,
+            )
+            assert denial is None  # surge never denies
+            prices.append(cost)
+
+        # demand 0-4 (utilization 0%-40%): below first tier -> base price
+        assert prices[0] == 100
+        assert prices[4] == 100
+
+        # demand 5-7 (utilization 50%-70%): first tier -> 1.5x
+        assert prices[5] == 150
+        assert prices[7] == 150
+
+        # demand 8-10 (utilization 80%-100%): second tier -> 2.0x
+        assert prices[8] == 200
+        assert prices[10] == 200
+
+    def test_volume_discount_prices_decrease_with_demand(self):
+        """Operator configures multipliers < 1.0: busier = cheaper."""
+        tool = "search"
+        base_cost = 200
+        config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=_surge_config(
+                tool=tool,
+                max_capacity=20,
+                tiers=[
+                    {"capacity_pct": 0.25, "multiplier": 0.8},
+                    {"capacity_pct": 0.5, "multiplier": 0.6},
+                    {"capacity_pct": 0.75, "multiplier": 0.4},
+                ],
+            ),
+        )
+        gate = ConstraintGate(config)
+
+        def price_at(demand: int) -> int:
+            demand_dict = {tool: demand} if demand else {}
+            denial, cost = gate.check(
+                tool_name=tool,
+                base_cost=base_cost,
+                ledger=_StubLedger(),
+                global_demand=demand_dict,
+            )
+            assert denial is None
+            return cost
+
+        # Low demand: base price
+        assert price_at(0) == 200
+        assert price_at(4) == 200
+
+        # 25% utilization (demand=5): 0.8x -> 160
+        assert price_at(5) == 160
+
+        # 50% utilization (demand=10): 0.6x -> 120
+        assert price_at(10) == 120
+
+        # 75% utilization (demand=15): 0.4x -> 80
+        assert price_at(15) == 80
+
+        # Prices strictly decrease: busier = cheaper
+        assert price_at(0) > price_at(5) > price_at(10) > price_at(15)
+
+    def test_surge_and_supply_compose(self):
+        """Surge pricing and finite supply on the same tool: price surges then supply exhausts."""
+        tool = "search"
+        base_cost = 100
+        config = TollboothConfig(
+            constraints_enabled=True,
+            constraints_config=json.dumps(
+                {
+                    "tool_constraints": {
+                        tool: {
+                            "constraints": [
+                                {
+                                    "type": "surge_pricing",
+                                    "max_capacity": 4,
+                                    "tiers": [{"capacity_pct": 0.5, "multiplier": 2.0}],
+                                },
+                                {
+                                    "type": "finite_supply",
+                                    "max_invocations": 3,
+                                    "scope": "global",
+                                },
+                            ]
+                        }
+                    }
+                }
+            ),
+        )
+        gate = ConstraintGate(config)
+        vault_total = 0
+        results: list[tuple[bool, int]] = []
+
+        for demand in range(4):
+            demand_dict: dict[str, int] = {}
+            if demand:
+                demand_dict[tool] = demand
+            if vault_total:
+                demand_dict[f"{tool}:__total__"] = vault_total
+
+            denial, cost = gate.check(
+                tool_name=tool,
+                base_cost=base_cost,
+                ledger=_StubLedger(),
+                global_demand=demand_dict,
+            )
+            allowed = denial is None
+            results.append((allowed, cost))
+            if allowed:
+                vault_total += 1
+
+        # Call 0: demand=0 (below surge), supply 0/3 -> allowed at base
+        assert results[0] == (True, 100)
+        # Call 1: demand=1 (below 50% of 4), supply 1/3 -> allowed at base
+        assert results[1] == (True, 100)
+        # Call 2: demand=2 (50% of 4 -> surge 2x), supply 2/3 -> allowed at 200
+        assert results[2] == (True, 200)
+        # Call 3: demand=3 (surge 2x), supply 3/3 -> DENIED by supply
+        allowed, cost = results[3]
+        assert allowed is False
+        assert cost == 0
