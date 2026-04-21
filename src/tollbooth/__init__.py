@@ -166,6 +166,12 @@ except ImportError:
     NotificationPreferences = None  # type: ignore[assignment,misc]
 
 try:
+    from tollbooth.x402_client import X402Client, x402_wallet_template
+except ImportError:
+    X402Client = None  # type: ignore[assignment,misc]
+    x402_wallet_template = None  # type: ignore[assignment,misc]
+
+try:
     from tollbooth.constraints import (
         ToolConstraint,
         ConstraintContext,
@@ -348,6 +354,8 @@ __all__ = [
     "ensure_bootstrapped",
     "OperatorRuntime",
     "OAuthProviderConfig",
+    "X402Client",
+    "x402_wallet_template",
     "resolve_npub",
     "VaultCipher",
     # Session Caches

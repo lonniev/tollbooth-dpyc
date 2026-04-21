@@ -32,6 +32,10 @@ nostr = [
 ]
 qr = ["segno>=1.6.0"]
 ots = []  # Reserved — no extra deps needed (uses stdlib hashlib + existing httpx)
+x402 = [
+    "x402>=2.8.0",
+    "eth-account>=0.13.0",
+]
 constraints = []  # No external deps — stdlib only (datetime, zoneinfo, re)
 dev = [
     "pytest>=9.0",
