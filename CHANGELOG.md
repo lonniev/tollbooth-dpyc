@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **x402 upstream adapter** (`X402Client`) — transparent HTTP 402 payment for operators consuming Coinbase x402-protected APIs. Per-tool opt-in, optional `[x402]` dependency group.
+- `x402_wallet_template()` credential template for Secure Courier delivery of agentic wallet credentials
+- BOLT11 retry with exponential backoff in `get_lightning_invoice()` — fixes QR codes showing checkout URL instead of Lightning invoice
+
+### Changed
+- `MAX_PROVEN_TTL` raised from 24 hours to 7 days (604,800 seconds) — patrons can request proof cache durations up to "7d"
+
 ## [0.14.2] — 2026-04-20
 
 ### Added

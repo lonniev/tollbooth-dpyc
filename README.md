@@ -345,6 +345,30 @@ On first relay receipt, the service sends an `ncred1...` credential card back vi
 
 ---
 
+## x402 Upstream Encapsulation
+
+Operators who consume [Coinbase x402](https://www.x402.org/)-protected APIs can absorb the 402 payment ceremony transparently. Patrons never see the 402 handshake — the Operator pays upstream USDC fees as COGS, like server rental.
+
+```python
+from tollbooth.x402_client import X402Client
+
+# Wallet credentials delivered via Secure Courier (service "x402-wallet")
+creds = await runtime.load_credentials(["wallet_private_key", "wallet_address"])
+x402 = X402Client(
+    wallet_private_key=creds["wallet_private_key"],
+    wallet_address=creds["wallet_address"],
+)
+
+@runtime.paid_tool(tool_id)
+async def fetch_upstream(query: str, npub: str = "", proof: str = "") -> dict:
+    resp = await x402.get(f"https://x402-api.example.com/data?q={query}")
+    return resp.json()  # patron sees data, never sees 402
+```
+
+Per-tool opt-in: only tool handlers that hit x402 upstreams use the client. Requires `pip install tollbooth-dpyc[x402]`. No refunds, no rebates — the Operator prices their tools to cover upstream costs with margin.
+
+---
+
 ## Identity & Proofs
 
 Every participant is identified by a [Nostr](https://nostr.com/) keypair. The `npub` is your identity on the DPYC Honor Chain. The `nsec` stays with you — never shared, never sent to a service.
@@ -407,7 +431,12 @@ pip install tollbooth-dpyc[nostr]
 pip install tollbooth-dpyc[nostr,qr]
 ```
 
-Core dependencies (`httpx`, `pynostr`) handle identity, proofs, and HTTP. The `[nostr]` extra adds `websocket-client` for Nostr relay I/O — required by every real operator since Secure Courier credential delivery, audit publishing, and bootstrap all use relay DMs. The `[qr]` extra adds `segno` for credential card QR rendering.
+Core dependencies (`httpx`, `pynostr`) handle identity, proofs, and HTTP. The `[nostr]` extra adds `websocket-client` for Nostr relay I/O — required by every real operator since Secure Courier credential delivery, audit publishing, and bootstrap all use relay DMs. The `[qr]` extra adds `segno` for credential card QR rendering. The `[x402]` extra adds `x402` + `eth-account` for transparent Coinbase x402 upstream encapsulation.
+
+```bash
+# With x402 upstream encapsulation (for operators consuming x402-protected APIs)
+pip install tollbooth-dpyc[nostr,x402]
+```
 
 ---
 
