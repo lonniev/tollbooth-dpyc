@@ -169,22 +169,35 @@ class BTCPayClient:
             "GET", f"/stores/{self._store_id}/invoices/{invoice_id}/payment-methods"
         )
 
-    async def get_lightning_invoice(self, invoice_id: str) -> str | None:
+    async def get_lightning_invoice(
+        self, invoice_id: str, *, retries: int = 3, delay: float = 0.5,
+    ) -> str | None:
         """Extract the BOLT11 Lightning invoice string for a BTCPay invoice.
 
+        BTCPay may not populate the Lightning ``destination`` immediately
+        after invoice creation.  This method retries up to *retries* times
+        with exponential backoff (*delay* doubles each attempt) to give
+        the Lightning node time to generate the BOLT11.
+
         Returns the BOLT11 string (``lnbc...``) or None if no Lightning
-        payment method is available.
+        payment method is available after all attempts.
         """
-        try:
-            methods = await self.get_invoice_payment_methods(invoice_id)
-        except BTCPayError:
-            return None
-        for method in methods:
-            pm_id = method.get("paymentMethodId", "") or method.get("paymentMethod", "")
-            if "LN" in pm_id.upper() or "LIGHTNING" in pm_id.upper():
-                dest = method.get("destination", "")
-                if dest and dest.lower().startswith("lnbc"):
-                    return dest
+        import asyncio
+
+        for attempt in range(retries):
+            try:
+                methods = await self.get_invoice_payment_methods(invoice_id)
+            except BTCPayError:
+                return None
+            for method in methods:
+                pm_id = method.get("paymentMethodId", "") or method.get("paymentMethod", "")
+                if "LN" in pm_id.upper() or "LIGHTNING" in pm_id.upper():
+                    dest = method.get("destination", "")
+                    if dest and dest.lower().startswith("lnbc"):
+                        return dest
+            if attempt < retries - 1:
+                await asyncio.sleep(delay)
+                delay *= 2
         return None
 
     async def get_api_key_info(self) -> dict[str, Any]:

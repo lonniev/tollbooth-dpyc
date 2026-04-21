@@ -26,7 +26,7 @@ from tollbooth.session_cache import SessionCache
 logger = logging.getLogger(__name__)
 
 DEFAULT_PROVEN_TTL = 7200  # 2 hours
-MAX_PROVEN_TTL = 86400  # 24 hours — hard cap, patron cannot exceed
+MAX_PROVEN_TTL = 604800  # 7 days — hard cap, patron cannot exceed
 
 # Sentinel: "patron did not specify a duration"
 UNSET: Any = object()
@@ -200,7 +200,7 @@ class ProvenNpubCache:
         """Cache an npub as ownership-proven on this session.
 
         Writes to both in-memory cache and vault (if configured).
-        The TTL is capped at ``MAX_PROVEN_TTL`` (24 hours) regardless
+        The TTL is capped at ``MAX_PROVEN_TTL`` (7 days) regardless
         of what the patron requests.
 
         Args:
