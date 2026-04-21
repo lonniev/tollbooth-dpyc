@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.15.0] — 2026-04-21
 
 ### Added
 - **x402 upstream adapter** (`X402Client`) — transparent HTTP 402 payment for operators consuming Coinbase x402-protected APIs. Per-tool opt-in, optional `[x402]` dependency group.
