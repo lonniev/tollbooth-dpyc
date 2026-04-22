@@ -10,6 +10,8 @@
 
 **Don't Pester Your Customer** — Bitcoin Lightning micropayments for MCP servers.
 
+**Patent Pending** — US Provisional Application 64/045,999
+
 > *The metaphors in this project are drawn with admiration from* The Phantom Tollbooth *by Norton Juster, illustrated by Jules Feiffer (1961). Milo, Tock, the Tollbooth, Dictionopolis, and Digitopolis are creations of Mr. Juster's extraordinary imagination. We just built the payment infrastructure.*
 
 ---
