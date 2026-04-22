@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.15.1] — 2026-04-22
+
+### Fixed
+- `record_invoice_settled` fallback path now defaults `created_at` to `settled_at` instead of empty string — invoices recovered after cold start no longer have missing timestamps
+
 ## [0.15.0] — 2026-04-21
 
 ### Added

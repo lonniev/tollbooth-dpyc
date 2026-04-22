@@ -227,7 +227,7 @@ class UserLedger:
                 api_sats_credited=api_sats_credited,
                 multiplier=0,  # Unknown
                 status="Settled",
-                created_at="",  # Unknown
+                created_at=settled_at,  # Best approximation when original creation time is lost
                 settled_at=settled_at,
                 btcpay_status=btcpay_status,
             )
