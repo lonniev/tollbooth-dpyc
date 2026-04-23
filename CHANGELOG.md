@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.15.3] — 2026-04-23
+
+### Changed
+- Proof confirmation DM to patron now carries the same enriched message as the tool response (operator name, session, expiry timestamp) instead of generic "npub ownership confirmed"
+
 ## [0.15.2] — 2026-04-22
 
 ### Fixed

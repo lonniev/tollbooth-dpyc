@@ -2545,11 +2545,6 @@ def register_standard_tools(
 
         # One summary DM to patron
         if matched_payload is not None:
-            try:
-                exchange.send_dm(resolved, "npub ownership confirmed.")
-            except Exception:
-                pass
-
             # Store to vault (for cold-start recovery of proven status)
             if exchange._credential_vault is not None:
                 try:
@@ -2604,6 +2599,20 @@ def register_standard_tools(
             sid_short = sid[:12] + "..."
             op_name = rt._service_name
 
+            confirmation_msg = (
+                f"Your ownership of {npub_short} is confirmed "
+                f"for {op_name} on session {sid_short}. "
+                f"Proof remains valid until {expires_str} "
+                f"({duration_human} from now). "
+                f"Cleaned {popped} DM(s) from relay."
+            )
+
+            # Send enriched confirmation DM to patron
+            try:
+                exchange.send_dm(resolved, confirmation_msg)
+            except Exception:
+                pass
+
             return {
                 "success": True,
                 "proven_npub": resolved,
@@ -2611,13 +2620,7 @@ def register_standard_tools(
                 "popped_dms": popped,
                 "expires_in_seconds": ttl_display,
                 "expires_at": expires_str,
-                "message": (
-                    f"Your ownership of {npub_short} is confirmed "
-                    f"for {op_name} on session {sid_short}. "
-                    f"Proof remains valid until {expires_str} "
-                    f"({duration_human} from now). "
-                    f"Cleaned {popped} DM(s) from relay."
-                ),
+                "message": confirmation_msg,
             }
         else:
             summary = f"Scanned and cleaned {popped} DM(s) but none matched."
