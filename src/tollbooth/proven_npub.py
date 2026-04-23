@@ -140,7 +140,11 @@ class ProvenNpubCache:
         self, ttl_seconds: int = DEFAULT_PROVEN_TTL, vault: Any | None = None, **_: Any
     ) -> None:
         self._ttl = ttl_seconds
-        self._cache: SessionCache[ProvenNpub] = SessionCache(ttl_seconds=ttl_seconds)
+        # SessionCache's global TTL must accommodate the longest possible
+        # per-entry TTL.  Real expiry is checked in is_proven() using the
+        # ProvenNpub.expires_at field, so the cache itself just needs to
+        # avoid evicting entries before their patron-chosen duration.
+        self._cache: SessionCache[ProvenNpub] = SessionCache(ttl_seconds=MAX_PROVEN_TTL)
         self._vault = vault
 
     async def is_proven(self, session_id: str, npub: str) -> bool:

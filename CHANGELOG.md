@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.15.2] — 2026-04-22
+
+### Fixed
+- Patron-requested proof cache durations (e.g. 36h) were silently capped to 2h by `SessionCache`'s global TTL — container now uses `MAX_PROVEN_TTL` so per-entry expiry is honored
+
+### Changed
+- `receive_npub_proof` response message now includes operator name, truncated npub, session ID, and human-readable expiry timestamp (e.g. "valid until 2026-04-24 09:30 UTC (36 hours from now)")
+- Added `expires_at` field to proof confirmation response for programmatic use
+
 ## [0.15.1] — 2026-04-22
 
 ### Fixed

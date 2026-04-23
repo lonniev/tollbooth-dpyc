@@ -51,11 +51,19 @@ async def test_expiry_removes_proven():
     await cache.mark_proven(SESSION_A, VALID_NPUB)
     assert await cache.is_proven(SESSION_A, VALID_NPUB)
 
-    # Backdate the TTL entry to force expiry
+    # Backdate the ProvenNpub record's expires_at to force expiry.
+    # SessionCache uses MAX_PROVEN_TTL as its container TTL; real expiry
+    # is checked by is_proven() via the record's expires_at field.
     key = f"{SESSION_A}:{VALID_NPUB}"
     entry = cache._cache._entries.get(key)
     if entry is not None:
-        cache._cache._entries[key] = (entry[0], time.time() - 10)
+        expired_record = ProvenNpub(
+            session_id=entry[0].session_id,
+            npub=entry[0].npub,
+            verified_at=entry[0].verified_at,
+            expires_at=time.time() - 10,
+        )
+        cache._cache._entries[key] = (expired_record, entry[1])
     assert not await cache.is_proven(SESSION_A, VALID_NPUB)
 
 

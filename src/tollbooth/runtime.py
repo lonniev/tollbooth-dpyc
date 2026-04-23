@@ -2590,18 +2590,33 @@ def register_standard_tools(
             record = await cache.mark_proven(sid, resolved, ttl_override=ttl_seconds if raw_duration else UNSET)
 
             ttl_display = int(record.expires_at - record.verified_at)
+            hours = ttl_display / 3600
+            if hours >= 1:
+                duration_human = f"{hours:.0f} hour{'s' if hours != 1 else ''}"
+            else:
+                duration_human = f"{ttl_display // 60} minute{'s' if ttl_display >= 120 else ''}"
+
+            from datetime import datetime, timezone
+            expires_dt = datetime.fromtimestamp(record.expires_at, tz=timezone.utc)
+            expires_str = expires_dt.strftime("%Y-%m-%d %H:%M UTC")
+
+            npub_short = resolved[:16] + "..." if len(resolved) > 20 else resolved
+            sid_short = sid[:12] + "..."
+            op_name = rt._service_name
 
             return {
                 "success": True,
                 "proven_npub": resolved,
-                "session_id": sid[:12] + "...",
+                "session_id": sid_short,
                 "popped_dms": popped,
                 "expires_in_seconds": ttl_display,
+                "expires_at": expires_str,
                 "message": (
-                    f"npub ownership verified via signed DM. "
-                    f"Proof bound to this session. "
-                    f"Cleaned {popped} DM(s) from relay. "
-                    f"Cached for {ttl_display}s."
+                    f"Your ownership of {npub_short} is confirmed "
+                    f"for {op_name} on session {sid_short}. "
+                    f"Proof remains valid until {expires_str} "
+                    f"({duration_human} from now). "
+                    f"Cleaned {popped} DM(s) from relay."
                 ),
             }
         else:
