@@ -209,11 +209,11 @@ def probe_relay_liveness(
 
 # ── Relay resolution ──────────────────────────────────────────────────
 
-DEFAULT_RELAY = "wss://nostr.wine"
+DEFAULT_RELAY = "wss://relay.primal.net"
 FALLBACK_RELAY_POOL = [
-    "wss://relay.primal.net",
     "wss://relay.damus.io",
     "wss://nos.lol",
+    "wss://nostr.wine",
     "wss://relay.nostr.band",
 ]
 
@@ -244,17 +244,19 @@ def resolve_relays(
     Returns:
         A non-empty list of relay WebSocket URLs.
     """
-    # Normalise input to a list
+    # Normalise input to a list.
+    # When unconfigured, use DEFAULT_RELAY + FALLBACK_RELAY_POOL so
+    # operators reach patrons on whichever relays their client uses.
     if configured is None:
-        relays = [DEFAULT_RELAY]
+        relays = [DEFAULT_RELAY] + FALLBACK_RELAY_POOL
     elif isinstance(configured, str):
         relays = [r.strip() for r in configured.split(",") if r.strip()]
         if not relays:
-            relays = [DEFAULT_RELAY]
+            relays = [DEFAULT_RELAY] + FALLBACK_RELAY_POOL
     else:
         relays = [r.strip() for r in configured if r.strip()]
         if not relays:
-            relays = [DEFAULT_RELAY]
+            relays = [DEFAULT_RELAY] + FALLBACK_RELAY_POOL
 
     results = probe_relay_liveness(relays, timeout=timeout)
     live = [r["relay"] for r in results if r["connected"]]

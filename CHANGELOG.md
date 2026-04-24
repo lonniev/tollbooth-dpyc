@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.15.4] — 2026-04-24
+
+### Fixed
+- Default relay set broadened from `nostr.wine` alone to 5 relays (`relay.primal.net`, `relay.damus.io`, `nos.lol`, `nostr.wine`, `relay.nostr.band`) — patron replies from clients like Oxchat were invisible when their relays didn't include the operator's single default
+- `PeriodicRefreshConstraint` now supports `scope` parameter (`global` / `per_patron`) matching `FiniteSupplyConstraint`
+
 ## [0.15.3] — 2026-04-23
 
 ### Changed

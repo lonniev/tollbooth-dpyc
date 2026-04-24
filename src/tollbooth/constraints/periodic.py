@@ -72,6 +72,9 @@ class PeriodicRefreshConstraint(ToolConstraint):
         How many invocations are allowed per window.
     window_duration:
         ISO-8601 duration string, e.g. ``"PT5H"`` for 5 hours.
+    scope:
+        ``"global"`` — window count is shared across all patrons.
+        ``"per_patron"`` — each patron gets their own window counter.
     current_window_count:
         Number of invocations already consumed in the current window.
     window_start:
@@ -83,17 +86,27 @@ class PeriodicRefreshConstraint(ToolConstraint):
         self,
         max_per_window: int,
         window_duration: str,
+        scope: str = "global",
         current_window_count: int = 0,
         window_start: str | None = None,
     ) -> None:
         self.max_per_window = max_per_window
         self.window_duration = window_duration
+        self.scope = scope
         self.current_window_count = current_window_count
         self.window_start = window_start
         self._delta = parse_iso_duration(window_duration)
 
     def evaluate(self, context: ConstraintContext) -> ConstraintResult:
         now = context.env.utc_now
+
+        # Scope-aware count: per_patron uses the patron's own counter,
+        # global uses the shared counter.
+        base_count = (
+            context.env.invocation_count
+            if self.scope == "per_patron"
+            else self.current_window_count
+        )
 
         # Determine effective window start / count
         if self.window_start is not None:
@@ -105,11 +118,11 @@ class PeriodicRefreshConstraint(ToolConstraint):
                 # Window expired — new window, count resets
                 count = 0
             else:
-                count = self.current_window_count
+                count = base_count
         else:
             ws = now  # synthetic "current" window
             window_end = ws + self._delta
-            count = self.current_window_count
+            count = base_count
 
         remaining = max(0, self.max_per_window - count)
 
@@ -133,7 +146,7 @@ class PeriodicRefreshConstraint(ToolConstraint):
     def describe(self) -> str:
         return (
             f"Rate-limited to {self.max_per_window} invocations "
-            f"per {self.window_duration}."
+            f"per {self.window_duration} ({self.scope})."
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -141,6 +154,7 @@ class PeriodicRefreshConstraint(ToolConstraint):
             "type": "periodic_refresh",
             "max_per_window": self.max_per_window,
             "window_duration": self.window_duration,
+            "scope": self.scope,
             "current_window_count": self.current_window_count,
         }
         if self.window_start is not None:
@@ -152,6 +166,7 @@ class PeriodicRefreshConstraint(ToolConstraint):
         return cls(
             max_per_window=int(data["max_per_window"]),
             window_duration=str(data["window_duration"]),
+            scope=str(data.get("scope", "global")),
             current_window_count=int(data.get("current_window_count", 0)),
             window_start=data.get("window_start"),
         )
@@ -165,6 +180,7 @@ class PeriodicRefreshConstraint(ToolConstraint):
             params=[
                 ParamSchema(name="max_per_window", type="int", description="Max invocations allowed per window."),
                 ParamSchema(name="window_duration", type="string", description="ISO-8601 duration (e.g. PT5H for 5 hours)."),
+                ParamSchema(name="scope", type="string", required=False, default="global", description="'global' or 'per_patron'."),
                 ParamSchema(name="current_window_count", type="int", required=False, default=0, description="Invocations already consumed in current window."),
                 ParamSchema(name="window_start", type="string", required=False, description="ISO-8601 datetime of current window start."),
             ],
