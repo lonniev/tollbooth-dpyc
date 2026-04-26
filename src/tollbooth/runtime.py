@@ -566,19 +566,30 @@ class OperatorRuntime:
                     }
             else:
                 # Non-restricted: check proven npub cache before requiring inline proof.
-                # Proof is bound to the MCP session — different sessions must prove independently.
+                # Proof is poison-keyed — the calling application holds the raw
+                # poison phrase and supplies it as the ``proof`` parameter.
+                # The MCP hashes it and looks up the proof record in Neon.
+                import hashlib as _hashlib
+                import re as _re
                 cache = await self.proven_npub_cache()
-                try:
-                    sid = self._get_session_id()
-                except Exception as exc:
-                    logger.warning(
-                        "session_id unavailable for proof cache lookup: %s",
-                        exc,
-                    )
-                    sid = ""
-                if sid and await cache.is_proven(sid, resolved):
-                    pass  # npub ownership already verified on this session
+                _POISON_RE = _re.compile(r"^[a-z]+-[a-z]+-\d+$")
+                if proof and _POISON_RE.match(proof):
+                    # Proof looks like a poison phrase — hash and look up
+                    poison_hash = _hashlib.sha256(proof.encode()).hexdigest()
+                    if await cache.is_proven(poison_hash, resolved):
+                        pass  # npub ownership verified via poison-keyed proof
+                    else:
+                        return {
+                            "success": False,
+                            "error": (
+                                "proof token expired or not recognized. "
+                                "Call request_npub_proof to start a fresh "
+                                "proof exchange, then receive_npub_proof "
+                                "to verify and cache it."
+                            ),
+                        }
                 elif proof:
+                    # Proof looks like a Schnorr signature — verify inline
                     if not verify_proof(proof, resolved, cap):
                         return {
                             "success": False,
@@ -590,8 +601,8 @@ class OperatorRuntime:
                         "error": (
                             "proof is required. Call request_npub_proof to "
                             "start a fresh proof exchange, then receive_npub_proof "
-                            "to verify and cache it. The cache expires after ~1 hour "
-                            "and must be renewed with a new request/receive cycle."
+                            "to verify and cache it. Pass the returned proof_token "
+                            "as the proof parameter on every paid tool call."
                         ),
                     }
 
@@ -1071,6 +1082,112 @@ class OperatorRuntime:
         if not svc:
             return None
         return await self._load_vault_creds(svc, npub_override=patron_npub) or None
+
+    # ------------------------------------------------------------------
+    # OAuth session restore (generic refresh-and-persist)
+    # ------------------------------------------------------------------
+
+    async def restore_oauth_session(
+        self,
+        patron_npub: str,
+    ) -> tuple[dict[str, str] | None, str]:
+        """Restore OAuth tokens from vault, refreshing if expired.
+
+        Uses the ``OAuthProviderConfig`` attached to this runtime to
+        determine the token endpoint, credential field names, and
+        whether auto-refresh is enabled.  On successful refresh, the
+        new tokens are persisted back to the vault so subsequent
+        cold starts find fresh credentials.
+
+        Returns:
+            ``(creds, "")`` on success — *creds* contains at least
+            ``access_token``, ``token_json``, and ``expires_at``.
+
+            ``(None, situation)`` on failure — *situation* is one of
+            ``"no_oauth_config"``, ``"no_credentials"``,
+            ``"token_expired"``, or ``"vault_bootstrapping"``.
+        """
+        opc = self._oauth_provider
+        if opc is None:
+            return None, "no_oauth_config"
+
+        svc = opc.service_name
+
+        # Stage 1: load from vault
+        try:
+            creds = await self.load_patron_session(patron_npub, service=svc)
+        except Exception:
+            return None, "vault_bootstrapping"
+
+        if not creds or not creds.get("access_token"):
+            return None, "no_credentials"
+
+        # Stage 2: check expiration
+        import time as _time
+        expires_at = float(creds.get("expires_at", "0"))
+        if _time.time() <= expires_at:
+            return creds, ""  # still valid
+
+        # Stage 3: refresh if enabled
+        if not opc.refresh_enabled:
+            return None, "token_expired"
+
+        refresh_token = creds.get("refresh_token", "")
+        if not refresh_token:
+            return None, "token_expired"
+
+        try:
+            op_creds = await self.load_credentials(
+                [opc.client_id_field, opc.client_secret_field],
+            )
+        except Exception:
+            return None, "token_expired"
+
+        client_id = op_creds.get(opc.client_id_field, "")
+        client_secret = op_creds.get(opc.client_secret_field, "")
+        if not client_id or not client_secret:
+            return None, "token_expired"
+
+        try:
+            from tollbooth.oauth2_collector import refresh_access_token
+            new_token = await refresh_access_token(
+                client_id, client_secret, refresh_token, opc.token_url,
+            )
+        except Exception as exc:
+            logger.warning(
+                "OAuth token refresh failed for %s: %s", patron_npub[:20], exc,
+            )
+            return None, "token_expired"
+
+        # Build vault data from refreshed token
+        import json as _json
+        vault_data: dict[str, str] = {
+            "token_json": _json.dumps(new_token),
+            "access_token": new_token.get("access_token", ""),
+            "refresh_token": new_token.get("refresh_token", refresh_token),
+            "expires_at": str(new_token.get("expires_at", "")),
+            "token_type": new_token.get("token_type", "Bearer"),
+        }
+
+        # Carry forward non-token fields from original creds (e.g., account_hash)
+        for key, val in creds.items():
+            if key not in vault_data:
+                vault_data[key] = val
+
+        # Operator callback (e.g., Schwab fetches account_hash on refresh too)
+        if opc.on_token_received is not None:
+            try:
+                extra = await opc.on_token_received(patron_npub, new_token)
+                if extra:
+                    vault_data.update({k: str(v) for k, v in extra.items()})
+            except Exception as exc:
+                logger.warning("on_token_received callback failed on refresh: %s", exc)
+
+        # Persist refreshed tokens
+        await self.store_patron_session(patron_npub, vault_data, service=svc)
+        logger.info("Refreshed and persisted OAuth token for %s.", patron_npub[:20])
+
+        return vault_data, ""
 
     # ------------------------------------------------------------------
     # BTCPay client (from operator credential vault)
@@ -2310,8 +2427,13 @@ def register_standard_tools(
         Do NOT poll or retry — each ``receive_npub_proof`` call
         destructively drains the relay mailbox.
 
-        **Lifecycle:** The cached proof expires after a fixed TTL
-        (default 1 hour). When it expires, call ``request_npub_proof``
+        **Returns** a ``proof_token`` — the poison phrase that the
+        calling application MUST remember and pass as the ``proof``
+        parameter on every subsequent paid tool call. The MCP does
+        not retain this value across restarts.
+
+        **Lifecycle:** The cached proof expires after the patron's
+        chosen duration. When it expires, call ``request_npub_proof``
         again for a fresh challenge, then wait for the user, then
         call ``receive_npub_proof``.
 
@@ -2366,6 +2488,9 @@ def register_standard_tools(
         except Exception as e:
             return {"success": False, "error": f"Failed to send proof request: {e}"}
 
+        # Extract the poison phrase from the channel result
+        poison = result.get("poison", "")
+
         # Store challenge timestamp in vault for receive_npub_proof
         try:
             await rt.store_patron_session(
@@ -2378,6 +2503,7 @@ def register_standard_tools(
 
         return {
             "success": True,
+            "proof_token": poison,
             "message": (
                 "Proof request sent via Secure Courier. "
                 "Call receive_npub_proof to complete."
@@ -2398,8 +2524,12 @@ def register_standard_tools(
         Do NOT poll, loop, or retry.
 
         The signed DM itself proves npub ownership (the patron's nsec
-        signed it). On success, caches the proven npub so subsequent
-        paid tool calls skip inline proof. Free.
+        signed it). On success, returns a ``proof_token`` — the same
+        poison phrase from ``request_npub_proof``. The calling
+        application MUST remember this token and pass it as the
+        ``proof`` parameter on every subsequent paid tool call.
+        The proof is stored in the vault keyed by a hash of the
+        poison — the MCP never stores the raw poison itself. Free.
 
         Args:
             patron_npub: Required. The patron's npub to receive proof from.
@@ -2562,15 +2692,24 @@ def register_standard_tools(
                     logger.warning("on_npub_proven callback failed: %s", exc)
 
             cache = await rt.proven_npub_cache()
-            try:
-                sid = rt._get_session_id()
-            except Exception:
-                sid = ""
-            if not sid:
+
+            # Compute poison hash — the caller-supplied proof token for
+            # future paid calls. The raw poison is returned to the caller
+            # but never stored by the MCP.
+            if not expected_phrase:
                 return {
                     "success": False,
-                    "error": "No MCP session ID available — cannot bind proof to channel.",
+                    "error": (
+                        "Proof reply matched but the original poison phrase "
+                        "could not be recovered. Call request_npub_proof "
+                        "to start a fresh exchange."
+                    ),
                 }
+            import hashlib as _hashlib
+            poison_hash = _hashlib.sha256(
+                expected_phrase.encode(),
+            ).hexdigest()
+
             # Parse patron's chosen cache duration (default: 2h)
             raw_duration = (matched_payload or {}).get("cache_duration", "").strip()
             ttl_seconds: int | None = None
@@ -2582,7 +2721,7 @@ def register_standard_tools(
                     pass  # unparseable → use cache default
 
             from tollbooth.proven_npub import UNSET
-            record = await cache.mark_proven(sid, resolved, ttl_override=ttl_seconds if raw_duration else UNSET)
+            record = await cache.mark_proven(poison_hash, resolved, ttl_override=ttl_seconds if raw_duration else UNSET)
 
             ttl_display = int(record.expires_at - record.verified_at)
             hours = ttl_display / 3600
@@ -2596,12 +2735,11 @@ def register_standard_tools(
             expires_str = expires_dt.strftime("%Y-%m-%d %H:%M UTC")
 
             npub_short = resolved[:16] + "..." if len(resolved) > 20 else resolved
-            sid_short = sid[:12] + "..."
             op_name = rt._service_name
 
             confirmation_msg = (
                 f"Your ownership of {npub_short} is confirmed "
-                f"for {op_name} on session {sid_short}. "
+                f"for {op_name}. "
                 f"Proof remains valid until {expires_str} "
                 f"({duration_human} from now). "
                 f"Cleaned {popped} DM(s) from relay."
@@ -2616,7 +2754,7 @@ def register_standard_tools(
             return {
                 "success": True,
                 "proven_npub": resolved,
-                "session_id": sid_short,
+                "proof_token": expected_phrase,
                 "popped_dms": popped,
                 "expires_in_seconds": ttl_display,
                 "expires_at": expires_str,

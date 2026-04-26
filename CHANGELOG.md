@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.15.5] — 2026-04-26
+
+### Changed
+- **Poison-keyed proof** — proof cache key changed from `session_id:npub` to `sha256(poison):npub`. Proof now survives MCP restarts because the calling application holds the raw poison phrase and supplies it on each paid tool call. The MCP stores only the hashed poison in Neon.
+- `request_npub_proof` and `receive_npub_proof` now return `proof_token` in the response for the calling application to remember
+- `debit_or_deny` accepts poison phrases (e.g. `bold-hawk-42`) as the `proof` parameter; Schnorr signatures still accepted for restricted tools
+
+### Added
+- `OperatorRuntime.restore_oauth_session(patron_npub)` — generic restore-refresh-persist cycle for OAuth tokens. Loads from vault, checks expiry, refreshes via `OAuthProviderConfig.token_url`, persists rotated tokens back to vault. Eliminates duplicated refresh logic in schwab-mcp and excalibur-mcp.
+
 ## [0.15.4] — 2026-04-24
 
 ### Fixed

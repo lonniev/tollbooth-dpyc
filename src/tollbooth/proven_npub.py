@@ -1,15 +1,19 @@
-"""Proven npub cache — channel-bound npub ownership proof.
+"""Proven npub cache — poison-keyed npub ownership proof.
 
-The proof is bound to the MCP session (FastMCP session_id) that
-completed the proof exchange. A different session must prove
-independently — proof does not leak across channels.
+The proof is bound to the poison phrase that the calling application
+received during the ``request_npub_proof`` / ``receive_npub_proof``
+exchange. The application remembers the raw poison; the MCP stores
+only ``sha256(poison):npub`` — never the raw poison itself.
 
-Cache key: ``"{session_id}:{npub}"``.
+Cache key: ``"{poison_hash}:{npub}"``.
 
 On ``mark_proven``, the record is written to both the in-memory
 cache and the Neon vault (encrypted by the operator's nsec).
 On ``is_proven`` cache miss, the vault is checked before rejecting —
 surviving serverless cold starts that wipe in-memory state.
+
+Security: a vault compromise yields only hashed poisons — useless
+without the raw values held exclusively by the calling application.
 """
 
 from __future__ import annotations
@@ -96,19 +100,19 @@ def parse_duration(text: str) -> int | None:
 _VAULT_KEY_PREFIX = "proven_npub:"
 
 
-def _cache_key(session_id: str, npub: str) -> str:
-    return f"{session_id}:{npub}"
+def _cache_key(poison_hash: str, npub: str) -> str:
+    return f"{poison_hash}:{npub}"
 
 
-def _vault_key(session_id: str, npub: str) -> str:
-    return f"{_VAULT_KEY_PREFIX}{session_id}:{npub}"
+def _vault_key(poison_hash: str, npub: str) -> str:
+    return f"{_VAULT_KEY_PREFIX}{poison_hash}:{npub}"
 
 
 @dataclass(frozen=True)
 class ProvenNpub:
-    """Record that an npub owner proved ownership on a specific channel."""
+    """Record that an npub owner proved ownership via a poison phrase."""
 
-    session_id: str
+    poison_hash: str
     npub: str
     verified_at: float
     expires_at: float
@@ -122,17 +126,18 @@ class ProvenNpub:
 
 
 class ProvenNpubCache:
-    """Channel-bound npub ownership cache with vault persistence.
+    """Poison-keyed npub ownership cache with vault persistence.
 
     In-memory ``SessionCache`` for hot lookups.  On cache miss,
     falls back to the Neon vault (encrypted at rest) so proofs
     survive serverless cold starts.
 
-    Keyed by ``(session_id, npub)`` — proof on one MCP session
-    does not extend to another.
+    Keyed by ``(poison_hash, npub)`` — the calling application holds
+    the raw poison phrase and supplies it on each paid tool call.
+    The MCP never stores the raw poison.
 
     Args:
-        ttl_seconds: How long a proven npub stays valid (default 3600).
+        ttl_seconds: How long a proven npub stays valid (default 2h).
         vault: Optional NeonVault for durable storage.
     """
 
@@ -147,17 +152,17 @@ class ProvenNpubCache:
         self._cache: SessionCache[ProvenNpub] = SessionCache(ttl_seconds=MAX_PROVEN_TTL)
         self._vault = vault
 
-    async def is_proven(self, session_id: str, npub: str) -> bool:
-        """Check if an npub is proven on this session."""
-        key = _cache_key(session_id, npub)
+    async def is_proven(self, poison_hash: str, npub: str) -> bool:
+        """Check if an npub is proven via the given poison hash."""
+        key = _cache_key(poison_hash, npub)
         record = self._cache.get(key)
 
         if record is not None:
             if time.time() > record.expires_at:
                 logger.warning(
-                    "Proof cache EXPIRED for session=%s npub=%s — "
+                    "Proof cache EXPIRED for poison_hash=%s npub=%s — "
                     "verified_at=%.0f expires_at=%.0f now=%.0f (%.0fs overdue)",
-                    session_id[:16], npub[:20],
+                    poison_hash[:16], npub[:20],
                     record.verified_at, record.expires_at,
                     time.time(), time.time() - record.expires_at,
                 )
@@ -165,50 +170,50 @@ class ProvenNpubCache:
                 return False
             remaining = record.expires_at - time.time()
             logger.debug(
-                "Proof cache HIT for session=%s npub=%s (%.0fs remaining)",
-                session_id[:16], npub[:20], remaining,
+                "Proof cache HIT for poison_hash=%s npub=%s (%.0fs remaining)",
+                poison_hash[:16], npub[:20], remaining,
             )
             return True
 
         # In-memory miss — try vault restore
         if self._vault:
-            record = await self._vault_fetch(session_id, npub)
+            record = await self._vault_fetch(poison_hash, npub)
             if record is not None and time.time() < record.expires_at:
                 self._cache.set(key, record)
                 remaining = record.expires_at - time.time()
                 logger.info(
-                    "Proof cache RESTORED from vault for session=%s npub=%s (%.0fs remaining)",
-                    session_id[:16], npub[:20], remaining,
+                    "Proof cache RESTORED from vault for poison_hash=%s npub=%s (%.0fs remaining)",
+                    poison_hash[:16], npub[:20], remaining,
                 )
                 return True
             if record is not None:
                 logger.info(
-                    "Vault proof expired for session=%s npub=%s — cleaning up",
-                    session_id[:16], npub[:20],
+                    "Vault proof expired for poison_hash=%s npub=%s — cleaning up",
+                    poison_hash[:16], npub[:20],
                 )
-                await self._vault_delete(session_id, npub)
+                await self._vault_delete(poison_hash, npub)
 
         cached_keys = list(self._cache._entries.keys())
         logger.warning(
-            "Proof cache MISS for session=%s npub=%s — "
+            "Proof cache MISS for poison_hash=%s npub=%s — "
             "key=%s not found. %d entries in cache: %s",
-            session_id[:16], npub[:20], key[:40],
+            poison_hash[:16], npub[:20], key[:40],
             len(cached_keys),
             [k[:40] for k in cached_keys],
         )
         return False
 
     async def mark_proven(
-        self, session_id: str, npub: str, ttl_override: Any = UNSET,
+        self, poison_hash: str, npub: str, ttl_override: Any = UNSET,
     ) -> ProvenNpub:
-        """Cache an npub as ownership-proven on this session.
+        """Cache an npub as ownership-proven via a poison phrase.
 
         Writes to both in-memory cache and vault (if configured).
         The TTL is capped at ``MAX_PROVEN_TTL`` (7 days) regardless
         of what the patron requests.
 
         Args:
-            session_id: The MCP transport session ID.
+            poison_hash: SHA-256 hex digest of the raw poison phrase.
             npub: The patron's npub (bech32).
             ttl_override: Seconds until expiry. ``None`` or values
                 exceeding the cap are clamped to ``MAX_PROVEN_TTL``.
@@ -223,16 +228,16 @@ class ProvenNpubCache:
         now = time.time()
         expires_at = now + ttl
         record = ProvenNpub(
-            session_id=session_id,
+            poison_hash=poison_hash,
             npub=npub,
             verified_at=now,
             expires_at=expires_at,
         )
-        self._cache.set(_cache_key(session_id, npub), record)
+        self._cache.set(_cache_key(poison_hash, npub), record)
         label = f"{ttl}s" if ttl is not None else "unlimited"
         logger.info(
-            "Cached proven npub %s on session %s (expires in %s)",
-            npub[:20], session_id[:12], label,
+            "Cached proven npub %s with poison_hash %s (expires in %s)",
+            npub[:20], poison_hash[:12], label,
         )
 
         if self._vault:
@@ -240,9 +245,9 @@ class ProvenNpubCache:
 
         return record
 
-    def invalidate(self, session_id: str, npub: str) -> None:
+    def invalidate(self, poison_hash: str, npub: str) -> None:
         """Remove a proven npub from the cache."""
-        self._cache.clear(_cache_key(session_id, npub))
+        self._cache.clear(_cache_key(poison_hash, npub))
 
     # -- Vault helpers --------------------------------------------------------
 
@@ -250,18 +255,18 @@ class ProvenNpubCache:
         try:
             encrypted = self._vault._encrypt(record.to_json())
             await self._vault.set_config(
-                _vault_key(record.session_id, record.npub), encrypted,
+                _vault_key(record.poison_hash, record.npub), encrypted,
             )
             logger.debug(
-                "Proof persisted to vault for session=%s npub=%s",
-                record.session_id[:12], record.npub[:20],
+                "Proof persisted to vault for poison_hash=%s npub=%s",
+                record.poison_hash[:12], record.npub[:20],
             )
         except Exception as exc:
             logger.warning("Vault store for proven npub failed (non-fatal): %s", exc)
 
-    async def _vault_fetch(self, session_id: str, npub: str) -> ProvenNpub | None:
+    async def _vault_fetch(self, poison_hash: str, npub: str) -> ProvenNpub | None:
         try:
-            raw = await self._vault.get_config(_vault_key(session_id, npub))
+            raw = await self._vault.get_config(_vault_key(poison_hash, npub))
             if raw is None:
                 return None
             decrypted = self._vault._decrypt(raw)
@@ -270,8 +275,8 @@ class ProvenNpubCache:
             logger.warning("Vault fetch for proven npub failed (non-fatal): %s", exc)
             return None
 
-    async def _vault_delete(self, session_id: str, npub: str) -> None:
+    async def _vault_delete(self, poison_hash: str, npub: str) -> None:
         try:
-            await self._vault.set_config(_vault_key(session_id, npub), "")
+            await self._vault.set_config(_vault_key(poison_hash, npub), "")
         except Exception:
             pass  # best-effort cleanup
