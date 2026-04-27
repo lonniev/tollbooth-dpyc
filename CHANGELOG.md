@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.15.6] — 2026-04-26
+
+### Fixed
+- Bootstrap relay discovery now uses the operator's configured relays instead of a hardcoded list. Previously `_read_config_from_relays` ignored `OperatorRuntime._relays`, causing bootstrap failures when the Authority's config DM was on relays not in `BOOTSTRAP_RELAYS`.
+
 ## [0.15.5] — 2026-04-26
 
 ### Changed

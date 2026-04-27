@@ -329,7 +329,7 @@ class OperatorRuntime:
 
         # Certified operators: bootstrap from Authority relay DM.
         from tollbooth.bootstrap import ensure_bootstrapped
-        result = await ensure_bootstrapped()
+        result = await ensure_bootstrapped(relays=self._relays)
         if not result.success or not result.neon_database_url:
             raise ValueError(
                 f"Bootstrap failed: {result.error or 'no Neon URL'}. "

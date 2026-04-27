@@ -39,11 +39,18 @@ class BootstrapResult:
 _cached_result: BootstrapResult | None = None
 
 
-async def ensure_bootstrapped() -> BootstrapResult:
+async def ensure_bootstrapped(
+    relays: list[str] | None = None,
+) -> BootstrapResult:
     """Run bootstrap once, cache the result for process lifetime.
 
     Call this from the first tool invocation. Returns immediately
     on subsequent calls.
+
+    Args:
+        relays: Optional relay URLs to search for the Authority's
+            bootstrap config DM. Falls back to ``BOOTSTRAP_RELAYS``
+            if not provided.
 
     Reads ``TOLLBOOTH_NOSTR_OPERATOR_NSEC`` from the environment.
     """
@@ -59,7 +66,7 @@ async def ensure_bootstrapped() -> BootstrapResult:
         _cached_result = result
         return result
 
-    client = BootstrapClient(nsec_hex=nsec)
+    client = BootstrapClient(nsec_hex=nsec, relays=relays)
     _cached_result = await client.bootstrap()
     return _cached_result
 
@@ -81,8 +88,9 @@ class BootstrapClient:
             )
     """
 
-    def __init__(self, nsec_hex: str) -> None:
+    def __init__(self, nsec_hex: str, relays: list[str] | None = None) -> None:
         self._nsec_hex = nsec_hex
+        self._relays = relays
         self._npub: str | None = None
         self._pubkey_hex: str | None = None
 
@@ -190,6 +198,7 @@ class BootstrapClient:
             config, diag = receive_bootstrap_config(
                 operator_nsec=self._nsec_hex,
                 authority_pubkey_hex=authority_hex,
+                relays=self._relays,
             )
             self._relay_diag = diag
             return config
