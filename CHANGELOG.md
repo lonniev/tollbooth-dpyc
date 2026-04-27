@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.15.7] — 2026-04-26
+
+### Fixed
+- Bootstrap config relay filter `max_age_seconds` raised from 30 days to 1 year. The old 30-day client-side filter was causing bootstrap failures when the Authority's config DM aged past the window, even though relays still held it.
+
 ## [0.15.6] — 2026-04-26
 
 ### Fixed

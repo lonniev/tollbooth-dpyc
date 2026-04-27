@@ -125,7 +125,7 @@ def receive_bootstrap_config(
     operator_nsec: str,
     authority_pubkey_hex: str,
     relays: list[str] | None = None,
-    max_age_seconds: int = 30 * 24 * 3600,  # 30 days
+    max_age_seconds: int = 365 * 24 * 3600,  # 1 year
 ) -> tuple[dict[str, str] | None, str]:
     """Read bootstrap config from Nostr relays.
 
