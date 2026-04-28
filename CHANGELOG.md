@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.0] — 2026-04-27
+
+### Added
+- **Field-level patron credential CRUD** — `update_patron_credential`, `delete_patron_credential`, `get_patron_credential`, `list_patron_credential_fields` on `OperatorRuntime`. Read-merge-write on the existing encrypted blob; no schema changes.
+- Three new standard tools: `update_patron_credential`, `delete_patron_credential`, `get_patron_credential_fields`. Free, registered on all MCPs.
+
 ## [0.15.7] — 2026-04-26
 
 ### Fixed

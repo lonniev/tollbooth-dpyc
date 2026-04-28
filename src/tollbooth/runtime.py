@@ -1084,6 +1084,74 @@ class OperatorRuntime:
         return await self._load_vault_creds(svc, npub_override=patron_npub) or None
 
     # ------------------------------------------------------------------
+    # Field-level patron credential CRUD (read-merge-write)
+    # ------------------------------------------------------------------
+
+    async def update_patron_credential(
+        self,
+        patron_npub: str,
+        field: str,
+        value: str,
+        *,
+        service: str | None = None,
+    ) -> bool:
+        """Add or update a single credential field, preserving all others.
+
+        Decrypts the existing blob, merges the field, re-encrypts,
+        and stores. Creates a new blob if none exists.
+        """
+        svc = service or self.patron_credential_service
+        if not svc:
+            return False
+        existing = await self.load_patron_session(patron_npub, service=svc) or {}
+        existing[field] = value
+        return await self.store_patron_session(patron_npub, existing, service=svc)
+
+    async def delete_patron_credential(
+        self,
+        patron_npub: str,
+        field: str,
+        *,
+        service: str | None = None,
+    ) -> bool:
+        """Remove a single credential field, preserving all others."""
+        svc = service or self.patron_credential_service
+        if not svc:
+            return False
+        existing = await self.load_patron_session(patron_npub, service=svc) or {}
+        if field not in existing:
+            return True  # already absent
+        del existing[field]
+        return await self.store_patron_session(patron_npub, existing, service=svc)
+
+    async def get_patron_credential(
+        self,
+        patron_npub: str,
+        field: str,
+        *,
+        service: str | None = None,
+    ) -> str | None:
+        """Read a single credential field. Returns None if absent."""
+        svc = service or self.patron_credential_service
+        if not svc:
+            return None
+        existing = await self.load_patron_session(patron_npub, service=svc) or {}
+        return existing.get(field)
+
+    async def list_patron_credential_fields(
+        self,
+        patron_npub: str,
+        *,
+        service: str | None = None,
+    ) -> list[str]:
+        """List field names stored for a patron (names only, not values)."""
+        svc = service or self.patron_credential_service
+        if not svc:
+            return []
+        existing = await self.load_patron_session(patron_npub, service=svc) or {}
+        return list(existing.keys())
+
+    # ------------------------------------------------------------------
     # OAuth session restore (generic refresh-and-persist)
     # ------------------------------------------------------------------
 
@@ -2163,6 +2231,95 @@ def register_standard_tools(
         from tollbooth.tool_identity import capability_uuid
         for cap in ("request_patron_credentials", "receive_patron_credentials"):
             rt._tool_registry.pop(capability_uuid(cap), None)
+
+    # -- Patron credential CRUD (field-level) --------------------------------
+
+    @tool
+    async def update_patron_credential(
+        npub: str = "", field: str = "", value: str = "",
+        proof: str = "",
+    ) -> dict[str, Any]:
+        """Add or update a single patron credential field.
+
+        Merges into existing stored credentials without affecting
+        other fields. Useful for setting an account identifier
+        after OAuth, changing a default brain, etc. Free.
+
+        Args:
+            npub: Required. The patron's npub.
+            field: Required. The credential field name to set.
+            value: Required. The value to store.
+        """
+        if not npub:
+            return {"success": False, "error": "npub is required."}
+        if not field:
+            return {"success": False, "error": "field is required."}
+        if not value:
+            return {"success": False, "error": "value is required."}
+        try:
+            ok = await rt.update_patron_credential(npub, field, value)
+            if ok:
+                return {
+                    "success": True,
+                    "message": f"Field '{field}' updated.",
+                }
+            return {"success": False, "error": "No credential service configured."}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @tool
+    async def delete_patron_credential(
+        npub: str = "", field: str = "",
+        proof: str = "",
+    ) -> dict[str, Any]:
+        """Remove a single patron credential field.
+
+        Deletes one field from stored credentials without affecting
+        other fields. Free.
+
+        Args:
+            npub: Required. The patron's npub.
+            field: Required. The credential field name to remove.
+        """
+        if not npub:
+            return {"success": False, "error": "npub is required."}
+        if not field:
+            return {"success": False, "error": "field is required."}
+        try:
+            ok = await rt.delete_patron_credential(npub, field)
+            if ok:
+                return {
+                    "success": True,
+                    "message": f"Field '{field}' removed.",
+                }
+            return {"success": False, "error": "No credential service configured."}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @tool
+    async def get_patron_credential_fields(
+        npub: str = "",
+    ) -> dict[str, Any]:
+        """List stored patron credential field names (not values).
+
+        Returns the names of fields stored for a patron. Values
+        are never exposed — use this to verify which fields are
+        configured. Free.
+
+        Args:
+            npub: Required. The patron's npub.
+        """
+        if not npub:
+            return {"success": False, "error": "npub is required."}
+        try:
+            fields = await rt.list_patron_credential_fields(npub)
+            return {
+                "success": True,
+                "fields": fields,
+                "count": len(fields),
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     # -- OAuth2 tools (only if oauth_provider is configured) ----------------
 

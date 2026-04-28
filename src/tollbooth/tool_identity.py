@@ -142,6 +142,14 @@ _STANDARD_LIST: list[ToolIdentity] = [
     ToolIdentity(capability="list_constraint_types", category="free",
                  intent="List available constraint types and parameter schemas."),
 
+    # -- Patron credential CRUD --
+    ToolIdentity(capability="update_patron_credential", category="free",
+                 intent="Add or update a single patron credential field."),
+    ToolIdentity(capability="delete_patron_credential", category="free",
+                 intent="Remove a single patron credential field."),
+    ToolIdentity(capability="get_patron_credential_fields", category="free",
+                 intent="List stored patron credential field names."),
+
     # -- OTS notarization --
     ToolIdentity(capability="notarize_ledger", category="restricted",
                  intent="Submit patron balance Merkle root to Bitcoin via OTS."),
