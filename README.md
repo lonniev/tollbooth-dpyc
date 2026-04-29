@@ -84,7 +84,7 @@ runtime = OperatorRuntime(
 ### 4. Register Standard Tools + Domain Tools
 
 ```python
-# This single call registers all 21 standard DPYC tools
+# This single call registers all 26+ standard DPYC tools
 register_standard_tools(mcp, "weather", runtime,
     service_name="my-weather-service",
     service_version="1.0.0",
@@ -217,6 +217,9 @@ Each Authority is itself an operator of its upstream Authority — the same fee 
 | `receive_patron_credentials` | `patron_credential_template` set | Pick up patron credentials |
 | `begin_oauth` | `oauth_provider` set | Start OAuth2 authorization flow |
 | `check_oauth_status` | `oauth_provider` set | Complete OAuth2 flow after browser authorization |
+| `update_patron_credential` | `patron_credential_template` set | Add or update a single patron credential field |
+| `delete_patron_credential` | `patron_credential_template` set | Remove a single patron credential field |
+| `get_patron_credential_fields` | `patron_credential_template` set | List stored patron credential field names |
 
 ---
 
@@ -390,6 +393,14 @@ Every tool that accepts `npub` also requires `proof` — a JSON-serialized Schno
 ```
 
 Inline proofs must be less than 60 seconds old. Cached proofs (via `ProvenNpubCache`) support patron-chosen TTL up to 24 hours. Consumed event IDs are tracked to prevent replay.
+
+**Poison-keyed proof tokens:** For non-restricted tools, proof is a
+poison phrase (e.g., `bold-hawk-42`) returned by `request_npub_proof` /
+`receive_npub_proof`. The calling application remembers this token and
+passes it as the `proof` parameter on every subsequent paid tool call.
+The MCP stores only `sha256(poison):npub` in the vault — never the raw
+poison. Proofs survive unlimited MCP restarts; duration is patron-chosen
+(up to 7 days).
 
 ---
 
