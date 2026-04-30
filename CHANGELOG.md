@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.1] — 2026-04-30
+
+### Fixed
+- `paid_tool` decorator now extracts `proof` from kwargs directly in addition to `inspect.signature().bind()`. FastMCP's Pydantic argument marshaling could drop optional default-valued parameters from the bound arguments, causing proof tokens to arrive empty at `debit_or_deny`.
+
 ## [0.16.0] — 2026-04-27
 
 ### Added

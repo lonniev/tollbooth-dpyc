@@ -1499,8 +1499,20 @@ class OperatorRuntime:
                 sig = inspect.signature(fn)
                 bound = sig.bind(*args, **kwargs)
                 bound.apply_defaults()
-                npub = bound.arguments.get("npub", "")
-                proof = bound.arguments.get("proof", "")
+
+                # Extract npub and proof from kwargs directly —
+                # inspect.signature().bind() can lose optional kwargs
+                # when FastMCP passes arguments through Pydantic models.
+                npub = kwargs.get("npub", "") or bound.arguments.get("npub", "")
+                proof = kwargs.get("proof", "") or bound.arguments.get("proof", "")
+
+                if not proof and ("proof" in kwargs or "proof" in bound.arguments):
+                    logger.warning(
+                        "paid_tool proof empty despite presence in inputs — "
+                        "kwargs_proof=%r bound_proof=%r kwargs_keys=%s bound_keys=%s",
+                        kwargs.get("proof"), bound.arguments.get("proof"),
+                        list(kwargs.keys()), list(bound.arguments.keys()),
+                    )
 
                 call_kwargs = dict(bound.arguments)
                 result_or_cost = await rt.debit_or_deny(
