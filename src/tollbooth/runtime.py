@@ -594,6 +594,9 @@ class OperatorRuntime:
                                 "proof exchange, then receive_npub_proof "
                                 "to verify and cache it."
                             ),
+                            "_diag_proof_received": proof,
+                            "_diag_poison_hash": poison_hash[:16],
+                            "_diag_category": category,
                         }
                 elif proof:
                     # Proof looks like a Schnorr signature — verify inline
@@ -611,6 +614,8 @@ class OperatorRuntime:
                             "to verify and cache it. Pass the returned proof_token "
                             "as the proof parameter on every paid tool call."
                         ),
+                        "_diag_proof_received": proof or "<empty>",
+                        "_diag_category": category,
                     }
 
         # ── Access: operator-restricted ───────────────────────
