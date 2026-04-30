@@ -1515,6 +1515,14 @@ class OperatorRuntime:
                     )
 
                 call_kwargs = dict(bound.arguments)
+                logger.info(
+                    "paid_tool gate: tool=%s npub=%s proof=%r "
+                    "kwargs_keys=%s bound_keys=%s args_len=%d",
+                    tool_id[:12], npub[:16] if npub else "<none>",
+                    proof[:20] if proof else "<empty>",
+                    list(kwargs.keys()), list(bound.arguments.keys()),
+                    len(args),
+                )
                 result_or_cost = await rt.debit_or_deny(
                     tool_id, npub,
                     proof=proof,

@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.2] — 2026-04-30
+
+### Added
+- Diagnostic logging in `paid_tool` decorator showing proof extraction path, kwargs keys, and bound argument keys at gate time. Will reveal whether FastMCP/Claude.ai is dropping the proof parameter before it reaches debit_or_deny.
+
 ## [0.16.1] — 2026-04-30
 
 ### Fixed
