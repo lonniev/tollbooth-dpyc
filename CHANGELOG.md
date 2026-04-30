@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.3] — 2026-04-30
+
+### Fixed
+- Diagnostic print statements now use stderr with flush=True and avoid f-string `!r` syntax incompatible with Python 3.12. Fixed import ordering for `sys` module.
+
 ## [0.16.2] — 2026-04-30
 
 ### Added
