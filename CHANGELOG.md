@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.6] — 2026-04-30
+
+### Removed
+- Diagnostic print statements and inline error diagnostics from paid_tool decorator and debit_or_deny (added in 0.16.2–0.16.5 to trace excalibur proof bug). Root cause was a duplicate debit_or_deny call in excalibur-mcp's _prepare_x_client, not a wheel issue.
+
 ## [0.16.3] — 2026-04-30
 
 ### Fixed

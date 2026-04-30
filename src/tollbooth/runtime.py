@@ -546,13 +546,6 @@ class OperatorRuntime:
 
         # ── Proof verification ────────────────────────────────
         if npub:
-            import sys as _sys_dod
-            _pd = repr(proof[:20]) if proof else "<empty>"
-            print(
-                f"[PROOF-DIAG] debit_or_deny: tool={tool_id[:12]} "
-                f"category={category} npub={npub[:16]} proof={_pd}",
-                file=_sys_dod.stderr, flush=True,
-            )
             try:
                 resolved = resolve_npub(npub)
             except ValueError as e:
@@ -594,9 +587,6 @@ class OperatorRuntime:
                                 "proof exchange, then receive_npub_proof "
                                 "to verify and cache it."
                             ),
-                            "_diag_proof_received": proof,
-                            "_diag_poison_hash": poison_hash[:16],
-                            "_diag_category": category,
                         }
                 elif proof:
                     # Proof looks like a Schnorr signature — verify inline
@@ -614,8 +604,6 @@ class OperatorRuntime:
                             "to verify and cache it. Pass the returned proof_token "
                             "as the proof parameter on every paid tool call."
                         ),
-                        "_diag_proof_received": proof or "<empty>",
-                        "_diag_category": category,
                     }
 
         # ── Access: operator-restricted ───────────────────────
@@ -1515,30 +1503,10 @@ class OperatorRuntime:
                 # Extract npub and proof from kwargs directly —
                 # inspect.signature().bind() can lose optional kwargs
                 # when FastMCP passes arguments through Pydantic models.
-                import sys as _sys
                 npub = kwargs.get("npub", "") or bound.arguments.get("npub", "")
                 proof = kwargs.get("proof", "") or bound.arguments.get("proof", "")
 
-                if not proof and ("proof" in kwargs or "proof" in bound.arguments):
-                    _kp = repr(kwargs.get("proof"))
-                    _bp = repr(bound.arguments.get("proof"))
-                    print(
-                        f"[PROOF-DIAG] WARNING proof empty despite presence — "
-                        f"kwargs_proof={_kp} bound_proof={_bp}",
-                        file=_sys.stderr, flush=True,
-                    )
-
                 call_kwargs = dict(bound.arguments)
-                _proof_display = repr(proof[:20]) if proof else "<empty>"
-                print(
-                    f"[PROOF-DIAG] paid_tool gate: tool={tool_id[:12]} "
-                    f"npub={npub[:16] if npub else '<none>'} "
-                    f"proof={_proof_display} "
-                    f"kwargs_keys={list(kwargs.keys())} "
-                    f"bound_keys={list(bound.arguments.keys())} "
-                    f"args_len={len(args)}",
-                    file=_sys.stderr, flush=True,
-                )
                 result_or_cost = await rt.debit_or_deny(
                     tool_id, npub,
                     proof=proof,
