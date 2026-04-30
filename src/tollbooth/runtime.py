@@ -546,6 +546,13 @@ class OperatorRuntime:
 
         # ── Proof verification ────────────────────────────────
         if npub:
+            import sys as _sys_dod
+            _pd = repr(proof[:20]) if proof else "<empty>"
+            print(
+                f"[PROOF-DIAG] debit_or_deny: tool={tool_id[:12]} "
+                f"category={category} npub={npub[:16]} proof={_pd}",
+                file=_sys_dod.stderr, flush=True,
+            )
             try:
                 resolved = resolve_npub(npub)
             except ValueError as e:
