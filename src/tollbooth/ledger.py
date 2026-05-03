@@ -513,7 +513,7 @@ class UserLedger:
                 if isinstance(rec_data, dict):
                     invoices[iid] = InvoiceRecord.from_dict(rec_data)
 
-        return cls(
+        ledger = cls(
             tranches=tranches,
             total_deposited_api_sats=int(obj.get("total_deposited_api_sats", 0)),
             total_consumed_api_sats=int(obj.get("total_consumed_api_sats", 0)),
@@ -525,3 +525,7 @@ class UserLedger:
             history=history,
             invoices=invoices,
         )
+        # Collect any tranches that expired while the process was down.
+        # Without this, expired sats vanish without being counted.
+        ledger._collect_expired()
+        return ledger

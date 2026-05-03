@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.7] — 2026-05-02
+
+### Fixed
+- Expired tranches are now collected on ledger deserialization (`from_json`). Previously, `_collect_expired` only ran during `debit()` and `to_json()` — if the process was down during a tranche's expiry window, the expired sats vanished without incrementing `total_expired_api_sats`.
+
 ## [0.16.6] — 2026-04-30
 
 ### Removed
