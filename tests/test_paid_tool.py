@@ -304,3 +304,137 @@ class TestPaidToolDecorator:
 
         result = await promo(npub=VALID_NPUB, proof=_make_proof("promo"))
         assert result["free"] is True
+
+
+# ---------------------------------------------------------------------------
+# Structured error_code (added in 0.17.0)
+# ---------------------------------------------------------------------------
+
+
+class TestErrorCodeMapping:
+    """Every denial path from debit_or_deny / paid_tool returns a stable error_code."""
+
+    @pytest.mark.asyncio
+    async def test_insufficient_balance_carries_error_code_and_next_steps(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime({"my_tool": 9999})
+        await _inject_fake_cache(rt, balance=10)
+
+        @rt.paid_tool(capability_uuid("my_tool"))
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
+            return {"unreachable": True}
+
+        result = await my_tool(npub=VALID_NPUB, proof=_make_proof())
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.INSUFFICIENT_BALANCE
+        assert isinstance(result["next_steps"], list)
+        assert any("purchase_credits" in s for s in result["next_steps"])
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_returns_tool_not_registered_code(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        unregistered = capability_uuid("ghost_tool")
+        result = await rt.debit_or_deny(unregistered, VALID_NPUB)
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.TOOL_NOT_REGISTERED
+
+    @pytest.mark.asyncio
+    async def test_missing_proof_returns_proof_required_code(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        await _inject_fake_cache(rt)
+
+        @rt.paid_tool(capability_uuid("my_tool"))
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
+            return {"unreachable": True}
+
+        result = await my_tool(npub=VALID_NPUB, proof="")
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.PROOF_REQUIRED
+        assert isinstance(result["next_steps"], list)
+        assert any("request_npub_proof" in s for s in result["next_steps"])
+
+    @pytest.mark.asyncio
+    async def test_invalid_proof_returns_proof_invalid_code(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        await _inject_fake_cache(rt)
+
+        @rt.paid_tool(capability_uuid("my_tool"))
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
+            return {"unreachable": True}
+
+        # Inline proof (Schnorr-shaped, not a poison phrase) signed by a different key
+        from pynostr.key import PrivateKey
+        other = PrivateKey()
+        from tollbooth.identity_proof import create_proof
+        wrong_proof = create_proof(other.bech32(), "my_tool")
+
+        result = await my_tool(npub=VALID_NPUB, proof=wrong_proof)
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.PROOF_INVALID
+
+    @pytest.mark.asyncio
+    async def test_unpriced_tool_returns_tool_not_priced_code(self):
+        from tollbooth.constants import ErrorCode
+        identity = ToolIdentity(capability="unpriced2", category="write", intent="test")
+        registry = {identity.tool_id: identity}
+        rt = OperatorRuntime(tool_registry=registry, nsec_env_var="__UNUSED__")
+        rt._pricing_resolver = FakePricingResolver(
+            costs={identity.tool_id: 0},
+            priced={identity.tool_id: False},
+        )
+        rt._proven_npub_cache = FakeProvenNpubCache()
+
+        @rt.paid_tool(identity.tool_id)
+        async def unpriced(npub: str = "", proof: str = "") -> dict:
+            return {"unreachable": True}
+
+        result = await unpriced(npub=VALID_NPUB, proof=_make_proof("unpriced2"))
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.TOOL_NOT_PRICED
+
+    @pytest.mark.asyncio
+    async def test_generic_exception_returns_tool_execution_failed(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        await _inject_fake_cache(rt, balance=1000)
+
+        @rt.paid_tool(capability_uuid("my_tool"))
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
+            raise RuntimeError("something opaque happened")
+
+        result = await my_tool(npub=VALID_NPUB, proof=_make_proof())
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.TOOL_EXECUTION_FAILED
+
+    @pytest.mark.asyncio
+    async def test_upstream_401_routes_to_oauth_refresh_code(self):
+        """Exception text containing '401' or 'unauthorized' maps to upstream_auth_refresh_needed."""
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        await _inject_fake_cache(rt, balance=1000)
+
+        @rt.paid_tool(capability_uuid("my_tool"))
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
+            raise RuntimeError("HTTP 401 Unauthorized from upstream")
+
+        result = await my_tool(npub=VALID_NPUB, proof=_make_proof())
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.UPSTREAM_AUTH_REFRESH_NEEDED
+        assert isinstance(result["next_steps"], list)
+        assert any("begin_oauth" in s for s in result["next_steps"])
+
+    @pytest.mark.asyncio
+    async def test_invalid_grant_routes_to_oauth_refresh_code(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        await _inject_fake_cache(rt, balance=1000)
+
+        @rt.paid_tool(capability_uuid("my_tool"))
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
+            raise RuntimeError("OAuth invalid_grant: token has expired")
+
+        result = await my_tool(npub=VALID_NPUB, proof=_make_proof())
+        assert result["error_code"] == ErrorCode.UPSTREAM_AUTH_REFRESH_NEEDED

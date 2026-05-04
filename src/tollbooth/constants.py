@@ -3,6 +3,36 @@
 MAX_INVOICE_SATS = 1_000_000  # 0.01 BTC cap per invoice
 LOW_BALANCE_FLOOR_API_SATS = 100  # minimum warning threshold
 
+
+# Error codes returned by debit_or_deny and paid_tool denials.
+# These are stable strings that calling agents can branch on
+# without parsing prose.  Add new codes here; never inline.
+class ErrorCode:
+    """Stable string codes for paid-tool denial paths.
+
+    Each denial response from ``debit_or_deny`` and from the
+    ``paid_tool`` decorator's catch-errors fallback carries one
+    of these values in the ``error_code`` field, so callers can
+    branch programmatically.  Companion ``next_steps`` lists are
+    included where the situation is patron-actionable.
+    """
+
+    NPUB_INVALID = "npub_invalid"
+    PROOF_REQUIRED = "proof_required"
+    PROOF_INVALID = "proof_invalid"
+    PROOF_REFRESH_NEEDED = "proof_refresh_needed"
+    RESTRICTED = "restricted"
+    TOOL_NOT_REGISTERED = "tool_not_registered"
+    TOOL_NOT_PRICED = "tool_not_priced"
+    WARMING_UP = "warming_up"
+    OPERATOR_NOT_REGISTERED = "operator_not_registered"
+    INSUFFICIENT_BALANCE = "insufficient_balance"
+    CONSTRAINT_DENIED = "constraint_denied"
+    UPSTREAM_AUTH_REFRESH_NEEDED = "upstream_auth_refresh_needed"
+    TOOL_EXECUTION_FAILED = "tool_execution_failed"
+    SECURE_COURIER_UNAVAILABLE = "secure_courier_unavailable"
+    VAULT_BOOTSTRAPPING = "vault_bootstrapping"
+
 # Canonical links to DPYC ecosystem repos and live services.
 # Operators should include these in service_status responses so
 # AI agents can discover sibling services without web search.

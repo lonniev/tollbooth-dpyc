@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.0] — 2026-05-04
+
+### Added
+- **Structured `error_code` field** on every denial path from `debit_or_deny` and the `paid_tool` decorator's `catch_errors` fallback. Calling agents can branch on stable strings (e.g. `proof_refresh_needed`, `insufficient_balance`, `upstream_auth_refresh_needed`) without parsing prose. New `tollbooth.constants.ErrorCode` enumerates the codes.
+- **Patron-actionable `next_steps` lists** on routine refresh situations (`proof_required`, `proof_refresh_needed`, `insufficient_balance`, `upstream_auth_refresh_needed`) so calling LLMs can route directly to the recovery flow.
+- **`check_proof_status` standard tool** — free, no side effects. Mirrors `check_oauth_status` for the npub-proof flow: a calling agent can ask "will my next paid call accept this proof_token?" before burning credits on a guaranteed failure. Returns `status` (valid|expired|unknown) and runtime-derived `expires_in_seconds`.
+- **`ProvenNpubCache.proof_status(poison_hash, npub)`** — read-only sibling of `is_proven`; never mutates cache state on expiry.
+- **Optional `patron_npub` argument on `session_status`** — when supplied, the response includes an `upstream_oauth` block with the patron's stored OAuth token expiry (runtime-derived from vault state) so clients can refresh proactively rather than reactively.
+- **Generic upstream-auth detection in `paid_tool`** — exception messages mentioning `401`, `unauthorized`, `invalid_grant`, or `token expired` are remapped to `error_code: "upstream_auth_refresh_needed"` with a `begin_oauth → check_oauth_status` next-steps recipe.
+
+### Changed
+- Removed magic-number TTL claims from user-facing error strings. Where a number was previously printed (e.g. "10-15 seconds after a cold start"), the wording now describes the behavior ("typically resolves shortly") so docstring "examples" don't ossify into false contracts.
+
 ## [0.16.7] — 2026-05-02
 
 ### Fixed

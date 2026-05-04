@@ -87,3 +87,46 @@ async def test_json_round_trip():
     )
     restored = ProvenNpub.from_json(record.to_json())
     assert restored == record
+
+
+@pytest.mark.asyncio
+async def test_proof_status_unknown_when_no_record():
+    cache = ProvenNpubCache(ttl_seconds=3600)
+    info = await cache.proof_status(HASH_A, VALID_NPUB)
+    assert info["status"] == "unknown"
+    assert info["expires_in_seconds"] == 0
+
+
+@pytest.mark.asyncio
+async def test_proof_status_valid_returns_remaining_ttl():
+    cache = ProvenNpubCache(ttl_seconds=3600)
+    await cache.mark_proven(HASH_A, VALID_NPUB)
+    info = await cache.proof_status(HASH_A, VALID_NPUB)
+    assert info["status"] == "valid"
+    # Runtime-derived — within a small epsilon of the configured TTL
+    assert 3590 < info["expires_in_seconds"] <= 3600
+
+
+@pytest.mark.asyncio
+async def test_proof_status_expired_does_not_evict():
+    """proof_status is read-only — must not mutate cache state on expiry."""
+    cache = ProvenNpubCache(ttl_seconds=3600)
+    await cache.mark_proven(HASH_A, VALID_NPUB)
+
+    # Backdate the record's expires_at without going through is_proven
+    key = f"{HASH_A}:{VALID_NPUB}"
+    entry = cache._cache._entries.get(key)
+    assert entry is not None
+    expired_record = ProvenNpub(
+        poison_hash=entry[0].poison_hash,
+        npub=entry[0].npub,
+        verified_at=entry[0].verified_at,
+        expires_at=time.time() - 10,
+    )
+    cache._cache._entries[key] = (expired_record, entry[1])
+
+    info = await cache.proof_status(HASH_A, VALID_NPUB)
+    assert info["status"] == "expired"
+    assert info["expires_in_seconds"] == 0
+    # Record must still be in the cache — proof_status is read-only
+    assert cache._cache._entries.get(key) is not None

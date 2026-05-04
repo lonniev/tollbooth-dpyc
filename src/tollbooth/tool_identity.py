@@ -121,6 +121,8 @@ _STANDARD_LIST: list[ToolIdentity] = [
                  intent="Request npub ownership proof from patron via DM."),
     ToolIdentity(capability="receive_npub_proof", category="free",
                  intent="Receive and cache npub ownership proof."),
+    ToolIdentity(capability="check_proof_status", category="free",
+                 intent="Read-only check of a proof_token's remaining validity."),
 
     # -- Oracle delegation --
     # Oracle tools are free and use the oracle_ namespace. They don't

@@ -529,6 +529,7 @@ class OperatorRuntime:
         Every tool that takes an npub requires a proof (Schnorr-signed
         kind-27235 event proving npub ownership). No proof, no service.
         """
+        from tollbooth.constants import ErrorCode
         from tollbooth.identity_proof import verify_proof
 
         identity = self._tool_registry.get(tool_id)
@@ -537,6 +538,7 @@ class OperatorRuntime:
         if identity is None:
             return {
                 "success": False,
+                "error_code": ErrorCode.TOOL_NOT_REGISTERED,
                 "error": f"Unknown tool '{tool_id}' — not registered with this operator.",
             }
 
@@ -549,19 +551,25 @@ class OperatorRuntime:
             try:
                 resolved = resolve_npub(npub)
             except ValueError as e:
-                return {"success": False, "error": str(e)}
+                return {
+                    "success": False,
+                    "error_code": ErrorCode.NPUB_INVALID,
+                    "error": str(e),
+                }
 
             if category == "restricted":
                 # Restricted tools always require inline proof (operator identity)
                 if not proof:
                     return {
                         "success": False,
+                        "error_code": ErrorCode.PROOF_REQUIRED,
                         "error": "proof is required. Sign a kind-27235 Nostr event with your nsec.",
                     }
                 verify_against = self.operator_npub()
                 if not verify_proof(proof, verify_against, cap):
                     return {
                         "success": False,
+                        "error_code": ErrorCode.PROOF_INVALID,
                         "error": "Invalid proof — Schnorr signature does not match npub.",
                     }
             else:
@@ -581,29 +589,38 @@ class OperatorRuntime:
                     else:
                         return {
                             "success": False,
+                            "error_code": ErrorCode.PROOF_REFRESH_NEEDED,
                             "error": (
-                                "proof token expired or not recognized. "
-                                "Call request_npub_proof to start a fresh "
-                                "proof exchange, then receive_npub_proof "
-                                "to verify and cache it."
+                                "Your npub-proof cache entry is no longer valid. "
+                                "This is routine — sign a fresh DM challenge and you're back."
                             ),
+                            "next_steps": [
+                                "request_npub_proof(patron_npub=<patron_npub>)",
+                                "Sign the DM challenge from your Nostr client",
+                                "receive_npub_proof(patron_npub=<patron_npub>) to cache the fresh proof_token",
+                            ],
                         }
                 elif proof:
                     # Proof looks like a Schnorr signature — verify inline
                     if not verify_proof(proof, resolved, cap):
                         return {
                             "success": False,
+                            "error_code": ErrorCode.PROOF_INVALID,
                             "error": "Invalid proof — Schnorr signature does not match npub.",
                         }
                 else:
                     return {
                         "success": False,
+                        "error_code": ErrorCode.PROOF_REQUIRED,
                         "error": (
-                            "proof is required. Call request_npub_proof to "
-                            "start a fresh proof exchange, then receive_npub_proof "
-                            "to verify and cache it. Pass the returned proof_token "
-                            "as the proof parameter on every paid tool call."
+                            "proof is required. Establish npub ownership before calling paid tools."
                         ),
+                        "next_steps": [
+                            "request_npub_proof(patron_npub=<patron_npub>)",
+                            "Sign the DM challenge from your Nostr client",
+                            "receive_npub_proof(patron_npub=<patron_npub>) — remember the returned proof_token",
+                            "Pass proof_token as the proof parameter on every subsequent paid tool call",
+                        ],
                     }
 
         # ── Access: operator-restricted ───────────────────────
@@ -612,10 +629,18 @@ class OperatorRuntime:
             try:
                 caller = resolve_npub(npub)
             except ValueError as e:
-                return {"success": False, "error": str(e)}
+                return {
+                    "success": False,
+                    "error_code": ErrorCode.NPUB_INVALID,
+                    "error": str(e),
+                }
             if caller == self.operator_npub():
                 return 0
-            return {"success": False, "error": "This tool is restricted to the operator."}
+            return {
+                "success": False,
+                "error_code": ErrorCode.RESTRICTED,
+                "error": "This tool is restricted to the operator.",
+            }
 
         # ── Pricing ───────────────────────────────────────────
         # Code says "free" → cost is 0, Neon not consulted.
@@ -627,18 +652,21 @@ class OperatorRuntime:
             if not resolver.neon_available:
                 return {
                     "success": False,
+                    "error_code": ErrorCode.WARMING_UP,
                     "error": (
                         "Service is warming up — the pricing model could not be "
-                        "loaded from the database yet. This typically resolves in "
-                        "10-15 seconds after a cold start. Retry your request shortly. "
+                        "loaded from the database yet. This typically resolves shortly "
+                        "after a cold start. Retry your request. "
                         "Free tools (check_balance, check_payment, proof exchange) "
                         "remain available during warm-up."
                     ),
+                    "next_steps": ["Retry the same call shortly"],
                 }
 
             if not await resolver.has_tool(tool_id):
                 return {
                     "success": False,
+                    "error_code": ErrorCode.TOOL_NOT_PRICED,
                     "error": (
                         f"Tool '{name}' is not yet in the pricing model. "
                         f"Add it to the pricing model before use."
@@ -647,6 +675,7 @@ class OperatorRuntime:
             if not await resolver.is_priced(tool_id):
                 return {
                     "success": False,
+                    "error_code": ErrorCode.TOOL_NOT_PRICED,
                     "error": (
                         f"Tool '{name}' has not been priced yet (TBD). "
                         f"Set a price in the pricing model before use."
@@ -664,6 +693,7 @@ class OperatorRuntime:
             if category != "free":
                 return {
                     "success": False,
+                    "error_code": ErrorCode.NPUB_INVALID,
                     "error": (
                         "npub is required. Pass your Nostr public key (npub1...) "
                         "to identify yourself."
@@ -707,6 +737,7 @@ class OperatorRuntime:
                     if not result.allowed:
                         error: dict[str, Any] = {
                             "success": False,
+                            "error_code": ErrorCode.CONSTRAINT_DENIED,
                             "error": result.message or f"Constraint denied: {result.reason}",
                             "constraint_reason": result.reason,
                         }
@@ -759,12 +790,18 @@ class OperatorRuntime:
         if ledger.balance_api_sats < effective_cost:
             return {
                 "success": False,
+                "error_code": ErrorCode.INSUFFICIENT_BALANCE,
                 "error": (
                     f"Insufficient balance: {ledger.balance_api_sats} sats "
                     f"available, {effective_cost} required for {name}."
                 ),
                 "balance_sats": ledger.balance_api_sats,
                 "cost_sats": effective_cost,
+                "next_steps": [
+                    f"purchase_credits(amount_sats=<at least {effective_cost - ledger.balance_api_sats}>, npub=<patron_npub>)",
+                    "Pay the returned Lightning invoice",
+                    "check_payment(invoice_id=<from purchase_credits>) to confirm settlement",
+                ],
             }
 
         ledger.debit(name, effective_cost)
@@ -1524,8 +1561,39 @@ class OperatorRuntime:
                 except Exception as exc:
                     await rt.rollback_debit(tool_id, npub, tool_kwargs=call_kwargs)
                     if catch_errors:
+                        from tollbooth.constants import ErrorCode as _EC
                         logger.error("Tool %s failed: %s", tool_id, exc, exc_info=True)
-                        return {"success": False, "error": "Tool execution failed. Check operator logs."}
+                        # Map upstream-API auth failures to a friendlier code
+                        # so calling agents can route directly to the OAuth
+                        # refresh flow without parsing prose.
+                        msg = str(exc).lower()
+                        is_upstream_auth = (
+                            "401" in msg
+                            or "unauthorized" in msg
+                            or "invalid_grant" in msg
+                            or "token expired" in msg
+                            or "token has expired" in msg
+                        )
+                        if is_upstream_auth:
+                            return {
+                                "success": False,
+                                "error_code": _EC.UPSTREAM_AUTH_REFRESH_NEEDED,
+                                "error": (
+                                    "Upstream API authorization needs to be re-granted. "
+                                    "This is routine — your previous grant has been "
+                                    "revoked or has aged out."
+                                ),
+                                "next_steps": [
+                                    "begin_oauth(npub=<patron_npub>)",
+                                    "Open the authorize_url, log in, click Allow",
+                                    "check_oauth_status(npub=<patron_npub>) promptly after Allow",
+                                ],
+                            }
+                        return {
+                            "success": False,
+                            "error_code": _EC.TOOL_EXECUTION_FAILED,
+                            "error": "Tool execution failed. Check operator logs.",
+                        }
                     raise
 
                 rt.fire_and_forget_demand_increment(rt.mcp_name_for(tool_id))
@@ -1901,7 +1969,7 @@ def register_standard_tools(
     # -- Secure Courier ------------------------------------------------
 
     @tool
-    async def session_status() -> dict[str, Any]:
+    async def session_status(patron_npub: str = "") -> dict[str, Any]:
         """Check operator readiness. Returns the operator lifecycle
         state and clear guidance on what to do next. Free.
 
@@ -1910,6 +1978,13 @@ def register_standard_tools(
         - warming_up: Operator is initializing (cold start). Try a tool call — it will warm up on demand.
         - not_registered: Operator has no Authority relationship yet. Call register_operator first.
         - no_identity: Operator nsec is not configured. Deployment issue.
+
+        Args:
+            patron_npub: Optional. If supplied, the response includes an
+                ``upstream_oauth`` block with the patron's stored OAuth
+                token expiry (runtime-derived from vault state) so a
+                client can refresh proactively rather than reactively
+                after a stale-token failure.
         """
         # 1. Identity check
         try:
@@ -1963,7 +2038,7 @@ def register_standard_tools(
             }
 
         # 4. Fully ready
-        return {
+        result: dict[str, Any] = {
             "success": True,
             "lifecycle": "ready",
             "operator_npub": npub,
@@ -1971,6 +2046,42 @@ def register_standard_tools(
             "patron_credential_service": rt.patron_credential_service,
             "message": "Operator is ready. Proceed with tool calls.",
         }
+
+        # Optional: per-patron upstream OAuth token expiry (runtime-derived).
+        # No magic numbers in the docstring — the value comes from whatever
+        # the upstream provider returned at token issuance.
+        if patron_npub:
+            try:
+                resolved = resolve_npub(patron_npub)
+            except ValueError:
+                return result
+            opc = rt._oauth_provider
+            if opc is not None:
+                try:
+                    creds = await rt.load_patron_session(resolved, service=opc.service_name)
+                except Exception:
+                    creds = None
+                if creds and creds.get("access_token"):
+                    import time as _t
+                    expires_at = 0.0
+                    try:
+                        expires_at = float(creds.get("expires_at", "0") or 0)
+                    except (TypeError, ValueError):
+                        expires_at = 0.0
+                    has_refresh = bool(creds.get("refresh_token"))
+                    block: dict[str, Any] = {
+                        "service": opc.service_name,
+                        "has_access_token": True,
+                        "has_refresh_token": has_refresh,
+                        "refresh_enabled": opc.refresh_enabled,
+                    }
+                    if expires_at > 0:
+                        block["access_token_expires_at"] = expires_at
+                        block["access_token_expires_in_seconds"] = max(
+                            0, int(expires_at - _t.time()),
+                        )
+                    result["upstream_oauth"] = block
+        return result
 
     @tool
     async def request_credential_channel(
@@ -2940,6 +3051,61 @@ def register_standard_tools(
                 "popped_dms": popped,
                 "error": summary,
             }
+
+    @tool
+    async def check_proof_status(
+        patron_npub: str = "",
+        proof_token: str = "",
+    ) -> dict[str, Any]:
+        """Check whether a previously-cached proof_token is still valid.
+
+        Mirrors ``check_oauth_status`` for the npub-proof flow: a calling
+        agent can ask "will my next paid call accept this proof_token?"
+        before burning credits on a guaranteed failure.
+
+        Free, no side effects — does not evict the cache or touch relays.
+
+        Args:
+            patron_npub: Required. The patron's npub (npub1...).
+            proof_token: Required. The poison phrase returned by
+                ``request_npub_proof`` / ``receive_npub_proof``.
+        """
+        if not patron_npub:
+            return {"success": False, "error": "patron_npub is required."}
+        if not proof_token:
+            return {"success": False, "error": "proof_token is required."}
+        try:
+            resolved = resolve_npub(patron_npub)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+        import hashlib as _hashlib
+        poison_hash = _hashlib.sha256(proof_token.encode()).hexdigest()
+        cache = await rt.proven_npub_cache()
+        info = await cache.proof_status(poison_hash, resolved)
+
+        status = info["status"]
+        if status == "valid":
+            message = (
+                f"Proof is valid. Pass proof_token as the proof parameter "
+                f"on paid tool calls."
+            )
+        elif status == "expired":
+            message = (
+                "Proof has expired. Call request_npub_proof and "
+                "receive_npub_proof to refresh."
+            )
+        else:
+            message = (
+                "No proof record found for this (patron_npub, proof_token). "
+                "Call request_npub_proof and receive_npub_proof first."
+            )
+        return {
+            "success": True,
+            "status": status,
+            "expires_in_seconds": info["expires_in_seconds"],
+            "message": message,
+        }
 
     # -- Oracle delegation (oracle_ namespace) ----------------------------
 

@@ -249,6 +249,33 @@ class ProvenNpubCache:
         """Remove a proven npub from the cache."""
         self._cache.clear(_cache_key(poison_hash, npub))
 
+    async def proof_status(self, poison_hash: str, npub: str) -> dict[str, Any]:
+        """Read-only lookup of a proof's current state.
+
+        Mirrors :meth:`is_proven` but does NOT mutate cache state.
+        Used by the ``check_proof_status`` standard tool so calling
+        agents can ask "is this proof_token still going to work?"
+        without burning credits on a guaranteed failure.
+
+        Returns a dict with ``status`` (``"valid"`` | ``"expired"`` |
+        ``"unknown"``) and ``expires_in_seconds`` (the remaining TTL,
+        runtime-derived from the stored ``ProvenNpub.expires_at``).
+        """
+        key = _cache_key(poison_hash, npub)
+        record = self._cache.get(key)
+
+        if record is None and self._vault is not None:
+            # Try vault — but do NOT delete on expiry (read-only path)
+            record = await self._vault_fetch(poison_hash, npub)
+
+        if record is None:
+            return {"status": "unknown", "expires_in_seconds": 0}
+
+        remaining = int(record.expires_at - time.time())
+        if remaining <= 0:
+            return {"status": "expired", "expires_in_seconds": 0}
+        return {"status": "valid", "expires_in_seconds": remaining}
+
     # -- Vault helpers --------------------------------------------------------
 
     async def _vault_store(self, record: ProvenNpub) -> None:
