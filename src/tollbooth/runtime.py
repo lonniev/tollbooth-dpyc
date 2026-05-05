@@ -1295,6 +1295,95 @@ class OperatorRuntime:
         return vault_data, ""
 
     # ------------------------------------------------------------------
+    # OAuth situation → structured patron-facing error
+    # ------------------------------------------------------------------
+
+    def oauth_situation_response(self, situation: str) -> dict[str, Any]:
+        """Build a structured patron-facing error for a session-restoration situation.
+
+        Maps the ``situation`` string returned by ``restore_oauth_session``
+        to a canonical ``error_code`` + ``next_steps`` recipe the calling
+        agent can act on without parsing prose.  Tool names in
+        ``next_steps`` are qualified with this operator's slug so the
+        response is directly invocable.
+
+        Standard situations:
+
+        - ``token_expired`` → ``oauth_refresh_needed`` + begin_oauth recipe
+        - ``no_credentials`` → ``oauth_refresh_needed`` + begin_oauth recipe
+        - ``vault_bootstrapping`` → ``warming_up`` + retry guidance
+        - ``operator_not_configured`` → ``operator_not_configured``
+        - ``no_oauth_config`` → ``operator_not_configured``
+
+        Unknown situations fall through to ``oauth_refresh_needed`` with
+        a generic begin_oauth recipe.
+
+        Consumers with operator-specific situations (e.g. schwab-mcp's
+        ``no_account_hash``) handle those inline and call this helper
+        only for the standard cases.
+        """
+        from tollbooth.constants import ErrorCode
+
+        slug = self._slug or ""
+        prefix = f"{slug}_" if slug else ""
+        oauth_recovery = [
+            f"{prefix}begin_oauth(npub=<patron_npub>)",
+            "Open the authorize_url, log in, click Allow",
+            f"{prefix}check_oauth_status(npub=<patron_npub>) promptly after Allow",
+        ]
+
+        table: dict[str, dict[str, Any]] = {
+            "token_expired": {
+                "error_code": ErrorCode.OAUTH_REFRESH_NEEDED,
+                "error": (
+                    "OAuth refresh token has expired or been revoked. A new "
+                    "browser authorization is needed."
+                ),
+                "next_steps": oauth_recovery,
+            },
+            "no_credentials": {
+                "error_code": ErrorCode.OAUTH_REFRESH_NEEDED,
+                "error": (
+                    "No OAuth credentials are stored for your identity. This "
+                    "is expected on first use."
+                ),
+                "next_steps": oauth_recovery,
+            },
+            "vault_bootstrapping": {
+                "error_code": ErrorCode.WARMING_UP,
+                "error": (
+                    "The server is establishing its encrypted connection to "
+                    "the credential vault. This happens once after a cold start."
+                ),
+                "next_steps": ["Repeat your request shortly — no re-authentication needed."],
+            },
+            "operator_not_configured": {
+                "error_code": ErrorCode.OPERATOR_NOT_CONFIGURED,
+                "error": (
+                    "The operator's upstream API credentials have not been "
+                    "delivered yet. This is an operator setup step, not a "
+                    "patron action."
+                ),
+                "next_steps": ["Contact the operator", "Try again later"],
+            },
+            "no_oauth_config": {
+                "error_code": ErrorCode.OPERATOR_NOT_CONFIGURED,
+                "error": "OAuth provider is not configured on this operator.",
+                "next_steps": ["Contact the operator"],
+            },
+        }
+
+        spec = table.get(situation, {
+            "error_code": ErrorCode.OAUTH_REFRESH_NEEDED,
+            "error": (
+                f"OAuth session unavailable ({situation}). A new browser "
+                "authorization may be needed."
+            ),
+            "next_steps": oauth_recovery,
+        })
+        return {"success": False, **spec}
+
+    # ------------------------------------------------------------------
     # BTCPay client (from operator credential vault)
     # ------------------------------------------------------------------
 

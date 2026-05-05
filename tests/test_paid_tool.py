@@ -438,3 +438,90 @@ class TestErrorCodeMapping:
 
         result = await my_tool(npub=VALID_NPUB, proof=_make_proof())
         assert result["error_code"] == ErrorCode.UPSTREAM_AUTH_REFRESH_NEEDED
+
+
+# ---------------------------------------------------------------------------
+# OAuth situation → structured response (added in 0.17.1)
+# ---------------------------------------------------------------------------
+
+
+class TestOAuthSituationResponse:
+    """oauth_situation_response is the cross-operator helper that turns
+    restore_oauth_session situation strings into patron-actionable dicts."""
+
+    @pytest.mark.asyncio
+    async def test_token_expired_returns_oauth_refresh_needed(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        rt._slug = "schwab"
+
+        result = rt.oauth_situation_response("token_expired")
+
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.OAUTH_REFRESH_NEEDED
+        assert "schwab_begin_oauth" in result["next_steps"][0]
+        assert "schwab_check_oauth_status" in result["next_steps"][2]
+
+    @pytest.mark.asyncio
+    async def test_no_credentials_returns_oauth_refresh_needed(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        rt._slug = "excalibur"
+
+        result = rt.oauth_situation_response("no_credentials")
+
+        assert result["error_code"] == ErrorCode.OAUTH_REFRESH_NEEDED
+        assert "excalibur_begin_oauth" in result["next_steps"][0]
+
+    @pytest.mark.asyncio
+    async def test_vault_bootstrapping_returns_warming_up(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        rt._slug = "schwab"
+
+        result = rt.oauth_situation_response("vault_bootstrapping")
+
+        assert result["error_code"] == ErrorCode.WARMING_UP
+        assert "Repeat" in result["next_steps"][0]
+
+    @pytest.mark.asyncio
+    async def test_operator_not_configured_routes_to_operator_code(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        rt._slug = "schwab"
+
+        result = rt.oauth_situation_response("operator_not_configured")
+        assert result["error_code"] == ErrorCode.OPERATOR_NOT_CONFIGURED
+
+    @pytest.mark.asyncio
+    async def test_no_oauth_config_routes_to_operator_code(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        rt._slug = "schwab"
+
+        result = rt.oauth_situation_response("no_oauth_config")
+        assert result["error_code"] == ErrorCode.OPERATOR_NOT_CONFIGURED
+
+    @pytest.mark.asyncio
+    async def test_unknown_situation_falls_through_to_oauth_refresh(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        rt._slug = "schwab"
+
+        result = rt.oauth_situation_response("some_brand_new_situation")
+        # Falls through with the situation echoed in the message
+        assert result["error_code"] == ErrorCode.OAUTH_REFRESH_NEEDED
+        assert "some_brand_new_situation" in result["error"]
+        assert any("schwab_begin_oauth" in s for s in result["next_steps"])
+
+    @pytest.mark.asyncio
+    async def test_empty_slug_omits_qualifier(self):
+        """A runtime without a slug yet still produces sensible recipes."""
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        rt._slug = ""
+
+        result = rt.oauth_situation_response("token_expired")
+        # Steps should reference begin_oauth without a slug prefix
+        assert "begin_oauth(" in result["next_steps"][0]
+        assert result["error_code"] == ErrorCode.OAUTH_REFRESH_NEEDED

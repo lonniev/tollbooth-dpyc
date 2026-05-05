@@ -33,6 +33,14 @@ class ErrorCode:
     SECURE_COURIER_UNAVAILABLE = "secure_courier_unavailable"
     VAULT_BOOTSTRAPPING = "vault_bootstrapping"
 
+    # OAuth session-restoration situations (from
+    # OperatorRuntime.restore_oauth_session → oauth_situation_response).
+    # OAUTH_REFRESH_NEEDED is the patron-actionable case: a fresh
+    # browser authorization is required.  OPERATOR_NOT_CONFIGURED is
+    # an operator-actionable setup state.
+    OAUTH_REFRESH_NEEDED = "oauth_refresh_needed"
+    OPERATOR_NOT_CONFIGURED = "operator_not_configured"
+
 # Canonical links to DPYC ecosystem repos and live services.
 # Operators should include these in service_status responses so
 # AI agents can discover sibling services without web search.

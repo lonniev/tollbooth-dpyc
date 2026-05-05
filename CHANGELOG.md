@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.1] — 2026-05-04
+
+### Added
+- **`OperatorRuntime.oauth_situation_response(situation)`** — generic helper that maps the situation strings returned by `restore_oauth_session` to canonical `{success, error_code, error, next_steps}` dicts. Tool names in `next_steps` are qualified with the runtime's slug so the response is directly invocable. Eliminates duplication of situation→error_code tables across consumer MCPs (schwab, excalibur, future OAuth2 operators).
+- **`ErrorCode.OAUTH_REFRESH_NEEDED`** and **`ErrorCode.OPERATOR_NOT_CONFIGURED`** for the standard OAuth-session-restoration outcomes.
+
 ## [0.17.0] — 2026-05-04
 
 ### Added
