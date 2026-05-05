@@ -1124,6 +1124,30 @@ class OperatorRuntime:
     # Field-level patron credential CRUD (read-merge-write)
     # ------------------------------------------------------------------
 
+    def _patron_storage_service(self, service: str | None) -> str:
+        """Resolve the vault service name for patron-credential CRUD.
+
+        Resolution order:
+        1. Explicit ``service`` argument (caller knows what they want).
+        2. ``patron_credential_service`` (set when the operator declared
+           a ``patron_credential_template`` — set-once secrets like
+           eXcalibur API keys, TheBrain tokens).
+        3. The OAuth provider's ``service_name`` if configured.  This
+           is the natural home for patron *preferences* on OAuth-only
+           operators (account_hash, default_brain_id, etc.) — they
+           live alongside the tokens and survive refresh cycles via
+           ``restore_oauth_session``.
+
+        Returns ``""`` if none resolve.
+        """
+        if service:
+            return service
+        if self.patron_credential_service:
+            return self.patron_credential_service
+        if self._oauth_provider is not None:
+            return self._oauth_provider.service_name
+        return ""
+
     async def update_patron_credential(
         self,
         patron_npub: str,
@@ -1136,8 +1160,13 @@ class OperatorRuntime:
 
         Decrypts the existing blob, merges the field, re-encrypts,
         and stores. Creates a new blob if none exists.
+
+        On OAuth-only operators (no ``patron_credential_template``),
+        falls back to writing into the OAuth provider's vault entry
+        so per-patron preferences (e.g. ``account_hash``,
+        ``default_brain_id``) live alongside the tokens.
         """
-        svc = service or self.patron_credential_service
+        svc = self._patron_storage_service(service)
         if not svc:
             return False
         existing = await self.load_patron_session(patron_npub, service=svc) or {}
@@ -1152,7 +1181,7 @@ class OperatorRuntime:
         service: str | None = None,
     ) -> bool:
         """Remove a single credential field, preserving all others."""
-        svc = service or self.patron_credential_service
+        svc = self._patron_storage_service(service)
         if not svc:
             return False
         existing = await self.load_patron_session(patron_npub, service=svc) or {}
@@ -1169,7 +1198,7 @@ class OperatorRuntime:
         service: str | None = None,
     ) -> str | None:
         """Read a single credential field. Returns None if absent."""
-        svc = service or self.patron_credential_service
+        svc = self._patron_storage_service(service)
         if not svc:
             return None
         existing = await self.load_patron_session(patron_npub, service=svc) or {}
@@ -1182,7 +1211,7 @@ class OperatorRuntime:
         service: str | None = None,
     ) -> list[str]:
         """List field names stored for a patron (names only, not values)."""
-        svc = service or self.patron_credential_service
+        svc = self._patron_storage_service(service)
         if not svc:
             return []
         existing = await self.load_patron_session(patron_npub, service=svc) or {}

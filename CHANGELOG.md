@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.3] — 2026-05-05
+
+### Fixed
+- **`update_patron_credential` (and friends) now work on OAuth-only operators.** Previously, `update_patron_credential(npub, field='account_hash', value=<hash>)` returned `"No credential service configured"` for schwab-mcp because no `patron_credential_template` was wired. The new `OperatorRuntime._patron_storage_service` helper falls back to the OAuth provider's `service_name` when no patron template is set, so per-patron preferences (e.g. `account_hash`, `default_brain_id`) land in the OAuth vault entry alongside the tokens — surviving refresh cycles automatically. Closes the contradiction where `account_hash_required` errors directed callers at a tool that refused to write.
+- Same fallback for `delete_patron_credential`, `get_patron_credential`, `list_patron_credential_fields`. Explicit `service=` argument and the `patron_credential_service` (set-once template) both still take precedence; the OAuth fallback is the third option.
+
 ## [0.17.2] — 2026-05-05
 
 ### Changed (breaking — internal codes)

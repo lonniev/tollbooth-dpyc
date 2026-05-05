@@ -95,6 +95,66 @@ class TestCredentialServiceProperties:
         assert rt.patron_credential_service == "test-patron"
 
 
+class TestPatronStorageServiceFallback:
+    """_patron_storage_service resolves the vault key for patron preferences.
+
+    Operators with no patron_credential_template (OAuth-only, e.g. schwab)
+    still need a place to store per-patron selections like account_hash.
+    The OAuth provider's service_name is the natural fallback — preferences
+    live alongside tokens and survive refresh cycles.
+    """
+
+    def test_explicit_service_argument_wins(self) -> None:
+        rt = _make_runtime(patron_template=PATRON_TEMPLATE)
+        assert rt._patron_storage_service("custom-svc") == "custom-svc"
+
+    def test_patron_credential_service_used_when_template_set(self) -> None:
+        rt = _make_runtime(patron_template=PATRON_TEMPLATE)
+        assert rt._patron_storage_service(None) == "test-patron"
+
+    def test_oauth_service_used_when_no_patron_template(self) -> None:
+        """OAuth-only operator: account_hash, default_brain_id, etc. land
+        in the OAuth blob alongside tokens."""
+        from tollbooth.oauth_config import OAuthProviderConfig
+        opc = OAuthProviderConfig(
+            service_name="schwab",
+            authorize_url="https://example.com/oauth/authorize",
+            token_url="https://example.com/oauth/token",
+            client_id_field="app_key",
+            client_secret_field="secret",
+        )
+        rt = OperatorRuntime(
+            tool_registry={},
+            service_name="Test",
+            oauth_provider=opc,
+        )
+        assert rt.patron_credential_service == ""  # no patron template
+        assert rt._patron_storage_service(None) == "schwab"
+
+    def test_returns_empty_when_no_template_and_no_oauth(self) -> None:
+        rt = _make_runtime()
+        assert rt._patron_storage_service(None) == ""
+
+    def test_patron_template_takes_precedence_over_oauth(self) -> None:
+        """If both are configured, the patron template wins —
+        keeps set-once secrets and OAuth tokens in separate blobs."""
+        from tollbooth.oauth_config import OAuthProviderConfig
+        opc = OAuthProviderConfig(
+            service_name="some-oauth",
+            authorize_url="https://example.com/oauth/authorize",
+            token_url="https://example.com/oauth/token",
+            client_id_field="app_key",
+            client_secret_field="secret",
+        )
+        rt = OperatorRuntime(
+            tool_registry={},
+            patron_credential_template=PATRON_TEMPLATE,
+            service_name="Test",
+            oauth_provider=opc,
+        )
+        assert rt._patron_storage_service(None) == "test-patron"
+
+
 # ---------------------------------------------------------------------------
 # Onboarding status — template-driven
 # ---------------------------------------------------------------------------
