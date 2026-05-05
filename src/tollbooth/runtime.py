@@ -3271,8 +3271,8 @@ def register_standard_tools(
         status = info["status"]
         if status == "valid":
             message = (
-                f"Proof is valid. Pass proof_token as the proof parameter "
-                f"on paid tool calls."
+                "Proof is valid. Pass proof_token as the proof parameter "
+                "on paid tool calls."
             )
         elif status == "expired":
             message = (
