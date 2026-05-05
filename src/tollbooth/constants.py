@@ -17,29 +17,46 @@ class ErrorCode:
     included where the situation is patron-actionable.
     """
 
+    # Patron identity
+    NPUB_MISSING = "npub_missing"
     NPUB_INVALID = "npub_invalid"
-    PROOF_REQUIRED = "proof_required"
-    PROOF_INVALID = "proof_invalid"
-    PROOF_REFRESH_NEEDED = "proof_refresh_needed"
+
+    # Npub ownership proof (from request_npub_proof / receive_npub_proof
+    # → cached as poison_hash in ProvenNpubCache).
+    PROOF_MISSING = "proof_missing"          # parameter empty
+    PROOF_REQUIRED = "proof_required"        # restricted-tool path requiring inline Schnorr
+    PROOF_INVALID = "proof_invalid"          # signature does not verify
+    PROOF_REFRESH_NEEDED = "proof_refresh_needed"  # poison-keyed proof_token cache miss
+
+    # Tool/registry
     RESTRICTED = "restricted"
     TOOL_NOT_REGISTERED = "tool_not_registered"
     TOOL_NOT_PRICED = "tool_not_priced"
+
+    # Lifecycle / infrastructure
     WARMING_UP = "warming_up"
     OPERATOR_NOT_REGISTERED = "operator_not_registered"
+    VAULT_BOOTSTRAPPING = "vault_bootstrapping"
+    SECURE_COURIER_UNAVAILABLE = "secure_courier_unavailable"
+
+    # Billing / pricing
     INSUFFICIENT_BALANCE = "insufficient_balance"
     CONSTRAINT_DENIED = "constraint_denied"
-    UPSTREAM_AUTH_REFRESH_NEEDED = "upstream_auth_refresh_needed"
+
+    # Generic execution
     TOOL_EXECUTION_FAILED = "tool_execution_failed"
-    SECURE_COURIER_UNAVAILABLE = "secure_courier_unavailable"
-    VAULT_BOOTSTRAPPING = "vault_bootstrapping"
+    UPSTREAM_AUTH_REFRESH_NEEDED = "upstream_auth_refresh_needed"
 
     # OAuth session-restoration situations (from
     # OperatorRuntime.restore_oauth_session → oauth_situation_response).
-    # OAUTH_REFRESH_NEEDED is the patron-actionable case: a fresh
-    # browser authorization is required.  OPERATOR_NOT_CONFIGURED is
-    # an operator-actionable setup state.
-    OAUTH_REFRESH_NEEDED = "oauth_refresh_needed"
-    OPERATOR_NOT_CONFIGURED = "operator_not_configured"
+    # 1:1 with the situation strings — same recovery flow may be shared
+    # via next_steps, but the error_code preserves the diagnostic
+    # specificity the calling agent needs to phrase patron-facing output.
+    OAUTH_TOKEN_EXPIRED = "oauth_token_expired"          # returning patron, refresh token aged out / revoked
+    OAUTH_NOT_YET_AUTHORIZED = "oauth_not_yet_authorized"  # first-time patron, no token in vault
+    OAUTH_NOT_WIRED = "oauth_not_wired"                  # operator MCP has no OAuthProviderConfig
+    OPERATOR_CREDENTIALS_MISSING = "operator_credentials_missing"  # vault load failed
+    OAUTH_SITUATION_UNKNOWN = "oauth_situation_unknown"  # fallthrough — situation string echoed in message
 
 # Canonical links to DPYC ecosystem repos and live services.
 # Operators should include these in service_status responses so

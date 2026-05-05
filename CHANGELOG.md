@@ -3,6 +3,20 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.2] — 2026-05-05
+
+### Changed (breaking — internal codes)
+- **`oauth_situation_response` now maps situations 1:1 to ErrorCodes.** Previously two distinct situations (token_expired vs no_credentials, operator_not_configured vs no_oauth_config) collapsed to the same code, losing the diagnostic specificity calling agents need. Each situation now keeps its own code — shared recovery flows are expressed via shared `next_steps`, not shared codes.
+- Removed `ErrorCode.OAUTH_REFRESH_NEEDED` (split into `OAUTH_TOKEN_EXPIRED` for returning patrons and `OAUTH_NOT_YET_AUTHORIZED` for first-time patrons).
+- Removed `ErrorCode.OPERATOR_NOT_CONFIGURED` (split into `OAUTH_NOT_WIRED` for deployment-side issues and `OPERATOR_CREDENTIALS_MISSING` for credential-delivery issues).
+- Unknown situations now return `OAUTH_SITUATION_UNKNOWN` with the raw situation echoed, instead of silently masquerading as a routine refresh.
+
+### Added
+- **`OperatorRuntime.npub_validation_error(npub, *, param)`** — DRY validation helper returning `None` if valid or a structured `{success, error_code, error}` dict otherwise. Distinguishes `NPUB_MISSING` (param absent) from `NPUB_INVALID` (bad format).
+- **`OperatorRuntime.proof_validation_error(proof, *, param)`** — same shape for proof_token presence checks. Returns slug-qualified `next_steps` recipe.
+- New `ErrorCode` entries: `NPUB_MISSING`, `PROOF_MISSING`, `OAUTH_TOKEN_EXPIRED`, `OAUTH_NOT_YET_AUTHORIZED`, `OAUTH_NOT_WIRED`, `OPERATOR_CREDENTIALS_MISSING`, `OAUTH_SITUATION_UNKNOWN`.
+- Standard tools (`begin_oauth`, `check_oauth_status`, `request_npub_proof`, `receive_npub_proof`, `check_proof_status`, `update/delete_patron_credential`, `get_patron_credential_fields`, `get_patron_onboarding_status`) now use the new helpers instead of inline `if not npub: return …; try: resolve_npub(…) except: return …` duplication. All free-tool denial paths now carry `error_code`.
+
 ## [0.17.1] — 2026-05-04
 
 ### Added

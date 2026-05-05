@@ -1295,6 +1295,84 @@ class OperatorRuntime:
         return vault_data, ""
 
     # ------------------------------------------------------------------
+    # Identity-parameter validation helpers
+    # ------------------------------------------------------------------
+
+    def npub_validation_error(
+        self, npub: str, *, param: str = "npub",
+    ) -> dict[str, Any] | None:
+        """Validate an npub parameter.  Returns ``None`` if valid, or a
+        structured error dict (``{success, error_code, error}``) if not.
+
+        Distinguishes the "missing" case (param empty/None) from the
+        "invalid" case (bad format / bech32 decode failure) so the
+        calling agent knows whether the patron forgot to pass it or
+        passed a malformed value.
+
+        Standardizes the validation pattern that every wheel-side and
+        consumer-side tool needs to repeat (DRY):
+
+        ::
+
+            err = runtime.npub_validation_error(npub, param="patron_npub")
+            if err is not None:
+                return err
+        """
+        from tollbooth.constants import ErrorCode
+
+        if not npub:
+            return {
+                "success": False,
+                "error_code": ErrorCode.NPUB_MISSING,
+                "error": (
+                    f"{param} is required. Pass your Nostr public key "
+                    "(npub1...) to identify yourself."
+                ),
+            }
+        try:
+            resolve_npub(npub)
+        except ValueError as exc:
+            return {
+                "success": False,
+                "error_code": ErrorCode.NPUB_INVALID,
+                "error": str(exc),
+            }
+        return None
+
+    def proof_validation_error(
+        self, proof: str, *, param: str = "proof_token",
+    ) -> dict[str, Any] | None:
+        """Validate a proof_token parameter for the npub-proof flow.
+        Returns ``None`` if non-empty, or a structured error dict if
+        absent.
+
+        This is the "param missing" check only — actual cache lookup
+        and Schnorr verification happen in ``debit_or_deny`` and
+        produce the more specific ``PROOF_REFRESH_NEEDED`` /
+        ``PROOF_INVALID`` codes when needed.
+        """
+        from tollbooth.constants import ErrorCode
+
+        if not proof:
+            slug = self._slug or ""
+            prefix = f"{slug}_" if slug else ""
+            return {
+                "success": False,
+                "error_code": ErrorCode.PROOF_MISSING,
+                "error": (
+                    f"{param} is required. Establish npub ownership first "
+                    "via the proof exchange."
+                ),
+                "next_steps": [
+                    f"{prefix}request_npub_proof(patron_npub=<patron_npub>)",
+                    "Sign the DM challenge from your Nostr client",
+                    f"{prefix}receive_npub_proof(patron_npub=<patron_npub>) — remember the returned proof_token",
+                    "Pass proof_token as the proof parameter on every subsequent paid tool call",
+                ],
+            }
+        return None
+
+    # ------------------------------------------------------------------
     # OAuth situation → structured patron-facing error
     # ------------------------------------------------------------------
 
@@ -1302,25 +1380,34 @@ class OperatorRuntime:
         """Build a structured patron-facing error for a session-restoration situation.
 
         Maps the ``situation`` string returned by ``restore_oauth_session``
-        to a canonical ``error_code`` + ``next_steps`` recipe the calling
-        agent can act on without parsing prose.  Tool names in
-        ``next_steps`` are qualified with this operator's slug so the
-        response is directly invocable.
+        to a canonical ``error_code`` + ``next_steps`` recipe.  The
+        mapping is **1:1** — situations with the same recovery flow
+        still get distinct ``error_code`` values, because a calling
+        agent needs to distinguish "your existing session aged out"
+        from "you've never authorized" even though both end at
+        ``begin_oauth``.
+
+        Tool names in ``next_steps`` are qualified with this operator's
+        slug so the response is directly invocable.
 
         Standard situations:
 
-        - ``token_expired`` → ``oauth_refresh_needed`` + begin_oauth recipe
-        - ``no_credentials`` → ``oauth_refresh_needed`` + begin_oauth recipe
-        - ``vault_bootstrapping`` → ``warming_up`` + retry guidance
-        - ``operator_not_configured`` → ``operator_not_configured``
-        - ``no_oauth_config`` → ``operator_not_configured``
-
-        Unknown situations fall through to ``oauth_refresh_needed`` with
-        a generic begin_oauth recipe.
+        - ``token_expired`` → ``oauth_token_expired`` (returning patron,
+          refresh token revoked or aged out)
+        - ``no_credentials`` → ``oauth_not_yet_authorized`` (first-time
+          patron with no vault entry)
+        - ``vault_bootstrapping`` → ``warming_up``
+        - ``operator_not_configured`` → ``operator_credentials_missing``
+          (vault loaded but operator app credentials absent)
+        - ``no_oauth_config`` → ``oauth_not_wired`` (operator MCP never
+          declared an OAuthProviderConfig — deployment bug)
+        - *unrecognized* → ``oauth_situation_unknown`` with the raw
+          situation echoed in the message (preserves diagnostic
+          signal instead of silently collapsing to a routine code)
 
         Consumers with operator-specific situations (e.g. schwab-mcp's
-        ``no_account_hash``) handle those inline and call this helper
-        only for the standard cases.
+        ``no_account_hash``) handle those inline and delegate the
+        standard cases here.
         """
         from tollbooth.constants import ErrorCode
 
@@ -1334,18 +1421,19 @@ class OperatorRuntime:
 
         table: dict[str, dict[str, Any]] = {
             "token_expired": {
-                "error_code": ErrorCode.OAUTH_REFRESH_NEEDED,
+                "error_code": ErrorCode.OAUTH_TOKEN_EXPIRED,
                 "error": (
-                    "OAuth refresh token has expired or been revoked. A new "
-                    "browser authorization is needed."
+                    "Your existing OAuth session has aged out — the refresh "
+                    "token is no longer accepted by the upstream provider. "
+                    "Reconnect to continue."
                 ),
                 "next_steps": oauth_recovery,
             },
             "no_credentials": {
-                "error_code": ErrorCode.OAUTH_REFRESH_NEEDED,
+                "error_code": ErrorCode.OAUTH_NOT_YET_AUTHORIZED,
                 "error": (
-                    "No OAuth credentials are stored for your identity. This "
-                    "is expected on first use."
+                    "No OAuth session is linked to this npub yet. Authorize "
+                    "with the upstream provider to begin."
                 ),
                 "next_steps": oauth_recovery,
             },
@@ -1358,7 +1446,7 @@ class OperatorRuntime:
                 "next_steps": ["Repeat your request shortly — no re-authentication needed."],
             },
             "operator_not_configured": {
-                "error_code": ErrorCode.OPERATOR_NOT_CONFIGURED,
+                "error_code": ErrorCode.OPERATOR_CREDENTIALS_MISSING,
                 "error": (
                     "The operator's upstream API credentials have not been "
                     "delivered yet. This is an operator setup step, not a "
@@ -1367,17 +1455,21 @@ class OperatorRuntime:
                 "next_steps": ["Contact the operator", "Try again later"],
             },
             "no_oauth_config": {
-                "error_code": ErrorCode.OPERATOR_NOT_CONFIGURED,
-                "error": "OAuth provider is not configured on this operator.",
+                "error_code": ErrorCode.OAUTH_NOT_WIRED,
+                "error": (
+                    "This operator's MCP has no OAuth provider configured. "
+                    "This is a deployment-side issue, not a patron action."
+                ),
                 "next_steps": ["Contact the operator"],
             },
         }
 
         spec = table.get(situation, {
-            "error_code": ErrorCode.OAUTH_REFRESH_NEEDED,
+            "error_code": ErrorCode.OAUTH_SITUATION_UNKNOWN,
             "error": (
-                f"OAuth session unavailable ({situation}). A new browser "
-                "authorization may be needed."
+                f"OAuth session unavailable for an unrecognized reason "
+                f"({situation!r}). Reconnecting may help; if it persists, "
+                "this likely warrants a closer look at operator logs."
             ),
             "next_steps": oauth_recovery,
         })
@@ -2051,8 +2143,9 @@ def register_standard_tools(
         Args:
             patron_npub: Required. The patron's Nostr public key.
         """
-        if not patron_npub or not patron_npub.startswith("npub1"):
-            return {"success": False, "error": "patron_npub is required."}
+        err = rt.npub_validation_error(patron_npub, param="patron_npub")
+        if err is not None:
+            return err
         return await rt.patron_onboarding_status(patron_npub)
 
     # -- Secure Courier ------------------------------------------------
@@ -2454,8 +2547,9 @@ def register_standard_tools(
             field: Required. The credential field name to set.
             value: Required. The value to store.
         """
-        if not npub:
-            return {"success": False, "error": "npub is required."}
+        err = rt.npub_validation_error(npub)
+        if err is not None:
+            return err
         if not field:
             return {"success": False, "error": "field is required."}
         if not value:
@@ -2485,8 +2579,9 @@ def register_standard_tools(
             npub: Required. The patron's npub.
             field: Required. The credential field name to remove.
         """
-        if not npub:
-            return {"success": False, "error": "npub is required."}
+        err = rt.npub_validation_error(npub)
+        if err is not None:
+            return err
         if not field:
             return {"success": False, "error": "field is required."}
         try:
@@ -2513,8 +2608,9 @@ def register_standard_tools(
         Args:
             npub: Required. The patron's npub.
         """
-        if not npub:
-            return {"success": False, "error": "npub is required."}
+        err = rt.npub_validation_error(npub)
+        if err is not None:
+            return err
         try:
             fields = await rt.list_patron_credential_fields(npub)
             return {
@@ -2542,12 +2638,10 @@ def register_standard_tools(
             Args:
                 npub: Required. Your DPYC patron npub (npub1...).
             """
-            if not npub:
-                return {"success": False, "error": "npub is required."}
-            try:
-                resolved = resolve_npub(npub)
-            except ValueError as e:
-                return {"success": False, "error": str(e)}
+            err = rt.npub_validation_error(npub)
+            if err is not None:
+                return err
+            resolved = resolve_npub(npub)
 
             # Load operator credentials using vendor field names
             _id_field = _opc.client_id_field
@@ -2651,12 +2745,10 @@ def register_standard_tools(
             Args:
                 npub: Required. The same npub used in begin_oauth.
             """
-            if not npub:
-                return {"success": False, "error": "npub is required."}
-            try:
-                resolved = resolve_npub(npub)
-            except ValueError as e:
-                return {"success": False, "error": str(e)}
+            err = rt.npub_validation_error(npub)
+            if err is not None:
+                return err
+            resolved = resolve_npub(npub)
 
             # Load pending state (PKCE verifier, redirect_uri)
             pending = await rt.load_patron_session(
@@ -2803,16 +2895,18 @@ def register_standard_tools(
         Args:
             patron_npub: Required. The patron's npub to request proof from.
         """
-        if not patron_npub:
-            return {"success": False, "error": "patron_npub is required."}
-        try:
-            resolve_npub(patron_npub)
-        except ValueError as e:
-            return {"success": False, "error": str(e)}
+        err = rt.npub_validation_error(patron_npub, param="patron_npub")
+        if err is not None:
+            return err
 
         courier = await rt.courier()
         if courier is None:
-            return {"success": False, "error": "Secure Courier not configured."}
+            from tollbooth.constants import ErrorCode as _EC
+            return {
+                "success": False,
+                "error_code": _EC.SECURE_COURIER_UNAVAILABLE,
+                "error": "Secure Courier not configured.",
+            }
 
         import time as _t
 
@@ -2895,18 +2989,20 @@ def register_standard_tools(
         Args:
             patron_npub: Required. The patron's npub to receive proof from.
         """
-        if not patron_npub:
-            return {"success": False, "error": "patron_npub is required."}
+        err = rt.npub_validation_error(patron_npub, param="patron_npub")
+        if err is not None:
+            return err
         import time as _time
-
-        try:
-            resolved = resolve_npub(patron_npub)
-        except ValueError as e:
-            return {"success": False, "error": str(e)}
+        resolved = resolve_npub(patron_npub)
 
         courier = await rt.courier()
         if courier is None:
-            return {"success": False, "error": "Secure Courier not configured."}
+            from tollbooth.constants import ErrorCode as _EC
+            return {
+                "success": False,
+                "error_code": _EC.SECURE_COURIER_UNAVAILABLE,
+                "error": "Secure Courier not configured.",
+            }
 
         exchange = courier._exchange
         from tollbooth.nostr_credentials import (
@@ -3159,14 +3255,13 @@ def register_standard_tools(
             proof_token: Required. The poison phrase returned by
                 ``request_npub_proof`` / ``receive_npub_proof``.
         """
-        if not patron_npub:
-            return {"success": False, "error": "patron_npub is required."}
-        if not proof_token:
-            return {"success": False, "error": "proof_token is required."}
-        try:
-            resolved = resolve_npub(patron_npub)
-        except ValueError as e:
-            return {"success": False, "error": str(e)}
+        err = rt.npub_validation_error(patron_npub, param="patron_npub")
+        if err is not None:
+            return err
+        err = rt.proof_validation_error(proof_token, param="proof_token")
+        if err is not None:
+            return err
+        resolved = resolve_npub(patron_npub)
 
         import hashlib as _hashlib
         poison_hash = _hashlib.sha256(proof_token.encode()).hexdigest()

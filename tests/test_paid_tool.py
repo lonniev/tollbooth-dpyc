@@ -447,10 +447,14 @@ class TestErrorCodeMapping:
 
 class TestOAuthSituationResponse:
     """oauth_situation_response is the cross-operator helper that turns
-    restore_oauth_session situation strings into patron-actionable dicts."""
+    restore_oauth_session situation strings into patron-actionable dicts.
+
+    Mapping is 1:1 — situations that share a recovery flow still get
+    distinct error_codes so a calling agent can phrase patron output
+    correctly (e.g. 'reconnect' vs 'connect for the first time')."""
 
     @pytest.mark.asyncio
-    async def test_token_expired_returns_oauth_refresh_needed(self):
+    async def test_token_expired_returns_specific_code(self):
         from tollbooth.constants import ErrorCode
         rt = _make_runtime()
         rt._slug = "schwab"
@@ -458,20 +462,34 @@ class TestOAuthSituationResponse:
         result = rt.oauth_situation_response("token_expired")
 
         assert result["success"] is False
-        assert result["error_code"] == ErrorCode.OAUTH_REFRESH_NEEDED
+        assert result["error_code"] == ErrorCode.OAUTH_TOKEN_EXPIRED
         assert "schwab_begin_oauth" in result["next_steps"][0]
         assert "schwab_check_oauth_status" in result["next_steps"][2]
 
     @pytest.mark.asyncio
-    async def test_no_credentials_returns_oauth_refresh_needed(self):
+    async def test_no_credentials_returns_first_time_code(self):
+        """Distinct from token_expired — this is a returning vs first-time signal."""
         from tollbooth.constants import ErrorCode
         rt = _make_runtime()
         rt._slug = "excalibur"
 
         result = rt.oauth_situation_response("no_credentials")
 
-        assert result["error_code"] == ErrorCode.OAUTH_REFRESH_NEEDED
+        assert result["error_code"] == ErrorCode.OAUTH_NOT_YET_AUTHORIZED
         assert "excalibur_begin_oauth" in result["next_steps"][0]
+
+    @pytest.mark.asyncio
+    async def test_token_expired_distinct_from_no_credentials(self):
+        """Two situations with the same recovery still get distinct codes."""
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        rt._slug = "schwab"
+
+        a = rt.oauth_situation_response("token_expired")
+        b = rt.oauth_situation_response("no_credentials")
+        assert a["error_code"] == ErrorCode.OAUTH_TOKEN_EXPIRED
+        assert b["error_code"] == ErrorCode.OAUTH_NOT_YET_AUTHORIZED
+        assert a["error_code"] != b["error_code"]
 
     @pytest.mark.asyncio
     async def test_vault_bootstrapping_returns_warming_up(self):
@@ -485,33 +503,39 @@ class TestOAuthSituationResponse:
         assert "Repeat" in result["next_steps"][0]
 
     @pytest.mark.asyncio
-    async def test_operator_not_configured_routes_to_operator_code(self):
+    async def test_operator_not_configured_routes_to_credentials_missing(self):
         from tollbooth.constants import ErrorCode
         rt = _make_runtime()
         rt._slug = "schwab"
 
         result = rt.oauth_situation_response("operator_not_configured")
-        assert result["error_code"] == ErrorCode.OPERATOR_NOT_CONFIGURED
+        assert result["error_code"] == ErrorCode.OPERATOR_CREDENTIALS_MISSING
 
     @pytest.mark.asyncio
-    async def test_no_oauth_config_routes_to_operator_code(self):
+    async def test_no_oauth_config_distinct_from_creds_missing(self):
+        """A deployment-side issue is distinct from a credential-delivery issue."""
         from tollbooth.constants import ErrorCode
         rt = _make_runtime()
         rt._slug = "schwab"
 
-        result = rt.oauth_situation_response("no_oauth_config")
-        assert result["error_code"] == ErrorCode.OPERATOR_NOT_CONFIGURED
+        a = rt.oauth_situation_response("no_oauth_config")
+        b = rt.oauth_situation_response("operator_not_configured")
+        assert a["error_code"] == ErrorCode.OAUTH_NOT_WIRED
+        assert b["error_code"] == ErrorCode.OPERATOR_CREDENTIALS_MISSING
+        assert a["error_code"] != b["error_code"]
 
     @pytest.mark.asyncio
-    async def test_unknown_situation_falls_through_to_oauth_refresh(self):
+    async def test_unknown_situation_returns_unknown_code(self):
+        """Don't silently collapse unknown situations to a routine code."""
         from tollbooth.constants import ErrorCode
         rt = _make_runtime()
         rt._slug = "schwab"
 
         result = rt.oauth_situation_response("some_brand_new_situation")
-        # Falls through with the situation echoed in the message
-        assert result["error_code"] == ErrorCode.OAUTH_REFRESH_NEEDED
+        # Distinct code preserves the diagnostic signal — situation echoed for debugging
+        assert result["error_code"] == ErrorCode.OAUTH_SITUATION_UNKNOWN
         assert "some_brand_new_situation" in result["error"]
+        # next_steps still suggests begin_oauth as a last-resort guess
         assert any("schwab_begin_oauth" in s for s in result["next_steps"])
 
     @pytest.mark.asyncio
@@ -524,4 +548,59 @@ class TestOAuthSituationResponse:
         result = rt.oauth_situation_response("token_expired")
         # Steps should reference begin_oauth without a slug prefix
         assert "begin_oauth(" in result["next_steps"][0]
-        assert result["error_code"] == ErrorCode.OAUTH_REFRESH_NEEDED
+        assert result["error_code"] == ErrorCode.OAUTH_TOKEN_EXPIRED
+
+
+class TestNpubAndProofValidationHelpers:
+    """The DRY helpers that every wheel-side and consumer-side tool uses
+    to validate npub / proof_token parameters consistently."""
+
+    @pytest.mark.asyncio
+    async def test_npub_missing_returns_npub_missing_code(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        result = rt.npub_validation_error("")
+        assert result is not None
+        assert result["error_code"] == ErrorCode.NPUB_MISSING
+
+    @pytest.mark.asyncio
+    async def test_npub_malformed_returns_npub_invalid_code(self):
+        """Distinct from NPUB_MISSING — caller passed *something*, just not valid."""
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        result = rt.npub_validation_error("not-an-npub")
+        assert result is not None
+        assert result["error_code"] == ErrorCode.NPUB_INVALID
+
+    @pytest.mark.asyncio
+    async def test_npub_valid_returns_none(self):
+        rt = _make_runtime()
+        # VALID_NPUB is the bech32 of _TEST_KEY at the top of this module
+        assert rt.npub_validation_error(VALID_NPUB) is None
+
+    @pytest.mark.asyncio
+    async def test_npub_param_name_appears_in_error_message(self):
+        """Custom param name (e.g. patron_npub) ships with the error so the
+        agent can surface 'patron_npub is required' specifically."""
+        rt = _make_runtime()
+        result = rt.npub_validation_error("", param="patron_npub")
+        assert result is not None
+        assert "patron_npub" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_proof_missing_returns_proof_missing_code(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        rt._slug = "schwab"
+        result = rt.proof_validation_error("")
+        assert result is not None
+        assert result["error_code"] == ErrorCode.PROOF_MISSING
+        # next_steps recipe is slug-qualified
+        assert any("schwab_request_npub_proof" in s for s in result["next_steps"])
+
+    @pytest.mark.asyncio
+    async def test_proof_present_returns_none(self):
+        rt = _make_runtime()
+        # Any non-empty string passes the param-presence check; cache-lookup
+        # validity is checked later in debit_or_deny.
+        assert rt.proof_validation_error("bold-hawk-42") is None
