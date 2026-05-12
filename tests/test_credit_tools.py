@@ -175,6 +175,33 @@ class TestPurchaseCredits:
         cache.mark_dirty.assert_called_once_with("user1")
 
     @pytest.mark.asyncio
+    async def test_invoice_metadata_includes_orderId(self) -> None:
+        """BTCPay's Lightning Description Template substitutes orderId into
+        the BOLT11 description. Without an orderId, wallets like Wallet of
+        Satoshi render '(Order ID:)' with an empty field, which looks like
+        a bug to the paying user. Confirm we always pass one."""
+        btcpay = _mock_btcpay({
+            "id": "inv-99",
+            "checkoutLink": "https://pay.example.com/inv-99",
+            "expirationTime": "2026-02-16T01:00:00Z",
+        })
+        cache = _mock_cache()
+        result = await purchase_credits_tool(
+            btcpay, cache, "user1", 1000,
+            certificate=_test_certificate(net_sats=1000),
+            authority_npub=_TEST_AUTHORITY_NPUB,
+        )
+        assert result["success"] is True
+        # Inspect the metadata that reached BTCPay
+        kwargs = btcpay.create_invoice.call_args.kwargs
+        metadata = kwargs["metadata"]
+        assert "orderId" in metadata, "orderId must be set so WoS doesn't render '(Order ID:)' empty"
+        order_id = metadata["orderId"]
+        assert isinstance(order_id, str)
+        assert order_id.startswith("dpyc-"), f"orderId should be dpyc-prefixed; got {order_id!r}"
+        assert "user1" in order_id, "orderId should include the user-identity slug"
+
+    @pytest.mark.asyncio
     async def test_zero_amount_rejected(self) -> None:
         btcpay = _mock_btcpay()
         cache = _mock_cache()

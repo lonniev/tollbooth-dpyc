@@ -49,6 +49,21 @@ async def _create_purchase_invoice(
     if extra_metadata:
         invoice_metadata.update(extra_metadata)
 
+    # Populate BTCPay's `orderId` so the store's Lightning Description
+    # Template — typically "{StoreName} (Order ID: {OrderId})" — substitutes
+    # a meaningful string into the BOLT11 description. Without this,
+    # wallets like Wallet of Satoshi show "Paid to <StoreName> (Order ID:)"
+    # with an empty Order ID field, which looks like a bug to the paying
+    # user. The id is constructed from the purchase purpose, a 16-char slug
+    # of the user identity, and a unix timestamp — enough to disambiguate
+    # purchases in the patron's wallet history without exposing the full
+    # npub.
+    if "orderId" not in invoice_metadata:
+        purpose_slug = str(invoice_metadata.get("purpose", "purchase"))
+        user_slug = str(user_id)[:16]
+        ts = int(datetime.now(timezone.utc).timestamp())
+        invoice_metadata["orderId"] = f"dpyc-{purpose_slug}-{user_slug}-{ts}"
+
     try:
         invoice = await btcpay.create_invoice(
             amount_sats,
