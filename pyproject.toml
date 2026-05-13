@@ -24,6 +24,11 @@ classifiers = [
 dependencies = [
     "httpx==0.28.1",
     "pynostr==0.7.0",
+    # AES-256-GCM in vault_encryption.py is sourced from `cryptography`. Pinning
+    # an explicit floor keeps a fresh install from transitively pulling an older
+    # version with known CVEs. 46.0.5 is the floor that includes the 2024-2025
+    # fix cohort consumers of this wheel rely on.
+    "cryptography>=46.0.5",
 ]
 
 [project.optional-dependencies]
