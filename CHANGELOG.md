@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.4] — 2026-05-12
+
+### Fixed
+- **BTCPay invoices now carry an `orderId` so Lightning wallets render a real description.** BTCPay's per-store Lightning Description Template — typically `"{StoreName} (Order ID: {OrderId})"` — gets substituted into the BOLT11 description that paying wallets read. Without an `orderId`, wallets like Wallet of Satoshi showed `"Paid to <StoreName> (Order ID:)"` with an empty field, which looked like a bug to the patron. Every credit-purchase invoice now sets `orderId` to `"dpyc-{purpose}-{user_id[:16]}-{utc_timestamp}"` — enough to disambiguate purchases in the patron's wallet history without exposing the full npub. Any pre-set `orderId` in `extra_metadata` is honored.
+
 ## [0.17.3] — 2026-05-05
 
 ### Fixed
