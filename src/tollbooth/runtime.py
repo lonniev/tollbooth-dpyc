@@ -2679,7 +2679,7 @@ def register_standard_tools(
                 creds = await rt.load_credentials(
                     [_id_field, _secret_field],
                 )
-            except Exception as e:
+            except Exception:
                 return {
                     "success": False,
                     "error": (

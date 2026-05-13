@@ -76,7 +76,7 @@ def parse_duration(text: str) -> int | None:
     """
     cleaned = text.strip().lower()
     if not cleaned:
-        raise ValueError(f"Empty duration string")
+        raise ValueError("Empty duration string")
     if cleaned in ("unlimited", "never", "forever", "none", "no expiry", "no expiration"):
         return None
     m = _DURATION_RE.match(cleaned)

@@ -43,7 +43,6 @@ _HEADER_PAYMENT_SIGNATURE = "X-PAYMENT"
 try:
     from x402 import (
         PaymentPayload,
-        PaymentRequired,
         parse_payment_required,
     )
 
