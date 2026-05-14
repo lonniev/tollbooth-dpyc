@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.18.0] — 2026-05-13
+
+### Security
+- **Vault AAD is now enforced — no silent fallback.** `VaultCipher.decrypt()` previously retried-without-AAD on tag failure, a back-compat shim added in v0.14.0 for ciphertext written before AAD support landed. That shim made AAD purely advisory: a ciphertext written with `aad="oauth/access_token"` could be swapped into the `aad="oauth/refresh_token"` slot, the AAD-aware decrypt would fail, the shim's retry-without-AAD path would succeed, and the application got the wrong-slot plaintext silently. AAD now does what its name says — a tag mismatch raises `InvalidTag` and decrypt fails. **Mildly breaking**: any pre-AAD-era ciphertext written before v0.14.0 (2026-04-19) that has not been rotated through a write since then is now un-decryptable. After ~24 days of normal traffic (OAuth refresh cycles, ledger updates, Secure Courier redelivery), the realistic survivor population is set-once preferences and untouched operator credentials; both recover through normal operator/patron flows (`update_patron_credential`, `receive_credentials`).
+
+### Added
+- **`cryptography>=46.0.5` is now an explicit dependency.** The wheel uses `AESGCM` from `cryptography` in `vault_encryption.py` but had been relying on transitive resolution. Fresh installs without other pinning could pull older versions with known CVEs. 46.0.5 is the floor that includes the 2024-2025 fix cohort consumers of this wheel already run.
+
+### Fixed
+- Three pre-existing ruff lint findings on `main` that had been silently failing the Tests workflow's Lint step — an unused `f""` prefix in `proven_npub.py`, an unused `except as e` binding in `runtime.py`, and an unused `PaymentRequired` import in `x402_client.py`. No behavior change.
+
 ## [0.17.4] — 2026-05-12
 
 ### Fixed
