@@ -108,3 +108,62 @@ def test_migration_detection():
     # New encrypted ledger
     new_encrypted = cipher.encrypt(old_plain)
     assert cipher.is_encrypted(new_encrypted) is True
+
+
+# ---------------------------------------------------------------------------
+# AAD enforcement — the cross-slot ciphertext-swap defense
+# ---------------------------------------------------------------------------
+
+
+class TestAADEnforcement:
+    """Verify that AAD binds ciphertext to its context, with no silent
+    fallback that would let one slot's ciphertext be decrypted as another's.
+
+    A pre-v0.17.5 shim retried decrypt without AAD on tag failure, which
+    made AAD purely advisory. That shim was removed once production
+    rotation had aged out the pre-AAD ciphertext population. These tests
+    pin the now-enforced behavior so the shim doesn't quietly come back.
+    """
+
+    def test_same_aad_roundtrip(self):
+        """The normal case — same AAD on encrypt and decrypt → success."""
+        cipher = VaultCipher(nsec_hex=TEST_NSEC_HEX)
+        ct = cipher.encrypt("access-token-data", aad="oauth/access_token")
+        pt = cipher.decrypt(ct, aad="oauth/access_token")
+        assert pt == "access-token-data"
+
+    def test_cross_slot_swap_rejected(self):
+        """Ciphertext written for one slot cannot be decrypted as another.
+        This is the entire point of AAD — without enforcement, an attacker
+        with DB access could swap rows between slots."""
+        cipher = VaultCipher(nsec_hex=TEST_NSEC_HEX)
+        ct = cipher.encrypt("refresh-token-data", aad="oauth/refresh_token")
+        with pytest.raises(Exception):  # InvalidTag from AES-GCM
+            cipher.decrypt(ct, aad="oauth/access_token")
+
+    def test_aad_required_on_decrypt_when_encrypt_used_aad(self):
+        """If encrypt used AAD, decrypt without AAD must fail. Pre-v0.17.5
+        a fallback would have made this succeed — this test pins that
+        the fallback is gone."""
+        cipher = VaultCipher(nsec_hex=TEST_NSEC_HEX)
+        ct = cipher.encrypt("sensitive", aad="some-context")
+        with pytest.raises(Exception):
+            cipher.decrypt(ct, aad="")
+
+    def test_aad_required_on_encrypt_when_decrypt_uses_aad(self):
+        """Symmetric: if encrypt was called without AAD, decrypt-with-AAD
+        must fail. Pre-v0.17.5 the fallback would have masked this — the
+        test exists to keep that fallback removed."""
+        cipher = VaultCipher(nsec_hex=TEST_NSEC_HEX)
+        ct = cipher.encrypt("sensitive")  # no aad
+        with pytest.raises(Exception):
+            cipher.decrypt(ct, aad="some-context")
+
+    def test_empty_aad_unchanged_behavior(self):
+        """When neither side passes AAD, behavior is unchanged from
+        pre-AAD — the no-AAD path still roundtrips. This is the bulk
+        of existing call sites the wheel ships today."""
+        cipher = VaultCipher(nsec_hex=TEST_NSEC_HEX)
+        ct = cipher.encrypt("data")
+        pt = cipher.decrypt(ct)
+        assert pt == "data"

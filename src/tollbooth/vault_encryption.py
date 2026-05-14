@@ -68,9 +68,19 @@ class VaultCipher:
     def decrypt(self, ciphertext_b64: str, aad: str = "") -> str:
         """Decrypt a base64-encoded payload. Raises on tamper or wrong key.
 
-        ``aad`` must match the value used during encryption.
-        For backward compatibility, empty ``aad`` matches ciphertext
-        encrypted without AAD.
+        ``aad`` must match the value used during encryption — exactly.
+        A row encrypted with ``aad="oauth/access_token"`` cannot be
+        decrypted as ``aad="oauth/refresh_token"``; the tag check fails
+        and decrypt raises. This is the cross-slot ciphertext-swap
+        defense AAD exists to provide.
+
+        There is no fallback path. An earlier shim retried without AAD
+        for backward compatibility with ciphertext written before AAD
+        was introduced (v0.14.0, 2026-04-19) — that shim made AAD
+        advisory rather than enforced, and was removed in v0.17.5 after
+        the natural rotation cadence (OAuth refresh, ledger updates,
+        Secure Courier redelivery) had aged out the pre-AAD population
+        in production.
         """
         AESGCM = _get_aesgcm()
         payload = base64.b64decode(ciphertext_b64)
@@ -80,15 +90,7 @@ class VaultCipher:
         ct = payload[self._NONCE_SIZE:]
         aes = AESGCM(self._key)
         aad_bytes = aad.encode("utf-8") if aad else None
-        try:
-            plaintext = aes.decrypt(nonce, ct, aad_bytes)
-        except Exception:
-            if aad:
-                # Retry without AAD for backward compatibility with
-                # ciphertext encrypted before AAD was introduced
-                plaintext = aes.decrypt(nonce, ct, None)
-            else:
-                raise
+        plaintext = aes.decrypt(nonce, ct, aad_bytes)
         return plaintext.decode("utf-8")
 
     def is_encrypted(self, value: str) -> bool:
