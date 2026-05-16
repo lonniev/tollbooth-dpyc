@@ -180,3 +180,49 @@ def verify_proof(
         _consumed_proofs[event_id] = now + window_seconds
 
     return True
+
+
+def require_proof(
+    npub: str,
+    proof: str,
+    tool_name: str,
+    window_seconds: int = DEFAULT_WINDOW_SECONDS,
+) -> dict | None:
+    """Gate a tool call on a verified Nostr identity proof.
+
+    Returns ``None`` if the proof verifies (caller proceeds). Returns a
+    structured error dict the caller should return verbatim from its
+    ``@tool`` body otherwise.
+
+    Use at the top of every standard tool whose semantics include
+    "caller is acting as ``npub``" — check_balance, purchase_credits,
+    account_statement, etc. Bootstrap tools (request_npub_proof,
+    receive_credentials, register_authority_npub) deliberately do NOT
+    gate on this — they're how a candidate proves identity in the
+    first place.
+
+    Bound to ``tool_name``: a proof issued for one tool will not pass
+    for another, preventing replay across the public tool surface.
+    """
+    if not npub.startswith("npub1") or len(npub) < 60:
+        return {
+            "success": False,
+            "error": (
+                "Invalid npub format. Must start with 'npub1' and be at "
+                "least 60 characters."
+            ),
+        }
+    if not proof:
+        return {
+            "success": False,
+            "error": "proof is required.",
+            "next_steps": [
+                "Call request_npub_proof to obtain a challenge",
+                "Sign the challenge with your nsec",
+                "Call receive_npub_proof with the signed event",
+                "Retry this call with the cached proof_token",
+            ],
+        }
+    if not verify_proof(proof, npub, tool_name, window_seconds=window_seconds):
+        return {"success": False, "error": "Invalid identity proof."}
+    return None

@@ -3,6 +3,41 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.19.0] — 2026-05-16
+
+### Security — Breaking API: every tool that names a proof now verifies it
+
+Closed a class of bug where standard tools accepted `proof: str = ""` in
+their signature but never actually called `verify_proof`. The pattern
+looked security-aware (proof is a parameter!) without enforcing anything —
+any caller with someone else's npub could enumerate balances, scrape
+account statements, and read OAuth state. The Authority service had
+silently patched its own tools with a local `_verify_operator_proof`
+helper; that fix is now hoisted into the wheel as `identity_proof.require_proof`
+and applied uniformly.
+
+**Affected standard tools** (now require non-empty `npub` and `proof`,
+with proof verified via Schnorr against npub bound to the tool name):
+
+- `check_balance`, `purchase_credits`, `check_payment`, `restore_credits`
+- `account_statement`, `account_statement_infographic`, `get_patron_onboarding_status`
+- `update_patron_credential`, `delete_patron_credential`, `get_patron_credential_fields`
+- `forget_credentials`, `begin_oauth`, `check_oauth_status`
+
+**Bootstrap tools intentionally still allow empty params** — they're how
+a candidate proves identity in the first place: `request_credential_channel`,
+`receive_credentials`, `request_patron_credentials`, `receive_patron_credentials`,
+`request_npub_proof`, `receive_npub_proof`, `check_proof_status`.
+
+**Caller impact**: any MCP client that called these tools without proof
+will receive a clear error response with `next_steps` pointing at the
+request/receive_npub_proof handshake. Pricing Studio already drives that
+handshake (per `feedback_human_in_loop_proof`); other clients (Claude
+Desktop, Claude Code, ad-hoc curls) need to wire it up.
+
+**Deferred to follow-up**: `session_status` (two-mode anonymous-or-per-patron
+design), `check_price` (per-npub pricing nuance), `service_status` (system-level).
+
 ## [0.18.0] — 2026-05-13
 
 ### Security

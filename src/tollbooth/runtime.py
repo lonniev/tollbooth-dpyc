@@ -1893,7 +1893,7 @@ def register_standard_tools(
     # -- Credit tools --------------------------------------------------
 
     @tool
-    async def check_balance(npub: str = "", proof: str = "") -> dict[str, Any]:
+    async def check_balance(npub: str, proof: str) -> dict[str, Any]:
         """Check a patron's credit balance at this operator.
 
         This is the patron's spending balance — credits purchased via
@@ -1901,11 +1901,16 @@ def register_standard_tools(
         own balance at the Authority (needed to certify patron purchases),
         use authority_check_balance instead.
 
-        Free — no credits required.
+        Free — no credits required. Proof of npub ownership is required
+        to prevent anyone-with-the-registry from enumerating balances.
 
         Args:
-            npub: Required. The patron's Nostr public key (npub1...).
+            npub: The Nostr public key (npub1...) whose balance to check.
+            proof: A kind-27235 Nostr event signed by npub for this tool.
         """
+        from tollbooth.identity_proof import require_proof
+        if err := require_proof(npub, proof, "check_balance"):
+            return err
         try:
             npub = resolve_npub(npub)
             cache = await rt.ledger_cache()
@@ -1915,18 +1920,23 @@ def register_standard_tools(
         return await credits.check_balance_tool(cache, npub)
 
     @tool
-    async def purchase_credits(amount_sats: int = 1000, npub: str = "", proof: str = "") -> dict[str, Any]:
+    async def purchase_credits(npub: str, proof: str, amount_sats: int = 1000) -> dict[str, Any]:
         """Buy credits via Bitcoin Lightning.
 
         Creates a Lightning invoice. Pay it with any Lightning wallet,
-        then call check_payment to confirm.
+        then call check_payment to confirm. Proof of npub ownership is
+        required so credits land in the correct ledger.
 
         Free — no credits required to call.
 
         Args:
+            npub: The Nostr public key (npub1...) the credits will fund.
+            proof: A kind-27235 Nostr event signed by npub for this tool.
             amount_sats: Satoshis to purchase (default 1000).
-            npub: Required. Your Nostr public key (npub1...).
         """
+        from tollbooth.identity_proof import require_proof
+        if err := require_proof(npub, proof, "purchase_credits"):
+            return err
         try:
             npub = resolve_npub(npub)
         except ValueError as e:
@@ -1970,15 +1980,22 @@ def register_standard_tools(
             return {"success": False, "error": str(e)}
 
     @tool
-    async def check_payment(invoice_id: str, npub: str = "", proof: str = "") -> dict[str, Any]:
+    async def check_payment(invoice_id: str, npub: str, proof: str) -> dict[str, Any]:
         """Check the payment status of a Lightning invoice.
 
         Call after paying the invoice from purchase_credits.
-        Free — no credits required.
+        Free — no credits required. Proof of npub ownership is required
+        to prevent credit-grant front-running by an observer of the
+        invoice ID.
 
         Args:
-            npub: Required. Your Nostr public key (npub1...).
+            invoice_id: The invoice ID returned by purchase_credits.
+            npub: The Nostr public key (npub1...) that purchased the invoice.
+            proof: A kind-27235 Nostr event signed by npub for this tool.
         """
+        from tollbooth.identity_proof import require_proof
+        if err := require_proof(npub, proof, "check_payment"):
+            return err
         try:
             npub = resolve_npub(npub)
             cashier = await rt.ensure_cashier()
@@ -2011,12 +2028,20 @@ def register_standard_tools(
         return result
 
     @tool
-    async def restore_credits(invoice_id: str, npub: str = "", proof: str = "") -> dict[str, Any]:
+    async def restore_credits(invoice_id: str, npub: str, proof: str) -> dict[str, Any]:
         """Restore credits from a previously paid invoice. Free.
 
+        Proof of npub ownership is required so credits land in the
+        correct ledger.
+
         Args:
-            npub: Required. Your Nostr public key (npub1...).
+            invoice_id: The invoice ID whose credits to restore.
+            npub: The Nostr public key (npub1...) that paid the invoice.
+            proof: A kind-27235 Nostr event signed by npub for this tool.
         """
+        from tollbooth.identity_proof import require_proof
+        if err := require_proof(npub, proof, "restore_credits"):
+            return err
         try:
             npub = resolve_npub(npub)
             cashier = await rt.ensure_cashier()
@@ -2031,7 +2056,7 @@ def register_standard_tools(
         )
 
     @tool
-    async def account_statement(npub: str = "", proof: str = "", days: int = 30) -> dict[str, Any]:
+    async def account_statement(npub: str, proof: str, days: int = 30) -> dict[str, Any]:
         """Generate a patron's account statement at this operator.
 
         Returns the patron's purchase history, active credit tranches,
@@ -2039,12 +2064,17 @@ def register_standard_tools(
         the patron's spending account — not the operator's Authority
         tax balance.
 
-        Free — no credits consumed.
+        Free — no credits consumed. Proof of npub ownership is required
+        to prevent statement-scraping of arbitrary patrons.
 
         Args:
-            npub: Required. The patron's Nostr public key (npub1...).
+            npub: The patron's Nostr public key (npub1...).
+            proof: A kind-27235 Nostr event signed by npub for this tool.
             days: Number of days of daily usage history to include (default 30).
         """
+        from tollbooth.identity_proof import require_proof
+        if err := require_proof(npub, proof, "account_statement"):
+            return err
         try:
             npub = resolve_npub(npub)
             cache = await rt.ledger_cache()
@@ -2054,15 +2084,17 @@ def register_standard_tools(
         return await credits.account_statement_tool(cache, npub, days=days)
 
     @tool
-    async def account_statement_infographic(npub: str = "", proof: str = "", days: int = 30) -> dict[str, Any]:
+    async def account_statement_infographic(npub: str, proof: str, days: int = 30) -> dict[str, Any]:
         """Generate a visual SVG infographic of your account statement.
 
         Returns the same data as account_statement, rendered as a dark-themed
         SVG graphic with balance hero, metrics cards, health gauge, tranche
-        table, and tool usage breakdown. Costs 1 api_sat per call.
+        table, and tool usage breakdown. Costs 1 api_sat per call. Proof is
+        verified by ``debit_or_deny`` before any cost is incurred.
 
         Args:
-            npub: Required. Your Nostr public key (npub1...).
+            npub: The Nostr public key (npub1...) whose statement to render.
+            proof: A kind-27235 Nostr event signed by npub for this tool.
             days: Number of days of daily usage history to include (default 30).
         """
         try:
@@ -2161,19 +2193,21 @@ def register_standard_tools(
         return await rt.onboarding_status()
 
     @tool
-    async def get_patron_onboarding_status(patron_npub: str = "", proof: str = "") -> dict[str, Any]:
+    async def get_patron_onboarding_status(patron_npub: str, proof: str) -> dict[str, Any]:
         """Report a patron's credential readiness for this operator.
 
         For set-once services (eXcalibur, TheBrain), shows which patron
         secrets are configured and which are missing. For dynamic/OAuth2
         services (Schwab), reports that no patron credentials are needed.
-        Free.
+        Free. Proof of npub ownership is required because credential
+        presence is sensitive information about the patron's setup.
 
         Args:
-            patron_npub: Required. The patron's Nostr public key.
+            patron_npub: The patron's Nostr public key (npub1...).
+            proof: A kind-27235 Nostr event signed by patron_npub for this tool.
         """
-        err = rt.npub_validation_error(patron_npub, param="patron_npub")
-        if err is not None:
+        from tollbooth.identity_proof import require_proof
+        if err := require_proof(patron_npub, proof, "get_patron_onboarding_status"):
             return err
         return await rt.patron_onboarding_status(patron_npub)
 
@@ -2452,19 +2486,20 @@ def register_standard_tools(
 
     @tool
     async def forget_credentials(
-        service: str = "",
-        npub: str = "",
-        proof: str = "",
+        service: str,
+        npub: str,
+        proof: str,
     ) -> dict[str, Any]:
         """Delete vaulted credentials for a specific service and npub.
 
-        For operator credentials, omit npub (defaults to operator).
-        For patron credentials, pass the patron's npub.
+        For operator credentials, pass the operator's own npub. For patron
+        credentials, pass the patron's npub. Always requires proof of
+        npub ownership — a deletion is as destructive as a write.
 
         Args:
-            service: Required. The credential service to forget.
-            npub: The npub whose credentials to forget. Defaults to
-                operator npub for operator services.
+            service: The credential service to forget.
+            npub: The Nostr public key (npub1...) whose credentials to forget.
+            proof: A kind-27235 Nostr event signed by npub for this tool.
         Free.
         """
         if not service:
@@ -2480,7 +2515,10 @@ def register_standard_tools(
                     )
                 ),
             }
-        target_npub = npub if npub else rt.operator_npub()
+        from tollbooth.identity_proof import require_proof
+        if err := require_proof(npub, proof, "forget_credentials"):
+            return err
+        target_npub = npub
         courier = await rt.courier()
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
@@ -2562,22 +2600,24 @@ def register_standard_tools(
 
     @tool
     async def update_patron_credential(
-        npub: str = "", field: str = "", value: str = "",
-        proof: str = "",
+        npub: str, proof: str, field: str, value: str,
     ) -> dict[str, Any]:
         """Add or update a single patron credential field.
 
         Merges into existing stored credentials without affecting
         other fields. Useful for setting an account identifier
-        after OAuth, changing a default brain, etc. Free.
+        after OAuth, changing a default brain, etc. Free. Proof of
+        npub ownership is required — this is a write to the patron's
+        sensitive credential vault.
 
         Args:
-            npub: Required. The patron's npub.
-            field: Required. The credential field name to set.
-            value: Required. The value to store.
+            npub: The patron's Nostr public key (npub1...).
+            proof: A kind-27235 Nostr event signed by npub for this tool.
+            field: The credential field name to set.
+            value: The value to store.
         """
-        err = rt.npub_validation_error(npub)
-        if err is not None:
+        from tollbooth.identity_proof import require_proof
+        if err := require_proof(npub, proof, "update_patron_credential"):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -2596,20 +2636,21 @@ def register_standard_tools(
 
     @tool
     async def delete_patron_credential(
-        npub: str = "", field: str = "",
-        proof: str = "",
+        npub: str, proof: str, field: str,
     ) -> dict[str, Any]:
         """Remove a single patron credential field.
 
         Deletes one field from stored credentials without affecting
-        other fields. Free.
+        other fields. Free. Proof of npub ownership is required —
+        this is a write to the patron's sensitive credential vault.
 
         Args:
-            npub: Required. The patron's npub.
-            field: Required. The credential field name to remove.
+            npub: The patron's Nostr public key (npub1...).
+            proof: A kind-27235 Nostr event signed by npub for this tool.
+            field: The credential field name to remove.
         """
-        err = rt.npub_validation_error(npub)
-        if err is not None:
+        from tollbooth.identity_proof import require_proof
+        if err := require_proof(npub, proof, "delete_patron_credential"):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -2626,19 +2667,22 @@ def register_standard_tools(
 
     @tool
     async def get_patron_credential_fields(
-        npub: str = "",
+        npub: str, proof: str,
     ) -> dict[str, Any]:
         """List stored patron credential field names (not values).
 
         Returns the names of fields stored for a patron. Values
         are never exposed — use this to verify which fields are
-        configured. Free.
+        configured. Free. Proof of npub ownership is required: the
+        list of configured fields is itself sensitive (reveals
+        which integrations a patron has set up).
 
         Args:
-            npub: Required. The patron's npub.
+            npub: The patron's Nostr public key (npub1...).
+            proof: A kind-27235 Nostr event signed by npub for this tool.
         """
-        err = rt.npub_validation_error(npub)
-        if err is not None:
+        from tollbooth.identity_proof import require_proof
+        if err := require_proof(npub, proof, "get_patron_credential_fields"):
             return err
         try:
             fields = await rt.list_patron_credential_fields(npub)
@@ -2657,18 +2701,21 @@ def register_standard_tools(
         _OAUTH_SERVICE = _opc.service_name
 
         @tool
-        async def begin_oauth(npub: str = "") -> dict[str, Any]:
+        async def begin_oauth(npub: str, proof: str) -> dict[str, Any]:
             """Start the OAuth2 authorization flow.
 
             Returns an authorization URL. Open it in a browser to log in
             and authorize. Then call ``check_oauth_status`` with the
-            same npub to complete. Free.
+            same npub to complete. Free. Proof of npub ownership is
+            required so an observer cannot DOS your account by
+            initiating OAuth flows in your name.
 
             Args:
-                npub: Required. Your DPYC patron npub (npub1...).
+                npub: Your DPYC patron npub (npub1...).
+                proof: A kind-27235 Nostr event signed by npub for this tool.
             """
-            err = rt.npub_validation_error(npub)
-            if err is not None:
+            from tollbooth.identity_proof import require_proof
+            if err := require_proof(npub, proof, "begin_oauth"):
                 return err
             resolved = resolve_npub(npub)
 
@@ -2765,17 +2812,20 @@ def register_standard_tools(
             return result
 
         @tool
-        async def check_oauth_status(npub: str = "") -> dict[str, Any]:
+        async def check_oauth_status(npub: str, proof: str) -> dict[str, Any]:
             """Check whether the OAuth2 authorization flow has completed.
 
             Call after opening the authorization URL from ``begin_oauth``
-            and completing the login in your browser. Free.
+            and completing the login in your browser. Free. Proof of npub
+            ownership is required: OAuth status exposes which upstream
+            services a patron has connected.
 
             Args:
-                npub: Required. The same npub used in begin_oauth.
+                npub: The same Nostr public key (npub1...) used in begin_oauth.
+                proof: A kind-27235 Nostr event signed by npub for this tool.
             """
-            err = rt.npub_validation_error(npub)
-            if err is not None:
+            from tollbooth.identity_proof import require_proof
+            if err := require_proof(npub, proof, "check_oauth_status"):
                 return err
             resolved = resolve_npub(npub)
 
