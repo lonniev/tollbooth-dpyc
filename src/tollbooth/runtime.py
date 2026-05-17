@@ -530,7 +530,7 @@ class OperatorRuntime:
         kind-27235 event proving npub ownership). No proof, no service.
         """
         from tollbooth.constants import ErrorCode
-        from tollbooth.identity_proof import verify_proof
+        from tollbooth.identity_proof import require_proof
 
         identity = self._tool_registry.get(tool_id)
 
@@ -547,6 +547,10 @@ class OperatorRuntime:
         category = identity.category           # set in code, never by the pricing model
 
         # ── Proof verification ────────────────────────────────
+        # Single gate for both tactics (cached poison and inline Schnorr).
+        # Restricted tools verify against the operator's npub — the proof
+        # must be signed by the operator, regardless of which caller npub
+        # is acting. The access check below enforces caller == operator.
         if npub:
             try:
                 resolved = resolve_npub(npub)
@@ -557,71 +561,14 @@ class OperatorRuntime:
                     "error": str(e),
                 }
 
-            if category == "restricted":
-                # Restricted tools always require inline proof (operator identity)
-                if not proof:
-                    return {
-                        "success": False,
-                        "error_code": ErrorCode.PROOF_REQUIRED,
-                        "error": "proof is required. Sign a kind-27235 Nostr event with your nsec.",
-                    }
-                verify_against = self.operator_npub()
-                if not verify_proof(proof, verify_against, cap):
-                    return {
-                        "success": False,
-                        "error_code": ErrorCode.PROOF_INVALID,
-                        "error": "Invalid proof — Schnorr signature does not match npub.",
-                    }
-            else:
-                # Non-restricted: check proven npub cache before requiring inline proof.
-                # Proof is poison-keyed — the calling application holds the raw
-                # poison phrase and supplies it as the ``proof`` parameter.
-                # The MCP hashes it and looks up the proof record in Neon.
-                import hashlib as _hashlib
-                import re as _re
-                cache = await self.proven_npub_cache()
-                _POISON_RE = _re.compile(r"^[a-z]+-[a-z]+-\d+$")
-                if proof and _POISON_RE.match(proof):
-                    # Proof looks like a poison phrase — hash and look up
-                    poison_hash = _hashlib.sha256(proof.encode()).hexdigest()
-                    if await cache.is_proven(poison_hash, resolved):
-                        pass  # npub ownership verified via poison-keyed proof
-                    else:
-                        return {
-                            "success": False,
-                            "error_code": ErrorCode.PROOF_REFRESH_NEEDED,
-                            "error": (
-                                "Your npub-proof cache entry is no longer valid. "
-                                "This is routine — sign a fresh DM challenge and you're back."
-                            ),
-                            "next_steps": [
-                                "request_npub_proof(patron_npub=<patron_npub>)",
-                                "Sign the DM challenge from your Nostr client",
-                                "receive_npub_proof(patron_npub=<patron_npub>) to cache the fresh proof_token",
-                            ],
-                        }
-                elif proof:
-                    # Proof looks like a Schnorr signature — verify inline
-                    if not verify_proof(proof, resolved, cap):
-                        return {
-                            "success": False,
-                            "error_code": ErrorCode.PROOF_INVALID,
-                            "error": "Invalid proof — Schnorr signature does not match npub.",
-                        }
-                else:
-                    return {
-                        "success": False,
-                        "error_code": ErrorCode.PROOF_REQUIRED,
-                        "error": (
-                            "proof is required. Establish npub ownership before calling paid tools."
-                        ),
-                        "next_steps": [
-                            "request_npub_proof(patron_npub=<patron_npub>)",
-                            "Sign the DM challenge from your Nostr client",
-                            "receive_npub_proof(patron_npub=<patron_npub>) — remember the returned proof_token",
-                            "Pass proof_token as the proof parameter on every subsequent paid tool call",
-                        ],
-                    }
+            proof_npub = self.operator_npub() if category == "restricted" else resolved
+            if err := await require_proof(
+                proof_npub,
+                proof,
+                cap,
+                proven_cache=await self.proven_npub_cache(),
+            ):
+                return err
 
         # ── Access: operator-restricted ───────────────────────
         # Proof already verified above. Just check the npub is the operator.
@@ -1909,7 +1856,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
         from tollbooth.identity_proof import require_proof
-        if err := require_proof(npub, proof, "check_balance"):
+        if err := await require_proof(npub, proof, "check_balance", proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             npub = resolve_npub(npub)
@@ -1935,7 +1882,7 @@ def register_standard_tools(
             amount_sats: Satoshis to purchase (default 1000).
         """
         from tollbooth.identity_proof import require_proof
-        if err := require_proof(npub, proof, "purchase_credits"):
+        if err := await require_proof(npub, proof, "purchase_credits", proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             npub = resolve_npub(npub)
@@ -1994,7 +1941,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
         from tollbooth.identity_proof import require_proof
-        if err := require_proof(npub, proof, "check_payment"):
+        if err := await require_proof(npub, proof, "check_payment", proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             npub = resolve_npub(npub)
@@ -2040,7 +1987,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
         from tollbooth.identity_proof import require_proof
-        if err := require_proof(npub, proof, "restore_credits"):
+        if err := await require_proof(npub, proof, "restore_credits", proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             npub = resolve_npub(npub)
@@ -2073,7 +2020,7 @@ def register_standard_tools(
             days: Number of days of daily usage history to include (default 30).
         """
         from tollbooth.identity_proof import require_proof
-        if err := require_proof(npub, proof, "account_statement"):
+        if err := await require_proof(npub, proof, "account_statement", proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             npub = resolve_npub(npub)
@@ -2217,7 +2164,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by patron_npub for this tool.
         """
         from tollbooth.identity_proof import require_proof
-        if err := require_proof(patron_npub, proof, "get_patron_onboarding_status"):
+        if err := await require_proof(patron_npub, proof, "get_patron_onboarding_status", proven_cache=await rt.proven_npub_cache()):
             return err
         return await rt.patron_onboarding_status(patron_npub)
 
@@ -2526,7 +2473,7 @@ def register_standard_tools(
                 ),
             }
         from tollbooth.identity_proof import require_proof
-        if err := require_proof(npub, proof, "forget_credentials"):
+        if err := await require_proof(npub, proof, "forget_credentials", proven_cache=await rt.proven_npub_cache()):
             return err
         target_npub = npub
         courier = await rt.courier()
@@ -2627,7 +2574,7 @@ def register_standard_tools(
             value: The value to store.
         """
         from tollbooth.identity_proof import require_proof
-        if err := require_proof(npub, proof, "update_patron_credential"):
+        if err := await require_proof(npub, proof, "update_patron_credential", proven_cache=await rt.proven_npub_cache()):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -2660,7 +2607,7 @@ def register_standard_tools(
             field: The credential field name to remove.
         """
         from tollbooth.identity_proof import require_proof
-        if err := require_proof(npub, proof, "delete_patron_credential"):
+        if err := await require_proof(npub, proof, "delete_patron_credential", proven_cache=await rt.proven_npub_cache()):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -2692,7 +2639,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
         from tollbooth.identity_proof import require_proof
-        if err := require_proof(npub, proof, "get_patron_credential_fields"):
+        if err := await require_proof(npub, proof, "get_patron_credential_fields", proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             fields = await rt.list_patron_credential_fields(npub)
@@ -2725,7 +2672,7 @@ def register_standard_tools(
                 proof: A kind-27235 Nostr event signed by npub for this tool.
             """
             from tollbooth.identity_proof import require_proof
-            if err := require_proof(npub, proof, "begin_oauth"):
+            if err := await require_proof(npub, proof, "begin_oauth", proven_cache=await rt.proven_npub_cache()):
                 return err
             resolved = resolve_npub(npub)
 
@@ -2835,7 +2782,7 @@ def register_standard_tools(
                 proof: A kind-27235 Nostr event signed by npub for this tool.
             """
             from tollbooth.identity_proof import require_proof
-            if err := require_proof(npub, proof, "check_oauth_status"):
+            if err := await require_proof(npub, proof, "check_oauth_status", proven_cache=await rt.proven_npub_cache()):
                 return err
             resolved = resolve_npub(npub)
 

@@ -3,6 +3,43 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.23.0] — 2026-05-17
+
+### Fixed — single canonical proof-of-ownership gate
+
+`require_proof` and `OperatorRuntime.debit_or_deny` were two parallel
+implementations of the same concern. `debit_or_deny` accepted both a
+cached poison phrase (looked up in the proven-npub cache) and an inline
+Schnorr-signed kind-27235 event. `require_proof` only accepted the
+Schnorr tactic. Tools added in v0.19 called `require_proof` *before*
+`debit_or_deny`, so the cache populated by `receive_npub_proof` was
+never readable by paid tools — a successful DM exchange would still
+fail the next paid call with `Invalid identity proof.`
+
+`require_proof` is now the single canonical gate. It is async, accepts
+an optional `proven_cache: ProvenNpubCache`, and dispatches by proof
+shape: a `<word>-<word>-<n>` poison phrase is sha256-hashed and looked
+up in the cache; anything else is verified as a Schnorr kind-27235
+event with the tool name in the `u` tag. Empty proof returns
+`proof is required.` with next-steps describing *both* tactics. All
+error responses carry an `error_code` (`PROOF_REQUIRED`,
+`PROOF_REFRESH_NEEDED`, `PROOF_INVALID`, `NPUB_INVALID`).
+
+`debit_or_deny` no longer duplicates the proof logic — it computes the
+target npub (operator npub for restricted tools, caller npub for
+everything else) and delegates to the gate. The 17 inline
+`require_proof(...)` call sites across `runtime.py` (12) and
+`authority/tools.py` (5) now `await require_proof(..., proven_cache=
+await rt.proven_npub_cache())`. Actor-agnostic — Operators and
+Authorities pass their own cache.
+
+### Breaking change
+
+`tollbooth.identity_proof.require_proof` is now async and takes the
+cache as a keyword argument. External callers (none known) must
+update accordingly. Internal call sites already migrated.
+
+
 ## [0.22.1] — 2026-05-16
 
 ### Fixed — `service_status.vault_configured` reflects readiness, not prior use
