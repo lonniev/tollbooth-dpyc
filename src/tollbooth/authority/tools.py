@@ -48,7 +48,6 @@ from tollbooth.registry import (
 from tollbooth.runtime import OperatorRuntime, resolve_npub
 from tollbooth.slug_tools import make_slug_tool
 from tollbooth.tool_identity import (
-    STANDARD_IDENTITIES,
     ToolIdentity,
     capability_uuid,
 )
