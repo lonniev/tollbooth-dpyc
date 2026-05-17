@@ -3,6 +3,24 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.22.1] — 2026-05-16
+
+### Fixed — `service_status.vault_configured` reflects readiness, not prior use
+
+The `vault_configured` field in `service_status` used to check
+`rt._vault is not None`, which only flipped true after some other tool
+had lazily instantiated the vault. On a fresh process, a properly-
+configured Authority would still report `vault_configured: false`
+until the first vault-touching tool ran, which contradicted the
+field's name.
+
+`service_status` now triggers the lazy init itself (same pattern the
+adjacent `courier` check uses) and reports `true` if the vault can be
+opened. Failures (missing `NEON_DATABASE_URL`, unreachable backend)
+are caught and reported as `false` so `service_status` stays a
+non-failing diagnostic.
+
+
 ## [0.22.0] — 2026-05-16
 
 ### Added — `register_authority_tools(mcp, runtime)` mixin (Phase B completes the Authority code unification)

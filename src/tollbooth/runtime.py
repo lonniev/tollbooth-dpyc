@@ -2128,7 +2128,17 @@ def register_standard_tools(
     async def service_status() -> dict[str, Any]:
         """Check the health and configuration of this service. Free."""
         import os
-        vault_ok = rt._vault is not None
+        # Trigger lazy init so the field reflects whether the vault CAN
+        # be opened (config present + reachable), not whether some prior
+        # tool happened to touch it. ``rt.vault()`` raises on missing
+        # NEON_DATABASE_URL or unreachable backend; we catch and report
+        # false so service_status stays a non-failing diagnostic.
+        vault_ok = False
+        try:
+            v = await rt.vault()
+            vault_ok = v is not None
+        except Exception:
+            vault_ok = rt._vault is not None
         # Trigger late-attach of credential vault if courier exists without one
         try:
             c = await rt.courier()
