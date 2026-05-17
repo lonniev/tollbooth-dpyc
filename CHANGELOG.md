@@ -3,6 +3,77 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.22.0] — 2026-05-16
+
+### Added — `register_authority_tools(mcp, runtime)` mixin (Phase B completes the Authority code unification)
+
+The 10 Authority `@tool` definitions that every Authority MCP previously
+forked in its own `server.py` are now defined exactly once in
+`tollbooth.authority.tools`. Authority repos call
+`register_authority_tools(mcp, runtime)` analogous to how operator MCPs
+call `register_standard_tools(mcp, slug, runtime)`.
+
+Tools moved into the wheel:
+
+- `register_operator`
+- `update_operator`
+- `deregister_operator`
+- `get_operator_config`
+- `operator_status`
+- `certify_credits` (the ad-valorem revenue tool)
+- `check_dpyc_membership`
+- `register_authority_npub`
+- `confirm_authority_claim`
+- `check_authority_approval`
+
+Also exported:
+
+- `AUTHORITY_DOMAIN_TOOLS` / `AUTHORITY_TOOL_REGISTRY` — the ToolIdentity
+  list/dict that Authority MCPs merge into their OperatorRuntime
+  `tool_registry`.
+- `OPERATOR_CREDENTIAL_TEMPLATE` — the standard BTCPay-store-credentials
+  template that every Authority's OperatorRuntime uses for its cashier.
+
+### Net effect across Authority repos (after this lands)
+
+Each Authority repo's `server.py` collapses from ~1000 lines of forked
+tool definitions to roughly 30 lines of actor-specific configuration:
+
+```python
+from fastmcp import FastMCP
+from tollbooth.authority import (
+    AUTHORITY_TOOL_REGISTRY,
+    OPERATOR_CREDENTIAL_TEMPLATE,
+    register_authority_tools,
+)
+from tollbooth.runtime import OperatorRuntime, register_standard_tools
+from tollbooth.tool_identity import STANDARD_IDENTITIES
+
+mcp = FastMCP("tollbooth-authority-mine", instructions="…")
+runtime = OperatorRuntime(
+    tool_registry={**STANDARD_IDENTITIES, **AUTHORITY_TOOL_REGISTRY},
+    purchase_mode="direct",
+    ots_enabled=True,
+    operator_credential_template=OPERATOR_CREDENTIAL_TEMPLATE,
+)
+register_standard_tools(mcp, "authority", runtime, ...)
+register_authority_tools(mcp, runtime)
+```
+
+Eight legacy modules per Authority repo (`actor.py`, `config.py`,
+`nostr_signing.py`, `onboarding.py`, `registry.py`, `replay.py`,
+`role_migration.py`, `tenant_provisioner.py`) become deletable — their
+contents now live in `tollbooth.authority.*`.
+
+### Architectural note
+
+This completes the architectural unification started in v0.21.0 Phase A
+(which moved the 6 supporting modules). NA and NE repos were always
+intended as *forks-to-get-started, distinct thereafter*, not as ongoing
+clones of canonical. With this release, anything that benefits multiple
+Authorities lives in the wheel, while each Authority's repo holds only
+its actor-specific identity, instructions, and (optionally) overrides.
+
 ## [0.21.0] — 2026-05-16
 
 ### Added — `tollbooth.authority` package (Phase A of Authority code unification)
