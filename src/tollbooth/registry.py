@@ -250,3 +250,45 @@ async def resolve_service_by_name(
         return await registry.resolve_service_by_name(service_name)
     finally:
         await registry.close()
+
+
+async def resolve_my_parent_npub(
+    own_npub: str,
+    registry_url: str = DEFAULT_REGISTRY_URL,
+    cache_ttl_seconds: int = 300,
+) -> str:
+    """Resolve the parent Authority npub for this Authority's own npub.
+
+    Reads ``own_npub``'s entry from dpyc-community and returns its
+    ``upstream_authority_npub``. Used by Authority onboarding flows to
+    escalate approval requests to the candidate's *registered* parent
+    rather than hardcoding Prime — letting a sub-Authority (e.g.,
+    Tollbooth-Authority-NewEngland) escalate to its actual sponsor
+    (Tollbooth-Authority-NorthAmerica) instead of always to Prime.
+
+    Raises:
+        RegistryError: when the registry can't be fetched.
+        ValueError: when ``own_npub`` is not in the registry, or is
+            registered without an upstream (Prime itself has no parent).
+    """
+    registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
+    try:
+        members = await registry._fetch()
+        for m in members:
+            if m.get("npub") == own_npub:
+                parent = m.get("upstream_authority_npub", "")
+                if not parent:
+                    raise ValueError(
+                        f"Authority {own_npub[:16]}… has no upstream_authority_npub "
+                        "in the dpyc-community registry. Prime is the trust root and "
+                        "has no parent; for any other Authority, add an "
+                        "upstream_authority_npub to its registry entry."
+                    )
+                return parent
+        raise ValueError(
+            f"Authority {own_npub[:16]}… is not in the dpyc-community registry. "
+            "Add members/authorities/{own_npub}.json with the desired "
+            "upstream_authority_npub before initiating an onboarding claim."
+        )
+    finally:
+        await registry.close()

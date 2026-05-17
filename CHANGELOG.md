@@ -3,6 +3,31 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.20.0] — 2026-05-16
+
+### Added — generic parent-Authority resolution
+
+New `tollbooth.registry.resolve_my_parent_npub(own_npub)` reads the
+caller's own entry from dpyc-community and returns its
+`upstream_authority_npub`. Authority MCPs use this to escalate
+onboarding claims to their *registered* parent — no longer hardcoding
+Prime as the only approver.
+
+For Lonnie-Authority and Tollbooth-Authority-NorthAmerica the parent
+is still Prime, so observable behavior is unchanged. For
+Tollbooth-Authority-NewEngland, the parent is now NorthAmerica — its
+onboarding claim escalates to NA, not Prime. The protocol now cascades
+transparently through arbitrary chain depth.
+
+**Architectural note:** this is the first step of promoting Authority-
+generic code from the three Authority repos (canonical, NorthAmerica,
+NewEngland) into the wheel. The Authority repos previously each held
+their own `_resolve_prime_npub()` helper; they'll now import this
+wheel-side helper instead. More Authority-class code (onboarding state
+machine, the 3 onboarding tools, certify_credits) is a planned future
+v0.21+ promotion to a full `register_authority_tools(mcp, runtime)`
+mixin analogous to `register_standard_tools`.
+
 ## [0.19.0] — 2026-05-16
 
 ### Security — Breaking API: every tool that names a proof now verifies it
