@@ -223,6 +223,71 @@ Each Authority is itself an operator of its upstream Authority — the same fee 
 
 ---
 
+## Authority Extension (`tollbooth.authority`)
+
+Authority MCPs — the institutions that certify operators' purchase orders — get their own protocol surface that mirrors `register_standard_tools` for operators. Since v0.22.0, the full Authority tool set lives in the wheel under `tollbooth.authority` and mounts onto a FastMCP app via one call:
+
+```python
+from fastmcp import FastMCP
+from tollbooth.authority import (
+    AUTHORITY_TOOL_REGISTRY,
+    OPERATOR_CREDENTIAL_TEMPLATE,
+    register_authority_tools,
+)
+from tollbooth.runtime import OperatorRuntime, register_standard_tools
+from tollbooth.tool_identity import STANDARD_IDENTITIES
+
+mcp = FastMCP("tollbooth-authority-mine", instructions="…")
+
+runtime = OperatorRuntime(
+    tool_registry={**STANDARD_IDENTITIES, **AUTHORITY_TOOL_REGISTRY},
+    purchase_mode="direct",  # Authority is its own trust root
+    ots_enabled=True,
+    operator_credential_template=OPERATOR_CREDENTIAL_TEMPLATE,
+)
+
+register_standard_tools(mcp, "authority", runtime, ...)
+register_authority_tools(mcp, runtime)
+```
+
+That's the entire Authority `server.py`. Everything below is wheel-provided.
+
+### What ``register_authority_tools`` mounts
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `register_operator` | Free | Provision an operator in the Authority ledger; creates per-operator Neon schema + LOGIN role |
+| `update_operator` | Free | Update an operator's community registry entry |
+| `deregister_operator` | Free | Remove an operator from the DPYC community registry |
+| `get_operator_config` | Free (proof-gated) | Retrieve the operator's bootstrap config (Neon URL, schema) |
+| `operator_status` | Free | Operator registration status + Authority's Nostr npub |
+| `certify_credits` | Ad valorem (default 2%, min 10 sats) | Sign a Schnorr-signed Nostr event certificate (kind 30079) for a purchase order |
+| `check_dpyc_membership` | Free | Look up an npub in the dpyc-community registry |
+| `register_authority_npub` | Free | Step 1 of Authority self-claim — DM challenge to the candidate |
+| `confirm_authority_claim` | Free | Step 2 — verify candidate's DM, escalate to parent Authority |
+| `check_authority_approval` | Free | Step 3 — confirm parent's approval, activate Authority |
+
+The 3-step onboarding flow escalates to whichever upstream Authority the candidate's `dpyc-community` registry entry names — Prime for direct-of-Prime, NA for NE, etc. (`tollbooth.registry.resolve_my_parent_npub`, added v0.20.0).
+
+### What the package exports
+
+`tollbooth.authority` is a thin facade over six supporting modules, all promoted from forked Authority repos in v0.21.0–v0.22.0:
+
+- `onboarding` — `OnboardingState`, `OnboardingChallenge`, claim/approval credential templates
+- `nostr_signing` — `AuthorityNostrSigner` (Schnorr certificate signer)
+- `replay` — `ReplayTracker` (anti-replay JTI window)
+- `tenant_provisioner` — Neon schema + LOGIN-role provisioning
+- `role_migration` — CLI for migrating legacy schemas to per-operator roles
+- `settings` — `AuthoritySettings` (pydantic-settings env reader)
+
+Each runtime singleton (signer, replay tracker, settings, onboarding state) is lazy-initialized on first tool call; Authority MCPs are one-per-process so module-level state is effectively per-Authority.
+
+### Architectural note — Authority repos as thin consumers
+
+The three reference Authority deployments (`tollbooth-authority`, `tollbooth-authority-northamerica`, `tollbooth-authority-newengland`) used to fork ~1000 lines of identical Authority code each. As of wheel v0.22.0 their `server.py` files are ~80 lines of actor-specific configuration: FastMCP name, human-readable instructions, OperatorRuntime construction, and the two `register_*_tools` calls. Adding a new regional Authority is now a scaffold-and-pin operation, not a fork.
+
+---
+
 ## OperatorRuntime
 
 `OperatorRuntime` is the core protocol engine. All DPYC operations — bootstrap, billing, credentials, pricing, constraints — are delegated to it.
