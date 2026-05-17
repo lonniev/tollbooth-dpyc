@@ -782,7 +782,7 @@ def register_authority_tools(
             "amount_sats": amount_sats,
             "fee_sats": fee_sats,
             "net_sats": net_sats,
-            "dpyc_protocol": "tollbooth-cert-v1",
+            "dpyc_protocol": "dpyp-01-base-certificate",
         }
 
         replay.check_and_record(jti)

@@ -3,6 +3,27 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.23.1] — 2026-05-17
+
+### Fixed — Authority issues `dpyp-01-base-certificate`, not `tollbooth-cert-v1`
+
+`certify_credits` in `authority/tools.py` stamped the certificate's
+`dpyc_protocol` claim with the legacy string `tollbooth-cert-v1`, but
+the verifier in `certificate.py` (and every test fixture, and every
+Operator) only knows `dpyp-01-base-certificate`. Operators paying a
+certified Authority for credits would see:
+`Certificate rejected: Unsupported protocol 'tollbooth-cert-v1'.`
+
+Stale string carried over from the pre-v0.22 standalone
+`tollbooth-authority` repo when the Authority code moved into the
+wheel as `tollbooth.authority`. Tests didn't catch it because the
+unit tests for the issuer mocked the protocol field, and integration
+tests never crossed an Authority→Operator certified-purchase boundary.
+
+The fix is one-line — replace the legacy string with the canonical
+protocol identifier.
+
+
 ## [0.23.0] — 2026-05-17
 
 ### Fixed — single canonical proof-of-ownership gate
