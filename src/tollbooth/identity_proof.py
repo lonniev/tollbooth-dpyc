@@ -1,18 +1,32 @@
-"""Identity proof — Nostr kind-27235 event for proving npub ownership.
+"""Identity proof — single canonical gate for npub ownership.
 
-Used by both operators (RESTRICTED tool access) and patrons (high-value
-tool authorization). The proof is a Schnorr-signed Nostr event with the
-tool name in the ``u`` tag and a freshness window.
+The gate ``require_proof`` accepts ANY of the following tactics —
+caller chooses based on what credentials it has on hand:
 
-Proof format (kind 27235, NIP-98 style):
-    {
-        "pubkey": "<hex_pubkey>",
-        "kind": 27235,
-        "content": "",
-        "created_at": <unix_timestamp>,
-        "tags": [["u", "<tool_name>"]],
-        "sig": "<schnorr_signature>"
-    }
+1. **Inline Schnorr proof** (kind 27235, NIP-98 style): a freshly-signed
+   Nostr event with the tool name in the ``u`` tag and a freshness
+   window. Works when the caller holds the nsec.
+   ::
+
+       {
+           "pubkey": "<hex_pubkey>",
+           "kind": 27235,
+           "content": "",
+           "created_at": <unix_timestamp>,
+           "tags": [["u", "<tool_name>"]],
+           "sig": "<schnorr_signature>"
+       }
+
+2. **Cached poison phrase** (format ``alpha-beta-42``): the
+   ``proof_token`` returned by a prior ``request_npub_proof`` →
+   ``receive_npub_proof`` DM round-trip. Works when the caller holds
+   only the poison and not the nsec (e.g., a remote AI agent that's
+   already proven ownership in this session). The gate hashes it and
+   looks up the proven-npub cache supplied by the caller.
+
+The gate is actor-agnostic — Operators, Authorities, and any future
+runtime use the same function. Callers pass their own
+``proven_cache`` (or omit it to disable tactic 2).
 
 Dependencies: ``pynostr`` (available via ``tollbooth-dpyc[nostr]``).
 """
@@ -21,9 +35,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from tollbooth.proven_npub import ProvenNpubCache
 
 logger = logging.getLogger(__name__)
+
+# Poison phrases produced by request_npub_proof have the shape
+# ``<word>-<word>-<n>`` — three lowercase letters/digits segments.
+_POISON_RE = re.compile(r"^[a-z]+-[a-z]+-\d+$")
 
 PROOF_EVENT_KIND = 27235
 """NIP-98 HTTP Auth event kind, repurposed for MCP identity proofs."""
@@ -182,31 +205,51 @@ def verify_proof(
     return True
 
 
-def require_proof(
+async def require_proof(
     npub: str,
     proof: str,
     tool_name: str,
+    *,
+    proven_cache: "ProvenNpubCache | None" = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
-) -> dict | None:
-    """Gate a tool call on a verified Nostr identity proof.
+) -> dict[str, Any] | None:
+    """Canonical proof-of-ownership gate. Returns ``None`` on success
+    (caller proceeds) or a structured error dict to return verbatim.
 
-    Returns ``None`` if the proof verifies (caller proceeds). Returns a
-    structured error dict the caller should return verbatim from its
-    ``@tool`` body otherwise.
+    Use at the top of every tool whose semantics include "caller is
+    acting as ``npub``" — check_balance, purchase_credits,
+    account_statement, register_operator, etc. Bootstrap tools
+    (request_npub_proof, receive_credentials, register_authority_npub)
+    deliberately do NOT gate on this — they're how a candidate proves
+    identity in the first place.
 
-    Use at the top of every standard tool whose semantics include
-    "caller is acting as ``npub``" — check_balance, purchase_credits,
-    account_statement, etc. Bootstrap tools (request_npub_proof,
-    receive_credentials, register_authority_npub) deliberately do NOT
-    gate on this — they're how a candidate proves identity in the
-    first place.
+    **Tactics accepted, in this order:**
+
+    1. **Cached poison phrase** — when ``proof`` matches the
+       ``<word>-<word>-<n>`` shape and ``proven_cache`` is supplied,
+       hash it (sha256) and check ``cache.is_proven(hash, npub)``. A
+       hit means a prior ``receive_npub_proof`` saw a valid signed-DM
+       reply from this npub.
+    2. **Inline Schnorr proof** — JSON-encoded kind-27235 event with
+       ``tool_name`` in the ``u`` tag, signed by ``npub``, no older
+       than ``window_seconds``. Works for any caller that holds the
+       nsec; no cache needed.
 
     Bound to ``tool_name``: a proof issued for one tool will not pass
     for another, preventing replay across the public tool surface.
+
+    Actor-agnostic — Operators, Authorities, and any future runtime
+    use the same gate. Pass the cache appropriate to that runtime
+    (``await rt.proven_npub_cache()`` for both).
     """
+    # Lazy import — constants is leaf-y, but identity_proof is too;
+    # keep the dep one-way to be safe.
+    from tollbooth.constants import ErrorCode
+
     if not npub.startswith("npub1") or len(npub) < 60:
         return {
             "success": False,
+            "error_code": ErrorCode.NPUB_INVALID,
             "error": (
                 "Invalid npub format. Must start with 'npub1' and be at "
                 "least 60 characters."
@@ -215,14 +258,50 @@ def require_proof(
     if not proof:
         return {
             "success": False,
+            "error_code": ErrorCode.PROOF_REQUIRED,
             "error": "proof is required.",
             "next_steps": [
-                "Call request_npub_proof to obtain a challenge",
-                "Sign the challenge with your nsec",
-                "Call receive_npub_proof with the signed event",
-                "Retry this call with the cached proof_token",
+                "Either: sign a kind-27235 Nostr event with your nsec and pass "
+                "it as `proof` (one-shot, no relay round-trip).",
+                "Or: call request_npub_proof, reply to the DM challenge from "
+                "your Nostr client, then call receive_npub_proof — pass the "
+                "returned proof_token as `proof` on every subsequent call.",
             ],
         }
+
+    # Tactic 1: cached poison phrase
+    if proven_cache is not None and _POISON_RE.match(proof):
+        # Lazy import to avoid identity_proof ↔ runtime circular dependency.
+        from tollbooth.runtime import resolve_npub as _resolve_npub
+        try:
+            resolved = _resolve_npub(npub)
+        except Exception:
+            resolved = npub
+
+        import hashlib as _hashlib
+        poison_hash = _hashlib.sha256(proof.encode()).hexdigest()
+        if await proven_cache.is_proven(poison_hash, resolved):
+            return None
+        return {
+            "success": False,
+            "error_code": ErrorCode.PROOF_REFRESH_NEEDED,
+            "error": (
+                "Your npub-proof cache entry is no longer valid. This is "
+                "routine — sign a fresh DM challenge and you're back."
+            ),
+            "next_steps": [
+                "request_npub_proof(patron_npub=<patron_npub>)",
+                "Reply to the DM challenge from your Nostr client",
+                "receive_npub_proof(patron_npub=<patron_npub>) to cache a "
+                "fresh proof_token",
+            ],
+        }
+
+    # Tactic 2: inline Schnorr-signed kind-27235 event
     if not verify_proof(proof, npub, tool_name, window_seconds=window_seconds):
-        return {"success": False, "error": "Invalid identity proof."}
+        return {
+            "success": False,
+            "error_code": ErrorCode.PROOF_INVALID,
+            "error": "Invalid identity proof.",
+        }
     return None
