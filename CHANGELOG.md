@@ -3,6 +3,53 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.21.0] — 2026-05-16
+
+### Added — `tollbooth.authority` package (Phase A of Authority code unification)
+
+The six supporting modules that every Authority MCP previously kept its
+own copy of are now defined exactly once in the wheel:
+
+- `tollbooth.authority.onboarding` — `OnboardingState`,
+  `OnboardingChallenge`, `AUTHORITY_CLAIM_TEMPLATE`,
+  `AUTHORITY_APPROVAL_TEMPLATE`
+- `tollbooth.authority.nostr_signing` — `AuthorityNostrSigner`,
+  `NOSTR_CERT_KIND`
+- `tollbooth.authority.replay` — `ReplayTracker`
+- `tollbooth.authority.tenant_provisioner` — `provision_operator_schema`,
+  `neon_url_for_operator`, etc.
+- `tollbooth.authority.role_migration` — CLI to migrate legacy schemas
+- `tollbooth.authority.settings` — `AuthoritySettings` (pydantic-settings)
+
+Authority repos that previously forked these six modules verbatim
+across `tollbooth-authority`, `tollbooth-authority-northamerica`, and
+`tollbooth-authority-newengland` can now delete their local copies and
+import from `tollbooth.authority.*` instead. Each Authority repo's
+diff after adoption: 8 files deleted, server.py imports updated.
+
+### Phase B coming next (v0.22.0)
+
+The 10 Authority `@tool` definitions in each Authority's `server.py`
+(register_operator, update_operator, deregister_operator,
+get_operator_config, operator_status, certify_credits, check_dpyc_membership,
+register_authority_npub, confirm_authority_claim, check_authority_approval)
+will be promoted into a `register_authority_tools(mcp, runtime)` mixin
+function in this package. After v0.22.0 lands, each Authority repo's
+`server.py` collapses to roughly:
+
+```python
+from fastmcp import FastMCP
+from tollbooth.authority import register_authority_tools
+from tollbooth.runtime import OperatorRuntime, register_standard_tools
+
+mcp = FastMCP("tollbooth-authority-mine", instructions="…")
+runtime = OperatorRuntime(...)
+register_standard_tools(mcp, "authority", runtime, ...)
+register_authority_tools(mcp, runtime)
+```
+
+— roughly 30 actor-specific lines instead of 1000.
+
 ## [0.20.0] — 2026-05-16
 
 ### Added — generic parent-Authority resolution
