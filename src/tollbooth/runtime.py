@@ -1844,7 +1844,11 @@ def register_standard_tools(
     """
     from tollbooth.slug_tools import make_slug_tool
     tool = make_slug_tool(mcp, slug)
-    oracle_tool = make_slug_tool(mcp, "oracle")
+    # Oracle-delegated tools live under the operator's namespace too —
+    # e.g. `schwab_oracle_about` rather than a bare `oracle_about`. This
+    # keeps every wire-exposed name under a single slug per operator so
+    # downstream clients can derive the slug unambiguously.
+    oracle_tool = make_slug_tool(mcp, f"{slug}_oracle")
     rt._slug = slug
     rt._mcp_name_cache.clear()  # invalidate any cached names
 

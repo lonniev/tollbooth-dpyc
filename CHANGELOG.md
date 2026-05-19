@@ -3,6 +3,30 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.24.1] — 2026-05-19
+
+### Changed — Oracle-delegated tools mount under the operator's slug
+
+`register_standard_tools` previously registered oracle delegations under
+a bare `oracle_*` namespace (e.g. `oracle_about`), so an operator like
+brain-mcp exposed both `brain_*` (its own paid tools) and `oracle_*`
+(delegated free tools) on the same wire. That mixed namespace broke any
+downstream client trying to derive the operator's slug from `tools/list`
+via a longest-common-prefix scan.
+
+Oracle delegations now mount under `<slug>_oracle_*` — e.g.
+`brain_oracle_about`, `schwab_oracle_about`. Every wire-exposed tool on
+a given operator now shares a single slug prefix, and downstream slug
+detection can fall back to LCP without special-casing oracle. The intent
+was always that every operator delegates oracle calls; this change makes
+that uniform on the wire.
+
+Breaking for any client calling the bare `oracle_*` names — switch to the
+slug-prefixed form. Pricing Studio's `MCPService` already resolves the
+slug via the `_service_status` marker so it picks the new names up
+automatically.
+
+
 ## [0.24.0] — 2026-05-18
 
 ### Changed — identity proof signs the runtime tool name, not the capability seed
