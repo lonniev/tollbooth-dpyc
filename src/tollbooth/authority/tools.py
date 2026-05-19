@@ -510,7 +510,7 @@ def register_authority_tools(
 
         Next step: Call purchase_credits to fund your credit balance.
         """
-        err = await require_proof(npub, proof, "register_operator", proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, proof, runtime.runtime_name("register_operator"), proven_cache=await runtime.proven_npub_cache())
         if err:
             return err
 
@@ -586,7 +586,7 @@ def register_authority_tools(
         who knew a victim Operator's public npub could rewrite their
         ``service_url`` to point at an attacker-controlled MCP endpoint.
         """
-        err = await require_proof(npub, proof, "update_operator", proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, proof, runtime.runtime_name("update_operator"), proven_cache=await runtime.proven_npub_cache())
         if err:
             return err
         if not service_url and not display_name:
@@ -620,7 +620,7 @@ def register_authority_tools(
         knew a victim Operator's public npub could remove them from the
         community registry under this Authority's signature.
         """
-        err = await require_proof(npub, proof, "deregister_operator", proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, proof, runtime.runtime_name("deregister_operator"), proven_cache=await runtime.proven_npub_cache())
         if err:
             return err
 
@@ -647,7 +647,7 @@ def register_authority_tools(
 
         Gated by Schnorr signature proving ownership of the requested npub.
         """
-        err = await require_proof(npub, proof, "get_operator_config", proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, proof, runtime.runtime_name("get_operator_config"), proven_cache=await runtime.proven_npub_cache())
         if err:
             return err
 
@@ -687,7 +687,7 @@ def register_authority_tools(
         inspection is always allowed).
         """
         if npub:
-            err = await require_proof(npub, proof, "operator_status", proven_cache=await runtime.proven_npub_cache())
+            err = await require_proof(npub, proof, runtime.runtime_name("operator_status"), proven_cache=await runtime.proven_npub_cache())
             if err:
                 return err
         user_id = _resolve_npub_or_operator(npub)

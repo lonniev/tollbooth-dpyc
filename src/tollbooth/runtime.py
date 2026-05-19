@@ -442,6 +442,16 @@ class OperatorRuntime:
         )
         return self._courier
 
+    def runtime_name(self, capability: str) -> str:
+        """Resolve the full runtime tool name from a capability seed.
+
+        The runtime name is what crosses every server boundary — the wire,
+        the pricing model, identity proofs, audit logs. The capability is
+        the Python function identifier and stays internal to this process.
+        """
+        from tollbooth.tool_identity import capability_uuid
+        return self.mcp_name_for(capability_uuid(capability))
+
     def mcp_name_for(self, tool_id: str) -> str:
         """Resolve the full MCP tool name for a tool UUID.
 
@@ -542,8 +552,7 @@ class OperatorRuntime:
                 "error": f"Unknown tool '{tool_id}' — not registered with this operator.",
             }
 
-        name = self.mcp_name_for(tool_id)        # full MCP name for display/logging
-        cap = identity.capability              # short name for proof verification
+        name = self.mcp_name_for(tool_id)      # the ONE external identifier
         category = identity.category           # set in code, never by the pricing model
 
         # ── Proof verification ────────────────────────────────
@@ -551,6 +560,8 @@ class OperatorRuntime:
         # Restricted tools verify against the operator's npub — the proof
         # must be signed by the operator, regardless of which caller npub
         # is acting. The access check below enforces caller == operator.
+        # The proof's u-tag matches the runtime name (`name`) — capability
+        # is a Python-function-identifier seed that never crosses the wire.
         if npub:
             try:
                 resolved = resolve_npub(npub)
@@ -565,7 +576,7 @@ class OperatorRuntime:
             if err := await require_proof(
                 proof_npub,
                 proof,
-                cap,
+                name,
                 proven_cache=await self.proven_npub_cache(),
             ):
                 return err
@@ -1856,7 +1867,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
         from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, "check_balance", proven_cache=await rt.proven_npub_cache()):
+        if err := await require_proof(npub, proof, rt.runtime_name("check_balance"), proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             npub = resolve_npub(npub)
@@ -1882,7 +1893,7 @@ def register_standard_tools(
             amount_sats: Satoshis to purchase (default 1000).
         """
         from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, "purchase_credits", proven_cache=await rt.proven_npub_cache()):
+        if err := await require_proof(npub, proof, rt.runtime_name("purchase_credits"), proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             npub = resolve_npub(npub)
@@ -1941,7 +1952,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
         from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, "check_payment", proven_cache=await rt.proven_npub_cache()):
+        if err := await require_proof(npub, proof, rt.runtime_name("check_payment"), proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             npub = resolve_npub(npub)
@@ -1987,7 +1998,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
         from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, "restore_credits", proven_cache=await rt.proven_npub_cache()):
+        if err := await require_proof(npub, proof, rt.runtime_name("restore_credits"), proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             npub = resolve_npub(npub)
@@ -2020,7 +2031,7 @@ def register_standard_tools(
             days: Number of days of daily usage history to include (default 30).
         """
         from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, "account_statement", proven_cache=await rt.proven_npub_cache()):
+        if err := await require_proof(npub, proof, rt.runtime_name("account_statement"), proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             npub = resolve_npub(npub)
@@ -2164,7 +2175,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by patron_npub for this tool.
         """
         from tollbooth.identity_proof import require_proof
-        if err := await require_proof(patron_npub, proof, "get_patron_onboarding_status", proven_cache=await rt.proven_npub_cache()):
+        if err := await require_proof(patron_npub, proof, rt.runtime_name("get_patron_onboarding_status"), proven_cache=await rt.proven_npub_cache()):
             return err
         return await rt.patron_onboarding_status(patron_npub)
 
@@ -2473,7 +2484,7 @@ def register_standard_tools(
                 ),
             }
         from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, "forget_credentials", proven_cache=await rt.proven_npub_cache()):
+        if err := await require_proof(npub, proof, rt.runtime_name("forget_credentials"), proven_cache=await rt.proven_npub_cache()):
             return err
         target_npub = npub
         courier = await rt.courier()
@@ -2574,7 +2585,7 @@ def register_standard_tools(
             value: The value to store.
         """
         from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, "update_patron_credential", proven_cache=await rt.proven_npub_cache()):
+        if err := await require_proof(npub, proof, rt.runtime_name("update_patron_credential"), proven_cache=await rt.proven_npub_cache()):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -2607,7 +2618,7 @@ def register_standard_tools(
             field: The credential field name to remove.
         """
         from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, "delete_patron_credential", proven_cache=await rt.proven_npub_cache()):
+        if err := await require_proof(npub, proof, rt.runtime_name("delete_patron_credential"), proven_cache=await rt.proven_npub_cache()):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -2639,7 +2650,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
         from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, "get_patron_credential_fields", proven_cache=await rt.proven_npub_cache()):
+        if err := await require_proof(npub, proof, rt.runtime_name("get_patron_credential_fields"), proven_cache=await rt.proven_npub_cache()):
             return err
         try:
             fields = await rt.list_patron_credential_fields(npub)
@@ -2672,7 +2683,7 @@ def register_standard_tools(
                 proof: A kind-27235 Nostr event signed by npub for this tool.
             """
             from tollbooth.identity_proof import require_proof
-            if err := await require_proof(npub, proof, "begin_oauth", proven_cache=await rt.proven_npub_cache()):
+            if err := await require_proof(npub, proof, rt.runtime_name("begin_oauth"), proven_cache=await rt.proven_npub_cache()):
                 return err
             resolved = resolve_npub(npub)
 
@@ -2782,7 +2793,7 @@ def register_standard_tools(
                 proof: A kind-27235 Nostr event signed by npub for this tool.
             """
             from tollbooth.identity_proof import require_proof
-            if err := await require_proof(npub, proof, "check_oauth_status", proven_cache=await rt.proven_npub_cache()):
+            if err := await require_proof(npub, proof, rt.runtime_name("check_oauth_status"), proven_cache=await rt.proven_npub_cache()):
                 return err
             resolved = resolve_npub(npub)
 

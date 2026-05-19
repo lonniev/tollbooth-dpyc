@@ -3,6 +3,49 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.24.0] — 2026-05-18
+
+### Changed — identity proof signs the runtime tool name, not the capability seed
+
+`debit_or_deny` and the dozen standard-tool `require_proof` callers passed
+`identity.capability` (the Python function identifier — e.g. `check_balance`)
+as the tool name the proof's `u` tag had to match. But the capability is
+deliberately internal: it exists to derive a stable `tool_id` UUID that
+survives FastMCP slug renames, and to decouple the in-process function name
+from the on-wire tool name. Every other server boundary — the MCP wire, the
+pricing model's `tool_name` field, audit logs — uses the runtime name
+(`mcp_name`, e.g. `schwab_check_balance`). The proof verifier was the lone
+exception, and that exception forced external callers (the Pricing Studio
+App, AI agents) to know about the capability/runtime-name split.
+
+The runtime name (mcp_name) is now the ONE external identifier. A new
+`OperatorRuntime.runtime_name(capability)` helper resolves it from a
+capability seed (function-local code stays readable):
+
+```python
+if err := await require_proof(
+    npub, proof,
+    rt.runtime_name("check_balance"),
+    proven_cache=await rt.proven_npub_cache(),
+):
+    return err
+```
+
+`debit_or_deny` itself passes `name = self.mcp_name_for(tool_id)` to
+`require_proof` — same value FastMCP exposes on the wire, same value the
+pricing model lists.
+
+**Breaking for external proof signers.** Any caller that was signing the
+short capability name (e.g. `["u", "check_balance"]`) will now hit
+`proof_invalid`. Sign the runtime tool name instead
+(e.g. `["u", "schwab_check_balance"]`). The Pricing Studio App will be
+updated to match in lock-step.
+
+`identity.capability` is unchanged — still the seed for the UUID, still
+internal. `tool_id` is unchanged — still UUID5(capability), still stable
+across slug renames. No Neon migration needed.
+
+
 ## [0.23.1] — 2026-05-17
 
 ### Fixed — Authority issues `dpyp-01-base-certificate`, not `tollbooth-cert-v1`
