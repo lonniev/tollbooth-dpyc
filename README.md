@@ -51,7 +51,6 @@ from fastmcp import FastMCP
 from tollbooth.tool_identity import ToolIdentity, STANDARD_IDENTITIES, capability_uuid
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
-from tollbooth.slug_tools import make_slug_tool
 
 mcp = FastMCP("My Service")
 
@@ -84,14 +83,12 @@ runtime = OperatorRuntime(
 ### 4. Register Standard Tools + Domain Tools
 
 ```python
-# This single call registers all 26+ standard DPYC tools
-register_standard_tools(mcp, "weather", runtime,
+# This single call registers all 26+ standard DPYC tools and returns
+# the slug-prefixed @tool decorator for the operator's own paid tools.
+tool = register_standard_tools(mcp, "weather", runtime,
     service_name="my-weather-service",
     service_version="1.0.0",
 )
-
-# Domain tools use the paid_tool decorator
-tool = make_slug_tool(mcp, "weather")
 
 @tool
 @runtime.paid_tool(capability_uuid("get_weather"))
@@ -139,11 +136,23 @@ When a patron purchases credits, the operator's upstream Authority deducts a sma
 
 Each Authority is itself an operator of its upstream Authority — the same fee cascades up through the chain to the Prime Authority.
 
+### Tool Naming: capability vs runtime name
+
+Every tool the wheel registers has three identifiers and exactly one of them crosses the server boundary.
+
+| Identifier | Example | Scope | Used for |
+|---|---|---|---|
+| `capability` | `"check_balance"` | **Internal only** | Python function identifier; seed for the UUID. Lets a slug rename leave Neon pricing rows intact. |
+| `mcp_name` / runtime name | `"weather_check_balance"` | **External** | Wire-exposed tool name, pricing model `tool_name`, identity-proof `u` tag, audit logs. The one external identifier. |
+| `tool_id` | UUID5 of capability | Internal | Neon pricing key. Stable across slug renames. |
+
+Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard tool by name outside this process (e.g., when signing an identity proof). Capability names never appear on the wire.
+
 ---
 
 ## Standard Tools
 
-`register_standard_tools(mcp, slug, runtime)` registers these tools, prefixed with the operator's slug (e.g., `weather_check_balance`):
+`register_standard_tools(mcp, slug, runtime)` registers these tools, prefixed with the operator's slug (e.g., `weather_check_balance`), and returns the slug-prefixed `@tool` decorator for the operator's own paid tools:
 
 ### Credit & Billing (always registered)
 
@@ -191,7 +200,7 @@ Each Authority is itself an operator of its upstream Authority — the same fee 
 
 | Tool | Cost | Purpose |
 |------|------|---------|
-| `oracle_*` | Free | Delegated calls to the DPYC Oracle (community info, tax rates, membership) |
+| `<slug>_oracle_*` | Free | Delegated calls to the DPYC Oracle (community info, tax rates, membership). Mounted under the operator's slug since v0.24.1 — e.g. `schwab_oracle_about`, `brain_oracle_how_to_join`. Keeps every wire-exposed tool on a given operator under a single slug prefix. |
 
 ### Pricing Model
 
@@ -342,6 +351,9 @@ OperatorRuntime(
 |--------|---------|---------|
 | `debit_or_deny(tool_id, npub, *, proof, tool_kwargs)` | `int` (cost) or `dict` (denial) | Gate a tool call through identity, proof, constraints, pricing, and billing |
 | `paid_tool(tool_id)` | decorator | Decorator that wraps `debit_or_deny` around a tool function |
+| `require_caller_proof(npub, proof, capability)` | `dict \| None` | Caller-identity gate for free / bootstrap standard tools — returns `None` on success or a structured error dict to return verbatim |
+| `runtime_name(capability)` | `str` | Resolve a capability seed to its runtime tool name (`<slug>_<capability>`) — what crosses every server boundary |
+| `mcp_name_for(tool_id)` | `str` | Resolve a tool UUID to its runtime tool name |
 | `vault()` | `NeonVault` | Bootstraps and returns the Neon vault (lazy) |
 | `ledger_cache()` | `LedgerCache` | Returns the write-behind ledger cache (lazy) |
 | `courier()` | `SecureCourierService` | Returns the Secure Courier (lazy) |
