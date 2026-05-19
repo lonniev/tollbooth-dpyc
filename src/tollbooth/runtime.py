@@ -49,6 +49,9 @@ import os
 import signal
 from typing import Any, Callable
 
+from tollbooth.identity_proof import require_proof
+from tollbooth.tool_identity import capability_uuid
+
 logger = logging.getLogger(__name__)
 
 
@@ -449,8 +452,29 @@ class OperatorRuntime:
         the pricing model, identity proofs, audit logs. The capability is
         the Python function identifier and stays internal to this process.
         """
-        from tollbooth.tool_identity import capability_uuid
         return self.mcp_name_for(capability_uuid(capability))
+
+    async def require_caller_proof(
+        self,
+        npub: str,
+        proof: str,
+        capability: str,
+    ) -> dict[str, Any] | None:
+        """Canonical caller-identity gate for free / bootstrap standard tools.
+
+        Wraps ``identity_proof.require_proof`` with this runtime's proven-npub
+        cache and the runtime name for ``capability``. Paid tools are gated by
+        ``debit_or_deny``; this helper is for the free tools that still need
+        to assert "the caller is who they claim to be" (check_balance,
+        purchase_credits, account_statement, etc.).
+
+        Returns ``None`` on success (caller proceeds) or a structured error
+        dict to return verbatim.
+        """
+        return await require_proof(
+            npub, proof, self.runtime_name(capability),
+            proven_cache=await self.proven_npub_cache(),
+        )
 
     def mcp_name_for(self, tool_id: str) -> str:
         """Resolve the full MCP tool name for a tool UUID.
@@ -540,7 +564,6 @@ class OperatorRuntime:
         kind-27235 event proving npub ownership). No proof, no service.
         """
         from tollbooth.constants import ErrorCode
-        from tollbooth.identity_proof import require_proof
 
         identity = self._tool_registry.get(tool_id)
 
@@ -1830,10 +1853,14 @@ def register_standard_tools(
     *,
     service_name: str = "",
     service_version: str = "",
-) -> None:
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register all standard DPYC tools on a FastMCP app.
 
-    Call once at module level.  Operators only write domain-specific tools.
+    Call once at module level. Operators only write domain-specific tools.
+
+    Returns the slug-prefixed ``@tool`` decorator so the operator can use
+    the same one for its own paid tools — no need to repeat ``slug`` in a
+    separate ``make_slug_tool`` call.
 
     Args:
         mcp: The FastMCP app instance.
@@ -1841,6 +1868,10 @@ def register_standard_tools(
         rt: The OperatorRuntime instance.
         service_name: Service name for service_status (e.g., ``"tollbooth-sample"``).
         service_version: Version string for service_status.
+
+    Returns:
+        The ``@tool`` decorator bound to ``slug`` — apply to operator-defined
+        functions so they register as ``<slug>_<function_name>``.
     """
     from tollbooth.slug_tools import make_slug_tool
     tool = make_slug_tool(mcp, slug)
@@ -1870,8 +1901,7 @@ def register_standard_tools(
             npub: The Nostr public key (npub1...) whose balance to check.
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
-        from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, rt.runtime_name("check_balance"), proven_cache=await rt.proven_npub_cache()):
+        if err := await rt.require_caller_proof(npub, proof, "check_balance"):
             return err
         try:
             npub = resolve_npub(npub)
@@ -1896,8 +1926,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
             amount_sats: Satoshis to purchase (default 1000).
         """
-        from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, rt.runtime_name("purchase_credits"), proven_cache=await rt.proven_npub_cache()):
+        if err := await rt.require_caller_proof(npub, proof, "purchase_credits"):
             return err
         try:
             npub = resolve_npub(npub)
@@ -1955,8 +1984,7 @@ def register_standard_tools(
             npub: The Nostr public key (npub1...) that purchased the invoice.
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
-        from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, rt.runtime_name("check_payment"), proven_cache=await rt.proven_npub_cache()):
+        if err := await rt.require_caller_proof(npub, proof, "check_payment"):
             return err
         try:
             npub = resolve_npub(npub)
@@ -2001,8 +2029,7 @@ def register_standard_tools(
             npub: The Nostr public key (npub1...) that paid the invoice.
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
-        from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, rt.runtime_name("restore_credits"), proven_cache=await rt.proven_npub_cache()):
+        if err := await rt.require_caller_proof(npub, proof, "restore_credits"):
             return err
         try:
             npub = resolve_npub(npub)
@@ -2034,8 +2061,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
             days: Number of days of daily usage history to include (default 30).
         """
-        from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, rt.runtime_name("account_statement"), proven_cache=await rt.proven_npub_cache()):
+        if err := await rt.require_caller_proof(npub, proof, "account_statement"):
             return err
         try:
             npub = resolve_npub(npub)
@@ -2063,7 +2089,6 @@ def register_standard_tools(
             npub = resolve_npub(npub)
         except ValueError as e:
             return {"success": False, "error": str(e)}
-        from tollbooth.tool_identity import capability_uuid
         result_or_cost = await rt.debit_or_deny(capability_uuid("account_statement_infographic"), npub, proof=proof)
         if isinstance(result_or_cost, dict):
             return result_or_cost
@@ -2178,8 +2203,7 @@ def register_standard_tools(
             patron_npub: The patron's Nostr public key (npub1...).
             proof: A kind-27235 Nostr event signed by patron_npub for this tool.
         """
-        from tollbooth.identity_proof import require_proof
-        if err := await require_proof(patron_npub, proof, rt.runtime_name("get_patron_onboarding_status"), proven_cache=await rt.proven_npub_cache()):
+        if err := await rt.require_caller_proof(patron_npub, proof, "get_patron_onboarding_status"):
             return err
         return await rt.patron_onboarding_status(patron_npub)
 
@@ -2487,8 +2511,7 @@ def register_standard_tools(
                     )
                 ),
             }
-        from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, rt.runtime_name("forget_credentials"), proven_cache=await rt.proven_npub_cache()):
+        if err := await rt.require_caller_proof(npub, proof, "forget_credentials"):
             return err
         target_npub = npub
         courier = await rt.courier()
@@ -2564,7 +2587,6 @@ def register_standard_tools(
     # Prune registry entries for conditionally-skipped tools so they
     # don't appear in the pricing model or mismatch detection.
     if rt._patron_credential_template is None:
-        from tollbooth.tool_identity import capability_uuid
         for cap in ("request_patron_credentials", "receive_patron_credentials"):
             rt._tool_registry.pop(capability_uuid(cap), None)
 
@@ -2588,8 +2610,7 @@ def register_standard_tools(
             field: The credential field name to set.
             value: The value to store.
         """
-        from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, rt.runtime_name("update_patron_credential"), proven_cache=await rt.proven_npub_cache()):
+        if err := await rt.require_caller_proof(npub, proof, "update_patron_credential"):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -2621,8 +2642,7 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
             field: The credential field name to remove.
         """
-        from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, rt.runtime_name("delete_patron_credential"), proven_cache=await rt.proven_npub_cache()):
+        if err := await rt.require_caller_proof(npub, proof, "delete_patron_credential"):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -2653,8 +2673,7 @@ def register_standard_tools(
             npub: The patron's Nostr public key (npub1...).
             proof: A kind-27235 Nostr event signed by npub for this tool.
         """
-        from tollbooth.identity_proof import require_proof
-        if err := await require_proof(npub, proof, rt.runtime_name("get_patron_credential_fields"), proven_cache=await rt.proven_npub_cache()):
+        if err := await rt.require_caller_proof(npub, proof, "get_patron_credential_fields"):
             return err
         try:
             fields = await rt.list_patron_credential_fields(npub)
@@ -2686,8 +2705,7 @@ def register_standard_tools(
                 npub: Your DPYC patron npub (npub1...).
                 proof: A kind-27235 Nostr event signed by npub for this tool.
             """
-            from tollbooth.identity_proof import require_proof
-            if err := await require_proof(npub, proof, rt.runtime_name("begin_oauth"), proven_cache=await rt.proven_npub_cache()):
+            if err := await rt.require_caller_proof(npub, proof, "begin_oauth"):
                 return err
             resolved = resolve_npub(npub)
 
@@ -2796,8 +2814,7 @@ def register_standard_tools(
                 npub: The same Nostr public key (npub1...) used in begin_oauth.
                 proof: A kind-27235 Nostr event signed by npub for this tool.
             """
-            from tollbooth.identity_proof import require_proof
-            if err := await require_proof(npub, proof, rt.runtime_name("check_oauth_status"), proven_cache=await rt.proven_npub_cache()):
+            if err := await rt.require_caller_proof(npub, proof, "check_oauth_status"):
                 return err
             resolved = resolve_npub(npub)
 
@@ -2905,9 +2922,8 @@ def register_standard_tools(
 
     # Prune registry if OAuth not configured
     if rt._oauth_provider is None:
-        from tollbooth.tool_identity import capability_uuid as _cap_uuid
         for cap in ("begin_oauth", "check_oauth_status"):
-            rt._tool_registry.pop(_cap_uuid(cap), None)
+            rt._tool_registry.pop(capability_uuid(cap), None)
 
     # -- Npub ownership proof tools ----------------------------------------
     #
@@ -3718,6 +3734,8 @@ def register_standard_tools(
         mcp._mcp_server.instructions = current + _DPYC_AGENT_GUIDANCE
     except AttributeError:
         logger.debug("Could not append DPYC agent guidance to MCP instructions")
+
+    return tool
 
 
 # ======================================================================

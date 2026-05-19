@@ -3,6 +3,42 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.25.0] — 2026-05-19
+
+### Changed — DRY pass on the proof gate and operator bootstrap
+
+Three repeated patterns collapsed.
+
+**`OperatorRuntime.require_caller_proof(npub, proof, capability)`** —
+the dozen standard-tool sites that wrote
+`await require_proof(npub, proof, rt.runtime_name("X"), proven_cache=await rt.proven_npub_cache())`
+now write `await rt.require_caller_proof(npub, proof, "X")`. Same
+semantics, one short line.
+
+**Module-level imports of `capability_uuid` and `require_proof`** —
+four lazy `from tollbooth.tool_identity import capability_uuid` and
+fourteen lazy `from tollbooth.identity_proof import require_proof`
+imports peppered inside `runtime.py` function bodies are gone. Verified
+no circular dependency.
+
+**`register_standard_tools` returns the `@tool` decorator** — operator
+servers previously typed the slug twice:
+
+```python
+tool = make_slug_tool(mcp, "schwab")        # slug literal once
+register_standard_tools(mcp, "schwab", runtime, …)  # slug literal twice
+```
+
+Now register the standard tools first and use the returned decorator:
+
+```python
+tool = register_standard_tools(mcp, "schwab", runtime, …)
+```
+
+All five in-tree operators (schwab, brain, excalibur, taxsort, sample)
+updated in lock-step.
+
+
 ## [0.24.1] — 2026-05-19
 
 ### Changed — Oracle-delegated tools mount under the operator's slug
