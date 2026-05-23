@@ -3,6 +3,38 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.27.0] — 2026-05-23
+
+### Fixed — Oracle registry failures no longer silently masked
+
+`_register_operator_via_oracle`, `_update_operator_via_oracle`,
+`_deregister_operator_via_oracle`, and `_register_via_oracle`
+previously did:
+
+```python
+return json.loads(block.text).get("commit_url", block.text)
+```
+
+When the Oracle returned `{"success": false, "error": "..."}`, the
+missing `commit_url` key caused the *entire failure JSON string* to be
+stuffed into the outer `commit_url` field, while the outer tool
+returned `success: true`. Studios and dashboards then displayed the
+operator as registered with a JSON blob where a GitHub URL should
+have been.
+
+The four helpers now share a single parser, `_parse_oracle_commit_url`,
+that detects `success: false` and raises `OracleRegistryError`. The
+outer `try/except` handlers behave correctly:
+
+- `register_operator`: logs warning, returns `commit_url=""` instead
+  of a fake URL. Local ledger still consistent.
+- `update_operator` / `deregister_operator`: propagate as
+  `{"success": false, "error": "Update failed: ..."}`.
+- `register_authority`: logs warning, omits `commit_url` from the
+  response.
+
+No public API change. Internal failure semantics only.
+
 ## [0.26.0] — 2026-05-23
 
 ### Changed — Authority consent now cryptographically witnessed (BREAKING)

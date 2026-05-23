@@ -275,6 +275,59 @@ async def _set_authority_npub(npub: str) -> None:
 # ======================================================================
 
 
+class OracleRegistryError(Exception):
+    """Raised when the Oracle's registry tool returned ``success: false``.
+
+    Previously the helpers below silently squashed inner failures into the
+    outer ``commit_url`` field as raw JSON, which caused outer tools to
+    return ``success: true`` with a garbage commit_url. Raising forces the
+    outer ``try/except`` to handle the failure explicitly — log-and-continue
+    for ``register_operator`` (local ledger still consistent), propagate as
+    ``{"success": false, "error": ...}`` for update/deregister.
+    """
+
+    def __init__(self, message: str, *, raw: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.raw = raw or {}
+
+
+def _parse_oracle_commit_url(result: Any) -> str:
+    """Extract a ``commit_url`` from an Oracle tool result, or raise.
+
+    Oracle tools always return JSON of the form::
+
+        {"success": true, "commit_url": "https://github.com/...", ...}
+
+    or::
+
+        {"success": false, "error": "service_url is required", ...}
+
+    The legacy ``.get("commit_url", block.text)`` fallback fed the failure
+    body straight into the outer field. This parser detects ``success:
+    false`` and raises so the caller's exception path runs.
+    """
+    import json
+
+    if not hasattr(result, "content"):
+        return str(result)
+    for block in result.content:
+        if not hasattr(block, "text"):
+            continue
+        try:
+            payload = json.loads(block.text)
+        except (json.JSONDecodeError, TypeError):
+            return block.text
+        if isinstance(payload, dict) and payload.get("success") is False:
+            raise OracleRegistryError(
+                payload.get("error") or "Oracle registry call returned success=false.",
+                raw=payload,
+            )
+        if isinstance(payload, dict):
+            return str(payload.get("commit_url") or "")
+        return block.text
+    return str(result)
+
+
 async def _register_operator_via_oracle(
     operator_npub: str,
     display_name: str,
@@ -297,15 +350,7 @@ async def _register_operator_via_oracle(
                 "authority_npub": authority_npub,
             },
         )
-        if hasattr(result, "content"):
-            for block in result.content:
-                if hasattr(block, "text"):
-                    import json
-                    try:
-                        return json.loads(block.text).get("commit_url", block.text)
-                    except (json.JSONDecodeError, TypeError):
-                        return block.text
-        return str(result)
+        return _parse_oracle_commit_url(result)
 
 
 async def _update_operator_via_oracle(
@@ -328,15 +373,7 @@ async def _update_operator_via_oracle(
 
     async with Client(oracle_info["url"]) as client:
         result = await client.call_tool("update_operator", args)
-        if hasattr(result, "content"):
-            for block in result.content:
-                if hasattr(block, "text"):
-                    import json
-                    try:
-                        return json.loads(block.text).get("commit_url", block.text)
-                    except (json.JSONDecodeError, TypeError):
-                        return block.text
-        return str(result)
+        return _parse_oracle_commit_url(result)
 
 
 async def _deregister_operator_via_oracle(
@@ -354,15 +391,7 @@ async def _deregister_operator_via_oracle(
             "deregister_operator",
             {"operator_npub": operator_npub, "authority_npub": authority_npub},
         )
-        if hasattr(result, "content"):
-            for block in result.content:
-                if hasattr(block, "text"):
-                    import json
-                    try:
-                        return json.loads(block.text).get("commit_url", block.text)
-                    except (json.JSONDecodeError, TypeError):
-                        return block.text
-        return str(result)
+        return _parse_oracle_commit_url(result)
 
 
 async def _register_via_oracle(
@@ -387,15 +416,7 @@ async def _register_via_oracle(
                 "upstream_authority_npub": upstream_authority_npub,
             },
         )
-        if hasattr(result, "content"):
-            for block in result.content:
-                if hasattr(block, "text"):
-                    import json
-                    try:
-                        return json.loads(block.text).get("commit_url", "")
-                    except (json.JSONDecodeError, TypeError):
-                        return block.text
-        return str(result)
+        return _parse_oracle_commit_url(result)
 
 
 async def _resolve_own_service_url() -> str:
