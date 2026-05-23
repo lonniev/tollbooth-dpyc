@@ -28,6 +28,14 @@ class ErrorCode:
     PROOF_INVALID = "proof_invalid"          # signature does not verify
     PROOF_REFRESH_NEEDED = "proof_refresh_needed"  # poison-keyed proof_token cache miss
 
+    # Authority-side discretionary consent (register/update/deregister_operator).
+    # The Authority's adoption of a new Operator (or modification of an
+    # existing one) is gated by a Schnorr proof signed by the Authority's
+    # OWN npub — the cryptographic witness that the human who controls the
+    # Authority's nsec has authorized this action. A missing or invalid
+    # ``authority_proof`` argument trips this code.
+    AUTHORITY_CONSENT_REQUIRED = "authority_consent_required"
+
     # Tool/registry
     RESTRICTED = "restricted"
     TOOL_NOT_REGISTERED = "tool_not_registered"

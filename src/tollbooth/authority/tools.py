@@ -421,6 +421,52 @@ async def _resolve_own_service_url() -> str:
         await registry.close()
 
 
+async def _require_authority_consent(
+    runtime: OperatorRuntime,
+    authority_proof: str,
+    tool_name: str,
+) -> dict[str, Any] | None:
+    """Verify the caller holds the Authority's own nsec.
+
+    The Authority's adoption / modification of an Operator entry is a
+    discretionary act. Only someone with the Authority's nsec on hand can
+    produce a valid Schnorr proof signed by the Authority's npub — the
+    cryptographic witness that the human who controls this Authority has
+    authorized this action. An app (e.g. the Pricing Studio) produces
+    this proof automatically when its user clicks "adopt", provided the
+    Authority's nsec is in the app's secure store.
+
+    Returns ``None`` on success (caller proceeds) or a structured error
+    dict the caller should return verbatim. The error code is
+    ``AUTHORITY_CONSENT_REQUIRED`` regardless of whether the proof was
+    missing, expired, or signature-invalid — the patron-actionable
+    remedy is the same: present a fresh valid Authority proof.
+    """
+    from tollbooth.constants import ErrorCode as _EC
+
+    authority_npub = runtime.operator_npub()
+    err = await require_proof(
+        authority_npub,
+        authority_proof,
+        tool_name,
+        proven_cache=await runtime.proven_npub_cache(),
+    )
+    if err is None:
+        return None
+    return {
+        "success": False,
+        "error_code": _EC.AUTHORITY_CONSENT_REQUIRED,
+        "error": (
+            f"Authority consent required: caller must supply a valid identity "
+            f"proof signed by the Authority's npub ({authority_npub[:16]}...). "
+            f"Apps holding the Authority's nsec produce this proof inline; "
+            f"otherwise call request_npub_proof / receive_npub_proof against "
+            f"this MCP using the Authority's npub to cache one."
+        ),
+        "authority_npub": authority_npub,
+    }
+
+
 async def _resend_bootstrap_dm(npub: str) -> bool:
     try:
         vault = await _get_runtime().vault()
@@ -499,18 +545,44 @@ def register_authority_tools(
             str,
             Field(description="Your MCP endpoint URL (e.g. 'https://my-service.fastmcp.app/mcp')."),
         ] = "",
+        authority_proof: Annotated[
+            str,
+            Field(description=(
+                "Identity proof signed by the Authority's OWN npub — the "
+                "Authority's discretionary consent to adopt this Operator. "
+                "Apps with the Authority's nsec in their keystore (e.g. the "
+                "Pricing Studio) produce this proof automatically when the "
+                "user clicks 'adopt'."
+            )),
+        ] = "",
     ) -> dict[str, Any]:
         """Provision an operator in the Authority ledger.
 
         Creates a ledger entry so the operator can purchase credits and
-        certify purchase orders. Idempotent — safe to call again. Requires
-        a Schnorr proof of npub ownership; the candidate operator should
-        call ``request_npub_proof`` + ``receive_npub_proof`` on this
-        Authority first, then pass the resulting token here.
+        certify purchase orders. Idempotent — safe to call again.
+
+        Requires TWO independent identity proofs:
+
+        1. ``proof`` — Schnorr proof signed by the candidate operator's
+           ``npub``. Proves the requester really controls that npub. The
+           operator typically calls ``request_npub_proof`` /
+           ``receive_npub_proof`` against this Authority first to mint
+           a cached proof_token.
+        2. ``authority_proof`` — Schnorr proof signed by the Authority's
+           own npub. This is the Authority's human consent — only an
+           agent with the Authority's nsec on hand can produce it. Apps
+           generate this inline when the human admin clicks 'adopt';
+           otherwise an Authority-side proof can be minted the same way
+           an operator-side one is.
 
         Next step: Call purchase_credits to fund your credit balance.
         """
         err = await require_proof(npub, proof, runtime.runtime_name("register_operator"), proven_cache=await runtime.proven_npub_cache())
+        if err:
+            return err
+        err = await _require_authority_consent(
+            runtime, authority_proof, runtime.runtime_name("register_operator"),
+        )
         if err:
             return err
 
@@ -579,14 +651,30 @@ def register_authority_tools(
         proof: str = "",
         service_url: Annotated[str, Field(description="New MCP endpoint URL (leave empty to keep current).")] = "",
         display_name: Annotated[str, Field(description="New display name (leave empty to keep current).")] = "",
+        authority_proof: Annotated[
+            str,
+            Field(description=(
+                "Identity proof signed by the Authority's OWN npub — the "
+                "Authority's consent to modify this Operator's registry entry."
+            )),
+        ] = "",
     ) -> dict[str, Any]:
         """Update an existing Operator's community registry entry.
 
-        Requires a Schnorr proof of npub ownership — without it, an attacker
-        who knew a victim Operator's public npub could rewrite their
-        ``service_url`` to point at an attacker-controlled MCP endpoint.
+        Requires the same two proofs as ``register_operator``:
+
+        - ``proof`` proves the caller controls the Operator's ``npub``.
+        - ``authority_proof`` proves the Authority's human admin consents
+          to the change. Without the Authority proof, anyone with the
+          Operator's nsec could redirect their own ``service_url`` under
+          this Authority's signature without the Authority's awareness.
         """
         err = await require_proof(npub, proof, runtime.runtime_name("update_operator"), proven_cache=await runtime.proven_npub_cache())
+        if err:
+            return err
+        err = await _require_authority_consent(
+            runtime, authority_proof, runtime.runtime_name("update_operator"),
+        )
         if err:
             return err
         if not service_url and not display_name:
@@ -613,14 +701,31 @@ def register_authority_tools(
     async def deregister_operator(
         npub: Annotated[str, Field(description="Nostr npub of the Operator to deregister.")] = "",
         proof: str = "",
+        authority_proof: Annotated[
+            str,
+            Field(description=(
+                "Identity proof signed by the Authority's OWN npub — the "
+                "Authority's consent to remove this Operator from the community "
+                "registry under its signature."
+            )),
+        ] = "",
     ) -> dict[str, Any]:
         """Remove an Operator from the DPYC community registry.
 
-        Requires a Schnorr proof of npub ownership — without it, anyone who
-        knew a victim Operator's public npub could remove them from the
-        community registry under this Authority's signature.
+        Requires the same two proofs as ``register_operator``:
+
+        - ``proof`` proves the caller controls the Operator's ``npub``.
+        - ``authority_proof`` proves the Authority's human admin consents
+          to the removal. Without the Authority proof, anyone who knew an
+          Operator's public npub and held its nsec could remove themselves
+          from this Authority's roster without the Authority noticing.
         """
         err = await require_proof(npub, proof, runtime.runtime_name("deregister_operator"), proven_cache=await runtime.proven_npub_cache())
+        if err:
+            return err
+        err = await _require_authority_consent(
+            runtime, authority_proof, runtime.runtime_name("deregister_operator"),
+        )
         if err:
             return err
 
