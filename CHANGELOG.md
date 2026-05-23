@@ -3,6 +3,42 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.26.0] — 2026-05-23
+
+### Changed — Authority consent now cryptographically witnessed (BREAKING)
+
+`authority_register_operator`, `authority_update_operator`, and
+`authority_deregister_operator` now require **two** independent
+Schnorr identity proofs:
+
+1. **`proof`** — signed by the *Operator's* npub. Existing behavior;
+   proves the caller really controls the operator npub they claim.
+2. **`authority_proof`** — signed by the *Authority's own* npub. New.
+   Cryptographic witness that the human who controls the Authority's
+   nsec has consented to this discretionary action. Apps holding the
+   Authority's nsec (e.g. the Pricing Studio) produce this proof
+   inline when their user clicks "adopt".
+
+Without the Authority proof, anyone who knew an operator's public
+npub and held that operator's own nsec could register / mutate /
+remove themselves under any Authority's signature without that
+Authority's awareness. Closes the gap where the Operator's
+self-signed proof was the only gate.
+
+New `ErrorCode.AUTHORITY_CONSENT_REQUIRED` distinguishes the
+Authority-side failure from the Operator-side `PROOF_REQUIRED` /
+`PROOF_INVALID` codes, so calling apps can render the right UX
+remedy.
+
+**Breaking change.** Clients calling these three tools without an
+`authority_proof` argument will receive
+`{success: false, error_code: "authority_consent_required", ...}`.
+Update calling code to mint a fresh Authority-side proof and pass it.
+
+The Pricing Studio's `argsWithProof` machinery already produces
+Operator proofs from Keychain; producing the Authority proof is the
+same code path keyed by the Authority's npub.
+
 ## [0.25.0] — 2026-05-19
 
 ### Changed — DRY pass on the proof gate and operator bootstrap
