@@ -196,8 +196,11 @@ class LedgerCache:
         """
         try:
             ledger_json = await self._vault.fetch_ledger(user_id)
-        except Exception:
-            logger.warning("Failed to load ledger from vault for %s — returning uncached empty ledger.", user_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load ledger from vault for %s — returning uncached empty ledger. Underlying error: %s: %s",
+                user_id, type(exc).__name__, exc,
+            )
             return UserLedger(), False
 
         if ledger_json is None:

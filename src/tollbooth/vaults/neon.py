@@ -135,12 +135,36 @@ class NeonVault:
         """Execute a single SQL statement via Neon HTTP API.
 
         Returns the result dict with ``rows``, ``rowCount``, ``command``, etc.
-        Raises ``NeonQueryError`` on SQL errors, ``httpx.HTTPStatusError``
-        on transport errors.
+        Raises ``NeonQueryError`` on SQL errors with the Neon-supplied message,
+        including 4xx HTTP responses (Neon's REST gateway returns 400 with a
+        SQL error message in the body for things like missing relations or
+        permission denied). Raises ``httpx.HTTPStatusError`` only on 5xx or
+        bodyless 4xx — anything where Neon didn't tell us why.
         """
         body = {"query": query, "params": params or []}
         resp = await self._client.post(self._endpoint, json=body)
-        resp.raise_for_status()
+
+        # Read the body before raise_for_status so 4xx error messages from
+        # Neon (which arrive as `{"message": "..."}` in a 400 body) surface
+        # to the caller instead of being lost behind an opaque
+        # "Client error '400 Bad Request'". Previously the
+        # raise_for_status() short-circuit prevented anyone from learning
+        # whether the failure was "relation does not exist", "permission
+        # denied", or a connection-level rejection.
+        if resp.status_code >= 400:
+            try:
+                err_body = resp.json()
+            except Exception:
+                err_body = None
+            if isinstance(err_body, dict) and err_body.get("message"):
+                raise NeonQueryError(
+                    f"Neon HTTP {resp.status_code}: {err_body['message']} "
+                    f"(query={query[:120]}…)"
+                )
+            # Body wasn't JSON or didn't have a message — fall through to
+            # raise_for_status so callers still see the HTTP error.
+            resp.raise_for_status()
+
         data = resp.json()
 
         # Neon returns SQL errors in the response body with a "message" field

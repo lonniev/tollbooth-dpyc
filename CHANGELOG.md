@@ -3,6 +3,41 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.31.0] — 2026-05-24
+
+### Added — `restore_neon_schema` admin tool + Neon error body surfaced
+
+When Optionality's patron-recovery flow ran into persistent 400s from
+Neon's HTTP SQL API, the wheel was blind to *why*: `_execute` called
+`resp.raise_for_status()` before reading the body, so the actual SQL
+error message ("relation does not exist", "permission denied",
+"password authentication failed", etc.) never reached the logs or
+the caller. The result: `Failed to load ledger from vault` with no
+hint of which root cause to chase.
+
+Three surgical changes:
+
+1. `NeonVault._execute` now reads the response body on 4xx before
+   `raise_for_status`. If Neon returned a JSON body with a `message`
+   field (its standard SQL-error shape), the wheel raises
+   `NeonQueryError` with that message + a query excerpt. Only
+   bodyless 4xx and 5xx fall through to the opaque `HTTPStatusError`.
+
+2. `LedgerCache._load_from_vault` no longer swallows the underlying
+   exception silently. The warning now includes the exception type
+   and message so logs tell you what failed instead of just that
+   something did.
+
+3. New operator-restricted `restore_neon_schema` tool re-runs
+   `ensure_schema()` on `NeonVault`, `PricingModelStore`, and the
+   credential vault (if configured). Idempotent (uses
+   `CREATE TABLE IF NOT EXISTS`). Returns per-step success / error
+   so the operator can diagnose without redeploying. Requires
+   nsec-signed proof — same gate as `reset_pricing_model`.
+
+The fix doesn't change behavior for the happy path; it only converts
+silent-and-opaque failure into loud-and-actionable failure.
+
 ## [0.30.0] — 2026-05-24
 
 ### Fixed — restore_credits and pending-invoice tracking no longer silently fail on cold start

@@ -3523,6 +3523,82 @@ def register_standard_tools(
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @tool
+    async def restore_neon_schema(proof: str = "") -> dict[str, Any]:
+        """Re-run ``ensure_schema()`` on every NeonVault this operator uses.
+
+        Diagnostic / recovery tool for the case where the Neon HTTP SQL API
+        is returning persistent 4xx errors and the operator suspects the
+        schema isn't there or grants are wrong. Idempotent — uses
+        ``CREATE TABLE IF NOT EXISTS`` so a successful re-run is harmless.
+
+        Returns the per-step result. If any step raises, surfaces the Neon
+        error message inline (0.31.0 reads the SQL error body that earlier
+        wheels swallowed behind ``raise_for_status``).
+
+        RESTRICTED to operator — requires proof (nsec-signed).
+        """
+        if not proof:
+            return {
+                "success": False,
+                "error": "Only the operator can re-run schema setup — provide proof.",
+            }
+        from tollbooth.identity_proof import verify_proof
+        if not verify_proof(proof, rt.operator_npub(), "restore_neon_schema"):
+            return {
+                "success": False,
+                "error": "Invalid proof — only the operator can re-run schema setup.",
+            }
+
+        steps: list[dict[str, Any]] = []
+
+        async def _try(label: str, coro: Any) -> None:
+            try:
+                await coro
+                steps.append({"step": label, "ok": True})
+            except Exception as exc:
+                steps.append({
+                    "step": label,
+                    "ok": False,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:500],
+                })
+
+        try:
+            vault = await rt.vault()
+        except Exception as exc:
+            return {
+                "success": False,
+                "error_type": type(exc).__name__,
+                "error": f"Could not open vault: {exc}",
+            }
+
+        await _try("NeonVault.ensure_schema", vault.ensure_schema())
+
+        try:
+            from tollbooth.pricing_store import PricingModelStore
+            store = PricingModelStore(neon_vault=vault)
+            await _try("PricingModelStore.ensure_schema", store.ensure_schema())
+        except Exception as exc:
+            steps.append({"step": "PricingModelStore.ensure_schema", "ok": False, "error": str(exc)[:500]})
+
+        # Credential vault and proven-npub cache live on the same Neon —
+        # only re-create their schemas if those subsystems are already
+        # configured (operators without credentials don't need this).
+        if getattr(rt, "_credential_vault", None) is not None:
+            await _try("CredentialVault.ensure_schema", rt._credential_vault.ensure_schema())
+
+        all_ok = all(s.get("ok") for s in steps)
+        return {
+            "success": all_ok,
+            "steps": steps,
+            "message": (
+                "Schema setup re-run completed cleanly."
+                if all_ok else
+                "Some schema steps failed — see steps[] for per-step error messages."
+            ),
+        }
+
     # -- Constraint Engine tools ---------------------------------------
 
     @tool
