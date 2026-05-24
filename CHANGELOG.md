@@ -31,6 +31,53 @@ After 0.32.0 + Authority re-provisioning + Horizon redeploy, the patron's
 1,000 sats were restored cleanly via `restore_credits` against BTCPay's
 authoritative settled state. No data loss.
 
+## [0.33.0] — 2026-05-24
+
+### Fixed — credential storage no longer lies about persistence
+
+`SecureCourierService._vault_store()` previously caught all exceptions
+from the credential `INSERT` and logged a warning, but returned no
+signal to the caller. Both credential receive paths — DM-based
+(`exchange.receive`) and ncred-based (`exchange.redeem_credential_card`)
+— then unconditionally returned `success: true` with the message
+"Credentials stored in vault for future sessions." If the underlying
+write had actually failed (cold-start Neon hiccup, schema missing,
+permission denied, etc.), the credentials were nowhere in Neon while
+the agent and the user both believed they were.
+
+This is the same lie-shape as the 0.30.0 `_vault_unavailable` ledger
+bug, just one layer over. It manifests as the "ncred state lag"
+symptom: after an ncred delivery, `get_patron_onboarding_status` keeps
+returning `missing` for some number of refreshes, then suddenly
+returns `configured` once a later attempt's write actually lands.
+
+Fix:
+
+1. `_vault_store` now returns `bool` (True if Neon actually accepted
+   the write, False otherwise). The warning log includes exception
+   type and message — same diagnostic visibility 0.31.0 added for the
+   ledger path.
+2. Both `redeem_credential_card` and `exchange.receive` propagate the
+   flag honestly: response now includes `persisted: bool`, and on
+   failure includes `error_code: "credential_vault_unavailable"` plus
+   a clear retry message. `success` is `false` when persistence failed
+   and a vault was supposed to receive the write.
+3. The success DM to the patron (DM-path only) is sent only when
+   `persisted=True` — pre-fix, the patron got "thanks, got it" even
+   when nothing was stored.
+
+The agent (Claude.ai, Studio, any MCP client) can now branch on
+`success` or `error_code` to retry receive_credentials cleanly, and
+the human gets one consistent answer about whether the credentials
+made it.
+
+Existing operators with `on_credentials_received` callbacks: this
+release does NOT change which path runs them — the ncred shortcut
+still bypasses `SecureCourierService.receive`'s post-process block
+(callbacks, session_bindings writes, credential-card DM echo). That's
+a separate follow-up for the future when operators actually rely on
+those callbacks; for now no operator in this monorepo sets one.
+
 ## [0.32.0] — 2026-05-24
 
 ### Fixed — ensure_schema no longer aborts on role-isolated tenants

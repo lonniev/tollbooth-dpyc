@@ -1129,12 +1129,16 @@ class NostrCredentialExchange:
             self._send_error_dm(sender_npub, template)
             raise CourierValidationError(str(exc)) from exc
 
-        # Store in vault for next session
+        # Store in vault for next session, honestly report outcome.
+        persisted = True
         if self._credential_vault is not None:
-            await self._vault_store(template.service, sender_npub, validated)
+            persisted = await self._vault_store(template.service, sender_npub, validated)
 
-        # Send success DM back to patron (non-fatal on failure)
-        self._send_success_dm(sender_npub)
+        # Send success DM back to patron only if persistence actually worked.
+        # Telling the patron "we got it" when the vault didn't accept the
+        # write is the root of the lag-and-confusion bug class.
+        if persisted:
+            self._send_success_dm(sender_npub)
 
         # Count sensitive vs non-sensitive fields
         sensitive_count = sum(
@@ -1142,18 +1146,27 @@ class NostrCredentialExchange:
         )
 
         return {
-            "success": True,
+            "success": persisted or self._credential_vault is None,
             "service": template.service,
             "fields_received": len(validated),
             "sensitive_fields": sensitive_count,
             "encryption": dm.get("encryption", "unknown"),
             "credentials": validated,
+            "persisted": persisted,
+            "error_code": None if persisted else "credential_vault_unavailable",
+            "error": None if persisted else (
+                "Credentials received and validated but the vault write "
+                "failed. Retry receive_credentials in 10–15 seconds — the "
+                "DM is gone from the relay; the agent must resend."
+            ),
             "message": (
                 f"Credentials received for {template.service} "
                 f"({len(validated)} fields). "
                 f"Relay copy deletion requested."
                 + (
                     " Credentials stored in vault for future sessions."
+                    if persisted and self._credential_vault is not None else
+                    " Vault write failed — patron must resend; retry receive_credentials in a moment."
                     if self._credential_vault is not None else ""
                 )
             ),
@@ -1266,9 +1279,12 @@ class NostrCredentialExchange:
                 f"No template found for service '{service}'"
             )
 
-        # Store in vault
+        # Store in vault, honestly report persistence outcome. Pre-0.33.0
+        # this was a fire-and-forget that always claimed success — root
+        # cause of the ncred state-lag bug class.
+        persisted = True
         if self._credential_vault is not None and resolved:
-            await self._vault_store(resolved, user_npub, credentials)
+            persisted = await self._vault_store(resolved, user_npub, credentials)
 
         # Count sensitive fields
         sensitive_count = 0
@@ -1280,18 +1296,27 @@ class NostrCredentialExchange:
             )
 
         return {
-            "success": True,
+            "success": persisted or self._credential_vault is None,
             "service": resolved or card_service,
             "fields_received": len(credentials),
             "sensitive_fields": sensitive_count,
             "encryption": "credential_card",
             "credentials": credentials,
             "user_npub": user_npub,
+            "persisted": persisted,
+            "error_code": None if persisted else "credential_vault_unavailable",
+            "error": None if persisted else (
+                "Credential card was valid but the vault write failed. "
+                "Retry receive_credentials in 10–15 seconds once the MCP has "
+                "warmed up; the ncred is still good."
+            ),
             "message": (
                 f"Credentials for {resolved or card_service} redeemed from "
                 f"credential card ({len(credentials)} fields)."
                 + (
                     " Credentials stored in vault for future sessions."
+                    if persisted and self._credential_vault is not None else
+                    " Vault write failed — retry receive_credentials in a moment."
                     if self._credential_vault is not None else ""
                 )
             ),
@@ -1426,8 +1451,17 @@ class NostrCredentialExchange:
 
     async def _vault_store(
         self, service: str, sender_npub: str, credentials: dict[str, str],
-    ) -> None:
-        """Encrypt and store credentials in the vault."""
+    ) -> bool:
+        """Encrypt and store credentials in the vault.
+
+        Returns True if the write actually reached Neon, False if it failed
+        (vault unreachable, schema not provisioned, permission denied, etc.).
+        Callers MUST propagate this honestly in their response — same lesson
+        as the 0.30.0 `_vault_unavailable` guards for the ledger path:
+        telling a caller "stored" when the row isn't there leads to the
+        ncred-state-lag class of bugs where `get_patron_onboarding_status`
+        keeps reporting "missing" while the user sees "accepted" messaging.
+        """
         assert self._credential_vault is not None
         try:
             plaintext = json.dumps(credentials)
@@ -1438,8 +1472,15 @@ class NostrCredentialExchange:
             logger.info(
                 "Credentials for %s/%s stored in vault", service, sender_npub[:16],
             )
+            return True
         except Exception as exc:
-            logger.warning("Vault credential storage failed: %s", exc)
+            logger.warning(
+                "Vault credential storage failed for %s/%s: %s: %s. "
+                "Caller will surface this as persisted=false; the credential "
+                "is NOT in Neon and the agent should retry receive_credentials.",
+                service, sender_npub[:16], type(exc).__name__, exc,
+            )
+            return False
 
     def _vault_encrypt(self, plaintext: str) -> str:
         """Encrypt plaintext for vault storage using operator's key.
