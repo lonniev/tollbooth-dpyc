@@ -79,8 +79,10 @@ _STANDARD_LIST: list[ToolIdentity] = [
                  intent="Buy credits via Bitcoin Lightning."),
     ToolIdentity(capability="check_payment", category="free",
                  intent="Check payment status of a Lightning invoice."),
-    ToolIdentity(capability="restore_credits", category="free",
-                 intent="Restore credits from a previously paid invoice."),
+    ToolIdentity(capability="restore_credits", category="restricted",
+                 intent="Operator-only: credit a patron's ledger from a "
+                        "BTCPay-settled invoice. Discretionary recovery for "
+                        "support escalations and infrastructure incidents."),
     ToolIdentity(capability="account_statement", category="free",
                  intent="Generate a patron's account statement."),
     ToolIdentity(capability="account_statement_infographic", category="read",

@@ -41,6 +41,42 @@ After 0.32.0 + Authority re-provisioning + Horizon redeploy, the patron's
 1,000 sats were restored cleanly via `restore_credits` against BTCPay's
 authoritative settled state. No data loss.
 
+## [0.36.0] — 2026-05-24
+
+### Changed — restore_credits is now operator-restricted (BREAKING)
+
+`restore_credits` was previously `category="free"` and gated on the
+patron's own proof — any patron could paste an invoice ID and recover
+their own balance. That misaligns with the responsibility model:
+
+- The operator owns the books. Manual credit grants are the operator's
+  discretionary action, not a patron self-service.
+- Patron-self-serve restore opens replay-after-BTCPay-refund vectors,
+  invoice-ID enumeration, and bypasses operator-side support visibility.
+- Every other credit-issuing tool in the protocol (e.g.
+  `authority_certify_credits`) is gated on the *issuer's* proof, not the
+  recipient's. This brings `restore_credits` into line.
+
+API change:
+
+- Parameter renamed: ``npub`` → ``patron_npub`` (recipient ledger).
+- ``proof`` must now be signed by the OPERATOR's nsec for the runtime
+  tool name (e.g. ``optionality_restore_credits``). Patron proofs are
+  rejected with ``operator_proof_invalid``.
+- Tool category in ``STANDARD_IDENTITIES`` flipped from ``free`` to
+  ``restricted``.
+
+Patron-side recovery flow: patrons who paid but didn't get credits
+escalate to the operator's support, who calls restore_credits with the
+patron's npub. The check_payment happy-path (with the anti-replay token
+from purchase_credits) is unchanged and remains patron-self-serve.
+
+Studio: the patron-side entry point in PR #47's RecoverPaymentSheet
+needs to be rewired or removed in a follow-up PR. The operator-side
+entry point (in PricingDetailView's overflow menu) needs to sign with
+the operator's nsec, not the patron's. See companion Studio PR for the
+client-side adjustments.
+
 ## [0.35.0] — 2026-05-24
 
 ### Fixed — operator-restricted tools now verify the runtime mcp_name, not the bare capability

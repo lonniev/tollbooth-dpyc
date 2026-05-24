@@ -2018,21 +2018,43 @@ def register_standard_tools(
         return result
 
     @tool
-    async def restore_credits(invoice_id: str, npub: str, proof: str) -> dict[str, Any]:
-        """Restore credits from a previously paid invoice. Free.
+    async def restore_credits(invoice_id: str, patron_npub: str, proof: str) -> dict[str, Any]:
+        """Credit a patron's ledger from a BTCPay-settled invoice.
 
-        Proof of npub ownership is required so credits land in the
-        correct ledger.
+        **RESTRICTED to the operator** — the operator owns the books and is
+        the only party who can issue a manual credit grant. Patrons who
+        believe they paid but never got credits must escalate to the
+        operator's support, who then invokes this tool on their behalf.
+
+        Use cases: cold-start vault races during check_payment, ncred
+        delivery hiccups, patrons closing Top-Off sheets before settle,
+        any infrastructure incident that left an invoice settled at BTCPay
+        but uncredited on the operator's ledger.
+
+        Idempotent — if the invoice is already credited (in the patron's
+        ``credited_invoices``), returns success with credits_granted=0.
 
         Args:
-            invoice_id: The invoice ID whose credits to restore.
-            npub: The Nostr public key (npub1...) that paid the invoice.
-            proof: A kind-27235 Nostr event signed by npub for this tool.
+            invoice_id: The BTCPay invoice ID to verify and credit.
+            patron_npub: The patron's npub whose ledger receives the grant.
+            proof: A kind-27235 Nostr event signed by the OPERATOR's nsec
+                for this tool. Patron proofs are rejected.
         """
-        if err := await rt.require_caller_proof(npub, proof, "restore_credits"):
-            return err
+        if not proof:
+            return {
+                "success": False,
+                "error_code": "operator_proof_required",
+                "error": "Only the operator can restore credits — provide a proof signed by the operator's nsec.",
+            }
+        from tollbooth.identity_proof import verify_proof
+        if not verify_proof(proof, rt.operator_npub(), rt.runtime_name("restore_credits")):
+            return {
+                "success": False,
+                "error_code": "operator_proof_invalid",
+                "error": "Invalid proof — only the operator can restore credits.",
+            }
         try:
-            npub = resolve_npub(npub)
+            patron_npub = resolve_npub(patron_npub)
             cashier = await rt.ensure_cashier()
             cache = await rt.ledger_cache()
         except (ValueError, RuntimeError) as e:
@@ -2040,7 +2062,7 @@ def register_standard_tools(
         from tollbooth.tools import credits
         ttl = await rt.resolve_tranche_lifetime()
         return await credits.restore_credits_tool(
-            cashier, cache, npub, invoice_id,
+            cashier, cache, patron_npub, invoice_id,
             tranche_lifetime_seconds=ttl,
         )
 
