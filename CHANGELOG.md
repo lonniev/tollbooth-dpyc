@@ -3,6 +3,34 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.30.x → 0.32.0 series — TL;DR
+
+Three back-to-back releases triggered by a real-world recovery: a patron's
+1,000-sat Lightning payment had cleared at BTCPay but never made it to the
+operator's ledger. The root cause turned out to be one bug (`CREATE SCHEMA
+IF NOT EXISTS` fails for the per-operator Postgres role even when the
+schema already exists) hidden behind layers of silent failure. Fixing each
+layer's silence is what these releases collectively do.
+
+- **0.30.0** — `check_payment_tool`, `_create_purchase_invoice`, and
+  `restore_credits_tool` now detect `_vault_unavailable` ledgers and
+  refuse to credit instead of returning `persisted: true` and dropping the
+  data on the floor. Three latent footguns closed.
+- **0.31.0** — `NeonVault._execute` reads the Neon error body before
+  `raise_for_status`, so the actual SQL message reaches the logs.
+  `LedgerCache._load_from_vault` logs the underlying exception. New
+  operator-restricted `restore_neon_schema` admin tool re-runs
+  `ensure_schema` on demand. Visibility, finally.
+- **0.32.0** — `NeonVault.ensure_schema` probes `pg_namespace` before
+  attempting `CREATE SCHEMA IF NOT EXISTS`. Postgres evaluates the
+  database-level CREATE privilege before the IF NOT EXISTS short-circuit,
+  so per-operator roles aborted setup of EVERY downstream table — the
+  recovery-blocker. Now skipped when the schema already exists.
+
+After 0.32.0 + Authority re-provisioning + Horizon redeploy, the patron's
+1,000 sats were restored cleanly via `restore_credits` against BTCPay's
+authoritative settled state. No data loss.
+
 ## [0.32.0] — 2026-05-24
 
 ### Fixed — ensure_schema no longer aborts on role-isolated tenants
