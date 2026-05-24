@@ -125,8 +125,24 @@ _STANDARD_LIST: list[ToolIdentity] = [
                  intent="Read-only check of a proof_token's remaining validity."),
 
     # -- Oracle delegation --
-    # Oracle tools are free and use the oracle_ namespace. They don't
-    # need pricing entries or registry identities — they're never gated.
+    # Wire-exposed under the operator's `_oracle_` namespace (e.g.
+    # `optionality_oracle_about`). Routed through a separate free
+    # decorator that bypasses pricing/gating entirely, so the price
+    # here is informational only — the wheel does not consult it at
+    # call time. Included in STANDARD_IDENTITIES anyway so the
+    # initial pricing model is a complete inventory of what's exposed
+    # (otherwise the Studio's Reconcile flow keeps offering them as
+    # "new tools" on every reset).
+    ToolIdentity(capability="oracle_about", category="free",
+                 intent="Describe the DPYC ecosystem via the Oracle."),
+    ToolIdentity(capability="oracle_get_tax_rate", category="free",
+                 intent="Get the current DPYC certification tax rate."),
+    ToolIdentity(capability="oracle_how_to_join", category="free",
+                 intent="Get DPYC onboarding instructions from the Oracle."),
+    ToolIdentity(capability="oracle_lookup_member", category="free",
+                 intent="Look up a DPYC community member by npub."),
+    ToolIdentity(capability="oracle_network_advisory", category="free",
+                 intent="Get active network advisories from the Oracle."),
 
     # -- Authority delegation --
     ToolIdentity(capability="check_authority_balance", category="free",

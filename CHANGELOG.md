@@ -41,6 +41,33 @@ After 0.32.0 + Authority re-provisioning + Horizon redeploy, the patron's
 1,000 sats were restored cleanly via `restore_credits` against BTCPay's
 authoritative settled state. No data loss.
 
+## [0.34.0] — 2026-05-24
+
+### Fixed — oracle tools now in initial pricing model (no Reconcile false positive)
+
+The 5 `oracle_*` delegation tools (`oracle_about`, `oracle_get_tax_rate`,
+`oracle_how_to_join`, `oracle_lookup_member`, `oracle_network_advisory`)
+are wire-exposed from `register_standard_tools` on every wheel-built MCP,
+but were deliberately excluded from `STANDARD_IDENTITIES` with the
+rationale "they're never gated, so they don't need pricing entries." That
+made the Studio's Reconcile flow keep offering them as "new tools to
+price" on every reset, since `list_tools()` returns them but
+`get_pricing_model` doesn't.
+
+The "never gated" claim is still true — they're routed through the free
+`oracle_tool` decorator that bypasses `debit_or_deny` entirely. But the
+pricing model serving as a complete inventory of what's exposed is more
+useful than the pricing model being terse, so they now get
+`STANDARD_IDENTITIES` entries with `category="free"` and price 0. The
+wheel doesn't consult these entries at oracle-call time (no runtime
+change), but the initial model is complete from day one and Reconcile
+stops flagging them.
+
+For existing operators: after redeploying on 0.34.0, the first
+`reset_pricing_model` will include the oracle entries. Until then, the
+Reconcile diff continues to show them as "new" — clicking accept is
+harmless (entries are ignored at runtime).
+
 ## [0.33.0] — 2026-05-24
 
 ### Fixed — credential storage no longer lies about persistence
