@@ -3,14 +3,16 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## 0.30.x → 0.32.0 series — TL;DR
+## 0.30.x → 0.33.0 series — TL;DR
 
-Three back-to-back releases triggered by a real-world recovery: a patron's
+Four back-to-back releases triggered by a real-world recovery: a patron's
 1,000-sat Lightning payment had cleared at BTCPay but never made it to the
 operator's ledger. The root cause turned out to be one bug (`CREATE SCHEMA
 IF NOT EXISTS` fails for the per-operator Postgres role even when the
 schema already exists) hidden behind layers of silent failure. Fixing each
-layer's silence is what these releases collectively do.
+layer's silence is what these releases collectively do — and 0.33.0
+extends the same "don't lie about persistence" treatment to the credential
+vault, after the user flagged the symmetric symptom in the ncred path.
 
 - **0.30.0** — `check_payment_tool`, `_create_purchase_invoice`, and
   `restore_credits_tool` now detect `_vault_unavailable` ledgers and
@@ -26,6 +28,14 @@ layer's silence is what these releases collectively do.
   database-level CREATE privilege before the IF NOT EXISTS short-circuit,
   so per-operator roles aborted setup of EVERY downstream table — the
   recovery-blocker. Now skipped when the schema already exists.
+- **0.33.0** — `_vault_store` (credential write path) returns `bool`
+  instead of swallowing exceptions. Both `redeem_credential_card` and
+  `exchange.receive` now propagate `persisted: bool` + `error_code:
+  "credential_vault_unavailable"` honestly. The "ncred state lag"
+  symptom (creds appear missing for a few refreshes after delivery,
+  then suddenly present) was the agent retrying until a write
+  actually landed — now the agent sees `success: false` on the
+  failed attempt and the human gets one consistent answer.
 
 After 0.32.0 + Authority re-provisioning + Horizon redeploy, the patron's
 1,000 sats were restored cleanly via `restore_credits` against BTCPay's
