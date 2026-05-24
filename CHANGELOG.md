@@ -3,6 +3,35 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.29.0] — 2026-05-24
+
+### Fixed — check_payment no longer lies about persistence on cold start
+
+When `LedgerCache.get()` couldn't reach Neon (serverless cold start),
+it returned an *uncached* empty ledger flagged `_vault_unavailable =
+True`. `check_payment_tool` then mutated that in-memory ledger,
+called `cache.mark_dirty(user_id)` (a silent no-op when the entry
+isn't in `_entries`), then `cache.flush_user(user_id)` (returns
+`True` for "nothing to flush" — indistinguishable from "successfully
+flushed"). The patron saw `Settled + credits_granted: N + persisted:
+true`, but the credits lived in a UserLedger that got garbage-
+collected the moment the function returned. A subsequent
+`account_statement` showed balance 0.
+
+The fix: `check_payment_tool` now checks `_vault_unavailable` before
+crediting. If true, it returns `success: false + persisted: false +
+error_code: "vault_unavailable"` with a clear retry prompt. The
+patron's LN payment is safe at BTCPay; the next `check_payment` call
+hits a warmed cache, finds the invoice isn't in `credited_invoices`,
+and credits normally (idempotent).
+
+`check_balance_tool` already handled the same flag correctly; only
+the write paths needed this guard. `_create_purchase_invoice` and
+`restore_credits_tool` have the same latent pattern but their
+silent-failure consequences are less severe (the BTCPay invoice
+still exists; the pending-invoice tracking just lags). Patching them
+is left to a follow-up.
+
 ## [0.28.0] — 2026-05-24
 
 ### Fixed — AuthorityCertifier signs the runtime mcp_name, not the bare capability

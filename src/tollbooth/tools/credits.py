@@ -282,6 +282,29 @@ async def check_payment_tool(
             # Already credited — true idempotency check
             result["message"] = "Payment already credited."
             result["credits_granted"] = 0
+        elif getattr(ledger, "_vault_unavailable", False):
+            # Cold start: cache.get() couldn't reach Neon and returned an
+            # uncached empty ledger. Mutating it would credit a phantom
+            # ledger that gets garbage-collected, while mark_dirty +
+            # flush_user silently no-op (no cache entry to mark or flush).
+            # Refuse to "credit" — the patron's payment is on BTCPay and
+            # the next check_payment call will succeed once the vault is
+            # warm, since check_payment is idempotent via credited_invoices.
+            logger.error(
+                "Vault unavailable during settle for %s (invoice %s). "
+                "Returning persisted=false so caller retries.",
+                user_id, invoice_id,
+            )
+            result["success"] = False
+            result["credits_granted"] = 0
+            result["persisted"] = False
+            result["error_code"] = "vault_unavailable"
+            result["error"] = (
+                "Vault wasn't reachable during settle — credits NOT persisted. "
+                "Your payment is safely settled at BTCPay; retry check_payment "
+                "in 10–15 seconds to credit your balance."
+            )
+            result["message"] = result["error"]
         else:
             # Credit the user — flush immediately so credits survive cache loss
             amount_str = invoice.get("amount", "0")
