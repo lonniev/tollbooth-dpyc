@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.30.0] — 2026-05-24
+
+### Fixed — restore_credits and pending-invoice tracking no longer silently fail on cold start
+
+Same root cause as 0.29.0's `check_payment` fix: `LedgerCache.get()`
+on a cold serverless instance returns an uncached `UserLedger`
+flagged `_vault_unavailable = True`. The other two ledger-write
+paths shared the bug:
+
+1. `_create_purchase_invoice` recorded a pending invoice into that
+   short-lived ledger; the patron's BTCPay invoice existed at BTCPay
+   but the Tollbooth ledger had no record of it. Subsequent
+   `check_balance` showed no pending invoices, so the Studio's
+   reconcile-pending UX never offered a way to verify settlement.
+2. `restore_credits_tool` — the recovery path of last resort — would
+   credit an uncached ledger and return `success: true` with the
+   credits about to be garbage-collected.
+
+Both now check `_vault_unavailable` and respond appropriately:
+
+- `_create_purchase_invoice` logs `error` (the invoice creation
+  itself still succeeds — BTCPay is the source of truth — but the
+  log makes the recovery situation obvious) and skips the no-op
+  mark_dirty/flush. The patron's path: pay the invoice, then call
+  `restore_credits` on the next warm call.
+- `restore_credits_tool` refuses outright, returning `success:
+  false + error_code: "vault_unavailable"` so the caller retries.
+
+A deeper fix would be in `LedgerCache.flush_user`, which currently
+returns `True` for "nothing to flush" — indistinguishable from
+"successfully flushed." That's a wider refactor; the three callsite
+guards in 0.29.0 + 0.30.0 cover every wheel-internal write path.
+
 ## [0.29.0] — 2026-05-24
 
 ### Fixed — check_payment no longer lies about persistence on cold start

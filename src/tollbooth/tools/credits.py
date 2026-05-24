@@ -76,7 +76,13 @@ async def _create_purchase_invoice(
     checkout_link = invoice.get("checkoutLink", "")
     expiry = invoice.get("expirationTime", "")
 
-    # Record pending invoice — flush immediately so the invoice survives cache loss
+    # Record pending invoice — flush immediately so the invoice survives cache loss.
+    # If the cache returned an uncached ledger because Neon was cold, mark_dirty
+    # silently no-ops and flush_user returns True for "nothing to flush." The
+    # invoice would then exist only at BTCPay with no record in the patron's
+    # ledger — recovery requires restore_credits, which the patron may not know
+    # to call. Log loudly so this shows up in traces even when the API call
+    # itself succeeds.
     ledger = await cache.get(user_id)
     ledger.pending_invoices.append(invoice_id)
     ledger.record_invoice_created(
@@ -85,9 +91,17 @@ async def _create_purchase_invoice(
         multiplier=1,
         created_at=datetime.now(timezone.utc).isoformat(),
     )
-    cache.mark_dirty(user_id)
-    if not await cache.flush_user(user_id):
-        logger.warning("Failed to flush pending invoice %s for %s.", invoice_id, user_id)
+    if getattr(ledger, "_vault_unavailable", False):
+        logger.error(
+            "Vault unavailable during purchase_credits — pending invoice %s "
+            "NOT persisted to ledger for %s. Patron will need restore_credits "
+            "to recover credits after paying.",
+            invoice_id, user_id,
+        )
+    else:
+        cache.mark_dirty(user_id)
+        if not await cache.flush_user(user_id):
+            logger.warning("Failed to flush pending invoice %s for %s.", invoice_id, user_id)
 
     # Fetch BOLT11 Lightning invoice string for direct wallet payment
     bolt11: str | None = None
@@ -459,6 +473,29 @@ async def restore_credits_tool(
             "credits_granted": 0,
             "balance_api_sats": ledger.balance_api_sats,
             "message": "Invoice already credited — no duplicate credits applied.",
+        }
+
+    # Refuse to restore when the cache returned an uncached, vault-unavailable
+    # ledger — any mutation here would be lost the moment this function returns,
+    # and the credits_granted result would be a lie (same trap as check_payment).
+    # Restore is the recovery path of last resort; it must not silently fail.
+    if getattr(ledger, "_vault_unavailable", False):
+        logger.error(
+            "Vault unavailable during restore_credits for %s (invoice %s). "
+            "Refusing to credit — would be lost on function return.",
+            user_id, invoice_id,
+        )
+        return {
+            "success": False,
+            "invoice_id": invoice_id,
+            "credits_granted": 0,
+            "persisted": False,
+            "error_code": "vault_unavailable",
+            "error": (
+                "Vault wasn't reachable. Restore aborted — your invoice at BTCPay "
+                "is unaffected. Retry restore_credits in 10–15 seconds once the "
+                "MCP has warmed up."
+            ),
         }
 
     # Vault-first: check if we have a settled invoice record in the ledger
