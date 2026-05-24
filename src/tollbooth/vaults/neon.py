@@ -284,12 +284,29 @@ class NeonVault:
         tables must be created in the operator's schema explicitly. Otherwise
         CREATE TABLE IF NOT EXISTS sees the table in ``public`` and skips,
         leaving the operator's schema without its own tables.
+
+        The per-operator role typically OWNS the schema (Authority transfers
+        ownership at provisioning time) but does NOT have CREATE on the
+        database itself. That means ``CREATE SCHEMA IF NOT EXISTS`` raises
+        ``permission denied for database`` even when the schema already
+        exists — Postgres checks the privilege before the IF NOT EXISTS
+        short-circuit. So: probe ``pg_namespace`` first, and only attempt
+        CREATE SCHEMA when the schema is genuinely missing.
         """
         # Ensure the operator's schema exists if we have one
         if self._schema_prefix:
             schema_name = self._schema_prefix.rstrip(".")
-            await self._execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name}")
             idx_prefix = f"{schema_name}_"
+            # Probe for existence — operator role can SELECT pg_namespace
+            # even when it can't CREATE on the database.
+            exists_result = await self._execute(
+                "SELECT 1 FROM pg_namespace WHERE nspname = $1",
+                [schema_name],
+            )
+            if not exists_result.get("rows"):
+                # Genuinely missing — attempt to create (will succeed for
+                # privileged roles, fail loud for unprivileged ones).
+                await self._execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name}")
         else:
             idx_prefix = ""
 

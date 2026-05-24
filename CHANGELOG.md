@@ -3,6 +3,42 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.32.0] — 2026-05-24
+
+### Fixed — ensure_schema no longer aborts on role-isolated tenants
+
+`NeonVault.ensure_schema()` opened with `CREATE SCHEMA IF NOT EXISTS
+{op_xxx}` to be defensive. But the per-operator Postgres role
+provisioned by `tenant_provisioner.provision_operator_schema` owns
+the schema (CREATE inside it works) but does NOT have CREATE
+privilege on the database itself. Postgres evaluates the database-
+level privilege before the `IF NOT EXISTS` short-circuit, so the
+statement raises `permission denied for database neondb` even when
+the schema already exists.
+
+Since `ensure_schema()` is called as the very first step of
+`_get_vault()`, the exception aborted the entire setup. No CREATE
+TABLE ran; subsequent `SELECT ... FROM op_xxx.balances` queries got
+`relation does not exist` and `_load_from_vault` returned
+`_vault_unavailable=True` forever. The 0.30.0 vault_unavailable
+guards correctly refused to pretend persistence worked, but the
+underlying issue stayed invisible until 0.31.0's surfaced the SQL
+error body.
+
+Fix: probe `pg_namespace` for the schema BEFORE attempting
+`CREATE SCHEMA`. Skip the create entirely when it already exists.
+The CREATE attempt is reserved for the genuine first-time case
+where a privileged role is bootstrapping; for the per-operator role
+visiting an Authority-provisioned schema (the production path),
+ensure_schema now flows straight to the CREATE TABLE statements,
+which succeed against the schema the role owns.
+
+Hit by Optionality after schema drop + Authority re-provision: the
+schema came back via the privileged Authority role's
+`tenant_provisioner.provision_operator_schema`, but the wheel could
+never populate it because the very first ensure_schema call failed
+for the operator role.
+
 ## [0.31.0] — 2026-05-24
 
 ### Added — `restore_neon_schema` admin tool + Neon error body surfaced
