@@ -3455,7 +3455,7 @@ def register_standard_tools(
                 "error": "Only the operator can modify pricing — provide proof.",
             }
         from tollbooth.identity_proof import verify_proof
-        if not verify_proof(proof, rt.operator_npub(), "set_pricing_model"):
+        if not verify_proof(proof, rt.operator_npub(), rt.runtime_name("set_pricing_model")):
             return {
                 "success": False,
                 "error": "Invalid proof — only the operator can modify pricing.",
@@ -3492,7 +3492,7 @@ def register_standard_tools(
                 "error": "Only the operator can reset pricing — provide proof.",
             }
         from tollbooth.identity_proof import verify_proof
-        if not verify_proof(proof, rt.operator_npub(), "reset_pricing_model"):
+        if not verify_proof(proof, rt.operator_npub(), rt.runtime_name("reset_pricing_model")):
             return {
                 "success": False,
                 "error": "Invalid proof — only the operator can reset pricing.",
@@ -3544,7 +3544,7 @@ def register_standard_tools(
                 "error": "Only the operator can re-run schema setup — provide proof.",
             }
         from tollbooth.identity_proof import verify_proof
-        if not verify_proof(proof, rt.operator_npub(), "restore_neon_schema"):
+        if not verify_proof(proof, rt.operator_npub(), rt.runtime_name("restore_neon_schema")):
             return {
                 "success": False,
                 "error": "Invalid proof — only the operator can re-run schema setup.",

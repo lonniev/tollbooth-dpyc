@@ -41,6 +41,27 @@ After 0.32.0 + Authority re-provisioning + Horizon redeploy, the patron's
 1,000 sats were restored cleanly via `restore_credits` against BTCPay's
 authoritative settled state. No data loss.
 
+## [0.35.0] — 2026-05-24
+
+### Fixed — operator-restricted tools now verify the runtime mcp_name, not the bare capability
+
+Three operator-restricted tools — `set_pricing_model`, `reset_pricing_model`,
+and `restore_neon_schema` — were calling `verify_proof(proof, npub,
+"<bare_capability>")` directly instead of `rt.runtime_name(...)`. Since
+wheel 0.24.0 the proof's `u`-tag is checked against the runtime mcp_name
+(`<slug>_<func>`, e.g. `optionality_set_pricing_model`), so any caller
+signing the wire name — including the Pricing Studio's `signRuntimeProof`
+— got `"Invalid proof — only the operator can modify pricing."` back.
+
+Same bug shape as `AuthorityCertifier.certify_credits` in 0.28.0: the
+verifier had moved to the namespaced name and a handful of callers
+weren't updated. Fix is one line per site: route through
+`rt.runtime_name("...")` like the rest of the codebase.
+
+This explains why the Studio got stuck on Set Pricing Model after the
+0.34.0 Reconcile diff added the oracle entries — the call was correctly
+signed but rejected by the gate.
+
 ## [0.34.0] — 2026-05-24
 
 ### Fixed — oracle tools now in initial pricing model (no Reconcile false positive)
