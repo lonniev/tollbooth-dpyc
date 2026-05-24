@@ -69,7 +69,11 @@ class AuthorityCertifier:
                     {
                         "npub": self._operator_npub,
                         "amount_sats": amount_sats,
-                        "proof": self._make_proof("certify_credits"),
+                        # The Authority's verify_proof gate uses the runtime
+                        # mcp_name (`<slug>_<func>`, e.g. "authority_certify_credits")
+                        # since wheel 0.24.0. Sign for whatever wire name the
+                        # caller is invoking — that's what the verifier sees.
+                        "proof": self._make_proof(self._certify_tool_name),
                     },
                 )
         except AuthorityCertifyError:

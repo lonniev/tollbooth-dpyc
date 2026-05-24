@@ -3,6 +3,27 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.28.0] — 2026-05-24
+
+### Fixed — AuthorityCertifier signs the runtime mcp_name, not the bare capability
+
+`AuthorityCertifier.certify_credits` was signing its kind-27235 proof
+for the bare capability string `"certify_credits"`. Since wheel
+0.24.0 the verifier on the Authority side gates against the runtime
+mcp_name (`<slug>_<func>`, e.g. `"authority_certify_credits"`). The
+mismatch caused every Operator → Authority certify call to fail with
+`Invalid identity proof.` — which in turn broke patron-side
+`purchase_credits` flows on every Operator, since the wheel auto-
+certifies through the Authority on each patron top-up.
+
+The fix is one line in `authority_client.py`: sign the proof using
+`self._certify_tool_name` (the same wire name the call uses) instead
+of the literal `"certify_credits"`. No public API change.
+
+Tests still pass; the regression slipped past coverage because the
+Operator → Authority cert path is exercised only by integration
+scenarios, not unit tests.
+
 ## [0.27.0] — 2026-05-23
 
 ### Fixed — Oracle registry failures no longer silently masked
