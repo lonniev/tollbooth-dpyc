@@ -3166,7 +3166,18 @@ def register_standard_tools(
         last_failure = None
         popped = 0
         stale_popped = 0
-        decrypt_key = exchange._privkey_hex
+        # For self-DM proofs (operator proves its OWN npub), the challenge
+        # was sent from an ephemeral agent npub, NOT from the operator's
+        # own. The patron's reply is therefore encrypted using the
+        # ephemeral ↔ patron ECDH pair, and decrypting with the operator's
+        # nsec produces garbage — the "undecryptable DM" symptom that
+        # made every drain return 0 matches. Mirror the credential-flow
+        # `receive` (nostr_credentials.py:1008-1012): look up the
+        # ephemeral agent's nsec for this (patron, service) pair and use
+        # IT to decrypt. Falls back to the operator nsec for non-self-DM
+        # flows (patron != operator).
+        agent_key = exchange._ephemeral_agents.get(poison_key) if poison_key else None
+        decrypt_key = agent_key.hex() if agent_key else exchange._privkey_hex
 
         for candidate in candidates:
             # Pop pre-challenge DMs without processing

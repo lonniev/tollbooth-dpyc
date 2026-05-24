@@ -41,6 +41,37 @@ After 0.32.0 + Authority re-provisioning + Horizon redeploy, the patron's
 1,000 sats were restored cleanly via `restore_credits` against BTCPay's
 authoritative settled state. No data loss.
 
+## [0.37.3] — 2026-05-24
+
+### Fixed — `receive_npub_proof` decrypts self-DM replies with ephemeral agent nsec
+
+For self-DM npub proofs (an operator or patron proving ownership of
+THEIR OWN npub against an MCP that also runs on that npub),
+`request_npub_proof`'s `open_channel` correctly generates an
+ephemeral agent nsec and sends the challenge from THAT ephemeral.
+The patron's reply is therefore encrypted to the ephemeral's pubkey
+using the ephemeral ↔ patron ECDH pair.
+
+But `receive_npub_proof` hardcoded `decrypt_key = exchange._privkey_hex`
+(the operator's own nsec), so the ECDH was degenerate (patron and
+self with the same key) and every popped candidate returned garbage
+or empty plaintext. The user's reply was on the relay, signed by the
+correct npub, but the wheel never saw the right plaintext — so the
+drain reported "popped N DMs, none matched."
+
+This is the same ephemeral-agent lookup the credential-flow
+`receive` already does (nostr_credentials.py:1008-1012). Mirroring
+it: look up `exchange._ephemeral_agents.get(poison_key)` and use
+that nsec for decryption when present; fall back to the operator's
+nsec for non-self-DM flows. No protocol change — just the right
+key for the right session.
+
+This explains the long sequence of "Scanned and cleaned N DMs but
+none matched" failures during the Optionality recovery dance and
+the pricing-model-reset attempts. The wheel was sending from one
+npub (ephemeral) and reading with another (operator), exactly as
+the user diagnosed.
+
 ## [0.37.2] — 2026-05-24
 
 ### Fixed — operator-restricted tools now accept cached proof tokens
