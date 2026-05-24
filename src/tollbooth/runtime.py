@@ -2052,13 +2052,15 @@ def register_standard_tools(
                 "error_code": "operator_proof_required",
                 "error": "Only the operator can restore credits — provide a proof signed by the operator's nsec.",
             }
-        from tollbooth.identity_proof import verify_proof
-        if not verify_proof(proof, rt.operator_npub(), rt.runtime_name("restore_credits")):
-            return {
-                "success": False,
-                "error_code": "operator_proof_invalid",
-                "error": "Invalid proof — only the operator can restore credits.",
-            }
+        # Accept both inline kind-27235 and cached poison-keyed proof tokens.
+        # The wheel's require_caller_proof checks the cache first (filled by
+        # the request/receive_npub_proof handshake) and falls through to
+        # inline Schnorr verification.
+        err = await rt.require_caller_proof(
+            rt.operator_npub(), proof, "restore_credits",
+        )
+        if err:
+            return err
         try:
             patron_npub = resolve_npub(patron_npub)
             cashier = await rt.ensure_cashier()
@@ -3482,12 +3484,15 @@ def register_standard_tools(
                 "success": False,
                 "error": "Only the operator can modify pricing — provide proof.",
             }
-        from tollbooth.identity_proof import verify_proof
-        if not verify_proof(proof, rt.operator_npub(), rt.runtime_name("set_pricing_model")):
-            return {
-                "success": False,
-                "error": "Invalid proof — only the operator can modify pricing.",
-            }
+        # Accept BOTH proof tactics — inline kind-27235 and cached
+        # poison-keyed token from request/receive_npub_proof.
+        # require_caller_proof checks the cache first, falls through to
+        # inline verification.
+        err = await rt.require_caller_proof(
+            rt.operator_npub(), proof, "set_pricing_model",
+        )
+        if err:
+            return err
 
         try:
             vault = await rt.vault()
@@ -3519,12 +3524,12 @@ def register_standard_tools(
                 "success": False,
                 "error": "Only the operator can reset pricing — provide proof.",
             }
-        from tollbooth.identity_proof import verify_proof
-        if not verify_proof(proof, rt.operator_npub(), rt.runtime_name("reset_pricing_model")):
-            return {
-                "success": False,
-                "error": "Invalid proof — only the operator can reset pricing.",
-            }
+        # Accept both inline kind-27235 and cached poison-keyed proof tokens.
+        err = await rt.require_caller_proof(
+            rt.operator_npub(), proof, "reset_pricing_model",
+        )
+        if err:
+            return err
         try:
             vault = await rt.vault()
             from tollbooth.pricing_store import PricingModelStore
@@ -3571,12 +3576,12 @@ def register_standard_tools(
                 "success": False,
                 "error": "Only the operator can re-run schema setup — provide proof.",
             }
-        from tollbooth.identity_proof import verify_proof
-        if not verify_proof(proof, rt.operator_npub(), rt.runtime_name("restore_neon_schema")):
-            return {
-                "success": False,
-                "error": "Invalid proof — only the operator can re-run schema setup.",
-            }
+        # Accept both inline kind-27235 and cached poison-keyed proof tokens.
+        err = await rt.require_caller_proof(
+            rt.operator_npub(), proof, "restore_neon_schema",
+        )
+        if err:
+            return err
 
         steps: list[dict[str, Any]] = []
 

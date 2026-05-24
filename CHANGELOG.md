@@ -41,6 +41,25 @@ After 0.32.0 + Authority re-provisioning + Horizon redeploy, the patron's
 1,000 sats were restored cleanly via `restore_credits` against BTCPay's
 authoritative settled state. No data loss.
 
+## [0.37.2] — 2026-05-24
+
+### Fixed — operator-restricted tools now accept cached proof tokens
+
+`set_pricing_model`, `reset_pricing_model`, `restore_neon_schema`,
+and `restore_credits` called the bare `identity_proof.verify_proof`,
+which only validates inline kind-27235 events. That meant a caller
+who had completed the standard `request_npub_proof` →
+`receive_npub_proof` handshake — and held a cached poison-keyed
+proof token — couldn't use it for these operator-restricted tools.
+Their only path was an inline-signed JSON event, which agents
+without a Studio-style proof-signing helper can't easily produce.
+
+Fix: route all four call sites through `rt.require_caller_proof()`
+like paid tools already do. That helper wraps
+`identity_proof.require_proof`, which checks the proven-npub cache
+first and falls back to inline Schnorr — so both tactics work and
+the operator can use either path.
+
 ## [0.37.1] — 2026-05-24
 
 ### Fixed — `check_price` flat branch passes kwargs to `compute()`
