@@ -41,6 +41,24 @@ After 0.32.0 + Authority re-provisioning + Horizon redeploy, the patron's
 1,000 sats were restored cleanly via `restore_credits` against BTCPay's
 authoritative settled state. No data loss.
 
+## [0.37.1] — 2026-05-24
+
+### Fixed — `check_price` flat branch passes kwargs to `compute()`
+
+The flat-pricing branch of `check_price` called `pricing.compute()`
+with no kwargs, which meant the new categorical-multiplier table
+(0.37.0) couldn't resolve any param values. The FE preview always
+got back the bare base price even when a deal_scenario kwargs
+preview was supplied. Now passes `**parsed_kwargs` through, and the
+response includes a `multipliers` field exposing the full table so
+the FE can render a price-by-selection matrix instead of just the
+current point.
+
+Also: `check_price`'s `tool_id` argument now accepts a bare
+capability string (e.g. `"deal_scenario"`) in addition to a UUID.
+The wheel resolves via `capability_uuid()`. FE callers usually have
+the capability name and don't want to derive UUIDs locally.
+
 ## [0.37.0] — 2026-05-24
 
 ### Added — categorical multipliers in `ToolPricing`

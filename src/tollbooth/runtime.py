@@ -3637,11 +3637,26 @@ def register_standard_tools(
         trials, surge pricing). Free — no credits required.
 
         Args:
-            tool_id: The tool's UUID (from the pricing model).
+            tool_id: Either the tool's UUID (from the pricing model) or a
+                bare capability string (e.g. ``"deal_scenario"``). FE
+                callers usually have the capability name; this resolves
+                both so the FE doesn't need to derive UUIDs locally.
             tool_kwargs: Optional JSON object with tool call parameters
-                for ad valorem pricing preview (e.g. '{"amount_sats": 5000}').
+                for ad valorem / categorical-multiplier pricing preview
+                (e.g. '{"amount_sats": 5000}' or
+                '{"difficulty": "sovereign", "mode": "live"}').
         """
         identity = rt._tool_registry.get(tool_id)
+        # Fallback: caller passed a capability name instead of a UUID.
+        if identity is None:
+            from tollbooth.tool_identity import capability_uuid as _cap_uuid
+            try:
+                resolved_id = _cap_uuid(tool_id)
+                identity = rt._tool_registry.get(resolved_id)
+                if identity is not None:
+                    tool_id = resolved_id
+            except Exception:
+                pass
         if identity is None:
             return {
                 "success": False,
@@ -3685,10 +3700,20 @@ def register_standard_tools(
                     f"to preview the cost (e.g. '{{\"{pricing.rate_param}\": 1000}}')."
                 )
         else:
-            base_cost = pricing.compute()
-            result["pricing_type"] = "flat"
+            # Flat pricing may still scale by categorical multipliers
+            # (0.37.0+ ToolPricing feature). Pass parsed_kwargs through
+            # so the lookup tables resolve against the caller's preview.
+            base_cost = pricing.compute(**parsed_kwargs)
+            result["pricing_type"] = "flat" if not pricing.multipliers else "flat+multipliers"
             result["base_cost_api_sats"] = base_cost
             result["effective_cost_api_sats"] = base_cost
+            if pricing.multipliers:
+                # Expose the table so the FE can render a price-by-selection
+                # matrix instead of just the current point.
+                result["multipliers"] = {
+                    param: {k: v for k, v in lookup}
+                    for param, lookup in pricing.multipliers
+                }
 
         gate = rt._constraint_gate
         base_cost = result.get("base_cost_api_sats") or 0
