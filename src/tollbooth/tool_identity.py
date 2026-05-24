@@ -53,6 +53,11 @@ class ToolIdentity:
     pricing_hint_value: int = 0        # flat sats or percent rate
     pricing_hint_param: str = ""       # kwarg name for percent base (e.g. "amount_sats")
     pricing_hint_min: int = 0          # floor in sats
+    # Categorical-multiplier hint for tools whose price scales by enum-
+    # valued kwargs (e.g. Optionality's deal_scenario: ``difficulty`` ×
+    # ``mode``). Shape: ``(("difficulty", (("apprentice", 1.0), …)), …)``.
+    # Frozen tuple form keeps the dataclass hashable.
+    pricing_hint_multipliers: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = ()
 
     @property
     def tool_id(self) -> str:

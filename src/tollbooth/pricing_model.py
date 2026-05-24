@@ -34,6 +34,10 @@ class ToolPrice:
     price_formula: str | None = None   # percent expression or formula string
     min_cost: int = 0                  # floor — minimum cost in sats
     max_cost: int | None = None        # ceiling — maximum cost in sats
+    # Categorical multipliers — see ToolPricing for shape. Serialized as a
+    # JSON object {param_name: {value: multiplier}}. Used for enum-keyed
+    # surcharges like Optionality's difficulty × historicity table.
+    multipliers: dict[str, dict[str, float]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -52,11 +56,21 @@ class ToolPrice:
             d["min_cost"] = self.min_cost
         if self.max_cost is not None:
             d["max_cost"] = self.max_cost
+        if self.multipliers:
+            d["multipliers"] = self.multipliers
         return d
 
     def to_tool_pricing(self) -> "ToolPricing":
         """Convert this declarative price entry to a runtime ToolPricing."""
         from tollbooth.pricing import ToolPricing
+
+        # Multipliers normalize to the frozen-tuple shape ToolPricing wants.
+        mults: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = ()
+        if self.multipliers:
+            mults = tuple(
+                (str(param), tuple((str(k), float(v)) for k, v in lookup.items()))
+                for param, lookup in self.multipliers.items()
+            )
 
         if self.price_type == "percent":
             return ToolPricing(
@@ -64,11 +78,13 @@ class ToolPrice:
                 rate_param=self.price_formula or "",
                 min_cost=self.min_cost,
                 max_cost=self.max_cost,
+                multipliers=mults,
             )
         return ToolPricing(
             fixed=self.price_sats,
             min_cost=self.min_cost,
             max_cost=self.max_cost,
+            multipliers=mults,
         )
 
     @classmethod
@@ -79,6 +95,14 @@ class ToolPrice:
                 f"tool_id is required for tool '{data.get('tool_name', '?')}'. "
                 "Run reset_pricing_model to re-seed from the tool registry."
             )
+        raw_mults = data.get("multipliers")
+        mults: dict[str, dict[str, float]] | None = None
+        if isinstance(raw_mults, dict):
+            mults = {
+                str(p): {str(k): float(v) for k, v in lookup.items()}
+                for p, lookup in raw_mults.items()
+                if isinstance(lookup, dict)
+            }
         return cls(
             tool_id=tool_id,
             tool_name=data["tool_name"],
@@ -90,6 +114,7 @@ class ToolPrice:
             price_formula=data.get("price_formula", None),
             min_cost=int(data.get("min_cost", 0)),
             max_cost=int(data["max_cost"]) if data.get("max_cost") is not None else None,
+            multipliers=mults,
         )
 
 

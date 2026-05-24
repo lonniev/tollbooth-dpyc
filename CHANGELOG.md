@@ -41,6 +41,45 @@ After 0.32.0 + Authority re-provisioning + Horizon redeploy, the patron's
 1,000 sats were restored cleanly via `restore_credits` against BTCPay's
 authoritative settled state. No data loss.
 
+## [0.37.0] — 2026-05-24
+
+### Added — categorical multipliers in `ToolPricing`
+
+The existing `ToolPricing` only supported fixed costs and
+percent-of-numeric-arg costs. Optionality needed a tool whose price
+scales by the product of two enum-valued kwargs (``difficulty`` ×
+``mode``), which neither shape covered. Added a `multipliers` field
+to `ToolPricing` and a parallel `multipliers` dict on `ToolPrice` so
+the pricing model JSON round-trips it.
+
+Shape on the JSON side:
+
+```json
+{
+  "tool_name": "optionality_deal_scenario",
+  "price_sats": 1,
+  "multipliers": {
+    "difficulty": {"apprentice": 1, "journeyman": 2, "adept": 3, "sovereign": 4},
+    "mode":       {"fiction": 1, "historical": 5, "live": 10}
+  }
+}
+```
+
+Result: `compute(difficulty="sovereign", mode="live")` returns
+`ceil(1 × 4 × 10) = 40` sats. Missing param values resolve to a
+multiplier of 1 (no surcharge). Compatible with the existing
+fixed/percent shapes — they compose multiplicatively in the order
+fixed → percent → multipliers → ceiling.
+
+`ToolIdentity` gains a parallel `pricing_hint_multipliers` field
+(frozen-tuple form for hashability) so operators can declare the
+seed table in their `_DOMAIN_TOOLS` list; `_build_initial_pricing_model`
+includes it in the initial pricing model entry. Operators on existing
+models pick up the multipliers after a `reset_pricing_model` call.
+
+`check_price(tool_id, tool_kwargs="...")` now correctly returns the
+multiplier-scaled price when the kwargs match a configured tool.
+
 ## [0.36.0] — 2026-05-24
 
 ### Changed — restore_credits is now operator-restricted (BREAKING)

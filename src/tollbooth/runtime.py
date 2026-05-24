@@ -1832,6 +1832,12 @@ def _build_initial_pricing_model(
             entry["price_formula"] = identity.pricing_hint_param
         if identity.pricing_hint_min > 0:
             entry["min_cost"] = identity.pricing_hint_min
+        if identity.pricing_hint_multipliers:
+            # Serialize the frozen tuple back to nested-dict for JSON.
+            entry["multipliers"] = {
+                param: {k: float(v) for k, v in lookup}
+                for param, lookup in identity.pricing_hint_multipliers
+            }
         tools.append(entry)
 
     model = {
