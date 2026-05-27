@@ -19,7 +19,7 @@ Usage::
 
     runtime = OperatorRuntime(
         nsec_env_var="TOLLBOOTH_NOSTR_OPERATOR_NSEC",
-        tool_registry={"my_tool": ToolIdentity(capability="my_tool", category="read", intent="...")},
+        tool_registry={MY_TOOL_UUID: ToolIdentity(tool_id=MY_TOOL_UUID, capability="my_tool", category="read", intent="...")},
         operator_credential_template=CredentialTemplate(
             service="my-operator", ...
         ),
@@ -3641,6 +3641,39 @@ def register_standard_tools(
                 if all_ok else
                 "Some schema steps failed — see steps[] for per-step error messages."
             ),
+        }
+
+    # -- Canonical-identity introspection ------------------------------
+
+    @tool
+    async def list_canonical_identities() -> dict[str, Any]:
+        """Return canonical (tool_id, mcp_name, …) for every registered tool.
+
+        The authoritative source for any client (Studio, agents, FE)
+        that needs to know how this MCP identifies its tools.
+        Reconcile uses this output to UUID-join against the stored
+        pricing model — no name-based UUID derivation, no guessing.
+
+        If the operator renames a function or rebrands a slug, the
+        mcp_name in this output changes but tool_id stays. That's the
+        whole point of the canonical-UUID design.
+
+        Free, no side effects.
+        """
+        items: list[dict[str, Any]] = []
+        for tool_id, identity in rt._tool_registry.items():
+            items.append({
+                "tool_id": tool_id,
+                "mcp_name": rt.mcp_name_for(tool_id),
+                "category": identity.category,
+                "intent": identity.intent,
+                "capability": identity.capability,
+            })
+        return {
+            "success": True,
+            "operator_npub": rt.operator_npub(),
+            "count": len(items),
+            "tools": items,
         }
 
     # -- Constraint Engine tools ---------------------------------------

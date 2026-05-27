@@ -570,8 +570,13 @@ class TestNpubEnforcement:
     @pytest.mark.asyncio
     async def test_debit_or_deny_passes_free_tools(self) -> None:
         """Free tools pass without npub."""
-        from tollbooth.tool_identity import ToolIdentity
-        identity = ToolIdentity(capability="free_tool", category="free", intent="test")
+        from tollbooth.tool_identity import ToolIdentity, capability_uuid
+        identity = ToolIdentity(
+            tool_id=capability_uuid("free_tool"),
+            capability="free_tool",
+            category="free",
+            intent="test",
+        )
         rt = OperatorRuntime(
             tool_registry={identity.tool_id: identity},
             service_name="Test",
@@ -602,11 +607,17 @@ class TestInitialPricingModel:
     def test_build_initial_pricing_model(self) -> None:
         """Generates a scaffold with all tools at 0 sats."""
         from tollbooth.runtime import _build_initial_pricing_model
-        from tollbooth.tool_identity import ToolIdentity
+        from tollbooth.tool_identity import ToolIdentity, capability_uuid
         import json
 
-        search = ToolIdentity(capability="search", category="read", intent="Find stuff", mcp_name="test_search")
-        create = ToolIdentity(capability="create", category="write", intent="Make stuff", mcp_name="test_create")
+        search = ToolIdentity(
+            tool_id=capability_uuid("search"),
+            capability="search", category="read", intent="Find stuff", mcp_name="test_search",
+        )
+        create = ToolIdentity(
+            tool_id=capability_uuid("create"),
+            capability="create", category="write", intent="Make stuff", mcp_name="test_create",
+        )
         rt = OperatorRuntime(
             tool_registry={
                 search.tool_id: search,

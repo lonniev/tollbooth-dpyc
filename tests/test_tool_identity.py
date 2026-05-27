@@ -27,12 +27,29 @@ class TestCapabilityUUID:
 
 
 class TestToolIdentity:
-    def test_tool_id_property(self) -> None:
-        ti = ToolIdentity(capability="check_balance", category="free", intent="test")
-        assert ti.tool_id == capability_uuid("check_balance")
+    def test_explicit_tool_id(self) -> None:
+        """tool_id is now an explicit field, NOT derived from capability."""
+        ti = ToolIdentity(
+            tool_id="aaaaaaaa-1111-2222-3333-444444444444",
+            capability="check_balance",
+            category="free",
+            intent="test",
+        )
+        # Explicit value is preserved verbatim; capability is decorative.
+        assert ti.tool_id == "aaaaaaaa-1111-2222-3333-444444444444"
+
+    def test_capability_uuid_helper_still_available(self) -> None:
+        """capability_uuid() is retained as a REPL helper for picking
+        an initial UUID seed — not called at runtime by the wheel."""
+        assert capability_uuid("check_balance") == "f09d5935-e58d-52a6-a5d3-ff82794ec7fb"
 
     def test_frozen(self) -> None:
-        ti = ToolIdentity(capability="x", category="free", intent="y")
+        ti = ToolIdentity(
+            tool_id="bbbbbbbb-1111-2222-3333-444444444444",
+            capability="x",
+            category="free",
+            intent="y",
+        )
         try:
             ti.capability = "z"  # type: ignore[misc]
             assert False, "should be frozen"

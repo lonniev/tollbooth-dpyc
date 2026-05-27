@@ -89,8 +89,24 @@ OPERATOR_CREDENTIAL_TEMPLATE = CredentialTemplate(
 # Authority domain tool registry
 # ======================================================================
 
+# Frozen UUIDs for Authority's domain tools. Derived once from
+# capability_uuid("<name>") at refactor time; pinned as constants
+# thereafter so rebrands and renames don't break pricing-model rows.
+CERTIFY_CREDITS_UUID          = "2b132223-a5c4-51e3-a854-a8445c0d7e0f"
+REGISTER_OPERATOR_UUID        = "21de2356-1e49-52eb-8f28-6fed77c039d9"
+UPDATE_OPERATOR_UUID          = "a7856d24-0665-5a3d-ae81-87a54fa35f26"
+DEREGISTER_OPERATOR_UUID      = "abbaa449-2b72-5632-812a-fb95c219e7d3"
+GET_OPERATOR_CONFIG_UUID      = "f77b4457-28cc-5e14-8bca-64a09d3ac5a0"
+OPERATOR_STATUS_UUID          = "1c7bdb45-cdeb-5b3f-9a81-2b8257e171b4"
+CHECK_DPYC_MEMBERSHIP_UUID    = "644bfdbc-aefd-58df-914f-e155aef2a94e"
+REGISTER_AUTHORITY_NPUB_UUID  = "0ce23a58-eab1-5a66-b9e4-f62219f5f6d2"
+CONFIRM_AUTHORITY_CLAIM_UUID  = "0c32c30f-4a1f-51d9-9b46-785de2d3e15a"
+CHECK_AUTHORITY_APPROVAL_UUID = "c901360d-a32e-53ea-b965-df35a66af68a"
+
+
 AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
     ToolIdentity(
+        tool_id=CERTIFY_CREDITS_UUID,
         capability="certify_credits",
         category="write",
         intent="Certify a purchase order with Schnorr-signed certificate.",
@@ -100,46 +116,55 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         pricing_hint_min=10,
     ),
     ToolIdentity(
+        tool_id=REGISTER_OPERATOR_UUID,
         capability="register_operator",
         category="free",
         intent="Provision an operator in the Authority ledger.",
     ),
     ToolIdentity(
+        tool_id=UPDATE_OPERATOR_UUID,
         capability="update_operator",
         category="free",
         intent="Update an operator's community registry entry.",
     ),
     ToolIdentity(
+        tool_id=DEREGISTER_OPERATOR_UUID,
         capability="deregister_operator",
         category="free",
         intent="Remove an operator from the DPYC community registry.",
     ),
     ToolIdentity(
+        tool_id=GET_OPERATOR_CONFIG_UUID,
         capability="get_operator_config",
         category="restricted",
         intent="Retrieve operator bootstrap configuration.",
     ),
     ToolIdentity(
+        tool_id=OPERATOR_STATUS_UUID,
         capability="operator_status",
         category="free",
         intent="View registration status, balance, and Authority npub.",
     ),
     ToolIdentity(
+        tool_id=CHECK_DPYC_MEMBERSHIP_UUID,
         capability="check_dpyc_membership",
         category="free",
         intent="Look up an npub in the DPYC community registry.",
     ),
     ToolIdentity(
+        tool_id=REGISTER_AUTHORITY_NPUB_UUID,
         capability="register_authority_npub",
         category="free",
         intent="Step 1/3 of Authority onboarding — send DM challenge.",
     ),
     ToolIdentity(
+        tool_id=CONFIRM_AUTHORITY_CLAIM_UUID,
         capability="confirm_authority_claim",
         category="free",
         intent="Step 2/3 of Authority onboarding — verify candidate DM.",
     ),
     ToolIdentity(
+        tool_id=CHECK_AUTHORITY_APPROVAL_UUID,
         capability="check_authority_approval",
         category="free",
         intent="Step 3/3 of Authority onboarding — check parent approval.",

@@ -3,6 +3,68 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.38.0 — 2026-05-27
+
+### Changed (breaking for tool declarations) — `tool_id` is now an explicit, opaque, frozen field
+
+Prior versions derived each tool's `tool_id` (UUID) from a *string*
+inside `@runtime.paid_tool(capability_uuid("X"))` and the matching
+`ToolIdentity(capability="X", …)`. Renaming `X` in code — exactly what
+TheBrain MCP did in `14892cb` ("UUID-keyed internals" / v1.9.20) — caused
+the derived UUID to change, which orphaned every pricing-model row in
+Neon that was keyed by the OLD UUID. The wheel's gate would look up
+the NEW UUID, miss, and refuse the call. Studio's "repair" added in
+pricing-studio 1.9.4 also could not see this class of orphan and was
+ultimately found to make things worse for operators where the function
+name and capability arg in the decorator had diverged.
+
+The fix removes the derivation step entirely. `tool_id` is now a
+required, opaque `str` field on `ToolIdentity` (no longer a `@property`
+that computes from `capability`). Operators paste an explicit UUID
+constant — generated once via `capability_uuid("X")` or `uuid.uuid4()`
+at tool birth — and never touch it again. Renaming any field of the
+ToolIdentity, the Python function, or the operator slug leaves the
+UUID intact and the pricing-model row keyed correctly forever.
+
+#### Migration for operators
+
+For each tool, declare its current canonical UUID as a module-level
+constant and pass it to `ToolIdentity(tool_id=...)`. The UUID values
+are exactly what `capability_uuid("<capability>")` produced in 0.37.x,
+so existing pricing-model rows continue to match without any data
+migration. The wheel itself ships frozen constants for every
+`STANDARD_IDENTITIES` entry and for every Authority domain tool. Each
+operator (`tollbooth-sample`, Optionality, TheBrain, Schwab, Excalibur,
+Taxsort, Shortlinks, dpyc-oracle, OAuth2 Collector) updates their own
+`_DOMAIN_TOOLS` the same way and bumps their wheel pin.
+
+A separate Studio rewrite (pricing-studio 1.10) replaces the local
+UUID-derivation in `ReconciliationViewModel` with a call to the new
+`list_canonical_identities()` tool below.
+
+### Added — `list_canonical_identities()` free tool
+
+Returns `{tools: [{tool_id, mcp_name, category, intent, capability}, …]}`
+for every tool in the running wheel's `_tool_registry`. Source of truth
+for any client (Studio, agents, FE) that needs to know how this MCP
+identifies its tools.
+
+Reserved UUID `e7a9c2f6-1d4b-4c3e-8f7a-5b9d2c1e8f3a` (will not collide
+with any historical `capability_uuid("...")` derivation; chosen as a
+fresh constant).
+
+### Tests
+
+- `tests/test_tool_identity.py` updated: `tool_id` is checked as an
+  explicit value not a derivation; `capability_uuid()` is exercised
+  separately as the REPL helper it now is.
+- `tests/test_paid_tool.py`, `tests/test_runtime_onboarding.py`: every
+  `ToolIdentity(...)` constructor call site provides an explicit
+  `tool_id` (using `capability_uuid(name)` as the value, preserving
+  test semantics).
+- Full suite: 1354 passed.
+
+
 ## 0.30.x → 0.33.0 series — TL;DR
 
 Four back-to-back releases triggered by a real-world recovery: a patron's

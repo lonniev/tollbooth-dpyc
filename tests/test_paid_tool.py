@@ -60,7 +60,12 @@ def _make_registry(tool_costs: dict[str, int] | None = None) -> tuple[dict[str, 
     resolver_costs: dict[str, int] = {}  # keyed by tool_id (UUID)
     for name, cost in costs.items():
         category = "free" if cost == 0 else "read"
-        identity = ToolIdentity(capability=name, category=category, intent=f"Test tool {name}")
+        identity = ToolIdentity(
+            tool_id=capability_uuid(name),
+            capability=name,
+            category=category,
+            intent=f"Test tool {name}",
+        )
         registry[identity.tool_id] = identity
         resolver_costs[identity.tool_id] = cost
     return registry, resolver_costs
@@ -267,7 +272,7 @@ class TestPaidToolDecorator:
     @pytest.mark.asyncio
     async def test_unpriced_tool_blocked(self):
         """A tool in the model but not yet priced (TBD) should be blocked."""
-        identity = ToolIdentity(capability="unpriced", category="write", intent="test")
+        identity = ToolIdentity(tool_id=capability_uuid("unpriced"), capability="unpriced", category="write", intent="test")
         registry = {identity.tool_id: identity}
         rt = OperatorRuntime(tool_registry=registry, nsec_env_var="__UNUSED__")
         # Tool is in model at 0 sats but priced=False (TBD)
@@ -288,7 +293,7 @@ class TestPaidToolDecorator:
     @pytest.mark.asyncio
     async def test_intentionally_free_tool_allowed(self):
         """A tool priced at 0 sats with priced=True is intentionally free."""
-        identity = ToolIdentity(capability="promo", category="write", intent="test")
+        identity = ToolIdentity(tool_id=capability_uuid("promo"), capability="promo", category="write", intent="test")
         registry = {identity.tool_id: identity}
         rt = OperatorRuntime(tool_registry=registry, nsec_env_var="__UNUSED__")
         rt._pricing_resolver = FakePricingResolver(
@@ -378,7 +383,7 @@ class TestErrorCodeMapping:
     @pytest.mark.asyncio
     async def test_unpriced_tool_returns_tool_not_priced_code(self):
         from tollbooth.constants import ErrorCode
-        identity = ToolIdentity(capability="unpriced2", category="write", intent="test")
+        identity = ToolIdentity(tool_id=capability_uuid("unpriced2"), capability="unpriced2", category="write", intent="test")
         registry = {identity.tool_id: identity}
         rt = OperatorRuntime(tool_registry=registry, nsec_env_var="__UNUSED__")
         rt._pricing_resolver = FakePricingResolver(
