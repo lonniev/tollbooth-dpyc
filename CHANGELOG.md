@@ -3,6 +3,65 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.39.0 — 2026-05-31
+
+### Changed (breaking protocol) — Secure Courier rendezvous-relay pinning
+
+Every persistent failure of `request_credential_channel` /
+`request_npub_proof` had the same root cause: sender and receiver
+disagreed on which Nostr relay to use, made worse by individual relay
+outages. The symptom — `receive_*` pops N stale DMs and never matches
+the actual reply — meant the responder published on a relay the
+courier's listener wasn't watching.
+
+`NostrCredentialExchange.open_channel()` now pins the rendezvous to
+the specific relay it successfully published the challenge on:
+
+- Iterates the configured relay list in order; the first relay that
+  accepts the publish becomes the per-conversation rendezvous.
+- The committed relay URL is embedded in the DM body as
+  `rendezvous_relay = @@@<wss-url>@@@` so the responder knows where
+  to publish their reply.
+- On failure the DM body is rebuilt with the next candidate URL and
+  resigned (the chicken-and-egg of "embed before publish" — the
+  embedded URL is always the one publish actually succeeded on).
+- The pinned relay is persisted in a new sibling dict
+  `_pinned_relays` and in the `__pending__{service}` vault blob for
+  cold-start recovery.
+- When every relay rejects the publish the courier raises a new
+  `CourierUnreachableError` — a lifecycle state, not a stack trace.
+  Callers must re-issue the request after checking relay connectivity.
+
+`request_npub_proof` surfaces the committed `rendezvous_relay` in its
+response so MCPs and frontends can display it to the human-in-the-loop
+responder. `request_credential_channel` already returns the full
+`open_channel` result dict so the field propagates naturally.
+
+The receive-side pin enforcement (subscribe-only-to-pin and
+mismatch-rejection) is deliberately not part of this release —
+responder cooperation via the embedded URL already eliminates the
+asymmetry; full receive-side enforcement is a follow-up once every
+deployed responder honors the pin.
+
+### Migration
+
+- **Old responders (clients that ignore `rendezvous_relay`):** still
+  work as before — receive subscribes to the full relay list, so a
+  reply that happens to land on any configured relay is found. They
+  just don't get the routing hint.
+- **Cooperating responders (Pricing Studio v1.x with this wheel pin):**
+  parse `rendezvous_relay` from the courier DM and display it to the
+  user, who configures their Nostr client to publish there. End of
+  asymmetry; reply success rate jumps.
+- **MCP operators:** no code change required; the new
+  `rendezvous_relay` field appears in `request_npub_proof` /
+  `request_credential_channel` responses. Pass through to your UI.
+- **`CourierUnreachableError` is new:** if your wrapper code catches
+  `CourierError` it inherits the new subclass automatically. If you
+  catch `Exception` specifically and care about distinguishing
+  "unreachable" from other failures, branch on
+  `isinstance(exc, CourierUnreachableError)`.
+
 ## 0.38.0 — 2026-05-27
 
 ### Changed (breaking for tool declarations) — `tool_id` is now an explicit, opaque, frozen field

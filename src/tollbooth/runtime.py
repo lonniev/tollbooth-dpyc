@@ -3040,8 +3040,12 @@ def register_standard_tools(
         except Exception as e:
             return {"success": False, "error": f"Failed to send proof request: {e}"}
 
-        # Extract the poison phrase from the channel result
+        # Extract the poison phrase and rendezvous relay from the channel
+        # result. The rendezvous relay is the specific relay the courier
+        # successfully published the challenge on — the responder must
+        # reply on that same relay so the courier's listener finds it.
         poison = result.get("poison", "")
+        rendezvous_relay = result.get("rendezvous_relay", "")
 
         # Store challenge timestamp in vault for receive_npub_proof
         try:
@@ -3053,7 +3057,7 @@ def register_standard_tools(
         except Exception:
             pass
 
-        return {
+        response: dict[str, Any] = {
             "success": True,
             "proof_token": poison,
             "message": (
@@ -3061,6 +3065,14 @@ def register_standard_tools(
                 "Call receive_npub_proof to complete."
             ),
         }
+        if rendezvous_relay:
+            response["rendezvous_relay"] = rendezvous_relay
+            response["message"] = (
+                f"Proof request sent via Secure Courier on {rendezvous_relay}. "
+                f"The patron MUST reply on that relay (it's embedded in the DM). "
+                f"Call receive_npub_proof after the patron confirms they replied."
+            )
+        return response
 
     @tool
     async def receive_npub_proof(
@@ -3123,6 +3135,11 @@ def register_standard_tools(
                     exchange._pending_poisons[poison_key] = (
                         pending["poison"], p_expiry,
                     )
+                    # Restore the rendezvous pin so receive can clean up
+                    # the sibling dict on success even after a restart.
+                    pinned_relay = pending.get("rendezvous_relay")
+                    if pinned_relay and poison_key not in exchange._pinned_relays:
+                        exchange._pinned_relays[poison_key] = pinned_relay
                     expected = exchange._pending_poisons.get(poison_key)
 
         expected_phrase = expected[0] if expected else None
@@ -3234,9 +3251,11 @@ def register_standard_tools(
         for candidate in candidates[popped:]:
             exchange._pop_event(candidate.get("id", ""))
 
-        # Clean up poison state
+        # Clean up poison state and rendezvous pin
         if poison_key and poison_key in exchange._pending_poisons:
             del exchange._pending_poisons[poison_key]
+        if poison_key:
+            exchange._pinned_relays.pop(poison_key, None)
 
         # One summary DM to patron
         if matched_payload is not None:

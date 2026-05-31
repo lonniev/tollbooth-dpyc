@@ -227,6 +227,17 @@ class CourierValidationError(CourierError):
     """Raised when credential payload fails template validation."""
 
 
+class CourierUnreachableError(CourierError):
+    """Raised when no configured relay accepted the challenge publish.
+
+    Surfaces as a lifecycle state to the caller: the courier exhausted
+    every candidate relay without a successful publish, so no rendezvous
+    could be pinned and the responder has nowhere to reply. The caller
+    should re-issue request_credential_channel / request_npub_proof
+    after checking relay connectivity.
+    """
+
+
 class NostrCredentialExchange:
     """Secure Courier Service — out-of-band credential delivery via Nostr.
 
@@ -310,6 +321,12 @@ class NostrCredentialExchange:
         self._consumed_ids: set[str] = set()
         # Poison slugs: {(recipient_npub, service): (phrase, expiry_timestamp)}
         self._pending_poisons: dict[tuple[str, str], tuple[str, float]] = {}
+        # Per-conversation rendezvous relay pins: {(recipient_npub, service): wss_url}
+        # The wheel commits one relay per challenge (the one that accepted the
+        # publish) and embeds it in the DM body so the responder knows where
+        # to send their reply. Lives alongside _pending_poisons; cleared
+        # together on receive success / expiry.
+        self._pinned_relays: dict[tuple[str, str], str] = {}
         # Ephemeral agent keys for self-DM avoidance:
         # {(recipient_npub, service): PrivateKey}
         self._ephemeral_agents: dict[tuple[str, str], PrivateKey] = {}
@@ -366,7 +383,13 @@ class NostrCredentialExchange:
         except Exception as exc:
             logger.warning("Failed to publish profile: %s", exc)
 
-    def send_dm(self, recipient_npub: str, message_text: str) -> None:
+    def send_dm(
+        self,
+        recipient_npub: str,
+        message_text: str,
+        *,
+        target_relay: str | None = None,
+    ) -> None:
         """Send a DM via both NIP-17 gift wrap and NIP-04 legacy.
 
         Sends the same message twice — once as a NIP-17 kind 1059 gift
@@ -380,6 +403,11 @@ class NostrCredentialExchange:
         Args:
             recipient_npub: Patron's npub (bech32).
             message_text: Plaintext message to encrypt and send.
+            target_relay: If set, publish only to this single relay
+                (rendezvous-pinned send used by ``open_channel``).
+                When ``None`` (default), fan out to all configured relays
+                — used for profile publishes, deletions, and ack DMs that
+                don't need pinning.
         """
         if not self._enabled:
             raise CourierNotReady("Secure Courier not enabled.")
@@ -401,19 +429,30 @@ class NostrCredentialExchange:
         # ── NIP-17 gift wrap (kind 1059) ─────────────────────────────
         try:
             message = self._build_gift_wrap(recipient_hex, message_text)
-            results = self._publish_to_relays(message) or []
-            accepted = sum(1 for _, ok, _ in results if ok)
-            nip17_ok = accepted > 0
-            if nip17_ok:
-                logger.info(
-                    "Sent NIP-17 gift-wrapped DM to %s (%d/%d relays)",
-                    recipient_npub[:20], accepted, len(results),
-                )
+            if target_relay:
+                ok, detail = self._publish_to_one_relay(message, target_relay)
+                nip17_ok = ok
+                if nip17_ok:
+                    logger.info(
+                        "Sent NIP-17 gift-wrapped DM to %s via pinned relay %s",
+                        recipient_npub[:20], target_relay,
+                    )
+                else:
+                    errors.append(f"NIP-17 @ {target_relay}: {detail}")
             else:
-                details = "; ".join(
-                    f"{url}: {err}" for url, ok, err in results if not ok
-                )
-                errors.append(f"NIP-17: {details}")
+                results = self._publish_to_relays(message) or []
+                accepted = sum(1 for _, ok, _ in results if ok)
+                nip17_ok = accepted > 0
+                if nip17_ok:
+                    logger.info(
+                        "Sent NIP-17 gift-wrapped DM to %s (%d/%d relays)",
+                        recipient_npub[:20], accepted, len(results),
+                    )
+                else:
+                    details = "; ".join(
+                        f"{url}: {err}" for url, ok, err in results if not ok
+                    )
+                    errors.append(f"NIP-17: {details}")
         except Exception as exc:
             errors.append(f"NIP-17: {exc}")
             logger.debug("NIP-17 send failed: %s", exc)
@@ -421,19 +460,30 @@ class NostrCredentialExchange:
         # ── NIP-04 legacy DM (kind 4) ───────────────────────────────
         try:
             message = self._build_nip04_dm(recipient_hex, message_text)
-            results = self._publish_to_relays(message) or []
-            accepted = sum(1 for _, ok, _ in results if ok)
-            nip04_ok = accepted > 0
-            if nip04_ok:
-                logger.info(
-                    "Sent NIP-04 DM to %s (%d/%d relays)",
-                    recipient_npub[:20], accepted, len(results),
-                )
+            if target_relay:
+                ok, detail = self._publish_to_one_relay(message, target_relay)
+                nip04_ok = ok
+                if nip04_ok:
+                    logger.info(
+                        "Sent NIP-04 DM to %s via pinned relay %s",
+                        recipient_npub[:20], target_relay,
+                    )
+                else:
+                    errors.append(f"NIP-04 @ {target_relay}: {detail}")
             else:
-                details = "; ".join(
-                    f"{url}: {err}" for url, ok, err in results if not ok
-                )
-                errors.append(f"NIP-04: {details}")
+                results = self._publish_to_relays(message) or []
+                accepted = sum(1 for _, ok, _ in results if ok)
+                nip04_ok = accepted > 0
+                if nip04_ok:
+                    logger.info(
+                        "Sent NIP-04 DM to %s (%d/%d relays)",
+                        recipient_npub[:20], accepted, len(results),
+                    )
+                else:
+                    details = "; ".join(
+                        f"{url}: {err}" for url, ok, err in results if not ok
+                    )
+                    errors.append(f"NIP-04: {details}")
         except Exception as exc:
             errors.append(f"NIP-04: {exc}")
             logger.debug("NIP-04 send failed: %s", exc)
@@ -449,6 +499,8 @@ class NostrCredentialExchange:
         sender_key: PrivateKey,
         recipient_npub: str,
         message_text: str,
+        *,
+        target_relay: str | None = None,
     ) -> None:
         """Send a DM using an explicit sender key instead of the operator key.
 
@@ -460,6 +512,8 @@ class NostrCredentialExchange:
             sender_key: The PrivateKey to use for signing/encrypting.
             recipient_npub: Recipient's npub (bech32).
             message_text: Plaintext message to encrypt and send.
+            target_relay: If set, publish only to this single relay
+                (used by the rendezvous-pinned open_channel path).
         """
         if not self._enabled:
             raise CourierNotReady("Secure Courier not enabled.")
@@ -487,19 +541,30 @@ class NostrCredentialExchange:
                 sender_privkey_hex, sender_pubkey_hex,
                 recipient_hex, message_text,
             )
-            results = self._publish_to_relays(message) or []
-            accepted = sum(1 for _, ok, _ in results if ok)
-            nip17_ok = accepted > 0
-            if nip17_ok:
-                logger.info(
-                    "Sent NIP-17 agent DM to %s (%d/%d relays)",
-                    recipient_npub[:20], accepted, len(results),
-                )
+            if target_relay:
+                ok, detail = self._publish_to_one_relay(message, target_relay)
+                nip17_ok = ok
+                if nip17_ok:
+                    logger.info(
+                        "Sent NIP-17 agent DM to %s via pinned relay %s",
+                        recipient_npub[:20], target_relay,
+                    )
+                else:
+                    errors.append(f"NIP-17 @ {target_relay}: {detail}")
             else:
-                details = "; ".join(
-                    f"{url}: {err}" for url, ok, err in results if not ok
-                )
-                errors.append(f"NIP-17: {details}")
+                results = self._publish_to_relays(message) or []
+                accepted = sum(1 for _, ok, _ in results if ok)
+                nip17_ok = accepted > 0
+                if nip17_ok:
+                    logger.info(
+                        "Sent NIP-17 agent DM to %s (%d/%d relays)",
+                        recipient_npub[:20], accepted, len(results),
+                    )
+                else:
+                    details = "; ".join(
+                        f"{url}: {err}" for url, ok, err in results if not ok
+                    )
+                    errors.append(f"NIP-17: {details}")
         except Exception as exc:
             errors.append(f"NIP-17: {exc}")
             logger.debug("NIP-17 agent send failed: %s", exc)
@@ -510,19 +575,30 @@ class NostrCredentialExchange:
                 sender_privkey_hex, sender_pubkey_hex,
                 recipient_hex, message_text,
             )
-            results = self._publish_to_relays(message) or []
-            accepted = sum(1 for _, ok, _ in results if ok)
-            nip04_ok = accepted > 0
-            if nip04_ok:
-                logger.info(
-                    "Sent NIP-04 agent DM to %s (%d/%d relays)",
-                    recipient_npub[:20], accepted, len(results),
-                )
+            if target_relay:
+                ok, detail = self._publish_to_one_relay(message, target_relay)
+                nip04_ok = ok
+                if nip04_ok:
+                    logger.info(
+                        "Sent NIP-04 agent DM to %s via pinned relay %s",
+                        recipient_npub[:20], target_relay,
+                    )
+                else:
+                    errors.append(f"NIP-04 @ {target_relay}: {detail}")
             else:
-                details = "; ".join(
-                    f"{url}: {err}" for url, ok, err in results if not ok
-                )
-                errors.append(f"NIP-04: {details}")
+                results = self._publish_to_relays(message) or []
+                accepted = sum(1 for _, ok, _ in results if ok)
+                nip04_ok = accepted > 0
+                if nip04_ok:
+                    logger.info(
+                        "Sent NIP-04 agent DM to %s (%d/%d relays)",
+                        recipient_npub[:20], accepted, len(results),
+                    )
+                else:
+                    details = "; ".join(
+                        f"{url}: {err}" for url, ok, err in results if not ok
+                    )
+                    errors.append(f"NIP-04: {details}")
         except Exception as exc:
             errors.append(f"NIP-04: {exc}")
             logger.debug("NIP-04 agent send failed: %s", exc)
@@ -695,21 +771,6 @@ class NostrCredentialExchange:
 
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         payload_lines = render_credential_payload_lines(template)
-        welcome_text = (
-            f"{greeting}\n\n"
-            f"--- Credential Payload ---\n"
-            + "\n".join(payload_lines) + "\n"
-            f"  poison = @@@{poison}@@@\n\n"
-            f"IMPORTANT: include the anti-replay token exactly as shown.\n\n"
-            f"--- Message Provenance ---\n"
-            f"Service: {template.description or template.service}\n"
-            f"Operator: {self._npub}\n"
-            f"Sent: {timestamp}\n"
-            f"Protocol: DPYC Secure Courier v{_tb_version}\n\n"
-            f"Your reply is end-to-end encrypted — "
-            f"only this service can read it.\n"
-            f"If you didn't request this, simply ignore this message."
-        )
 
         # Detect self-DM (operator onboarding themselves)
         is_self_dm = recipient_npub == self._npub
@@ -718,34 +779,42 @@ class NostrCredentialExchange:
         if is_self_dm:
             agent_key = PrivateKey()
             self._ephemeral_agents[(recipient_npub, service)] = agent_key
-            # Replace operator npub in welcome text so patron replies
-            # to the ephemeral agent (not the operator's own npub)
-            agent_npub = agent_key.public_key.bech32()
-            welcome_text = welcome_text.replace(
-                f"Operator: {self._npub}",
-                f"Operator: {agent_npub}",
-            )
             logger.info(
                 "Self-DM detected — using ephemeral agent %s for %s/%s",
-                agent_npub[:20], recipient_npub[:20], service,
+                agent_key.public_key.bech32()[:20],
+                recipient_npub[:20], service,
             )
 
-        # Store poison for validation on receive
-        if recipient_npub:
-            expiry = time.time() + self._freshness_window
-            self._pending_poisons[(recipient_npub, service)] = (poison, expiry)
+        operator_line_value = (
+            agent_key.public_key.bech32() if agent_key is not None else self._npub
+        )
 
-            # Persist pending state to survive cold starts
-            if self._credential_vault is not None:
-                pending_blob: dict[str, Any] = {
-                    "poison": poison,
-                    "expiry": expiry,
-                }
-                if agent_key is not None:
-                    pending_blob["agent_nsec_hex"] = agent_key.hex()
-                await self._vault_store(
-                    f"__pending__{service}", recipient_npub, pending_blob,
-                )
+        def build_welcome(rendezvous_relay: str) -> str:
+            """Build the welcome DM with the rendezvous relay embedded.
+
+            The rendezvous_relay field tells the responder which relay to
+            publish their reply to, so it lands where the courier is
+            listening. Called once per candidate relay during the
+            sequential publish loop.
+            """
+            return (
+                f"{greeting}\n\n"
+                f"--- Credential Payload ---\n"
+                + "\n".join(payload_lines) + "\n"
+                f"  poison = @@@{poison}@@@\n"
+                f"  rendezvous_relay = @@@{rendezvous_relay}@@@\n\n"
+                f"IMPORTANT: include the anti-replay token exactly as shown.\n"
+                f"IMPORTANT: reply via the rendezvous_relay above — the "
+                f"courier listens there.\n\n"
+                f"--- Message Provenance ---\n"
+                f"Service: {template.description or template.service}\n"
+                f"Operator: {operator_line_value}\n"
+                f"Sent: {timestamp}\n"
+                f"Protocol: DPYC Secure Courier v{_tb_version}\n\n"
+                f"Your reply is end-to-end encrypted — "
+                f"only this service can read it.\n"
+                f"If you didn't request this, simply ignore this message."
+            )
 
         result: dict[str, Any] = {
             "success": True,
@@ -761,36 +830,91 @@ class NostrCredentialExchange:
             result["agent_npub"] = agent_key.public_key.bech32()
 
         if recipient_npub:
-            try:
+            # ── Rendezvous-pinned publish ─────────────────────────────
+            # Try each configured relay in order. The first one that
+            # accepts at least one protocol (NIP-17 or NIP-04) becomes
+            # the per-conversation rendezvous. Embed that relay's URL
+            # in the DM body before signing so the responder knows
+            # where to reply.
+            committed_relay: str | None = None
+            attempt_errors: list[str] = []
+            for candidate_relay in self._relays:
+                welcome_text = build_welcome(candidate_relay)
+                try:
+                    if agent_key is not None:
+                        self._send_dm_as(
+                            agent_key, recipient_npub, welcome_text,
+                            target_relay=candidate_relay,
+                        )
+                    else:
+                        self.send_dm(
+                            recipient_npub, welcome_text,
+                            target_relay=candidate_relay,
+                        )
+                    committed_relay = candidate_relay
+                    break
+                except Exception as exc:
+                    # Catch broadly: relay socket errors, NACKs, NIP-44
+                    # encryption issues all surface as different types.
+                    # Move on to the next candidate; if none accept, the
+                    # caller gets CourierUnreachableError below.
+                    attempt_errors.append(f"{candidate_relay}: {exc}")
+                    logger.info(
+                        "Relay %s rejected challenge for %s/%s — trying next",
+                        candidate_relay, recipient_npub[:20], service,
+                    )
+                    continue
+
+            if committed_relay is None:
+                # No relay accepted — lifecycle state, not a stack trace.
+                # Record nothing in pending state; caller must re-issue
+                # after checking relay connectivity.
+                raise CourierUnreachableError(
+                    f"No configured relay accepted the challenge for "
+                    f"{recipient_npub} ({len(self._relays)} attempted). "
+                    f"Re-issue request after verifying relay connectivity. "
+                    f"Errors: {'; '.join(attempt_errors)}"
+                )
+
+            # Pin committed. Persist poison + rendezvous so receive can
+            # match the reply and the caller can display the URL.
+            expiry = time.time() + self._freshness_window
+            self._pending_poisons[(recipient_npub, service)] = (poison, expiry)
+            self._pinned_relays[(recipient_npub, service)] = committed_relay
+
+            # Persist pending state to survive cold starts
+            if self._credential_vault is not None:
+                pending_blob: dict[str, Any] = {
+                    "poison": poison,
+                    "expiry": expiry,
+                    "rendezvous_relay": committed_relay,
+                }
                 if agent_key is not None:
-                    self._send_dm_as(agent_key, recipient_npub, welcome_text)
-                else:
-                    self.send_dm(recipient_npub, welcome_text)
-                result["welcome_dm_sent"] = True
-                result["message"] = (
-                    f"A welcome DM has been sent to {recipient_npub}. "
-                    f"Tell the user to look for a DM containing the session phrase "
-                    f"\"{poison}\" — share this phrase in chat so they can identify "
-                    f"the correct message. It is not sensitive. "
-                    f"They should reply with their credentials using the @@@ format shown. "
-                    f"Then call receive_credentials with their npub."
+                    pending_blob["agent_nsec_hex"] = agent_key.hex()
+                await self._vault_store(
+                    f"__pending__{service}", recipient_npub, pending_blob,
                 )
-                result["relay_propagation_note"] = (
-                    "Nostr relay propagation may take 30-60 seconds. "
-                    "If the welcome DM doesn't appear immediately in "
-                    "Primal or your client, wait a moment and refresh."
-                )
-            except Exception as exc:
-                logger.warning("Welcome DM failed, falling back to manual: %s", exc)
-                result["welcome_dm_sent"] = False
-                result["message"] = (
-                    f"Could not send welcome DM ({exc}). "
-                    f"The user should send their {template.service} credentials as a Nostr DM "
-                    f"to {self._npub} from their Nostr client, including the session phrase "
-                    f"\"{poison}\" — share this phrase in chat so they can include it. "
-                    f"Then call receive_credentials with their npub."
-                )
+
+            result["welcome_dm_sent"] = True
+            result["rendezvous_relay"] = committed_relay
+            result["message"] = (
+                f"A welcome DM has been sent to {recipient_npub} via {committed_relay}. "
+                f"Tell the user to look for a DM containing the session phrase "
+                f"\"{poison}\" — share this phrase in chat so they can identify "
+                f"the correct message. It is not sensitive. "
+                f"They MUST reply on the rendezvous relay {committed_relay} "
+                f"(included in the DM body) using the @@@ format shown. "
+                f"Then call receive_credentials with their npub."
+            )
+            result["relay_propagation_note"] = (
+                f"Reply must land on {committed_relay} — the courier listens there. "
+                f"Nostr relay propagation may take 30-60 seconds."
+            )
         else:
+            # No recipient — pin-less manual flow. Caller will need to
+            # initiate the DM themselves, so we can't commit a relay
+            # pin. Embed every configured relay in the instructions so
+            # the caller can pick one.
             result["welcome_dm_sent"] = False
             result["message"] = (
                 f"The user should send their {template.service} credentials as a Nostr DM "
@@ -891,6 +1015,11 @@ class NostrCredentialExchange:
             if pending and "poison" in pending:
                 p_expiry = pending.get("expiry", 0)
                 if time.time() <= p_expiry:
+                    # Restore rendezvous pin from vault (cold-start
+                    # recovery — process restart loses in-memory pin)
+                    pinned_relay = pending.get("rendezvous_relay")
+                    if pinned_relay and poison_key_early not in self._pinned_relays:
+                        self._pinned_relays[poison_key_early] = pinned_relay
                     agent_nsec_hex = pending.get("agent_nsec_hex")
                     if agent_nsec_hex:
                         from pynostr.key import PrivateKey as _PK
@@ -967,6 +1096,13 @@ class NostrCredentialExchange:
                     self._pending_poisons[poison_key] = (
                         pending["poison"], p_expiry,
                     )
+                    # Restore rendezvous pin if persisted (challenges
+                    # opened before this restart used the old protocol
+                    # and won't have one; that's fine — receive falls
+                    # back to fan-out discovery)
+                    pinned_relay = pending.get("rendezvous_relay")
+                    if pinned_relay and poison_key not in self._pinned_relays:
+                        self._pinned_relays[poison_key] = pinned_relay
                     # Restore ephemeral agent key if present
                     agent_nsec_hex = pending.get("agent_nsec_hex")
                     if agent_nsec_hex:
@@ -996,6 +1132,7 @@ class NostrCredentialExchange:
             expected_phrase, expiry = expected
             if time.time() > expiry:
                 del self._pending_poisons[poison_key]
+                self._pinned_relays.pop(poison_key, None)
                 raise CourierValidationError(
                     "Anti-replay token expired. Call request_credential_channel "
                     "again to get a fresh token."
@@ -1091,6 +1228,10 @@ class NostrCredentialExchange:
         # Consume the poison — one-time use
         if poison_key and poison_key in self._pending_poisons:
             del self._pending_poisons[poison_key]
+
+        # Release the rendezvous pin — one-time use
+        if poison_key:
+            self._pinned_relays.pop(poison_key, None)
 
         # Discard ephemeral agent key — one-time use
         if poison_key and poison_key in self._ephemeral_agents:
@@ -1926,3 +2067,42 @@ class NostrCredentialExchange:
                 )
                 results.append((relay_url, False, str(exc)))
         return results
+
+    def _publish_to_one_relay(
+        self, message: str, relay_url: str,
+    ) -> tuple[bool, str]:
+        """Send an event to exactly one relay.
+
+        Used by the rendezvous-pinning publish path: the courier commits
+        the first relay that accepts the challenge as the per-conversation
+        rendezvous and embeds it in the DM body before publishing.
+
+        Returns:
+            ``(accepted, detail)`` — ``accepted`` is True when the relay
+            returned ``["OK", id, true, ...]`` (or any non-explicit
+            rejection).
+        """
+        sslopt: dict[str, Any] = {}
+        try:
+            ws = create_connection(
+                relay_url, timeout=_DEFAULT_SUBSCRIBE_TIMEOUT, sslopt=sslopt,
+            )
+            try:
+                ws.send(message)
+                raw = ws.recv()
+                try:
+                    ack = json.loads(raw)
+                    if isinstance(ack, list) and len(ack) >= 3 and ack[0] == "OK":
+                        ok = bool(ack[2])
+                        detail = ack[3] if len(ack) > 3 else ""
+                        return ok, detail
+                    return True, str(raw)
+                except (json.JSONDecodeError, IndexError):
+                    return True, str(raw)
+            finally:
+                ws.close()
+        except Exception as exc:
+            logger.debug(
+                "Single-relay publish %s failed (non-fatal): %s", relay_url, exc,
+            )
+            return False, str(exc)

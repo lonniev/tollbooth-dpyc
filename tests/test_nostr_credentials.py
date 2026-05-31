@@ -1204,23 +1204,156 @@ class TestOpenChannelWithWelcomeDm:
         assert self._npub_in_message(result, ex.npub)
 
     @pytest.mark.asyncio
-    async def test_fallback_on_dm_failure(self):
+    async def test_raises_unreachable_when_every_relay_rejects(self):
+        """Rendezvous-pin protocol: no fallback to a relay-less manual flow.
+
+        When every configured relay rejects the publish, the courier
+        cannot commit a rendezvous and the responder has nowhere to
+        reply. Surface CourierUnreachableError as a lifecycle state
+        — the caller must investigate relay connectivity and re-issue.
+        """
+        from tollbooth.nostr_credentials import CourierUnreachableError
+
         ex = _make_exchange()
         patron = PrivateKey()
 
         with patch.object(ex, "_start_subscription"), \
-             patch.object(ex, "send_dm", side_effect=Exception("relay down")):
-            result = await ex.open_channel(
+             patch.object(ex, "send_dm", side_effect=Exception("relay down")), \
+             pytest.raises(CourierUnreachableError, match="No configured relay"):
+            await ex.open_channel(
                 "x", greeting="Test greeting", recipient_npub=patron.public_key.bech32(),
             )
-
-        assert result["success"] is True
-        assert result["welcome_dm_sent"] is False
-        assert "could not send" in result["message"].lower()
 
     @staticmethod
     def _npub_in_message(result: dict, npub: str) -> bool:
         return npub in result.get("message", "")
+
+
+# ── Rendezvous Relay Pinning Tests ──────────────────────────────────────
+
+
+class TestRendezvousRelayPinning:
+    """Tests for the per-conversation transport relay pin.
+
+    The courier commits the first relay that accepts the challenge as
+    the rendezvous and embeds that URL in the DM body so the responder
+    knows where to reply. This eliminates the symmetric-relay failure
+    mode where sender and receiver disagreed on which relay to use.
+    """
+
+    @pytest.mark.asyncio
+    async def test_open_channel_returns_rendezvous_relay(self):
+        """The committed rendezvous relay is surfaced to the caller."""
+        ex = _make_exchange()
+        patron = PrivateKey()
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "send_dm"):
+            result = await ex.open_channel(
+                "x", greeting="Hi", recipient_npub=patron.public_key.bech32(),
+            )
+
+        assert result["welcome_dm_sent"] is True
+        assert result["rendezvous_relay"] == "wss://relay.test.com"
+        # Single configured relay → that's what gets pinned.
+
+    @pytest.mark.asyncio
+    async def test_dm_body_embeds_rendezvous_relay(self):
+        """The welcome DM body includes ``rendezvous_relay = @@@<url>@@@``."""
+        ex = _make_exchange()
+        patron = PrivateKey()
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "send_dm") as mock_send:
+            await ex.open_channel(
+                "x", greeting="Hi", recipient_npub=patron.public_key.bech32(),
+            )
+
+        # send_dm(recipient_npub, welcome_text, target_relay=...)
+        welcome_text = mock_send.call_args[0][1]
+        assert "rendezvous_relay = @@@wss://relay.test.com@@@" in welcome_text
+        # And the target_relay kwarg is the same URL.
+        assert mock_send.call_args[1]["target_relay"] == "wss://relay.test.com"
+
+    @pytest.mark.asyncio
+    async def test_pin_falls_through_when_first_relay_rejects(self):
+        """If the first relay errors, the courier rebuilds the DM with the
+        next relay's URL and commits whichever one accepts.
+
+        Self-healing under outages: a dead relay just rotates the pin.
+        """
+        # Multi-relay fixture so the loop actually has somewhere to go
+        operator = PrivateKey()
+        ex = NostrCredentialExchange(
+            nsec=operator.nsec,
+            relays=["wss://relay.down", "wss://relay.up"],
+            templates=_test_template(),
+        )
+        patron = PrivateKey()
+
+        # First call (wss://relay.down) raises; second (wss://relay.up) succeeds.
+        call_state = {"n": 0}
+
+        def fake_send(_npub, _text, *, target_relay):  # noqa: ANN001
+            call_state["n"] += 1
+            if target_relay == "wss://relay.down":
+                raise Exception("ECONNREFUSED")
+            # success on the second relay
+
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "send_dm", side_effect=fake_send):
+            result = await ex.open_channel(
+                "x", greeting="Hi", recipient_npub=patron.public_key.bech32(),
+            )
+
+        assert result["rendezvous_relay"] == "wss://relay.up"
+        assert call_state["n"] == 2  # tried both, committed the second
+        # And in-memory pin matches.
+        pin_key = (patron.public_key.bech32(), "x")
+        assert ex._pinned_relays[pin_key] == "wss://relay.up"
+
+    @pytest.mark.asyncio
+    async def test_vault_blob_persists_rendezvous_relay(self):
+        """Cold-start recovery needs the pin too — persist it in the blob."""
+        operator = PrivateKey()
+        vault = MockCredentialVault()
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=vault)
+        patron = PrivateKey()
+
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "send_dm"):
+            await ex.open_channel(
+                "x", greeting="Hi", recipient_npub=patron.public_key.bech32(),
+            )
+
+        # Use the exchange's own decrypt path so we see the original dict
+        pending = await ex._vault_fetch(
+            "__pending__x", patron.public_key.bech32(),
+        )
+        assert pending is not None
+        assert pending["rendezvous_relay"] == "wss://relay.test.com"
+
+    @pytest.mark.asyncio
+    async def test_pinned_relay_cleared_on_receive_success(self):
+        """One-time-use semantics: the pin is released alongside the poison."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+
+        # Simulate state from a prior open_channel
+        sender_npub = sender.public_key.bech32()
+        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
+        ex._pinned_relays[(sender_npub, "x")] = "wss://relay.test.com"
+
+        payload = {"api_key": "k", "api_secret": "s", "poison": "bold-hawk-42"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(sender_npub, service="x")
+
+        assert result["success"] is True
+        assert (sender_npub, "x") not in ex._pinned_relays
 
 
 # ── Poison Slug (Anti-Replay) Tests ──────────────────────────────────────
