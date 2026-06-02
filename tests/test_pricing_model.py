@@ -112,11 +112,15 @@ class TestPricingModel:
             name="Launch Pricing",
             is_active=True,
             tools=[
-                ToolPrice(tool_id=capability_uuid("search"), tool_name="search", price_sats=5),
+                ToolPrice(
+                    tool_id=capability_uuid("search"),
+                    tool_name="search",
+                    price_sats=5,
+                    chain=[
+                        PipelineStep(id="s1", type="free_trial", params={"first_n_free": 3}),
+                    ],
+                ),
                 ToolPrice(tool_id=capability_uuid("create"), tool_name="create", price_sats=10),
-            ],
-            pipeline=[
-                PipelineStep(id="s1", type="free_trial", params={"first_n_free": 3}),
             ],
         )
 
@@ -138,29 +142,14 @@ class TestPricingModel:
         model = PricingModel()
         assert model.tool_cost_map() == {}
 
-    def test_to_constraint_config(self) -> None:
+    def test_chain_for_returns_owning_tool_chain(self) -> None:
         model = self._sample_model()
-        cfg = model.to_constraint_config()
-        assert cfg is not None
-        assert "*" in cfg["tool_constraints"]
-        constraints = cfg["tool_constraints"]["*"]["constraints"]
-        assert len(constraints) == 1
-        assert constraints[0]["type"] == "free_trial"
-        assert constraints[0]["first_n_free"] == 3
-
-    def test_to_constraint_config_empty_pipeline(self) -> None:
-        model = PricingModel()
-        assert model.to_constraint_config() is None
-
-    def test_to_constraint_config_feeds_load_constraints(self) -> None:
-        """Verify the output can be consumed by load_constraints()."""
-        from tollbooth.constraints.config import load_constraints
-
-        model = self._sample_model()
-        cfg = model.to_constraint_config()
-        assert cfg is not None
-        engine = load_constraints(cfg)
-        assert engine is not None
+        chain = model.chain_for(capability_uuid("search"))
+        assert len(chain) == 1
+        assert chain[0].type == "free_trial"
+        # Tools without an explicit chain return empty list, not error.
+        assert model.chain_for(capability_uuid("create")) == []
+        assert model.chain_for("unknown-id") == []
 
     def test_json_round_trip(self) -> None:
         model = self._sample_model()
@@ -175,8 +164,23 @@ class TestPricingModel:
         assert len(restored.tools) == 2
         assert restored.tools[0].tool_name == "search"
         assert restored.tools[0].tool_id == capability_uuid("search")
-        assert len(restored.pipeline) == 1
-        assert restored.pipeline[0].type == "free_trial"
+        # Chain rides along on its owning tool.
+        assert len(restored.tools[0].chain) == 1
+        assert restored.tools[0].chain[0].type == "free_trial"
+        assert restored.tools[1].chain == []
+
+    def test_from_json_silently_drops_old_pipeline_key(self) -> None:
+        """Pre-0.40 models had a top-level ``pipeline`` array — ignored on read."""
+        raw = json.dumps({
+            "name": "old",
+            "tools": [{"tool_id": capability_uuid("x"), "tool_name": "x", "price_sats": 1}],
+            "pipeline": [{"id": "stray", "type": "happy_hour"}],
+        })
+        restored = PricingModel.from_json(raw)
+        assert len(restored.tools) == 1
+        assert restored.tools[0].chain == []
+        # No attribute leak — PricingModel has no .pipeline.
+        assert not hasattr(restored, "pipeline")
 
     def test_from_row_with_string_model_json(self) -> None:
         row = {
@@ -186,7 +190,6 @@ class TestPricingModel:
             "model_json": json.dumps({
                 "name": "Test",
                 "tools": [{"tool_id": capability_uuid("a"), "tool_name": "a", "price_sats": 1}],
-                "pipeline": [],
             }),
             "is_active": True,
         }
@@ -206,7 +209,6 @@ class TestPricingModel:
             "model_json": json.dumps({
                 "name": "Test",
                 "tools": [{"tool_name": "a", "price_sats": 1}],
-                "pipeline": [],
             }),
             "is_active": True,
         }
@@ -222,7 +224,6 @@ class TestPricingModel:
             "model_json": {
                 "name": "Test",
                 "tools": [],
-                "pipeline": [],
             },
             "is_active": False,
         }

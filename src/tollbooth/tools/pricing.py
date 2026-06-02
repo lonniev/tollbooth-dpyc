@@ -17,47 +17,50 @@ def list_constraint_types() -> list[dict[str, Any]]:
     return [s.to_dict() for s in get_all_schemas()]
 
 
-def _validate_pipeline(pipeline: list) -> list[str]:
-    """Validate pipeline steps against the constraint registry.
+def _validate_tool_chains(model: PricingModel) -> list[str]:
+    """Validate every tool's constraint chain against the registry.
 
-    Returns a list of error strings (empty = valid).
+    Returns a list of error strings (empty = valid).  Each error names
+    the tool and step position so the operator can find it in the
+    Pricing Studio.
     """
     errors: list[str] = []
     schemas_by_type = {s.type: s for s in get_all_schemas()}
 
-    for i, step in enumerate(pipeline):
-        ctype = step.type
-        if ctype not in CONSTRAINT_REGISTRY:
-            errors.append(
-                f"Step #{i} ({step.id!r}): unknown constraint type {ctype!r}. "
-                f"Valid types: {sorted(CONSTRAINT_REGISTRY)}"
-            )
-            continue
-
-        schema = schemas_by_type.get(ctype)
-        if schema is None:
-            continue  # no schema to validate against
-
-        # Check required params are present
-        for param in schema.params:
-            if param.required and param.name not in step.params:
+    for tool in model.tools:
+        for i, step in enumerate(tool.chain):
+            ctype = step.type
+            if ctype not in CONSTRAINT_REGISTRY:
                 errors.append(
-                    f"Step #{i} ({step.id!r}): missing required param {param.name!r} "
-                    f"for constraint type {ctype!r}."
+                    f"Tool {tool.tool_name!r} step #{i} ({step.id!r}): "
+                    f"unknown constraint type {ctype!r}. "
+                    f"Valid types: {sorted(CONSTRAINT_REGISTRY)}"
                 )
+                continue
+
+            schema = schemas_by_type.get(ctype)
+            if schema is None:
+                continue  # no schema to validate against
+
+            for param in schema.params:
+                if param.required and param.name not in step.params:
+                    errors.append(
+                        f"Tool {tool.tool_name!r} step #{i} ({step.id!r}): "
+                        f"missing required param {param.name!r} "
+                        f"for constraint type {ctype!r}."
+                    )
 
     return errors
 
 
 def _model_to_response(model: PricingModel) -> dict[str, Any]:
-    """Convert a PricingModel to a flat response dict matching PricingStudio's PricingModelResponse."""
+    """Convert a PricingModel to a flat response dict for the Studio."""
     d: dict[str, Any] = {
         "status": "ok",
         "model_id": model.model_id,
         "name": model.name,
         "is_active": model.is_active,
         "tools": [tp.to_dict() for tp in model.tools],
-        "pipeline": [ps.to_dict() for ps in model.pipeline],
     }
     if model.tranche_lifetime is not None:
         d["tranche_lifetime"] = model.tranche_lifetime.to_dict()
@@ -82,7 +85,7 @@ async def get_pricing_model_tool(
         return {"status": "error", "error": str(e)}
 
     if model is None:
-        return {"status": "ok", "model_id": None, "name": None, "is_active": None, "tools": None, "pipeline": None}
+        return {"status": "ok", "model_id": None, "name": None, "is_active": None, "tools": None}
 
     return _model_to_response(model)
 
@@ -109,10 +112,10 @@ async def set_pricing_model_tool(
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         return {"status": "error", "error": f"Invalid model_json: {e}"}
 
-    # Validate pipeline steps against constraint registry
-    validation_errors = _validate_pipeline(model.pipeline)
+    # Validate every tool's chain against the constraint registry.
+    validation_errors = _validate_tool_chains(model)
     if validation_errors:
-        return {"status": "error", "error": "Pipeline validation failed", "details": validation_errors}
+        return {"status": "error", "error": "Tool chain validation failed", "details": validation_errors}
 
     try:
         await store.ensure_schema()

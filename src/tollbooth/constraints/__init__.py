@@ -1,10 +1,8 @@
-"""Tollbooth Constraint Engine — conditional access and pricing for MCP tools.
+"""Tollbooth constraint chains — per-tool conditional access and pricing.
 
-Public API
-----------
-All classes are re-exported here for convenience::
-
-    from tollbooth.constraints import ConstraintEngine, ConstraintContext, ...
+Each tool in an operator's pricing model owns an ordered chain of
+constraint steps.  The :class:`ConstraintGate` walks that chain at
+debit / preview time, applying each step's price modifier in turn.
 """
 
 from tollbooth.constraints.base import (
@@ -23,10 +21,8 @@ from tollbooth.constraints.config import (
     ConfigError,
     get_all_schemas,
     load_constraint,
-    load_constraints,
-    validate_config,
+    validate_step,
 )
-from tollbooth.constraints.engine import ConstraintEngine
 from tollbooth.constraints.expression import JsonExpressionConstraint
 from tollbooth.constraints.gate import ConstraintGate
 from tollbooth.constraints.periodic import PeriodicRefreshConstraint, parse_iso_duration
@@ -65,8 +61,6 @@ __all__ = [
     "JsonExpressionConstraint",
     "SurgePricingConstraint",
     "PatronProofConstraint",
-    # Engine
-    "ConstraintEngine",
     # Gate
     "ConstraintGate",
     # Config
@@ -74,8 +68,7 @@ __all__ = [
     "ConfigError",
     "get_all_schemas",
     "load_constraint",
-    "load_constraints",
-    "validate_config",
+    "validate_step",
     # Utilities
     "parse_iso_duration",
 ]

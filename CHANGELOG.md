@@ -3,7 +3,54 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## 0.39.0 — 2026-05-31
+## 0.40.0 — 2026-06-02
+
+### Changed (breaking) — Per-tool constraint chains replace operator-wide pipeline
+
+Pricing rows were already per-tool but constraints were a single
+operator-wide `PricingModel.pipeline` with optional `tool_ids` filters
+as a secondary scope.  Mixed-grain authoring made pedagogical pricing
+ugly: a coupon meant to apply to cheap exploration tools but never to
+the heavy judge tool required a global discount narrowed by filter.
+
+This release flattens the model: every constraint is owned by exactly
+one tool's `ToolPrice.chain` (ordered list of `PipelineStep`).  The
+wheel ships a fixed registry of constraint *types*; operators compose
+chains of constraint *instances* per tool.  At debit and preview time,
+`ConstraintGate.evaluate_chain[_async]` walks the chain
+sequentially: each step's `price_modifier` applies to the running
+price; a denial short-circuits the walk.
+
+- `PricingModel.pipeline` field — **removed**.
+- `PricingModel.to_constraint_config()` — **removed**.
+- `PipelineStep.tool_ids` — **removed** (owning tool is implicit).
+- `PipelineStep.patron_npubs` — kept (audience filter within a tool).
+- `ToolPrice.chain: list[PipelineStep]` — **added**.
+- `PricingModel.chain_for(tool_id)` — **added**.
+- `ConstraintEngine` and its `ALL_MUST_PASS` / `ANY_MUST_PASS` /
+  `FIRST_MATCH` modes — **deleted**.  There is one mode now: walk the
+  chain, apply each step, deny short-circuits.
+- `ConstraintGate(config)` static-config constructor — **removed**.
+  The gate is constructed with no args and `attach_resolver(resolver)`
+  wires it to the runtime's `PricingResolver`.
+- `PricingResolver.get_constraint_engine()` — **replaced** by
+  `get_chain(tool_id) -> list[PipelineStep]`.
+- `load_constraints()` / `validate_config()` — **deleted**.
+  `load_constraint(step_dict)` and `validate_step(step_dict)` remain
+  as per-step utilities the gate and Studio use.
+- `OperatorRuntime.debit_or_deny`: chain-walks via the gate; when the
+  chain drives the price below zero, the patron is credited (via
+  `UserLedger.credit_deposit(abs(price), "chain_credit:<tool>")`)
+  instead of debited.  Skips the insufficient-balance gate for the
+  credit case.
+- `check_price` preview: same chain-walk for both pricing and effect
+  reporting; reports a `credit` effect when the chain drives the
+  price negative.
+- Existing pre-0.40 models with a top-level `pipeline` key
+  deserialize cleanly — the key is silently ignored.  Operators
+  re-author chains per tool via the Pricing Studio.
+
+
 
 ### Changed (breaking protocol) — Secure Courier rendezvous-relay pinning
 

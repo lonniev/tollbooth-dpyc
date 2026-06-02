@@ -1,8 +1,11 @@
 """Pricing model dataclasses for runtime-configurable tool pricing.
 
-A PricingModel is a named bundle of per-tool prices and an optional
-constraint pipeline that an operator can activate at runtime via the
-Pricing Studio.
+A PricingModel is a named bundle of per-tool prices.  Each tool owns
+its own ordered constraint *chain* — a sequence of constraint instances
+the gate walks at evaluation time, transforming the price step by step.
+There is no operator-level constraint pipeline: chains are strictly
+per-tool, and the same constraint applied to multiple tools is
+authored once per tool (no sharing, no references).
 
 Tools are identified by a stable UUID (``tool_id``) derived from their
 canonical capability name.  The pricing model references UUIDs, not
@@ -22,6 +25,11 @@ class ToolPrice:
 
     ``tool_id`` is the canonical UUID for the capability.  ``tool_name``
     is kept for display/debugging but is NOT the primary key.
+
+    ``chain`` is this tool's ordered constraint chain.  The gate walks
+    it left-to-right at evaluation time; each step receives the running
+    price and returns a (possibly-transformed) price.  Empty chain =
+    base price applies unchanged.
     """
 
     tool_id: str
@@ -38,6 +46,9 @@ class ToolPrice:
     # JSON object {param_name: {value: multiplier}}. Used for enum-keyed
     # surcharges like Optionality's difficulty × historicity table.
     multipliers: dict[str, dict[str, float]] | None = None
+    # Ordered constraint chain.  Each step is a PipelineStep whose owning
+    # tool is this ToolPrice (no need for the step to carry tool_ids).
+    chain: list[PipelineStep] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -58,6 +69,8 @@ class ToolPrice:
             d["max_cost"] = self.max_cost
         if self.multipliers:
             d["multipliers"] = self.multipliers
+        if self.chain:
+            d["chain"] = [step.to_dict() for step in self.chain]
         return d
 
     def to_tool_pricing(self) -> "ToolPricing":
@@ -103,6 +116,12 @@ class ToolPrice:
                 for p, lookup in raw_mults.items()
                 if isinstance(lookup, dict)
             }
+        raw_chain = data.get("chain", [])
+        chain: list[PipelineStep] = (
+            [PipelineStep.from_dict(s) for s in raw_chain]
+            if isinstance(raw_chain, list)
+            else []
+        )
         return cls(
             tool_id=tool_id,
             tool_name=data["tool_name"],
@@ -115,6 +134,7 @@ class ToolPrice:
             min_cost=int(data.get("min_cost", 0)),
             max_cost=int(data["max_cost"]) if data.get("max_cost") is not None else None,
             multipliers=mults,
+            chain=chain,
         )
 
 
@@ -167,17 +187,17 @@ class TrancheLifetime:
 
 @dataclass
 class PipelineStep:
-    """A single step in the constraint pipeline.
+    """A single step in a tool's constraint chain.
 
-    Scope fields control which tools and patrons this step applies to:
-    - ``tool_ids``: empty = all tools (wildcard). Non-empty = only these tools.
-    - ``patron_npubs``: empty = all patrons. Non-empty = only these patrons (max 10).
+    The owning :class:`ToolPrice` carries the chain, so the step is
+    implicitly scoped to one tool.  ``patron_npubs`` remains a
+    per-step filter (max 10 npubs) — narrowing a constraint to a
+    specific audience within the tool that owns the chain.
     """
 
     id: str
     type: str  # must match a key in CONSTRAINT_REGISTRY
     params: dict[str, Any] = field(default_factory=dict)
-    tool_ids: list[str] = field(default_factory=list)
     patron_npubs: list[str] = field(default_factory=list)
 
     _MAX_PATRON_GROUP = 10
@@ -193,8 +213,6 @@ class PipelineStep:
         d: dict[str, Any] = {"id": self.id, "type": self.type}
         if self.params:
             d["params"] = self.params
-        if self.tool_ids:
-            d["tool_ids"] = self.tool_ids
         if self.patron_npubs:
             d["patron_npubs"] = self.patron_npubs
         return d
@@ -205,21 +223,19 @@ class PipelineStep:
             id=data["id"],
             type=data["type"],
             params=dict(data.get("params", {})),
-            tool_ids=list(data.get("tool_ids", [])),
             patron_npubs=list(data.get("patron_npubs", [])),
         )
 
 
 @dataclass
 class PricingModel:
-    """A named pricing model — tool costs + optional constraint pipeline."""
+    """A named pricing model — per-tool prices with per-tool constraint chains."""
 
     model_id: str = ""
     operator: str = ""
     name: str = ""
     is_active: bool = False
     tools: list[ToolPrice] = field(default_factory=list)
-    pipeline: list[PipelineStep] = field(default_factory=list)
     tranche_lifetime: TrancheLifetime | None = None
 
     def tool_cost_map(self) -> dict[str, int]:
@@ -234,37 +250,12 @@ class PricingModel:
         """Return {tool_id: priced} — whether the operator has set a price."""
         return {tp.tool_id: tp.priced for tp in self.tools}
 
-    def to_constraint_config(self) -> dict[str, Any] | None:
-        """Convert pipeline to the format ``load_constraints()`` expects.
-
-        Returns ``None`` if the pipeline is empty.
-
-        Steps with ``tool_ids`` are grouped under each tool ID.
-        Steps without are grouped under the wildcard ``"*"`` key.
-        Patron scoping (``patron_npubs``) is embedded in the constraint
-        entry as metadata for the gate to filter at evaluation time.
-        """
-        if not self.pipeline:
-            return None
-
-        by_scope: dict[str, list[dict[str, Any]]] = {}
-        for step in self.pipeline:
-            entry: dict[str, Any] = {"type": step.type}
-            entry.update(step.params)
-            if step.patron_npubs:
-                entry["_patron_npubs"] = step.patron_npubs
-            if step.tool_ids:
-                for tid in step.tool_ids:
-                    by_scope.setdefault(tid, []).append(entry)
-            else:
-                by_scope.setdefault("*", []).append(entry)
-
-        return {
-            "tool_constraints": {
-                scope: {"constraints": steps}
-                for scope, steps in by_scope.items()
-            },
-        }
+    def chain_for(self, tool_id: str) -> list[PipelineStep]:
+        """Return this tool's constraint chain (empty list if no entry)."""
+        for tp in self.tools:
+            if tp.tool_id == tool_id:
+                return tp.chain
+        return []
 
     def to_json(self) -> str:
         """Serialize to a JSON string (for ``model_json`` column)."""
@@ -275,7 +266,6 @@ class PricingModel:
         d: dict[str, Any] = {
             "name": self.name,
             "tools": [tp.to_dict() for tp in self.tools],
-            "pipeline": [ps.to_dict() for ps in self.pipeline],
         }
         if self.tranche_lifetime is not None:
             d["tranche_lifetime"] = self.tranche_lifetime.to_dict()
@@ -283,7 +273,11 @@ class PricingModel:
 
     @classmethod
     def from_json(cls, raw: str, *, model_id: str = "", operator: str = "", is_active: bool = False) -> PricingModel:
-        """Deserialize from a JSON string (``model_json`` column)."""
+        """Deserialize from a JSON string (``model_json`` column).
+
+        Any top-level ``pipeline`` key from the pre-0.40 shape is silently
+        ignored.  Per-tool chains live inside each ``tools[].chain`` now.
+        """
         data = json.loads(raw)
 
         tl_data = data.get("tranche_lifetime")
@@ -295,7 +289,6 @@ class PricingModel:
             name=data.get("name", ""),
             is_active=is_active,
             tools=[ToolPrice.from_dict(t) for t in data.get("tools", [])],
-            pipeline=[PipelineStep.from_dict(p) for p in data.get("pipeline", [])],
             tranche_lifetime=tranche_lifetime,
         )
 

@@ -13,9 +13,7 @@ import logging
 import time
 from typing import Any
 
-from tollbooth.constraints.config import load_constraints
-from tollbooth.constraints.engine import ConstraintEngine
-from tollbooth.pricing_model import PricingModel
+from tollbooth.pricing_model import PipelineStep, PricingModel
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +47,6 @@ class PricingResolver:
         self._cached_cost_map: dict[str, int] | None = None
         self._cached_tool_ids: set[str] | None = None
         self._cached_priced_map: dict[str, bool] | None = None
-        self._cached_engine: ConstraintEngine | None = None
         self._neon_available: bool = False
         # Initialize to negative infinity so the first _is_stale() always
         # returns True — even if time.monotonic() is small (fresh CI runner).
@@ -88,16 +85,10 @@ class PricingResolver:
                     self._cached_cost_map = model.tool_cost_map()
                     self._cached_tool_ids = model.tool_id_set()
                     self._cached_priced_map = model.tool_priced_map()
-                    constraint_cfg = model.to_constraint_config()
-                    if constraint_cfg is not None:
-                        self._cached_engine = load_constraints(constraint_cfg)
-                    else:
-                        self._cached_engine = None
                 else:
                     self._cached_cost_map = None
                     self._cached_tool_ids = None
                     self._cached_priced_map = None
-                    self._cached_engine = None
                 self._cache_ts = time.monotonic()
                 if attempt > 0:
                     logger.info(
@@ -124,7 +115,6 @@ class PricingResolver:
         self._cached_cost_map = None
         self._cached_tool_ids = None
         self._cached_priced_map = None
-        self._cached_engine = None
         self._cache_ts = -self._cache_ttl - 1.0
 
     async def get_cost(self, tool_id: str) -> int:
@@ -168,13 +158,17 @@ class PricingResolver:
                     return tp.to_tool_pricing()
         return ToolPricing(fixed=0)
 
-    async def get_constraint_engine(self) -> ConstraintEngine | None:
-        """Return the constraint engine from the active model's pipeline.
+    async def get_chain(self, tool_id: str) -> list[PipelineStep]:
+        """Return the ordered constraint chain for *tool_id*.
 
-        Returns ``None`` if no active model or no pipeline defined.
+        Empty list if the tool has no chain (or no entry in the model).
+        Returns raw ``PipelineStep`` objects — the caller is responsible
+        for instantiating ``ToolConstraint`` instances from them.
         """
         await self._ensure_fresh()
-        return self._cached_engine
+        if self._cached_model is None:
+            return []
+        return self._cached_model.chain_for(tool_id)
 
     def refresh(self) -> None:
         """Force cache reset — call after Pricing Studio activates a model."""

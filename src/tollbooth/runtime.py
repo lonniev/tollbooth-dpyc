@@ -683,50 +683,39 @@ class OperatorRuntime:
             npub = ""
 
         # ── Constraints ───────────────────────────────────────
-        # The pipeline applies to every non-restricted tool.
-        # Constraints can modify the effective cost (discounts,
-        # free, surge) or deny access (temporal windows, rate
-        # limits). Without an npub, constraints cannot evaluate.
+        # The tool's per-tool constraint chain (if any) walks the
+        # price step by step.  Steps can deny access (temporal
+        # windows, supply caps) or transform the price (discounts,
+        # surcharges, even drive it negative into a credit).
+        # Without an npub, constraints cannot evaluate.
         effective_cost = cost
         if npub and category != "free":
             try:
                 resolver = await self.pricing_resolver()
-                engine = resolver._cached_engine
-                if engine is not None:
-                    from tollbooth.constraints.base import (
-                        ConstraintContext, LedgerSnapshot, PatronIdentity, EnvironmentSnapshot,
-                    )
+                chain = await resolver.get_chain(tool_id)
+                if chain:
                     cache = await self.ledger_cache()
                     ledger = await cache.get(npub)
                     demand = await self.get_global_demand(name)
-                    context = ConstraintContext(
-                        ledger=LedgerSnapshot(
-                            balance_api_sats=ledger.balance_api_sats,
-                            total_deposited_api_sats=ledger.total_deposited_api_sats,
-                            total_consumed_api_sats=ledger.total_consumed_api_sats,
-                            total_expired_api_sats=ledger.total_expired_api_sats,
-                        ),
-                        patron=PatronIdentity(npub=npub),
-                        env=EnvironmentSnapshot(
-                            utc_now=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
-                            tool_name=name,
-                            global_demand=tuple(demand.items()),
-                        ),
+                    gate = self._constraint_gate
+                    if gate is None:
+                        from tollbooth.constraints.gate import ConstraintGate
+                        gate = ConstraintGate()
+                        gate.attach_resolver(resolver)
+                        self._constraint_gate = gate
+                    denial, effective_signed = gate.evaluate_chain(
+                        chain=chain,
+                        tool_name=name,
+                        base_cost=cost,
+                        ledger=ledger,
+                        npub=npub,
+                        global_demand=demand,
                         proof=proof,
                     )
-                    result = engine.evaluate(name, context)
-                    if not result.allowed:
-                        error: dict[str, Any] = {
-                            "success": False,
-                            "error_code": ErrorCode.CONSTRAINT_DENIED,
-                            "error": result.message or f"Constraint denied: {result.reason}",
-                            "constraint_reason": result.reason,
-                        }
-                        if result.retry_after:
-                            error["retry_after"] = result.retry_after.isoformat()
-                        return error
-                    if result.price_modifier:
-                        effective_cost = result.price_modifier.apply_to(cost)
+                    if denial is not None:
+                        denial["error_code"] = ErrorCode.CONSTRAINT_DENIED
+                        return denial
+                    effective_cost = effective_signed
             except Exception as exc:
                 logger.warning("Constraint evaluation failed for %s: %s", name, exc)
                 # Fall through with base cost — don't block the call
@@ -739,6 +728,19 @@ class OperatorRuntime:
                 ledger.debit(name, 0)
                 cache.mark_dirty(npub)
             return 0
+
+        # ── Credit (chain drove price negative) ───────────────
+        # The constraint chain transformed the toll into a credit
+        # paid to the patron.  Skip the balance / insufficient-funds
+        # gate (you can't be short of money you're about to receive)
+        # and add the credit to the patron's balance directly.
+        if effective_cost < 0:
+            cache = await self.ledger_cache()
+            ledger = await cache.get(npub)
+            credit_sats = abs(effective_cost)
+            ledger.credit_deposit(credit_sats, f"chain_credit:{name}")
+            cache.mark_dirty(npub)
+            return effective_cost  # signed — caller can detect credit case
 
         # ── Billing ───────────────────────────────────────────
         cache = await self.ledger_cache()
@@ -3783,16 +3785,30 @@ def register_standard_tools(
                     for param, lookup in pricing.multipliers
                 }
 
-        gate = rt._constraint_gate
         base_cost = result.get("base_cost_api_sats") or 0
-        if gate and gate.enabled and base_cost > 0:
+        # Preview the chain for this tool, if it has one.  The cached
+        # model is already warmed by the resolver.get_tool_pricing call
+        # above, so chain_for is a synchronous in-memory lookup.
+        chain = (
+            resolver._cached_model.chain_for(tool_id)
+            if resolver._cached_model is not None
+            else []
+        )
+        if chain and base_cost != 0:
             result["constraints_enabled"] = True
             try:
                 resolved = resolve_npub(npub)
                 cache = await rt.ledger_cache()
                 ledger = await cache.get(resolved)
                 demand = await rt.get_global_demand(name)
-                denial, effective = gate.check(
+                gate = rt._constraint_gate
+                if gate is None:
+                    from tollbooth.constraints.gate import ConstraintGate
+                    gate = ConstraintGate()
+                    gate.attach_resolver(resolver)
+                    rt._constraint_gate = gate
+                denial, effective = gate.evaluate_chain(
+                    chain=chain,
                     tool_name=name,
                     base_cost=int(base_cost),
                     ledger=ledger,
@@ -3810,8 +3826,9 @@ def register_standard_tools(
                 else:
                     result["effective_cost_api_sats"] = effective
                     if effective != base_cost:
+                        effect_type = "credit" if effective < 0 else "discount"
                         result["constraint_effects"].append({
-                            "type": "discount",
+                            "type": effect_type,
                             "from": int(base_cost),
                             "to": effective,
                         })

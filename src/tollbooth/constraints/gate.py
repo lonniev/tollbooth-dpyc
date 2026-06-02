@@ -1,110 +1,73 @@
-"""Constraint gate — drop-in helper for operator _debit_or_deny flows."""
+"""Constraint gate — walks a tool's per-tool constraint chain.
+
+Each tool owns an ordered chain of ``PipelineStep`` objects stored on
+its ``ToolPrice``.  The gate fetches the chain from the
+:class:`PricingResolver` and walks it sequentially:
+
+* Build a :class:`ConstraintContext` from the ledger / npub / env.
+* For each step in order: instantiate its :class:`ToolConstraint`,
+  apply patron-npub scoping, evaluate, short-circuit on denial,
+  otherwise apply ``result.price_modifier`` to the running price.
+* Return the (possibly-signed) effective price.  Negative results
+  mean the chain has driven the toll into a credit — the caller
+  (``OperatorRuntime.debit_or_deny``) handles that as a credit on
+  the patron's balance.
+"""
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from tollbooth.config import TollboothConfig
 from tollbooth.constraints.base import (
     ConstraintContext,
     EnvironmentSnapshot,
     LedgerSnapshot,
     PatronIdentity,
 )
-from tollbooth.constraints.config import ConfigError, load_constraints
-from tollbooth.constraints.engine import ConstraintEngine
+from tollbooth.constraints.config import ConfigError, load_constraint
+from tollbooth.pricing_model import PipelineStep
 
 logger = logging.getLogger(__name__)
 
 
 class ConstraintGate:
-    """Evaluates constraints before a tool call.
+    """Walks a per-tool constraint chain at debit / preview time.
 
-    Usage in operator code::
-
-        gate = ConstraintGate(config)
-
-        async def _debit_or_deny(tool_name, user_id, cache):
-            cost = TOOL_COSTS.get(tool_name, 0)
-            if cost == 0:
-                return None, cost
-
-            ledger = await cache.get(user_id)
-
-            # Check constraints (may modify cost)
-            denial, effective_cost = gate.check(
-                tool_name=tool_name,
-                base_cost=cost,
-                ledger=ledger,
-                npub=user_id,
-            )
-            if denial is not None:
-                return denial, 0
-
-            # Debit at effective_cost (may be discounted)
-            if not ledger.debit(tool_name, effective_cost):
-                return {"success": False, "error": "Insufficient balance"}, 0
-
-            cache.mark_dirty(user_id)
-            return None, effective_cost
+    Stateless aside from the optional resolver attachment.  The
+    resolver (a :class:`PricingResolver`) is the source of the
+    cached active pricing model — the gate asks it for a tool's
+    chain on every evaluation.
     """
 
-    def __init__(self, config: TollboothConfig) -> None:
-        self._enabled = config.constraints_enabled
-        self._engine: ConstraintEngine | None = None
+    def __init__(self) -> None:
         self._resolver: Any | None = None  # PricingResolver (avoid circular import)
 
-        if self._enabled and config.constraints_config:
-            try:
-                raw = json.loads(config.constraints_config)
-                self._engine = load_constraints(raw)
-            except (json.JSONDecodeError, ConfigError) as e:
-                logger.error("Failed to load constraint config: %s", e)
-                self._enabled = False
-
     def attach_resolver(self, resolver: Any) -> None:
-        """Wire a :class:`PricingResolver` as a dynamic engine source.
-
-        When attached, :meth:`check_async` will prefer the resolver's
-        engine over the static one loaded from config.
-        """
+        """Wire a :class:`PricingResolver` as the chain source."""
         self._resolver = resolver
 
     @property
     def enabled(self) -> bool:
-        """True when the gate is active and has a valid engine."""
-        return self._enabled and self._engine is not None
+        """True when a resolver is attached.  Without one, the gate is
+        a no-op and tool calls pass through at their base price."""
+        return self._resolver is not None
 
-    def check(
+    # ---- evaluation ----
+
+    def _build_context(
         self,
+        *,
         tool_name: str,
-        base_cost: int,
-        ledger: Any,  # UserLedger — use Any to avoid circular import
-        npub: str = "",
+        ledger: Any,
+        npub: str,
         membership_tier: str = "default",
         invocation_count: int = 0,
         global_demand: dict[str, int] | None = None,
         proof: str = "",
-    ) -> tuple[dict[str, Any] | None, int]:
-        """Evaluate constraints for a tool call.
-
-        Returns
-        -------
-        (denial_dict, effective_cost)
-            If *denial_dict* is not ``None``, the tool call should be blocked
-            with that error.  Otherwise *effective_cost* is the (possibly
-            discounted) cost to debit.
-        """
-        if not self.enabled:
-            return None, base_cost
-
-        assert self._engine is not None  # guarded by self.enabled
-
-        # Build context from ledger snapshot (read-only)
-        context = ConstraintContext(
+    ) -> ConstraintContext:
+        return ConstraintContext(
             ledger=LedgerSnapshot(
                 balance_api_sats=ledger.balance_api_sats,
                 total_deposited_api_sats=ledger.total_deposited_api_sats,
@@ -119,36 +82,67 @@ class ConstraintGate:
                 utc_now=datetime.now(timezone.utc),
                 tool_name=tool_name,
                 invocation_count=invocation_count,
-                global_demand=tuple(
-                    (global_demand or {}).items()
-                ),
+                global_demand=tuple((global_demand or {}).items()),
             ),
             proof=proof,
         )
 
-        result = self._engine.evaluate(tool_name, context)
-
-        if not result.allowed:
-            error: dict[str, Any] = {
-                "success": False,
-                "error": result.message or f"Constraint denied: {result.reason}",
-                "constraint_reason": result.reason,
-            }
-            if result.retry_after:
-                error["retry_after"] = result.retry_after.isoformat()
-            if result.metadata:
-                error["constraint_metadata"] = result.metadata
-            return error, 0
-
-        # Apply price modifier if present
-        effective_cost = base_cost
-        if result.price_modifier:
-            effective_cost = result.price_modifier.apply_to(base_cost)
-
-        return None, effective_cost
-
-    async def check_async(
+    def _walk(
         self,
+        chain: list[PipelineStep],
+        base_cost: int,
+        context: ConstraintContext,
+    ) -> tuple[dict[str, Any] | None, int]:
+        """Walk *chain* against *context*, returning (denial, effective_cost).
+
+        Effective cost is signed — negative values are credits that the
+        caller routes to the patron's balance rather than debiting.
+        """
+        running = base_cost
+        patron_npub = context.patron.npub
+
+        for step in chain:
+            # patron_npubs is a per-step audience filter — skip the
+            # step if the patron isn't in its (non-empty) list.
+            if step.patron_npubs and patron_npub not in step.patron_npubs:
+                continue
+
+            try:
+                constraint = load_constraint({"type": step.type, **step.params})
+            except ConfigError as exc:
+                logger.warning(
+                    "Skipping malformed constraint step %s (%s): %s",
+                    step.id, step.type, exc,
+                )
+                continue
+
+            result = constraint.evaluate(context)
+
+            if not result.allowed:
+                error: dict[str, Any] = {
+                    "success": False,
+                    "error": result.message or f"Constraint denied: {result.reason}",
+                    "constraint_reason": result.reason,
+                    "constraint_step_id": step.id,
+                }
+                if result.retry_after:
+                    error["retry_after"] = result.retry_after.isoformat()
+                if result.metadata:
+                    error["constraint_metadata"] = result.metadata
+                return error, 0
+
+            if result.price_modifier is not None:
+                running = result.price_modifier.apply_to(running)
+                # Negative running price is allowed — the chain can drive
+                # a debit into a credit.  The runtime handles the sign at
+                # the balance-update step.
+
+        return None, running
+
+    async def evaluate_chain_async(
+        self,
+        *,
+        tool_id: str,
         tool_name: str,
         base_cost: int,
         ledger: Any,
@@ -156,70 +150,62 @@ class ConstraintGate:
         membership_tier: str = "default",
         invocation_count: int = 0,
         global_demand: dict[str, int] | None = None,
+        proof: str = "",
     ) -> tuple[dict[str, Any] | None, int]:
-        """Async version of :meth:`check` that prefers the resolver's engine.
+        """Fetch *tool_id*'s chain from the resolver and walk it.
 
-        If a :class:`PricingResolver` is attached via :meth:`attach_resolver`,
-        its dynamically-loaded engine takes precedence over the static one.
-        Falls back to the static engine (or passthrough) on resolver failure.
+        Returns ``(None, base_cost)`` unchanged if no resolver is
+        attached or the tool has an empty chain.
         """
-        engine = self._engine  # static default
-
-        if self._resolver is not None:
-            try:
-                dynamic_engine = await self._resolver.get_constraint_engine()
-                if dynamic_engine is not None:
-                    engine = dynamic_engine
-            except Exception:
-                logger.warning(
-                    "PricingResolver.get_constraint_engine() failed; "
-                    "falling back to static engine",
-                    exc_info=True,
-                )
-
-        if engine is None and not self._enabled:
+        if self._resolver is None:
+            return None, base_cost
+        try:
+            chain = await self._resolver.get_chain(tool_id)
+        except Exception:
+            logger.warning(
+                "PricingResolver.get_chain(%s) failed; passing base cost through",
+                tool_id, exc_info=True,
+            )
+            return None, base_cost
+        if not chain:
             return None, base_cost
 
-        if engine is None:
-            return None, base_cost
-
-        context = ConstraintContext(
-            ledger=LedgerSnapshot(
-                balance_api_sats=ledger.balance_api_sats,
-                total_deposited_api_sats=ledger.total_deposited_api_sats,
-                total_consumed_api_sats=ledger.total_consumed_api_sats,
-                total_expired_api_sats=ledger.total_expired_api_sats,
-            ),
-            patron=PatronIdentity(
-                npub=npub,
-                membership_tier=membership_tier,
-            ),
-            env=EnvironmentSnapshot(
-                utc_now=datetime.now(timezone.utc),
-                tool_name=tool_name,
-                invocation_count=invocation_count,
-                global_demand=tuple(
-                    (global_demand or {}).items()
-                ),
-            ),
+        context = self._build_context(
+            tool_name=tool_name,
+            ledger=ledger,
+            npub=npub,
+            membership_tier=membership_tier,
+            invocation_count=invocation_count,
+            global_demand=global_demand,
+            proof=proof,
         )
+        return self._walk(chain, base_cost, context)
 
-        result = engine.evaluate(tool_name, context)
-
-        if not result.allowed:
-            error: dict[str, Any] = {
-                "success": False,
-                "error": result.message or f"Constraint denied: {result.reason}",
-                "constraint_reason": result.reason,
-            }
-            if result.retry_after:
-                error["retry_after"] = result.retry_after.isoformat()
-            if result.metadata:
-                error["constraint_metadata"] = result.metadata
-            return error, 0
-
-        effective_cost = base_cost
-        if result.price_modifier:
-            effective_cost = result.price_modifier.apply_to(base_cost)
-
-        return None, effective_cost
+    def evaluate_chain(
+        self,
+        *,
+        chain: list[PipelineStep],
+        tool_name: str,
+        base_cost: int,
+        ledger: Any,
+        npub: str = "",
+        membership_tier: str = "default",
+        invocation_count: int = 0,
+        global_demand: dict[str, int] | None = None,
+        proof: str = "",
+    ) -> tuple[dict[str, Any] | None, int]:
+        """Sync chain walk.  Caller supplies the chain directly — used
+        from ``check_price`` previews that have already resolved the
+        cached model synchronously."""
+        if not chain:
+            return None, base_cost
+        context = self._build_context(
+            tool_name=tool_name,
+            ledger=ledger,
+            npub=npub,
+            membership_tier=membership_tier,
+            invocation_count=invocation_count,
+            global_demand=global_demand,
+            proof=proof,
+        )
+        return self._walk(chain, base_cost, context)

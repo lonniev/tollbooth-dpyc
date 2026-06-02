@@ -180,7 +180,6 @@ try:
         LedgerSnapshot,
         PatronIdentity,
         EnvironmentSnapshot,
-        ConstraintEngine,
         ConstraintGate,
         TemporalWindowConstraint,
         FiniteSupplyConstraint,
@@ -192,8 +191,7 @@ try:
         HappyHourConstraint,
         JsonExpressionConstraint,
         SurgePricingConstraint,
-        load_constraints,
-        validate_config,
+        validate_step,
     )
 except ImportError:
     ToolConstraint = None  # type: ignore[assignment,misc]
@@ -203,7 +201,6 @@ except ImportError:
     LedgerSnapshot = None  # type: ignore[assignment,misc]
     PatronIdentity = None  # type: ignore[assignment,misc]
     EnvironmentSnapshot = None  # type: ignore[assignment,misc]
-    ConstraintEngine = None  # type: ignore[assignment,misc]
     ConstraintGate = None  # type: ignore[assignment,misc]
     TemporalWindowConstraint = None  # type: ignore[assignment,misc]
     FiniteSupplyConstraint = None  # type: ignore[assignment,misc]
@@ -215,8 +212,7 @@ except ImportError:
     HappyHourConstraint = None  # type: ignore[assignment,misc]
     JsonExpressionConstraint = None  # type: ignore[assignment,misc]
     SurgePricingConstraint = None  # type: ignore[assignment,misc]
-    load_constraints = None  # type: ignore[assignment,misc]
-    validate_config = None  # type: ignore[assignment,misc]
+    validate_step = None  # type: ignore[assignment,misc]
 
 __all__ = [
     "CertificateError",
@@ -335,7 +331,6 @@ __all__ = [
     "LedgerSnapshot",
     "PatronIdentity",
     "EnvironmentSnapshot",
-    "ConstraintEngine",
     "TemporalWindowConstraint",
     "FiniteSupplyConstraint",
     "PeriodicRefreshConstraint",
@@ -346,8 +341,7 @@ __all__ = [
     "HappyHourConstraint",
     "JsonExpressionConstraint",
     "SurgePricingConstraint",
-    "load_constraints",
-    "validate_config",
+    "validate_step",
     # Bootstrap & Runtime
     "BootstrapClient",
     "BootstrapResult",

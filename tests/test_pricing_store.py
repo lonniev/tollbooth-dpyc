@@ -60,7 +60,6 @@ def _sample_model() -> PricingModel:
         operator="npub1abc",
         name="Test Model",
         tools=[ToolPrice(tool_id="test-uuid-1", tool_name="search", price_sats=5)],
-        pipeline=[],
     )
 
 

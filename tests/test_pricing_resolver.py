@@ -27,11 +27,15 @@ def _active_model() -> PricingModel:
         name="Active",
         is_active=True,
         tools=[
-            ToolPrice(tool_id=SEARCH_ID, tool_name="search", price_sats=3),
+            ToolPrice(
+                tool_id=SEARCH_ID,
+                tool_name="search",
+                price_sats=3,
+                chain=[
+                    PipelineStep(id="s1", type="free_trial", params={"first_n_free": 5}),
+                ],
+            ),
             ToolPrice(tool_id=CREATE_ID, tool_name="create", price_sats=7),
-        ],
-        pipeline=[
-            PipelineStep(id="s1", type="free_trial", params={"first_n_free": 5}),
         ],
     )
 
@@ -191,35 +195,32 @@ class TestNeonUnavailable:
 
 
 # ---------------------------------------------------------------------------
-# get_constraint_engine
+# get_chain — per-tool constraint chain lookup
 # ---------------------------------------------------------------------------
 
 
-class TestGetConstraintEngine:
+class TestGetChain:
     @pytest.mark.asyncio
-    async def test_returns_engine_from_pipeline(self) -> None:
+    async def test_returns_chain_for_tool_with_chain(self) -> None:
         store = _MockStore(model=_active_model())
         resolver = PricingResolver(store=store, operator="npub1op")
-        engine = await resolver.get_constraint_engine()
-        assert engine is not None
+        chain = await resolver.get_chain(SEARCH_ID)
+        assert len(chain) == 1
+        assert chain[0].type == "free_trial"
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_no_pipeline(self) -> None:
-        model = PricingModel(
-            model_id="uuid-2", operator="npub1op", name="NoPipeline",
-            is_active=True, tools=[], pipeline=[],
-        )
-        store = _MockStore(model=model)
+    async def test_returns_empty_for_tool_without_chain(self) -> None:
+        store = _MockStore(model=_active_model())
         resolver = PricingResolver(store=store, operator="npub1op")
-        engine = await resolver.get_constraint_engine()
-        assert engine is None
+        chain = await resolver.get_chain(CREATE_ID)
+        assert chain == []
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_no_model(self) -> None:
+    async def test_returns_empty_when_no_model(self) -> None:
         store = _MockStore(model=None)
         resolver = PricingResolver(store=store, operator="npub1op")
-        engine = await resolver.get_constraint_engine()
-        assert engine is None
+        chain = await resolver.get_chain(SEARCH_ID)
+        assert chain == []
 
 
 # ---------------------------------------------------------------------------
