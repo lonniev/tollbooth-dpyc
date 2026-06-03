@@ -66,6 +66,7 @@ class ConstraintGate:
         invocation_count: int = 0,
         global_demand: dict[str, int] | None = None,
         proof: str = "",
+        coupon_redemptions: Any | None = None,
     ) -> ConstraintContext:
         return ConstraintContext(
             ledger=LedgerSnapshot(
@@ -85,6 +86,7 @@ class ConstraintGate:
                 global_demand=tuple((global_demand or {}).items()),
             ),
             proof=proof,
+            coupon_redemptions=coupon_redemptions,
         )
 
     def _walk(
@@ -92,14 +94,22 @@ class ConstraintGate:
         chain: list[PipelineStep],
         base_cost: int,
         context: ConstraintContext,
-    ) -> tuple[dict[str, Any] | None, int]:
-        """Walk *chain* against *context*, returning (denial, effective_cost).
+    ) -> tuple[dict[str, Any] | None, int, list[str]]:
+        """Walk *chain* against *context*, returning
+        ``(denial, effective_cost, consume_coupon_ids)``.
 
         Effective cost is signed — negative values are credits that the
         caller routes to the patron's balance rather than debiting.
+
+        ``consume_coupon_ids`` is the deduped list of coupon ids that
+        applied during the walk (collected from each step's
+        ``metadata["consume_coupon_id"]``).  Callers use this when
+        ``consume=True`` to burn one use per id after the debit lands.
         """
         running = base_cost
         patron_npub = context.patron.npub
+        consumed_ids: list[str] = []
+        seen_ids: set[str] = set()
 
         for step in chain:
             # patron_npubs is a per-step audience filter — skip the
@@ -129,7 +139,7 @@ class ConstraintGate:
                     error["retry_after"] = result.retry_after.isoformat()
                 if result.metadata:
                     error["constraint_metadata"] = result.metadata
-                return error, 0
+                return error, 0, []
 
             if result.price_modifier is not None:
                 running = result.price_modifier.apply_to(running)
@@ -137,7 +147,27 @@ class ConstraintGate:
                 # a debit into a credit.  The runtime handles the sign at
                 # the balance-update step.
 
-        return None, running
+            cid = result.metadata.get("consume_coupon_id") if result.metadata else None
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                consumed_ids.append(cid)
+
+        return None, running, consumed_ids
+
+    @staticmethod
+    def collect_coupon_ids(chain: list[PipelineStep]) -> list[str]:
+        """Scan a chain for ``coupon`` steps and return their ``coupon_id``s.
+
+        Used by the runtime to batch-fetch the caller's redemption rows
+        before the walk so ``CouponConstraint.evaluate`` stays sync.
+        """
+        out: list[str] = []
+        for step in chain:
+            if step.type == "coupon":
+                cid = step.params.get("coupon_id") if step.params else None
+                if cid and isinstance(cid, str):
+                    out.append(cid)
+        return out
 
     async def evaluate_chain_async(
         self,
@@ -151,14 +181,15 @@ class ConstraintGate:
         invocation_count: int = 0,
         global_demand: dict[str, int] | None = None,
         proof: str = "",
-    ) -> tuple[dict[str, Any] | None, int]:
+        coupon_redemptions: Any | None = None,
+    ) -> tuple[dict[str, Any] | None, int, list[str]]:
         """Fetch *tool_id*'s chain from the resolver and walk it.
 
-        Returns ``(None, base_cost)`` unchanged if no resolver is
+        Returns ``(None, base_cost, [])`` unchanged if no resolver is
         attached or the tool has an empty chain.
         """
         if self._resolver is None:
-            return None, base_cost
+            return None, base_cost, []
         try:
             chain = await self._resolver.get_chain(tool_id)
         except Exception:
@@ -166,9 +197,9 @@ class ConstraintGate:
                 "PricingResolver.get_chain(%s) failed; passing base cost through",
                 tool_id, exc_info=True,
             )
-            return None, base_cost
+            return None, base_cost, []
         if not chain:
-            return None, base_cost
+            return None, base_cost, []
 
         context = self._build_context(
             tool_name=tool_name,
@@ -178,6 +209,7 @@ class ConstraintGate:
             invocation_count=invocation_count,
             global_demand=global_demand,
             proof=proof,
+            coupon_redemptions=coupon_redemptions,
         )
         return self._walk(chain, base_cost, context)
 
@@ -193,12 +225,13 @@ class ConstraintGate:
         invocation_count: int = 0,
         global_demand: dict[str, int] | None = None,
         proof: str = "",
-    ) -> tuple[dict[str, Any] | None, int]:
+        coupon_redemptions: Any | None = None,
+    ) -> tuple[dict[str, Any] | None, int, list[str]]:
         """Sync chain walk.  Caller supplies the chain directly — used
         from ``check_price`` previews that have already resolved the
         cached model synchronously."""
         if not chain:
-            return None, base_cost
+            return None, base_cost, []
         context = self._build_context(
             tool_name=tool_name,
             ledger=ledger,
@@ -207,5 +240,6 @@ class ConstraintGate:
             invocation_count=invocation_count,
             global_demand=global_demand,
             proof=proof,
+            coupon_redemptions=coupon_redemptions,
         )
         return self._walk(chain, base_cost, context)

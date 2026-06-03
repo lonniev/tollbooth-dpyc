@@ -3,6 +3,72 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.41.0 — 2026-06-03
+
+### Added — Operator-owned discount coupons
+
+Coupons are now first-class operator objects with their own CRUD
+surface, not inline params on a constraint.  Each coupon has a
+catchy name (the redemption code), a discount %, a calendar window,
+per-patron and aggregate usage caps, and a redemption counter that
+the wheel maintains atomically as patrons consume tools.
+
+Patrons redeem a code once via `redeem_coupon`; the wheel auto-applies
+the discount on subsequent paid tool calls (no per-call code entry).
+The constraint chain references a coupon by id; the runtime pre-loads
+the caller's redemption rows before walking the chain and burns one
+use per applied coupon when the debit commits.
+
+#### New persistence
+
+- `coupons` and `patron_coupons` tables, both per-operator schema,
+  added to `NeonVault.ensure_schema`.  Idempotent — upgrading
+  operators pick them up on the first paid tool call.
+- New `tollbooth/coupons/` module: `Coupon`, `PatronCoupon`,
+  `CouponRedemption`, `CouponRedemptionMap`, `CouponsVault`.
+
+#### New tools (registered by `register_standard_tools`)
+
+Operator-restricted (require proof; resolved against `operator_npub()`):
+
+- `mint_coupon(name, discount_percent, valid_from, valid_until,
+  uses_per_patron=1, total_uses=None)`
+- `list_coupons()`
+- `update_coupon(coupon_id, **patch)` — supports
+  `clear_uses_per_patron` / `clear_total_uses` to set caps to NULL
+- `delete_coupon(coupon_id)` — cascades to patron redemptions
+
+Patron-facing (free; require proof against caller's npub):
+
+- `redeem_coupon(npub, code)` — idempotent
+- `list_my_coupons(npub)` — joined view with status per row
+- `forget_coupon(npub, coupon_id)` — cosmetic removal
+
+#### Breaking — `CouponConstraint` shape
+
+`CouponConstraint(coupon_id=...)` replaces the old inline-params
+form.  The new constraint is a thin reference; the operator owns the
+coupon row, the patron owns the redemption.  Per-tool chains carrying
+the old shape fail `from_dict` (missing `coupon_id`) and the step is
+skipped — operators rebuild via mint + chain-attach.
+
+#### Gate + runtime
+
+- `ConstraintGate.evaluate_chain[_async]` now returns a 3-tuple
+  `(denial, effective_cost, consumed_coupon_ids)`.  The last element
+  is the deduped list of coupon ids whose discount applied.
+- `ConstraintContext.coupon_redemptions: CouponRedemptionMap | None`
+  carries pre-loaded redemption snapshots so the constraint stays
+  synchronous.
+- `OperatorRuntime.debit_or_deny` burns one use per applied coupon
+  after a successful debit (and on free / credit success paths).
+  `check_price` pre-loads for accurate preview but never burns.
+
+#### Graceful degradation
+
+Orphaned `coupon_id` references (deleted coupons, unredeemed
+patrons) return neutral — chain continues at base price, no denial.
+
 ## 0.40.0 — 2026-06-02
 
 ### Changed (breaking) — Per-tool constraint chains replace operator-wide pipeline

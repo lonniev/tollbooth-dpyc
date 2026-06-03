@@ -40,135 +40,160 @@ def _ctx(
 
 
 # ---------------------------------------------------------------------------
-# CouponConstraint
+# CouponConstraint — references an operator-owned coupon by id
 # ---------------------------------------------------------------------------
+
+from tollbooth.coupons.models import CouponRedemption, CouponRedemptionMap
+
+
+def _redemption(
+    coupon_id: str = "11111111-1111-4111-8111-111111111111",
+    *,
+    discount_percent: float = 50.0,
+    valid_from: datetime | None = None,
+    valid_until: datetime | None = None,
+    uses_per_patron: int | None = 1,
+    total_uses: int | None = None,
+    times_redeemed: int = 0,
+    use_count: int = 0,
+    name: str = "FRESHMAN",
+) -> CouponRedemption:
+    if valid_from is None:
+        valid_from = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    if valid_until is None:
+        valid_until = datetime(2027, 1, 1, tzinfo=timezone.utc)
+    return CouponRedemption(
+        coupon_id=coupon_id,
+        name=name,
+        discount_percent=discount_percent,
+        valid_from=valid_from,
+        valid_until=valid_until,
+        uses_per_patron=uses_per_patron,
+        total_uses=total_uses,
+        times_redeemed=times_redeemed,
+        use_count=use_count,
+    )
+
+
+def _ctx_with_redemptions(*redemptions: CouponRedemption, utc_now=None) -> ConstraintContext:
+    if utc_now is None:
+        utc_now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    rmap = CouponRedemptionMap(
+        entries=tuple((r.coupon_id, r) for r in redemptions),
+    )
+    return ConstraintContext(
+        ledger=LedgerSnapshot(),
+        patron=PatronIdentity(),
+        env=EnvironmentSnapshot(utc_now=utc_now),
+        coupon_redemptions=rmap,
+    )
 
 
 class TestCouponConstraint:
-    def test_valid_coupon_percent(self):
-        c = CouponConstraint(code="SAVE50", discount_percent=50.0)
-        result = c.evaluate(_ctx())
+    COUPON_ID = "11111111-1111-4111-8111-111111111111"
+
+    def test_no_pre_load_is_neutral(self):
+        """Loader didn't run → constraint stays neutral (no discount)."""
+        c = CouponConstraint(coupon_id=self.COUPON_ID)
+        result = c.evaluate(_ctx())  # coupon_redemptions is None
+        assert result.allowed is True
+        assert result.price_modifier is None
+
+    def test_patron_has_not_redeemed_is_neutral(self):
+        """Pre-load ran but this patron hasn't redeemed → neutral."""
+        c = CouponConstraint(coupon_id=self.COUPON_ID)
+        result = c.evaluate(_ctx_with_redemptions())  # empty map
+        assert result.allowed is True
+        assert result.price_modifier is None
+
+    def test_active_redemption_applies_discount(self):
+        c = CouponConstraint(coupon_id=self.COUPON_ID)
+        rmap = _ctx_with_redemptions(
+            _redemption(self.COUPON_ID, discount_percent=50.0)
+        )
+        result = c.evaluate(rmap)
         assert result.allowed is True
         assert result.price_modifier is not None
         assert result.price_modifier.discount_percent == 50.0
+        assert result.metadata["consume_coupon_id"] == self.COUPON_ID
+        assert result.metadata["coupon_name"] == "FRESHMAN"
 
-    def test_valid_coupon_sats(self):
-        c = CouponConstraint(code="FLAT100", discount_sats=100)
-        result = c.evaluate(_ctx())
+    def test_window_not_started_is_neutral(self):
+        c = CouponConstraint(coupon_id=self.COUPON_ID)
+        ctx = _ctx_with_redemptions(
+            _redemption(
+                self.COUPON_ID,
+                valid_from=datetime(2030, 1, 1, tzinfo=timezone.utc),
+                valid_until=datetime(2031, 1, 1, tzinfo=timezone.utc),
+            )
+        )
+        result = c.evaluate(ctx)
         assert result.allowed is True
-        assert result.price_modifier.discount_sats == 100
+        assert result.price_modifier is None
 
-    def test_valid_coupon_free(self):
-        c = CouponConstraint(code="FREEBIE", free=True)
-        result = c.evaluate(_ctx())
+    def test_window_closed_is_neutral(self):
+        c = CouponConstraint(coupon_id=self.COUPON_ID)
+        ctx = _ctx_with_redemptions(
+            _redemption(
+                self.COUPON_ID,
+                valid_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+                valid_until=datetime(2025, 12, 1, tzinfo=timezone.utc),
+            )
+        )
+        result = c.evaluate(ctx)
         assert result.allowed is True
-        assert result.price_modifier.free is True
+        assert result.price_modifier is None
 
-    def test_expired_coupon(self):
-        c = CouponConstraint(
-            code="OLD",
-            discount_percent=25.0,
-            expires_at="2026-01-01T00:00:00Z",
+    def test_per_patron_exhausted_is_neutral(self):
+        c = CouponConstraint(coupon_id=self.COUPON_ID)
+        ctx = _ctx_with_redemptions(
+            _redemption(self.COUPON_ID, uses_per_patron=3, use_count=3)
         )
-        result = c.evaluate(_ctx())  # March 2026 > Jan 2026
-        assert result.allowed is False
-        assert result.reason == "coupon_expired"
-
-    def test_future_expiry_ok(self):
-        c = CouponConstraint(
-            code="FUTURE",
-            discount_percent=10.0,
-            expires_at="2027-01-01T00:00:00Z",
-        )
-        result = c.evaluate(_ctx())
+        result = c.evaluate(ctx)
         assert result.allowed is True
+        assert result.price_modifier is None
 
-    def test_global_cap_exhausted(self):
-        c = CouponConstraint(
-            code="LIMITED",
-            discount_percent=30.0,
-            max_redemptions=100,
-            current_redemptions=100,
+    def test_total_cap_reached_is_neutral(self):
+        c = CouponConstraint(coupon_id=self.COUPON_ID)
+        ctx = _ctx_with_redemptions(
+            _redemption(self.COUPON_ID, total_uses=100, times_redeemed=100)
         )
-        result = c.evaluate(_ctx())
-        assert result.allowed is False
-        assert result.reason == "coupon_exhausted"
-
-    def test_global_cap_within(self):
-        c = CouponConstraint(
-            code="LIMITED",
-            discount_percent=30.0,
-            max_redemptions=100,
-            current_redemptions=50,
-        )
-        result = c.evaluate(_ctx())
+        result = c.evaluate(ctx)
         assert result.allowed is True
+        assert result.price_modifier is None
 
-    def test_patron_cap_exhausted(self):
-        c = CouponConstraint(
-            code="ONCE",
-            discount_percent=20.0,
-            max_per_patron=1,
-            patron_redemptions=1,
+    def test_unknown_coupon_id_in_chain_is_neutral(self):
+        """Orphan ref (deleted coupon) → neutral, no denial."""
+        c = CouponConstraint(coupon_id="22222222-2222-4222-8222-222222222222")
+        ctx = _ctx_with_redemptions(
+            _redemption(self.COUPON_ID)  # different id present
         )
-        result = c.evaluate(_ctx())
-        assert result.allowed is False
-        assert result.reason == "coupon_patron_limit"
-
-    def test_patron_cap_within(self):
-        c = CouponConstraint(
-            code="TWICE",
-            discount_percent=20.0,
-            max_per_patron=2,
-            patron_redemptions=1,
-        )
-        result = c.evaluate(_ctx())
+        result = c.evaluate(ctx)
         assert result.allowed is True
-
-    def test_metadata_includes_code(self):
-        c = CouponConstraint(code="META", discount_percent=5.0)
-        result = c.evaluate(_ctx())
-        assert result.metadata["coupon_code"] == "META"
-
-    def test_no_timezone_expiry_treated_as_utc(self):
-        # Naive datetime in expires_at should be treated as UTC
-        c = CouponConstraint(
-            code="NAIVE",
-            discount_percent=10.0,
-            expires_at="2026-01-01T00:00:00",  # no Z
-        )
-        result = c.evaluate(_ctx())
-        assert result.allowed is False
+        assert result.price_modifier is None
 
 
 class TestCouponSerialization:
+    COUPON_ID = "33333333-3333-4333-8333-333333333333"
+
     def test_to_dict(self):
-        c = CouponConstraint(
-            code="TEST",
-            discount_percent=25.0,
-            expires_at="2026-12-31",
-            max_redemptions=50,
-        )
+        c = CouponConstraint(coupon_id=self.COUPON_ID)
         d = c.to_dict()
-        assert d["type"] == "coupon"
-        assert d["code"] == "TEST"
-        assert d["discount_percent"] == 25.0
-        assert d["expires_at"] == "2026-12-31"
+        assert d == {"type": "coupon", "coupon_id": self.COUPON_ID}
 
     def test_round_trip(self):
-        c = CouponConstraint(
-            code="RT", discount_sats=200, max_per_patron=3, patron_redemptions=1
-        )
+        c = CouponConstraint(coupon_id=self.COUPON_ID)
         restored = CouponConstraint.from_dict(c.to_dict())
-        assert restored.code == "RT"
-        assert restored.discount_sats == 200
-        assert restored.max_per_patron == 3
+        assert restored.coupon_id == self.COUPON_ID
+
+    def test_from_dict_requires_coupon_id(self):
+        import pytest
+        with pytest.raises(ValueError):
+            CouponConstraint.from_dict({"type": "coupon"})
 
     def test_describe(self):
-        c = CouponConstraint(code="HALF", discount_percent=50.0, expires_at="2026-12-31")
-        desc = c.describe()
-        assert "HALF" in desc
-        assert "50" in desc
+        c = CouponConstraint(coupon_id=self.COUPON_ID)
+        assert "33333333" in c.describe()
 
 
 # ---------------------------------------------------------------------------

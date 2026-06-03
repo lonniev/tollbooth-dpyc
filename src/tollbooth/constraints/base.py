@@ -71,6 +71,13 @@ class ConstraintContext:
     env: EnvironmentSnapshot
     proof: str = ""  # Signed Nostr kind-27235 event proving npub ownership
 
+    # Pre-loaded patron-side state the chain may want to read.
+    # Populated by the runtime (via ``CouponsVault.fetch_redemptions_for_chain``)
+    # before walking the chain so ``CouponConstraint.evaluate`` stays sync.
+    # ``None`` means "no redemptions were pre-loaded" — distinct from an
+    # empty map (loader ran, patron has zero redemptions).
+    coupon_redemptions: Any | None = None  # CouponRedemptionMap | None
+
 
 # ---------------------------------------------------------------------------
 # PriceModifier

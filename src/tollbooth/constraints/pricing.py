@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from tollbooth.constraints.base import (
@@ -17,172 +16,93 @@ from tollbooth.constraints.temporal import TemporalWindowConstraint
 
 
 # ---------------------------------------------------------------------------
-# CouponConstraint
+# CouponConstraint — references an operator-owned coupon by id
 # ---------------------------------------------------------------------------
 
 
 class CouponConstraint(ToolConstraint):
-    """Apply a discount when a valid coupon code is supplied.
+    """Apply the discount on a previously-redeemed coupon, if any.
 
-    The coupon code itself must be passed via ``context.env`` metadata or
-    matched externally. This constraint checks expiry, redemption caps,
-    and per-patron caps.
+    The coupon itself (name, discount %, window, caps) is an
+    operator-owned row in the ``coupons`` table; this constraint just
+    references it by ``coupon_id``.  The patron redeems once via
+    ``redeem_coupon`` — subsequent paid tool calls auto-apply the
+    discount until uses-per-patron or the window are exhausted.
 
-    Parameters
-    ----------
-    code:
-        The coupon code string.
-    discount_percent:
-        Percentage discount (0-100).
-    discount_sats:
-        Absolute discount in api-sats.
-    free:
-        If ``True``, the tool call is free.
-    expires_at:
-        Optional ISO-8601 expiry datetime.
-    max_redemptions:
-        Optional global cap on total redemptions.
-    max_per_patron:
-        Optional per-patron redemption cap.
-    current_redemptions:
-        Externally tracked total redemptions so far.
-    patron_redemptions:
-        Externally tracked redemptions for the current patron.
+    Evaluation reads ``context.coupon_redemptions`` (loaded by the
+    runtime before the gate walks the chain).  Behavior:
+
+    * No redemption row for the patron → neutral; the chain continues
+      at base price.  This is the common case for patrons who haven't
+      claimed the code yet.
+    * Redemption present + window/caps OK → apply discount + record
+      ``metadata["consume_coupon_id"]`` so the runtime can burn one
+      use after a successful debit.
+    * Redemption present but window closed / caps reached → neutral.
+      An expired redemption isn't a denial; the patron just doesn't
+      get the discount on this call.
+    * ``coupon_id`` not found anywhere (deleted coupon, stale chain) →
+      neutral.  Lifecycle state, not an error.
     """
 
-    def __init__(
-        self,
-        code: str,
-        discount_percent: float = 0.0,
-        discount_sats: int = 0,
-        free: bool = False,
-        expires_at: str | None = None,
-        max_redemptions: int | None = None,
-        max_per_patron: int | None = None,
-        current_redemptions: int = 0,
-        patron_redemptions: int = 0,
-    ) -> None:
-        self.code = code
-        self.discount_percent = discount_percent
-        self.discount_sats = discount_sats
-        self.free = free
-        self.expires_at = expires_at
-        self.max_redemptions = max_redemptions
-        self.max_per_patron = max_per_patron
-        self.current_redemptions = current_redemptions
-        self.patron_redemptions = patron_redemptions
+    def __init__(self, coupon_id: str) -> None:
+        self.coupon_id = coupon_id
 
     def evaluate(self, context: ConstraintContext) -> ConstraintResult:
-        now = context.env.utc_now
+        rmap = context.coupon_redemptions
+        if rmap is None:
+            # Loader didn't run — be permissive (gate works without
+            # pre-loaded redemptions; this just means no discount).
+            return ConstraintResult(allowed=True)
 
-        # Check expiry
-        if self.expires_at is not None:
-            exp = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            if now >= exp:
-                return ConstraintResult(
-                    allowed=False,
-                    reason="coupon_expired",
-                    message=f"Coupon {self.code!r} has expired.",
-                )
+        view = rmap.get(self.coupon_id)
+        if view is None:
+            return ConstraintResult(allowed=True)
 
-        # Check global cap
-        if (
-            self.max_redemptions is not None
-            and self.current_redemptions >= self.max_redemptions
-        ):
-            return ConstraintResult(
-                allowed=False,
-                reason="coupon_exhausted",
-                message=f"Coupon {self.code!r} has been fully redeemed.",
-            )
+        ok, _reason = view.is_usable(context.env.utc_now)
+        if not ok:
+            return ConstraintResult(allowed=True)
 
-        # Check per-patron cap
-        if (
-            self.max_per_patron is not None
-            and self.patron_redemptions >= self.max_per_patron
-        ):
-            return ConstraintResult(
-                allowed=False,
-                reason="coupon_patron_limit",
-                message=f"You have already used coupon {self.code!r} the maximum number of times.",
-            )
-
-        # Valid — build modifier
-        modifier = PriceModifier(
-            discount_percent=self.discount_percent,
-            discount_sats=self.discount_sats,
-            free=self.free,
-        )
         return ConstraintResult(
             allowed=True,
-            price_modifier=modifier,
-            metadata={"coupon_code": self.code},
+            price_modifier=PriceModifier(discount_percent=view.discount_percent),
+            metadata={
+                "consume_coupon_id": self.coupon_id,
+                "coupon_name": view.name,
+                "coupon_discount_percent": view.discount_percent,
+            },
         )
 
     def describe(self) -> str:
-        parts = [f"Coupon {self.code!r}:"]
-        if self.free:
-            parts.append("free")
-        elif self.discount_percent:
-            parts.append(f"{self.discount_percent}% off")
-        elif self.discount_sats:
-            parts.append(f"{self.discount_sats} sats off")
-        if self.expires_at:
-            parts.append(f"(expires {self.expires_at})")
-        return " ".join(parts)
+        return f"Coupon {self.coupon_id[:8]}…: discount applied when redeemed and valid."
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"type": "coupon", "code": self.code}
-        if self.discount_percent:
-            d["discount_percent"] = self.discount_percent
-        if self.discount_sats:
-            d["discount_sats"] = self.discount_sats
-        if self.free:
-            d["free"] = True
-        if self.expires_at is not None:
-            d["expires_at"] = self.expires_at
-        if self.max_redemptions is not None:
-            d["max_redemptions"] = self.max_redemptions
-        if self.max_per_patron is not None:
-            d["max_per_patron"] = self.max_per_patron
-        if self.current_redemptions:
-            d["current_redemptions"] = self.current_redemptions
-        if self.patron_redemptions:
-            d["patron_redemptions"] = self.patron_redemptions
-        return d
+        return {"type": "coupon", "coupon_id": self.coupon_id}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CouponConstraint:
-        return cls(
-            code=data["code"],
-            discount_percent=float(data.get("discount_percent", 0.0)),
-            discount_sats=int(data.get("discount_sats", 0)),
-            free=bool(data.get("free", False)),
-            expires_at=data.get("expires_at"),
-            max_redemptions=data.get("max_redemptions"),
-            max_per_patron=data.get("max_per_patron"),
-            current_redemptions=int(data.get("current_redemptions", 0)),
-            patron_redemptions=int(data.get("patron_redemptions", 0)),
-        )
+        coupon_id = data.get("coupon_id")
+        if not coupon_id:
+            raise ValueError("coupon constraint requires a 'coupon_id'.")
+        return cls(coupon_id=str(coupon_id))
 
     @classmethod
     def schema(cls) -> ConstraintSchema:
         return ConstraintSchema(
             type="coupon",
             category="Pricing",
-            description="Apply a discount when a valid coupon code is present. Supports expiry, global caps, and per-patron caps.",
+            description=(
+                "Apply the discount on a redeemed coupon. The coupon "
+                "itself (name, discount %, window, caps) is managed "
+                "via mint_coupon / list_coupons / update_coupon / "
+                "delete_coupon — this references it by id."
+            ),
             params=[
-                ParamSchema(name="code", type="string", description="The coupon code string."),
-                ParamSchema(name="discount_percent", type="float", required=False, default=0.0, description="Percentage discount (0-100)."),
-                ParamSchema(name="discount_sats", type="int", required=False, default=0, description="Absolute discount in api-sats."),
-                ParamSchema(name="free", type="bool", required=False, default=False, description="If true, the tool call is free."),
-                ParamSchema(name="expires_at", type="string", required=False, description="ISO-8601 expiry datetime."),
-                ParamSchema(name="max_redemptions", type="int", required=False, description="Global cap on total redemptions."),
-                ParamSchema(name="max_per_patron", type="int", required=False, description="Per-patron redemption cap."),
-                ParamSchema(name="current_redemptions", type="int", required=False, default=0, description="Total redemptions so far (externally tracked)."),
-                ParamSchema(name="patron_redemptions", type="int", required=False, default=0, description="Current patron's redemptions (externally tracked)."),
+                ParamSchema(
+                    name="coupon_id",
+                    type="uuid",
+                    description="UUID of an operator-owned coupon row.",
+                ),
             ],
         )
 

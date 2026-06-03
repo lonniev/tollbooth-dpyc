@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from tollbooth.constraints.gate import ConstraintGate
+from tollbooth.coupons.models import CouponRedemption, CouponRedemptionMap
 from tollbooth.pricing_model import PipelineStep
 
 
@@ -17,7 +19,13 @@ class _StubLedger:
     total_expired_api_sats: int = 100
 
 
-def _walk(chain: list[PipelineStep], base_cost: int, *, npub: str = "npub1abc") -> tuple[dict | None, int]:
+def _walk(
+    chain: list[PipelineStep],
+    base_cost: int,
+    *,
+    npub: str = "npub1abc",
+    coupon_redemptions: CouponRedemptionMap | None = None,
+) -> tuple[dict | None, int, list[str]]:
     """Drive evaluate_chain directly (no resolver needed)."""
     return ConstraintGate().evaluate_chain(
         chain=chain,
@@ -25,19 +33,21 @@ def _walk(chain: list[PipelineStep], base_cost: int, *, npub: str = "npub1abc") 
         base_cost=base_cost,
         ledger=_StubLedger(),
         npub=npub,
+        coupon_redemptions=coupon_redemptions,
     )
 
 
 class TestPassthrough:
     def test_empty_chain_returns_base_cost(self):
-        denial, eff = _walk([], 100)
+        denial, eff, consumed = _walk([], 100)
         assert denial is None
         assert eff == 100
+        assert consumed == []
 
     def test_no_resolver_async_passthrough(self):
         import asyncio
         gate = ConstraintGate()
-        denial, eff = asyncio.run(
+        denial, eff, consumed = asyncio.run(
             gate.evaluate_chain_async(
                 tool_id="t1",
                 tool_name="search",
@@ -48,6 +58,7 @@ class TestPassthrough:
         )
         assert denial is None
         assert eff == 100
+        assert consumed == []
 
 
 class TestSequentialApplication:
@@ -67,7 +78,7 @@ class TestSequentialApplication:
                 params={"threshold_consumed_api_sats": 0, "discount_percent": 20.0},
             ),
         ]
-        denial, eff = _walk(chain, 100)
+        denial, eff, _ = _walk(chain, 100)
         assert denial is None
         assert eff == 40
 
@@ -80,7 +91,7 @@ class TestSequentialApplication:
                 params={"threshold_consumed_api_sats": 10_000, "discount_percent": 75.0},
             ),
         ]
-        denial, eff = _walk(chain, 100)
+        denial, eff, _ = _walk(chain, 100)
         assert denial is None
         assert eff == 100
 
@@ -100,9 +111,10 @@ class TestDenialShortCircuits:
                 params={"threshold_consumed_api_sats": 0, "discount_percent": 50.0},
             ),
         ]
-        denial, eff = _walk(chain, 100)
+        denial, eff, consumed = _walk(chain, 100)
         assert denial is not None
         assert eff == 0
+        assert consumed == []
         assert denial.get("constraint_step_id") == "exhausted"
         assert denial.get("constraint_reason") == "supply_exhausted"
 
@@ -117,7 +129,7 @@ class TestPatronScoping:
                 patron_npubs=["npub1alice"],
             ),
         ]
-        denial, eff = _walk(chain, 100, npub="npub1bob")
+        denial, eff, _ = _walk(chain, 100, npub="npub1bob")
         assert denial is None
         assert eff == 100  # step skipped, base price passes through
 
@@ -130,6 +142,76 @@ class TestPatronScoping:
                 patron_npubs=["npub1alice"],
             ),
         ]
-        denial, eff = _walk(chain, 100, npub="npub1alice")
+        denial, eff, _ = _walk(chain, 100, npub="npub1alice")
         assert denial is None
         assert eff == 50
+
+
+# ---------------------------------------------------------------------------
+# Coupon redemption + consume-marker collection
+# ---------------------------------------------------------------------------
+
+
+CID_A = "11111111-1111-4111-8111-111111111111"
+CID_B = "22222222-2222-4222-8222-222222222222"
+
+
+def _redemption(coupon_id: str, *, discount_percent: float = 50.0) -> CouponRedemption:
+    return CouponRedemption(
+        coupon_id=coupon_id,
+        name="TEST",
+        discount_percent=discount_percent,
+        valid_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        valid_until=datetime(2027, 1, 1, tzinfo=timezone.utc),
+        uses_per_patron=10,
+        total_uses=None,
+        times_redeemed=0,
+        use_count=0,
+    )
+
+
+class TestCouponConsumeMarkers:
+    def test_collect_coupon_ids_picks_only_coupon_steps(self):
+        chain = [
+            PipelineStep(id="c1", type="coupon", params={"coupon_id": CID_A}),
+            PipelineStep(
+                id="l1", type="loyalty_discount",
+                params={"threshold_consumed_api_sats": 0, "discount_percent": 10.0},
+            ),
+            PipelineStep(id="c2", type="coupon", params={"coupon_id": CID_B}),
+        ]
+        assert ConstraintGate.collect_coupon_ids(chain) == [CID_A, CID_B]
+
+    def test_applied_coupon_emits_consume_marker(self):
+        chain = [
+            PipelineStep(id="c1", type="coupon", params={"coupon_id": CID_A}),
+        ]
+        rmap = CouponRedemptionMap(
+            entries=((CID_A, _redemption(CID_A, discount_percent=50.0)),),
+        )
+        denial, eff, consumed = _walk(chain, 100, coupon_redemptions=rmap)
+        assert denial is None
+        assert eff == 50
+        assert consumed == [CID_A]
+
+    def test_unredeemed_coupon_does_not_emit_marker(self):
+        chain = [
+            PipelineStep(id="c1", type="coupon", params={"coupon_id": CID_A}),
+        ]
+        rmap = CouponRedemptionMap(entries=())  # patron has nothing
+        denial, eff, consumed = _walk(chain, 100, coupon_redemptions=rmap)
+        assert denial is None
+        assert eff == 100
+        assert consumed == []
+
+    def test_dedup_repeated_coupon_id(self):
+        chain = [
+            PipelineStep(id="c1", type="coupon", params={"coupon_id": CID_A}),
+            PipelineStep(id="c2", type="coupon", params={"coupon_id": CID_A}),
+        ]
+        rmap = CouponRedemptionMap(
+            entries=((CID_A, _redemption(CID_A, discount_percent=10.0)),),
+        )
+        denial, eff, consumed = _walk(chain, 100, coupon_redemptions=rmap)
+        assert denial is None
+        assert consumed == [CID_A]  # only once

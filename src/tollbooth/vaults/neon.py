@@ -399,6 +399,41 @@ class NeonVault:
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_pricing_models_operator "
             f"ON {self._t('operator_pricing_models')} (operator)"
         )
+        # -- Coupons (operator-owned discount offers) --
+        await self._execute(
+            f"CREATE TABLE IF NOT EXISTS {self._t('coupons')} ("
+            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            "    operator TEXT NOT NULL,"
+            "    name TEXT NOT NULL,"
+            "    discount_percent NUMERIC(5,2) NOT NULL,"
+            "    valid_from TIMESTAMPTZ NOT NULL,"
+            "    valid_until TIMESTAMPTZ NOT NULL,"
+            "    uses_per_patron INTEGER,"
+            "    total_uses INTEGER,"
+            "    times_redeemed INTEGER NOT NULL DEFAULT 0,"
+            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    UNIQUE (operator, name)"
+            ")"
+        )
+        await self._execute(
+            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_coupons_operator "
+            f"ON {self._t('coupons')}(operator)"
+        )
+        await self._execute(
+            f"CREATE TABLE IF NOT EXISTS {self._t('patron_coupons')} ("
+            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            f"    coupon_id UUID NOT NULL REFERENCES {self._t('coupons')}(id) ON DELETE CASCADE,"
+            "    npub TEXT NOT NULL,"
+            "    use_count INTEGER NOT NULL DEFAULT 0,"
+            "    redeemed_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    UNIQUE (coupon_id, npub)"
+            ")"
+        )
+        await self._execute(
+            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_patron_coupons_npub "
+            f"ON {self._t('patron_coupons')}(npub)"
+        )
 
     # -- Global demand counters (surge pricing) --------------------------------
 

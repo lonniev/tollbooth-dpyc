@@ -142,6 +142,7 @@ class OperatorRuntime:
         self._ledger_cache: Any | None = None
         self._courier: Any | None = None
         self._cashier: Any | None = None
+        self._coupons_vault: Any | None = None  # lazy CouponsVault
         self._operator_npub: str | None = None
         self._nsec: str | None = None
         self._reconciled_npubs: set[str] = set()  # dedup auto-reconciliation
@@ -547,6 +548,14 @@ class OperatorRuntime:
             )
         return self._pricing_resolver
 
+    async def coupons_vault(self) -> Any:
+        """Lazy accessor for the :class:`CouponsVault` (requires vault)."""
+        if self._coupons_vault is None:
+            vault = await self.vault()
+            from tollbooth.coupons import CouponsVault
+            self._coupons_vault = CouponsVault(neon_vault=vault)
+        return self._coupons_vault
+
     async def debit_or_deny(
         self,
         tool_id: str,
@@ -689,6 +698,7 @@ class OperatorRuntime:
         # surcharges, even drive it negative into a credit).
         # Without an npub, constraints cannot evaluate.
         effective_cost = cost
+        consumed_coupon_ids: list[str] = []
         if npub and category != "free":
             try:
                 resolver = await self.pricing_resolver()
@@ -703,7 +713,26 @@ class OperatorRuntime:
                         gate = ConstraintGate()
                         gate.attach_resolver(resolver)
                         self._constraint_gate = gate
-                    denial, effective_signed = gate.evaluate_chain(
+                    # Pre-load coupon redemptions for any coupon steps so
+                    # the chain walk stays synchronous.
+                    coupon_map = None
+                    coupon_ids = gate.collect_coupon_ids(chain)
+                    if coupon_ids:
+                        try:
+                            cv = await self.coupons_vault()
+                            redemptions = await cv.fetch_redemptions_for_chain(
+                                npub, coupon_ids,
+                            )
+                            from tollbooth.coupons import CouponRedemptionMap
+                            coupon_map = CouponRedemptionMap(
+                                entries=tuple(redemptions.items()),
+                            )
+                        except Exception as ce:
+                            logger.warning(
+                                "Coupon redemption pre-load failed for %s: %s",
+                                name, ce,
+                            )
+                    denial, effective_signed, consumed_coupon_ids = gate.evaluate_chain(
                         chain=chain,
                         tool_name=name,
                         base_cost=cost,
@@ -711,6 +740,7 @@ class OperatorRuntime:
                         npub=npub,
                         global_demand=demand,
                         proof=proof,
+                        coupon_redemptions=coupon_map,
                     )
                     if denial is not None:
                         denial["error_code"] = ErrorCode.CONSTRAINT_DENIED
@@ -720,6 +750,28 @@ class OperatorRuntime:
                 logger.warning("Constraint evaluation failed for %s: %s", name, exc)
                 # Fall through with base cost — don't block the call
 
+        async def _burn_consumed_coupons() -> None:
+            """Burn one use per consumed coupon id.  Best-effort —
+            errors are logged but don't unwind the debit (the chain
+            already evaluated allowed=True and the patron got the
+            discount; a transient burn failure is recoverable on
+            replay because the same use_count would just re-burn)."""
+            if not consumed_coupon_ids or not npub:
+                return
+            try:
+                cv = await self.coupons_vault()
+            except Exception as exc:
+                logger.warning("coupons_vault unavailable for burn: %s", exc)
+                return
+            for cid in consumed_coupon_ids:
+                try:
+                    await cv.burn_use(cid, npub)
+                except Exception as exc:
+                    logger.warning(
+                        "burn_use failed (coupon=%s patron=%s): %s",
+                        cid, npub[:20], exc,
+                    )
+
         # ── No charge ─────────────────────────────────────────
         if effective_cost == 0:
             if npub:
@@ -727,6 +779,7 @@ class OperatorRuntime:
                 ledger = await cache.get(npub)
                 ledger.debit(name, 0)
                 cache.mark_dirty(npub)
+            await _burn_consumed_coupons()
             return 0
 
         # ── Credit (chain drove price negative) ───────────────
@@ -740,6 +793,7 @@ class OperatorRuntime:
             credit_sats = abs(effective_cost)
             ledger.credit_deposit(credit_sats, f"chain_credit:{name}")
             cache.mark_dirty(npub)
+            await _burn_consumed_coupons()
             return effective_cost  # signed — caller can detect credit case
 
         # ── Billing ───────────────────────────────────────────
@@ -789,6 +843,7 @@ class OperatorRuntime:
 
         ledger.debit(name, effective_cost)
         cache.mark_dirty(npub)
+        await _burn_consumed_coupons()
         return effective_cost
 
     async def rollback_debit(
@@ -3807,13 +3862,32 @@ def register_standard_tools(
                     gate = ConstraintGate()
                     gate.attach_resolver(resolver)
                     rt._constraint_gate = gate
-                denial, effective = gate.evaluate_chain(
+                # Preview: pre-load redemptions so a coupon-discounted
+                # price shows accurately, but don't burn any uses.
+                coupon_map = None
+                coupon_ids = gate.collect_coupon_ids(chain)
+                if coupon_ids and resolved:
+                    try:
+                        cv = await rt.coupons_vault()
+                        redemptions = await cv.fetch_redemptions_for_chain(
+                            resolved, coupon_ids,
+                        )
+                        from tollbooth.coupons import CouponRedemptionMap
+                        coupon_map = CouponRedemptionMap(
+                            entries=tuple(redemptions.items()),
+                        )
+                    except Exception as ce:
+                        logger.warning(
+                            "check_price coupon pre-load failed: %s", ce,
+                        )
+                denial, effective, _consumed = gate.evaluate_chain(
                     chain=chain,
                     tool_name=name,
                     base_cost=int(base_cost),
                     ledger=ledger,
                     npub=resolved,
                     global_demand=demand,
+                    coupon_redemptions=coupon_map,
                 )
                 if demand.get(name, 0) > 0:
                     result["current_demand"] = demand[name]
@@ -3852,6 +3926,438 @@ def register_standard_tools(
             list_constraint_types as _list,
         )
         return {"status": "ok", "constraint_types": _list()}
+
+    # -- Coupon CRUD + redemption -------------------------------------------
+
+    def _format_coupon(c: Any) -> dict[str, Any]:
+        d = c.to_dict()
+        # times_redeemed / total_uses → simple "redeemed of N" string
+        if c.total_uses is not None:
+            d["progress"] = f"{c.times_redeemed} / {c.total_uses}"
+        else:
+            d["progress"] = f"{c.times_redeemed} / ∞"
+        return d
+
+    def _parse_window(value: str, label: str) -> Any:
+        from datetime import datetime as _dt, timezone as _tz
+        try:
+            dt = _dt.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"{label} must be ISO-8601 (e.g. '2026-06-01T00:00:00Z'); got {value!r}."
+            ) from exc
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_tz.utc)
+        return dt
+
+    @tool
+    async def mint_coupon(
+        name: str,
+        discount_percent: float,
+        valid_from: str,
+        valid_until: str,
+        uses_per_patron: int | None = 1,
+        total_uses: int | None = None,
+        proof: str = "",
+    ) -> dict[str, Any]:
+        """Create a new operator-owned discount coupon.
+
+        Args:
+            name: The catchy code patrons type to redeem
+                (operator-scoped uniqueness).
+            discount_percent: Percentage off the base price (0-100).
+            valid_from: ISO-8601 datetime when the coupon becomes active.
+            valid_until: ISO-8601 datetime when the coupon expires.
+            uses_per_patron: How many tool calls one patron can claim the
+                discount on (default 1; pass null/None for unlimited
+                within the window).
+            total_uses: Aggregate cap across all patrons (default None =
+                unlimited).
+
+        Returns the new coupon row. RESTRICTED to operator — requires
+        proof (nsec-signed kind-27235 or cached poison token).
+        """
+        if not proof:
+            return {
+                "success": False,
+                "error": "Only the operator can mint coupons — provide proof.",
+            }
+        err = await rt.require_caller_proof(
+            rt.operator_npub(), proof, "mint_coupon",
+        )
+        if err:
+            return err
+
+        if not name or not name.strip():
+            return {"success": False, "error": "name is required and must be non-empty."}
+        if not (0 < float(discount_percent) <= 100):
+            return {
+                "success": False,
+                "error": "discount_percent must be in (0, 100].",
+            }
+
+        try:
+            vf = _parse_window(valid_from, "valid_from")
+            vu = _parse_window(valid_until, "valid_until")
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        if vu <= vf:
+            return {
+                "success": False,
+                "error": "valid_until must be strictly later than valid_from.",
+            }
+        if uses_per_patron is not None and int(uses_per_patron) <= 0:
+            return {
+                "success": False,
+                "error": "uses_per_patron must be a positive integer or null for unlimited.",
+            }
+        if total_uses is not None and int(total_uses) <= 0:
+            return {
+                "success": False,
+                "error": "total_uses must be a positive integer or null for unlimited.",
+            }
+
+        from tollbooth.coupons.vault import CouponAlreadyExists
+        try:
+            cv = await rt.coupons_vault()
+            coupon = await cv.mint(
+                operator=rt.operator_npub(),
+                name=name.strip(),
+                discount_percent=float(discount_percent),
+                valid_from=vf,
+                valid_until=vu,
+                uses_per_patron=int(uses_per_patron) if uses_per_patron is not None else None,
+                total_uses=int(total_uses) if total_uses is not None else None,
+            )
+        except CouponAlreadyExists as exc:
+            return {"success": False, "error": str(exc)}
+        except Exception as exc:
+            return {"success": False, "error": f"mint failed: {exc}"}
+
+        return {"success": True, "coupon": _format_coupon(coupon)}
+
+    @tool
+    async def list_coupons(proof: str = "") -> dict[str, Any]:
+        """List every coupon this operator has minted (newest first).
+
+        Each row carries the current ``times_redeemed`` counter — the
+        Studio renders a progress bar from this against ``total_uses``.
+        RESTRICTED to operator — requires proof.
+        """
+        if not proof:
+            return {
+                "success": False,
+                "error": "Only the operator can list coupons — provide proof.",
+            }
+        err = await rt.require_caller_proof(
+            rt.operator_npub(), proof, "list_coupons",
+        )
+        if err:
+            return err
+
+        try:
+            cv = await rt.coupons_vault()
+            coupons = await cv.list_for_operator(rt.operator_npub())
+        except Exception as exc:
+            return {"success": False, "error": f"list failed: {exc}"}
+
+        return {
+            "success": True,
+            "count": len(coupons),
+            "coupons": [_format_coupon(c) for c in coupons],
+        }
+
+    @tool
+    async def update_coupon(
+        coupon_id: str,
+        name: str | None = None,
+        discount_percent: float | None = None,
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+        uses_per_patron: int | None = None,
+        total_uses: int | None = None,
+        clear_uses_per_patron: bool = False,
+        clear_total_uses: bool = False,
+        proof: str = "",
+    ) -> dict[str, Any]:
+        """Patch a coupon's editable fields.
+
+        Pass only the fields you want to change.  To set a cap to
+        unlimited (NULL in the schema), pass ``clear_uses_per_patron=true``
+        or ``clear_total_uses=true``.  Renaming the code is allowed —
+        existing patron redemption rows survive (they key on coupon id).
+
+        RESTRICTED to operator — requires proof.
+        """
+        if not proof:
+            return {
+                "success": False,
+                "error": "Only the operator can update coupons — provide proof.",
+            }
+        err = await rt.require_caller_proof(
+            rt.operator_npub(), proof, "update_coupon",
+        )
+        if err:
+            return err
+
+        if not coupon_id:
+            return {"success": False, "error": "coupon_id is required."}
+        if discount_percent is not None and not (0 < float(discount_percent) <= 100):
+            return {
+                "success": False,
+                "error": "discount_percent must be in (0, 100].",
+            }
+
+        vf = vu = None
+        try:
+            if valid_from is not None:
+                vf = _parse_window(valid_from, "valid_from")
+            if valid_until is not None:
+                vu = _parse_window(valid_until, "valid_until")
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+
+        upp: Any = ...
+        if clear_uses_per_patron:
+            upp = None
+        elif uses_per_patron is not None:
+            if int(uses_per_patron) <= 0:
+                return {
+                    "success": False,
+                    "error": "uses_per_patron must be a positive integer.",
+                }
+            upp = int(uses_per_patron)
+
+        tu: Any = ...
+        if clear_total_uses:
+            tu = None
+        elif total_uses is not None:
+            if int(total_uses) <= 0:
+                return {
+                    "success": False,
+                    "error": "total_uses must be a positive integer.",
+                }
+            tu = int(total_uses)
+
+        from tollbooth.coupons.vault import CouponAlreadyExists, CouponNotFound
+        try:
+            cv = await rt.coupons_vault()
+            updated = await cv.update(
+                coupon_id,
+                rt.operator_npub(),
+                name=name.strip() if name else None,
+                discount_percent=float(discount_percent) if discount_percent is not None else None,
+                valid_from=vf,
+                valid_until=vu,
+                uses_per_patron=upp,
+                total_uses=tu,
+            )
+        except CouponAlreadyExists as exc:
+            return {"success": False, "error": str(exc)}
+        except CouponNotFound:
+            return {
+                "success": False,
+                "error": f"No coupon {coupon_id!r} owned by this operator.",
+            }
+        except Exception as exc:
+            return {"success": False, "error": f"update failed: {exc}"}
+
+        return {"success": True, "coupon": _format_coupon(updated)}
+
+    @tool
+    async def delete_coupon(coupon_id: str, proof: str = "") -> dict[str, Any]:
+        """Delete a coupon.  Cascades to all patron redemptions.
+
+        Any chain step referencing the deleted coupon_id becomes a
+        no-op (the constraint returns neutral on unknown ids) — the
+        Studio surfaces orphan references as warnings.
+
+        RESTRICTED to operator — requires proof.
+        """
+        if not proof:
+            return {
+                "success": False,
+                "error": "Only the operator can delete coupons — provide proof.",
+            }
+        err = await rt.require_caller_proof(
+            rt.operator_npub(), proof, "delete_coupon",
+        )
+        if err:
+            return err
+
+        if not coupon_id:
+            return {"success": False, "error": "coupon_id is required."}
+
+        try:
+            cv = await rt.coupons_vault()
+            deleted = await cv.delete(coupon_id, rt.operator_npub())
+        except Exception as exc:
+            return {"success": False, "error": f"delete failed: {exc}"}
+
+        if not deleted:
+            return {
+                "success": False,
+                "error": f"No coupon {coupon_id!r} owned by this operator.",
+            }
+        return {"success": True, "coupon_id": coupon_id}
+
+    @tool
+    async def redeem_coupon(npub: str, code: str, proof: str = "") -> dict[str, Any]:
+        """Claim a coupon by its name (the code the operator shared).
+
+        Looks up the operator's coupon by ``code``, validates the window
+        and total cap, and records a per-patron redemption row.
+        Subsequent paid tool calls on this MCP auto-apply the discount
+        until ``uses_per_patron`` is exhausted.
+
+        Free — no credits required.  Requires proof of ``npub``.
+        Idempotent: redeeming the same code twice returns the existing
+        redemption.
+        """
+        try:
+            resolved = resolve_npub(npub)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        err = await rt.require_caller_proof(resolved, proof, "redeem_coupon")
+        if err:
+            return err
+        if not code or not code.strip():
+            return {"success": False, "error": "code is required and must be non-empty."}
+
+        try:
+            cv = await rt.coupons_vault()
+            coupon = await cv.find_by_name(rt.operator_npub(), code.strip())
+            if coupon is None:
+                return {
+                    "success": False,
+                    "error": f"No coupon named {code!r}. Check the spelling and try again.",
+                }
+
+            from datetime import datetime as _dt, timezone as _tz
+            now = _dt.now(_tz.utc)
+            if now < coupon.valid_from:
+                return {
+                    "success": False,
+                    "error": (
+                        f"That coupon isn't active yet. It opens at "
+                        f"{coupon.valid_from.isoformat()}."
+                    ),
+                }
+            if now >= coupon.valid_until:
+                return {
+                    "success": False,
+                    "error": (
+                        f"That coupon was active until "
+                        f"{coupon.valid_until.isoformat()}. Window is closed."
+                    ),
+                }
+            if (
+                coupon.total_uses is not None
+                and coupon.times_redeemed >= coupon.total_uses
+            ):
+                return {
+                    "success": False,
+                    "error": "That coupon has been fully claimed.",
+                }
+
+            pc = await cv.redeem(coupon.id, resolved)
+        except Exception as exc:
+            return {"success": False, "error": f"redeem failed: {exc}"}
+
+        uses_remaining: Any
+        if coupon.uses_per_patron is None:
+            uses_remaining = None
+        else:
+            uses_remaining = max(0, coupon.uses_per_patron - pc.use_count)
+
+        return {
+            "success": True,
+            "coupon_id": coupon.id,
+            "name": coupon.name,
+            "discount_percent": coupon.discount_percent,
+            "valid_until": coupon.valid_until.isoformat(),
+            "uses_remaining": uses_remaining,
+            "uses_per_patron": coupon.uses_per_patron,
+        }
+
+    @tool
+    async def list_my_coupons(npub: str, proof: str = "") -> dict[str, Any]:
+        """List the coupons this patron has redeemed on this operator.
+
+        Returns both active and exhausted redemptions with a per-row
+        ``status`` (``active`` / ``window_closed`` / ``patron_limit`` /
+        ``total_limit``).  Free — requires proof of ``npub``.
+        """
+        try:
+            resolved = resolve_npub(npub)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        err = await rt.require_caller_proof(resolved, proof, "list_my_coupons")
+        if err:
+            return err
+
+        try:
+            cv = await rt.coupons_vault()
+            views = await cv.list_redemptions_for_patron(
+                resolved, operator=rt.operator_npub(),
+            )
+        except Exception as exc:
+            return {"success": False, "error": f"list failed: {exc}"}
+
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        rows: list[dict[str, Any]] = []
+        for v in views:
+            ok, reason = v.is_usable(now)
+            row = {
+                "coupon_id": v.coupon_id,
+                "name": v.name,
+                "discount_percent": v.discount_percent,
+                "valid_from": v.valid_from.isoformat(),
+                "valid_until": v.valid_until.isoformat(),
+                "uses_per_patron": v.uses_per_patron,
+                "use_count": v.use_count,
+                "uses_remaining": v.uses_remaining(),
+                "total_uses": v.total_uses,
+                "total_remaining": v.total_remaining(),
+                "status": "active" if ok else reason,
+            }
+            rows.append(row)
+
+        return {"success": True, "count": len(rows), "coupons": rows}
+
+    @tool
+    async def forget_coupon(
+        npub: str, coupon_id: str, proof: str = "",
+    ) -> dict[str, Any]:
+        """Remove a coupon from this patron's redemption list.
+
+        Cosmetic only — the coupon itself still exists at the operator,
+        and the patron can re-redeem the same code later while the
+        window allows.  Free — requires proof of ``npub``.
+        """
+        try:
+            resolved = resolve_npub(npub)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        err = await rt.require_caller_proof(resolved, proof, "forget_coupon")
+        if err:
+            return err
+        if not coupon_id:
+            return {"success": False, "error": "coupon_id is required."}
+
+        try:
+            cv = await rt.coupons_vault()
+            removed = await cv.forget(coupon_id, resolved)
+        except Exception as exc:
+            return {"success": False, "error": f"forget failed: {exc}"}
+
+        if not removed:
+            return {
+                "success": False,
+                "error": "You don't have that coupon to forget.",
+            }
+        return {"success": True, "coupon_id": coupon_id}
 
     # -- OTS notarization tools (opt-in) --------------------------------
 
