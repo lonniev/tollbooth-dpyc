@@ -169,6 +169,15 @@ NOTARIZE_LEDGER_UUID                 = "fa72cde0-35a6-5fb3-8a49-85041cf3fb6c"
 GET_NOTARIZATION_PROOF_UUID          = "144b6fd8-6409-5642-a72a-d0b14434de73"
 LIST_NOTARIZATIONS_UUID              = "6600a576-84a1-5952-bbb9-350b2ee73ef9"
 
+# Coupon CRUD (wheel 0.41.0+)
+MINT_COUPON_UUID                     = "b2f6a56c-6641-52ec-9e83-934a011dca4e"
+LIST_COUPONS_UUID                    = "3e5c6e5c-6a49-5646-8d17-a6fff6c72e5b"
+UPDATE_COUPON_UUID                   = "566cc15c-e449-5f18-8a71-35f4e7e2f62e"
+DELETE_COUPON_UUID                   = "5b7656d5-bbd0-5c4a-af6d-7999c41f54bb"
+REDEEM_COUPON_UUID                   = "359cdb8d-3e39-58ef-91b4-42f786891b1e"
+LIST_MY_COUPONS_UUID                 = "6f41dfc6-9141-518c-84c9-07b0fdb3fa34"
+FORGET_COUPON_UUID                   = "08fc1a2b-5924-5761-9f8d-bc334001776e"
+
 
 _STANDARD_LIST: list[ToolIdentity] = [
     # -- Credit tools --
@@ -279,6 +288,26 @@ _STANDARD_LIST: list[ToolIdentity] = [
                  intent="Generate a Merkle inclusion proof for a patron balance."),
     ToolIdentity(tool_id=LIST_NOTARIZATIONS_UUID, capability="list_notarizations", category="free",
                  intent="List recent Bitcoin notarization records."),
+
+    # -- Coupon CRUD (wheel 0.41.0+) --
+    # Operator-restricted: mint / list / update / delete.  Patrons hit
+    # these tools through the Pricing Studio; the wheel verifies an
+    # operator-signed kind-27235 proof against the runtime name.
+    ToolIdentity(tool_id=MINT_COUPON_UUID, capability="mint_coupon", category="restricted",
+                 intent="Operator-only: mint a new discount coupon."),
+    ToolIdentity(tool_id=LIST_COUPONS_UUID, capability="list_coupons", category="restricted",
+                 intent="Operator-only: list this operator's coupons."),
+    ToolIdentity(tool_id=UPDATE_COUPON_UUID, capability="update_coupon", category="restricted",
+                 intent="Operator-only: patch a coupon's editable fields."),
+    ToolIdentity(tool_id=DELETE_COUPON_UUID, capability="delete_coupon", category="restricted",
+                 intent="Operator-only: delete a coupon and cascade patron redemptions."),
+    # Patron-facing free tools — npub proof against the caller, not the operator.
+    ToolIdentity(tool_id=REDEEM_COUPON_UUID, capability="redeem_coupon", category="free",
+                 intent="Claim a coupon by name; subsequent paid calls apply the discount."),
+    ToolIdentity(tool_id=LIST_MY_COUPONS_UUID, capability="list_my_coupons", category="free",
+                 intent="List the patron's redeemed coupons on this operator."),
+    ToolIdentity(tool_id=FORGET_COUPON_UUID, capability="forget_coupon", category="free",
+                 intent="Remove a coupon from the patron's redemption list."),
 ]
 
 # Build the UUID-keyed dict from the list.

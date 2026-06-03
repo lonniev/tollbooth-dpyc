@@ -3,6 +3,25 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.41.1 — 2026-06-03
+
+### Fixed — Coupon tools' runtime-name resolution
+
+The 7 new coupon tools (`mint_coupon`, `list_coupons`, `update_coupon`,
+`delete_coupon`, `redeem_coupon`, `list_my_coupons`, `forget_coupon`)
+were registered via `@tool` inside `register_standard_tools` but their
+`ToolIdentity` entries were missing from `STANDARD_IDENTITIES`.  That
+broke proof verification: `OperatorRuntime.runtime_name(capability)`
+calls `mcp_name_for(capability_uuid(capability))`, which returned the
+bare UUID when the identity wasn't in the registry.  The Studio signed
+the proof for `<slug>_list_coupons`; the wheel checked it against a
+UUID string.  Mismatch surfaced as `[proof_invalid] Invalid identity
+proof.`
+
+The 7 identities are now in `STANDARD_IDENTITIES` (4 restricted +
+3 free).  Operators picking up 0.41.1 see proof verification succeed
+without any source changes on their side.
+
 ## 0.41.0 — 2026-06-03
 
 ### Added — Operator-owned discount coupons
