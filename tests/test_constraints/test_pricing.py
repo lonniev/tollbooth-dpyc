@@ -16,6 +16,7 @@ from tollbooth.constraints.pricing import (
     HappyHourConstraint,
     LoyaltyDiscountConstraint,
 )
+from tollbooth.coupons.models import CouponRedemption, CouponRedemptionMap
 
 
 def _ctx(
@@ -42,8 +43,6 @@ def _ctx(
 # ---------------------------------------------------------------------------
 # CouponConstraint — references an operator-owned coupon by id
 # ---------------------------------------------------------------------------
-
-from tollbooth.coupons.models import CouponRedemption, CouponRedemptionMap
 
 
 def _redemption(
