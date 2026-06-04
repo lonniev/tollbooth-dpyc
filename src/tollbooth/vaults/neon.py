@@ -434,6 +434,35 @@ class NeonVault:
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_patron_coupons_npub "
             f"ON {self._t('patron_coupons')}(npub)"
         )
+        # -- Claim-check async jobs (slow tools return a claim check; a
+        #    companion tool redeems it — see tollbooth/async_jobs.py) --
+        await self._execute(
+            f"CREATE TABLE IF NOT EXISTS {self._t('async_jobs')} ("
+            "    claim UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            "    npub TEXT NOT NULL,"
+            "    kind TEXT NOT NULL,"
+            "    tool_id TEXT NOT NULL,"
+            "    params JSONB NOT NULL,"
+            "    status TEXT NOT NULL DEFAULT 'pending',"
+            "    attempts INTEGER NOT NULL DEFAULT 0,"
+            "    max_runtime_seconds INTEGER NOT NULL,"
+            "    result_ttl_seconds INTEGER NOT NULL,"
+            "    result JSONB,"
+            "    error TEXT,"
+            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    started_at TIMESTAMPTZ,"
+            "    completed_at TIMESTAMPTZ,"
+            "    expires_at TIMESTAMPTZ"
+            ")"
+        )
+        await self._execute(
+            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_async_jobs_npub "
+            f"ON {self._t('async_jobs')}(npub)"
+        )
+        await self._execute(
+            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_async_jobs_open "
+            f"ON {self._t('async_jobs')}(status) WHERE status IN ('pending','running')"
+        )
 
     # -- Global demand counters (surge pricing) --------------------------------
 

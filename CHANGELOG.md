@@ -3,6 +3,47 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.42.0 — 2026-06-04
+
+### Added — Claim-check async jobs
+
+Library support for slow Operator tools (LLM round-trips, web-search
+generations) that would otherwise hold the MCP connection open past
+client timeouts.  Such a tool now returns like any normal MCP tool — it
+just returns a *claim check* instead of the end item.  The work runs as
+a concurrent asyncio task in the Operator's process; the result (an
+opaque JSON blob — the output itself, or a pointer such as
+`{"entry_id": ...}`) persists in the Operator's Neon `async_jobs`
+table.  The Operator defines a companion tool that redeems the claim.
+
+New `tollbooth/async_jobs.py` (`AsyncJobStore`) plus three
+`OperatorRuntime` helpers:
+
+- `register_job_runner(kind, runner)` — map a job kind to the async
+  callable that performs the work; registration by name is what lets a
+  fresh serverless container resume an orphaned job.
+- `start_async_job(kind, npub, params, *, tool_id,
+  max_runtime_seconds, result_ttl_seconds)` — persist, spawn, return
+  `{claim_check, status: "pending"}`.  Call from inside a `@paid_tool`
+  body: the fee is assessed for *requesting* the work.  The durations
+  are coded by the tool itself — no operator-level settings.
+- `fetch_async_job(claim, npub)` — the companion tool's body.  Free to
+  call; every lifecycle state returns guidance
+  (`running`/`done`/`error`/`expired`).  Doubles as the watchdog:
+  pending or stalled jobs found while polling are re-kicked on the
+  current container, so serverless recycles can't strand work.  No
+  cron — the patron's own polling drives recovery.
+
+Claims are npub-bound (a claim check alone never unlocks another
+patron's job).  Terminal failures (3 attempts) refund the fee via the
+existing `rollback_debit` and surface a generic error — raw exception
+text never reaches the patron.  Expired results are purged
+opportunistically, rate-limited like the OTS check.
+
+Nothing new is exposed on the wire by the wheel: no standard tools, no
+discovery mechanism.  In the end there are simply some Operator tools
+that return a claim check rather than the end item.
+
 ## 0.41.1 — 2026-06-03
 
 ### Fixed — Coupon tools' runtime-name resolution

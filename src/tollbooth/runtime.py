@@ -152,6 +152,9 @@ class OperatorRuntime:
         self._npub_proof_greeting = npub_proof_greeting
         self._on_npub_proven = on_npub_proven  # async callback(npub, payload)
         self._oauth_provider = oauth_provider  # OAuthProviderConfig or None
+        # Claim-check async jobs (see tollbooth/async_jobs.py)
+        self._job_runners: dict[str, Callable[..., Any]] = {}
+        self._async_jobs_purge_last: float = 0.0  # monotonic, rate-limits purges
         # Shutdown state
         self._shutdown_triggered: bool = False
         self._shutdown_handlers_registered: bool = False
@@ -1749,6 +1752,209 @@ class OperatorRuntime:
                 self._ots_running = False
 
         asyncio.create_task(_maybe_notarize())
+
+    # ------------------------------------------------------------------
+    # Claim-check async jobs
+    # ------------------------------------------------------------------
+    #
+    # A slow tool (LLM round-trip, web-search generation) returns a claim
+    # check instead of the end item; the work runs as a concurrent asyncio
+    # task in this process and the result persists in the operator's Neon.
+    # The operator defines a companion tool that delegates to
+    # fetch_async_job() to redeem the claim. The wheel exposes nothing on
+    # the wire — these are library helpers only.
+
+    _ASYNC_JOB_MAX_ATTEMPTS = 3
+    _ASYNC_JOBS_PURGE_INTERVAL_SECONDS = 300
+
+    def register_job_runner(self, kind: str, runner: Callable[..., Any]) -> None:
+        """Map a job kind to the async callable that performs the work.
+
+        Operators register runners at startup. Runners receive the job's
+        persisted params as kwargs and must return a JSON-serializable
+        dict — either the output content itself or state the operator can
+        use to find the output elsewhere (e.g. ``{"entry_id": ...}``).
+        Registration by name (not closure) is what lets a fresh container
+        resume a job orphaned by a serverless recycle.
+        """
+        self._job_runners[kind] = runner
+
+    async def async_job_store(self) -> Any:
+        """Build an AsyncJobStore over the operator's vault."""
+        from tollbooth.async_jobs import AsyncJobStore
+        vault = await self.vault()
+        return AsyncJobStore(vault)
+
+    async def start_async_job(
+        self,
+        kind: str,
+        npub: str,
+        params: dict[str, Any],
+        *,
+        tool_id: str,
+        max_runtime_seconds: int,
+        result_ttl_seconds: int,
+    ) -> dict[str, Any]:
+        """Persist a job, kick it off concurrently, return its claim check.
+
+        Call from inside a ``@paid_tool`` body — the fee was just assessed
+        for *requesting* the work (that is when the operator incurs the
+        expense). The durations are coded by the calling tool:
+        ``max_runtime_seconds`` is how long one attempt may take (and the
+        staleness threshold for watchdog recovery), ``result_ttl_seconds``
+        is how long a finished result is kept before it expires.
+        """
+        if kind not in self._job_runners:
+            raise RuntimeError(f"No job runner registered for kind {kind!r}")
+        npub = resolve_npub(npub)
+        store = await self.async_job_store()
+        claim = await store.create(
+            npub=npub,
+            kind=kind,
+            tool_id=tool_id,
+            params=params,
+            max_runtime_seconds=max_runtime_seconds,
+            result_ttl_seconds=result_ttl_seconds,
+        )
+        import asyncio
+        asyncio.create_task(self._run_job(claim))
+        return {
+            "success": True,
+            "claim_check": claim,
+            "status": "pending",
+            "poll_after_seconds": 3,
+        }
+
+    async def _run_job(self, claim: str) -> None:
+        """Claim and execute a job; persist its outcome.
+
+        Survives the tool response because Horizon containers are
+        long-lived SSE servers — same mechanism as the fire-and-forget
+        notarization above. Safe to spawn redundantly: the atomic
+        claim_for_run ensures exactly one container runs an attempt.
+        """
+        import asyncio
+        try:
+            store = await self.async_job_store()
+            while True:
+                job = await store.claim_for_run(claim)
+                if job is None:
+                    return  # another container owns it, or it already finished
+                kind = job["kind"]
+                attempt = job["attempts"]
+                runner = self._job_runners.get(kind)
+                if runner is None:
+                    await store.fail(
+                        claim,
+                        f"No runner registered for job kind {kind!r}. "
+                        "The operator must register it at startup.",
+                    )
+                    await self.rollback_debit(
+                        job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                    )
+                    return
+                try:
+                    result = await runner(**job["params"])
+                except Exception as exc:
+                    # Generic message to the patron (an exception string can
+                    # carry anything); full detail to operator logs only —
+                    # same posture as paid_tool's catch_errors path. Domain
+                    # errors a patron *should* see belong in the runner's
+                    # returned dict, which flows through complete().
+                    logger.error(
+                        "Async job %s (%s) attempt %d/%d failed: %s",
+                        claim, kind, attempt, self._ASYNC_JOB_MAX_ATTEMPTS,
+                        exc, exc_info=True,
+                    )
+                    if attempt >= self._ASYNC_JOB_MAX_ATTEMPTS:
+                        await store.fail(
+                            claim, "Job execution failed. Check operator logs.",
+                        )
+                        await self.rollback_debit(
+                            job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                        )
+                        return
+                    await store.release(claim)
+                    await asyncio.sleep(2 * attempt)
+                    continue
+                if not isinstance(result, dict):
+                    result = {"result": result}
+                await store.complete(claim, result)
+                return
+        except Exception as exc:
+            # Store-level failure (Neon unreachable mid-job). Leave the row
+            # as-is — the watchdog reclaims it once max_runtime elapses.
+            logger.warning("Async job %s aborted: %s", claim, exc)
+
+    async def fetch_async_job(self, claim: str, npub: str) -> dict[str, Any]:
+        """Redeem a claim check — the body of an operator's companion tool.
+
+        Every lifecycle state returns guidance, not an error. Doubles as
+        the watchdog: a pending or stalled job found here is re-kicked on
+        this (alive) container, recovering work orphaned by a serverless
+        recycle. No cron required — the patron's own polling drives
+        recovery.
+        """
+        import asyncio
+        npub = resolve_npub(npub)
+        store = await self.async_job_store()
+        self._fire_and_forget_purge_expired_jobs(store)
+        job = await store.get(claim, npub)
+        if job is None or job["expired"]:
+            return {
+                "success": True,
+                "status": "expired",
+                "next_steps": (
+                    "This claim check is unknown or its result has expired. "
+                    "Start a new request to get a fresh claim check."
+                ),
+            }
+        if job["status"] == "done":
+            return {"success": True, "status": "done", "result": job["result"]}
+        if job["status"] == "error":
+            return {
+                "success": True,
+                "status": "error",
+                "error": job["error"],
+                "refunded": True,
+                "next_steps": "The fee was refunded. Start a new request to retry.",
+            }
+        # pending, or running — re-kick when no live container owns it
+        # (pending: creator died before claiming, or released for retry;
+        # stalled: running past its own max_runtime). claim_for_run's
+        # atomicity makes a redundant spawn harmless.
+        recovered = False
+        if job["status"] == "pending" or job["stalled"]:
+            asyncio.create_task(self._run_job(claim))
+            recovered = job["stalled"]
+        response: dict[str, Any] = {
+            "success": True,
+            "status": "running",
+            "poll_after_seconds": 3,
+        }
+        if recovered:
+            response["recovered"] = True
+        return response
+
+    def _fire_and_forget_purge_expired_jobs(self, store: Any) -> None:
+        """Opportunistic cleanup, rate-limited like the OTS check."""
+        import asyncio
+        import time as _time
+
+        now = _time.monotonic()
+        if (now - self._async_jobs_purge_last) < self._ASYNC_JOBS_PURGE_INTERVAL_SECONDS:
+            return
+        self._async_jobs_purge_last = now
+
+        async def _purge() -> None:
+            try:
+                purged = await store.purge_expired()
+                if purged:
+                    logger.info("Purged %d expired async job(s)", purged)
+            except Exception:
+                pass
+
+        asyncio.create_task(_purge())
 
     # ------------------------------------------------------------------
     # Paid tool decorator
