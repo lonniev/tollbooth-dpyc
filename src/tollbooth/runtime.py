@@ -3456,7 +3456,6 @@ def register_standard_tools(
                     "request_npub_proof."
                 ),
             }
-        import time as _time
         resolved = resolve_npub(patron_npub)
 
         courier = await rt.courier()

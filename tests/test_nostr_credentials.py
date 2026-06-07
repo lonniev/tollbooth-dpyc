@@ -14,7 +14,6 @@ from tollbooth.nip04 import _get_shared_secret
 from tollbooth.nostr_credentials import (
     CourierError,
     CourierNotReady,
-    CourierTimeout,
     CourierValidationError,
     NostrCredentialExchange,
     NostrProfile,
