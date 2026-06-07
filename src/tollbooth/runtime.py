@@ -2952,7 +2952,10 @@ def register_standard_tools(
                     return await courier._exchange.redeem_credential_card(
                         credential_card, service=service,
                     )
-                return await courier.receive(sender_npub, service, poison=poison)
+                return await courier.receive(
+                    sender_npub, service, poison=poison,
+                    request_tool="request_patron_credentials",
+                )
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
@@ -3469,7 +3472,7 @@ def register_standard_tools(
         exchange = courier._exchange
         from tollbooth.nostr_credentials import (
             _npub_to_hex, _parse_delimited_credentials,
-            _NACK_TOKEN, _MAX_NACKS_PER_DRAIN, _COURIER_RESOLVE_ERRORS,
+            _NACK_TOKEN, _MAX_NACKS_PER_DRAIN, _courier_resolve_error,
         )
 
         patron_hex = _npub_to_hex(resolved)
@@ -3490,9 +3493,7 @@ def register_standard_tools(
                 "success": False,
                 "error_code": error_code,
                 "popped_dms": 0,
-                "error": _COURIER_RESOLVE_ERRORS.get(
-                    error_code, "Could not resolve the proof channel.",
-                ),
+                "error": _courier_resolve_error(error_code, "request_npub_proof"),
             }
         expected_phrase = poison
 

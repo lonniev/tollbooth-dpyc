@@ -203,27 +203,41 @@ _MAX_NACKS_PER_DRAIN = 5
 
 # Patron-actionable prose for each courier-resolution failure. Keyed by the
 # ErrorCode the resolver returns; the agent branches on error_code, the human
-# reads the message.
+# reads the message. ``{request_tool}`` is filled per flow (the proof flow
+# names request_npub_proof, credential flows name request_*credentials*) so
+# the recovery hint always points at the tool that actually opens THIS channel.
 _COURIER_RESOLVE_ERRORS = {
     ErrorCode.COURIER_NO_PENDING_RECORD: (
-        "No open courier channel for this npub and service. Call "
-        "request_credential_channel (or request_npub_proof) first, then "
-        "retrieve with the poison it returns."
+        "No open courier channel for this npub. Call {request_tool} first, "
+        "then retrieve with the poison it returns."
     ),
     ErrorCode.COURIER_POISON_MISMATCH: (
         "The supplied session phrase does not match the open channel for this "
-        "npub and service. Use the exact poison returned by the request, or "
-        "open a fresh channel."
+        "npub. Use the exact poison returned by {request_tool}, or open a "
+        "fresh channel."
     ),
     ErrorCode.COURIER_TOKEN_EXPIRED: (
         "This courier channel's freshness window has elapsed. Call "
-        "request_credential_channel again for a fresh session phrase."
+        "{request_tool} again for a fresh session phrase."
     ),
     ErrorCode.COURIER_NO_PINNED_RELAY: (
         "The open channel has no pinned rendezvous relay on record, so there "
-        "is no single relay to drain. Open a fresh channel."
+        "is no single relay to drain. Call {request_tool} for a fresh channel."
     ),
 }
+
+
+def _courier_resolve_error(error_code: str, request_tool: str) -> str:
+    """Format the patron-facing resolve-error prose for the given flow.
+
+    ``request_tool`` is the request tool that opens this kind of channel
+    (request_credential_channel / request_patron_credentials /
+    request_npub_proof) so the recovery hint names the right one.
+    """
+    template = _COURIER_RESOLVE_ERRORS.get(
+        error_code, "Could not resolve the courier channel.",
+    )
+    return template.replace("{request_tool}", request_tool)
 
 
 def _npub_to_hex(npub: str) -> str:
@@ -1024,6 +1038,7 @@ class NostrCredentialExchange:
 
     async def receive(
         self, sender_npub: str, *, service: str, poison: str,
+        request_tool: str = "request_credential_channel",
     ) -> dict[str, Any]:
         """Pick up validated credentials via the deterministic courier drain.
 
@@ -1062,8 +1077,8 @@ class NostrCredentialExchange:
                 "error_code": ErrorCode.POISON_MISSING,
                 "popped": 0,
                 "error": (
-                    "poison is required — pass the session phrase returned by "
-                    "request_credential_channel."
+                    f"poison is required — pass the session phrase returned by "
+                    f"{request_tool}."
                 ),
             }
 
@@ -1090,9 +1105,7 @@ class NostrCredentialExchange:
                 "success": False,
                 "error_code": error_code,
                 "popped": 0,
-                "error": _COURIER_RESOLVE_ERRORS.get(
-                    error_code, "Could not resolve the courier channel.",
-                ),
+                "error": _courier_resolve_error(error_code, request_tool),
             }
 
         error_template = self._resolve_error_template(service)
@@ -1183,7 +1196,8 @@ class NostrCredentialExchange:
                     f"Drained the pinned relay ({pinned}); none of the "
                     f"{popped} message(s) carried the expected session phrase. "
                     f"The queue is now empty of the sought reply — confirm the "
-                    f"patron replied on {pinned}, or request a fresh channel."
+                    f"patron replied on {pinned}, or call {request_tool} for a "
+                    f"fresh channel."
                 ),
             }
 

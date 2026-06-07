@@ -206,6 +206,7 @@ class SecureCourierService:
         *,
         poison: str = "",
         caller_id: str | None = None,
+        request_tool: str = "request_credential_channel",
     ) -> dict[str, Any]:
         """Receive credentials via the deterministic Secure Courier drain.
 
@@ -230,7 +231,7 @@ class SecureCourierService:
             metadata.  **NEVER** returns credential values.
         """
         result = await self._exchange.receive(
-            sender_npub, service=service, poison=poison,
+            sender_npub, service=service, poison=poison, request_tool=request_tool,
         )
         return await self._finalize_receive(
             result, sender_npub, service, caller_id,

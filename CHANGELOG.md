@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Courier resolve-error prose pointed at the wrong recovery tool in the proof
+  and patron-credential flows — `COURIER_TOKEN_EXPIRED` (and siblings) said
+  "Call request_credential_channel again" even from `receive_npub_proof`. The
+  messages now carry a `{request_tool}` placeholder filled per flow
+  (request_npub_proof / request_patron_credentials / request_credential_channel),
+  so the hint always names the tool that opens *that* channel. Same fix applied
+  to the `poison_missing` and `courier_not_found` strings.
+
 ## 0.44.0 — 2026-06-07
 
 Deterministic, poison-scoped Secure Courier retrieval. Agentic clients kept
