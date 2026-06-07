@@ -643,6 +643,22 @@ class OperatorRuntime:
             resolver = await self.pricing_resolver()
             await resolver._ensure_fresh()
             if not resolver.neon_available:
+                if resolver.last_error_permanent:
+                    return {
+                        "success": False,
+                        "error_code": ErrorCode.PERSISTENCE_MISCONFIGURED,
+                        "error": (
+                            "The operator's database rejected the pricing-model "
+                            "query with a permanent error — this will NOT resolve "
+                            "by retrying. The operator must repair the database "
+                            f"(detail: {resolver.last_error_summary}). "
+                            "Free tools remain available."
+                        ),
+                        "next_steps": [
+                            "Notify the operator — this is an operator-side "
+                            "database repair, not a patron-actionable error"
+                        ],
+                    }
                 return {
                     "success": False,
                     "error_code": ErrorCode.WARMING_UP,
@@ -2508,8 +2524,12 @@ def register_standard_tools(
         state and clear guidance on what to do next. Free.
 
         Lifecycle states:
-        - ready: Operator is warm and fully operational. Proceed with tool calls.
+        - ready: Operator is warm and fully operational — vault AND pricing
+          model verified. Proceed with tool calls.
         - warming_up: Operator is initializing (cold start). Try a tool call — it will warm up on demand.
+        - misconfigured: Persistence rejected a query with a permanent SQL
+          error (permission denied, missing relation). Paid tools will fail
+          until the operator repairs the database — retrying does not help.
         - not_registered: Operator has no Authority relationship yet. Call register_operator first.
         - no_identity: Operator nsec is not configured. Deployment issue.
 
@@ -2571,7 +2591,34 @@ def register_standard_tools(
                            "Try a tool call — it will complete the warm-up.",
             }
 
-        # 4. Fully ready
+        # 4. Pricing-layer probe — "ready means ready". The paid-tool gate
+        # depends on the pricing model loading from Neon; a vault that
+        # answers while the pricing table rejects queries must not report
+        # ready (that green light cost a real outage its true diagnosis).
+        resolver = await rt.pricing_resolver()
+        await resolver._ensure_fresh()
+        if not resolver.neon_available:
+            if resolver.last_error_permanent:
+                return {
+                    "success": True,
+                    "lifecycle": "misconfigured",
+                    "operator_npub": npub,
+                    "message": "Persistence rejected the pricing-model query "
+                               "with a permanent SQL error. Paid tools will "
+                               "fail until the operator repairs the database — "
+                               "retrying does not help.",
+                    "detail": resolver.last_error_summary,
+                }
+            return {
+                "success": True,
+                "lifecycle": "warming_up",
+                "operator_npub": npub,
+                "message": "Operator vault is up but the pricing model has "
+                           "not loaded yet. Retry shortly.",
+                "detail": resolver.last_error_summary,
+            }
+
+        # 5. Fully ready
         result: dict[str, Any] = {
             "success": True,
             "lifecycle": "ready",

@@ -28,6 +28,7 @@ Typical Authority ``server.py``::
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -513,10 +514,25 @@ async def _require_authority_consent(
     }
 
 
+# Bootstrap DMs are kind-4 events on free public relays, which purge them
+# on their own retention schedules (empirically < 69 days on damus/primal,
+# 2026-06-06). A one-shot publication therefore guarantees an eventual
+# cold-start outage. Re-send whenever the last publication is older than
+# this — opportunistically, on Authority tool traffic (the OTS pattern).
+_BOOTSTRAP_DM_REFRESH_SECONDS = 7 * 24 * 3600
+# In-process throttle so high-traffic tools don't re-check the vault stamp
+# on every call.
+_BOOTSTRAP_DM_CHECK_INTERVAL = 3600.0
+_bootstrap_dm_last_check: dict[str, float] = {}
+
+
 async def _resend_bootstrap_dm(npub: str) -> bool:
     try:
         vault = await _get_runtime().vault()
-        from tollbooth.authority.tenant_provisioner import get_all_operator_config
+        from tollbooth.authority.tenant_provisioner import (
+            get_all_operator_config,
+            store_operator_config,
+        )
         config = await get_all_operator_config(vault, npub)
         neon_url = config.get("neon_database_url")
         schema = config.get("schema", "")
@@ -524,17 +540,47 @@ async def _resend_bootstrap_dm(npub: str) -> bool:
             return False
         from tollbooth.bootstrap_relay import send_bootstrap_config
         signer = _get_nostr_signer()
-        sent = send_bootstrap_config(
+        # The publish is blocking websocket I/O (up to ~10s per relay) —
+        # keep it off the event loop.
+        sent = await asyncio.to_thread(
+            send_bootstrap_config,
             authority_nsec=signer.nsec,
             operator_npub=npub,
             config={"neon_database_url": neon_url, "schema": schema},
         )
         if sent:
+            await store_operator_config(
+                vault, npub, "bootstrap_dm_sent_at", str(int(time.time())),
+            )
             logger.info("Bootstrap config DM (re)sent to operator %s", npub[:16])
         return sent
     except Exception as exc:
         logger.warning("Bootstrap DM resend failed for %s: %s", npub[:16], exc)
         return False
+
+
+async def _maybe_refresh_bootstrap_dm(npub: str) -> None:
+    """Re-publish the operator's bootstrap DM if the last send has aged.
+
+    Called opportunistically from Authority tool traffic. Cheap by
+    design: an in-process throttle gates the vault read, and the
+    publish itself runs only when the stored stamp is older than
+    ``_BOOTSTRAP_DM_REFRESH_SECONDS``. Never raises.
+    """
+    now = time.monotonic()
+    last_check = _bootstrap_dm_last_check.get(npub, 0.0)
+    if now - last_check < _BOOTSTRAP_DM_CHECK_INTERVAL:
+        return
+    _bootstrap_dm_last_check[npub] = now
+    try:
+        vault = await _get_runtime().vault()
+        from tollbooth.authority.tenant_provisioner import get_operator_config_value
+        stamp = await get_operator_config_value(vault, npub, "bootstrap_dm_sent_at")
+        sent_at = int(stamp) if stamp else 0
+        if time.time() - sent_at >= _BOOTSTRAP_DM_REFRESH_SECONDS:
+            await _resend_bootstrap_dm(npub)
+    except Exception as exc:
+        logger.debug("Bootstrap DM refresh check skipped for %s: %s", npub[:16], exc)
 
 
 # ======================================================================
@@ -866,6 +912,10 @@ def register_authority_tools(
         result["vault_backend"] = "neon" if s.neon_database_url else "unconfigured"
         result["cache_health"] = cache.health()
 
+        # Opportunistic bootstrap DM refresh for the inspected operator.
+        if npub:
+            asyncio.create_task(_maybe_refresh_bootstrap_dm(user_id))
+
         return result
 
     # ------------------------------------------------------------------
@@ -949,6 +999,12 @@ def register_authority_tools(
         cache = await runtime.ledger_cache()
         if not await cache.flush_user(npub):
             logger.error("Failed to persist fee debit for %s", npub)
+
+        # Opportunistic bootstrap DM refresh (the OTS pattern): relays
+        # purge kind-4 events, so keep this operator's bootstrap config
+        # alive on the back of its own certification traffic. Fire and
+        # forget — certification latency must not pay for relay I/O.
+        asyncio.create_task(_maybe_refresh_bootstrap_dm(npub))
 
         return {
             "success": True,

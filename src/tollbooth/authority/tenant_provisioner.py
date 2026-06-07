@@ -158,6 +158,24 @@ async def revoke_authority_access(
         )
 
 
+async def restore_operator_grants(vault: Any, schema: str) -> None:
+    """Re-grant the operator role full DML on every object in its schema.
+
+    The ALTER OWNER + REVOKE sequence during (re-)provisioning can strand
+    a table with an empty ACL (``relacl = {}``) — which in Postgres strips
+    even the owner's implicit privileges, leaving the operator unable to
+    SELECT its own pricing model (the 2026-06-06 excalibur outage). An
+    explicit idempotent GRANT as the final provisioning step makes the
+    operator's access unconditional regardless of ACL history.
+    """
+    await vault._execute(
+        f'GRANT ALL ON ALL TABLES IN SCHEMA "{schema}" TO "{schema}"'
+    )
+    await vault._execute(
+        f'GRANT ALL ON ALL SEQUENCES IN SCHEMA "{schema}" TO "{schema}"'
+    )
+
+
 def generate_operator_password() -> str:
     """Generate a secure random password for an operator role."""
     return secrets.token_urlsafe(32)
@@ -213,6 +231,9 @@ async def provision_operator_schema(
     if base_url:
         authority_role = extract_authority_role(base_url)
         await revoke_authority_access(vault, schema, authority_role)
+    # Final self-heal: the operator's own access must survive any ACL
+    # state the ALTER OWNER + REVOKE sequence left behind.
+    await restore_operator_grants(vault, schema)
 
     logger.info("Provisioned schema '%s' with isolated role for operator %s", schema, npub[:16])
     return schema, password

@@ -108,12 +108,30 @@ def send_bootstrap_config(
             ws = websocket.create_connection(relay_url, timeout=10)
             msg = json.dumps(["EVENT", event.to_dict()])
             ws.send(msg)
-            # Read OK response
+            # Read OK response — NIP-20: ["OK", <event_id>, <true|false>, <message>].
+            # Parse strictly: a rejection like ["OK", id, false, "rate-limited"]
+            # must not count as published (substring matching on "ok" did,
+            # silently dropping relays from the bootstrap config's coverage).
             resp = ws.recv()
             ws.close()
-            if "true" in resp.lower() or "ok" in resp.lower():
+            try:
+                reply = json.loads(resp)
+                accepted = (
+                    isinstance(reply, list)
+                    and len(reply) >= 3
+                    and reply[0] == "OK"
+                    and reply[2] is True
+                )
+            except (json.JSONDecodeError, TypeError):
+                accepted = False
+            if accepted:
                 published += 1
                 logger.info("Bootstrap config sent to %s via %s", operator_npub[:16], relay_url)
+            else:
+                logger.warning(
+                    "Relay %s rejected bootstrap config for %s: %s",
+                    relay_url, operator_npub[:16], resp[:200],
+                )
         except Exception as exc:
             logger.debug("Failed to publish bootstrap config to %s: %s", relay_url, exc)
 
@@ -215,8 +233,11 @@ def receive_bootstrap_config(
             ws.send(json.dumps(["CLOSE", sub_id]))
             ws.close()
 
-            if best_config is not None:
-                break
+            # No early break: poll EVERY relay and let the newest ``ts``
+            # win. Relays purge kind-4 events on different schedules, so
+            # the first relay to answer may hold a stale config — and a
+            # stale config carries a rotated-away role password, which
+            # fails worse than no config at all.
 
         except Exception as exc:
             relay_errors.append(f"{relay_url}: {exc}")

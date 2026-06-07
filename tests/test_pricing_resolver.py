@@ -268,3 +268,84 @@ class TestGetToolPricing:
         resolver = PricingResolver(store=store, operator="npub1op")
         pricing = await resolver.get_tool_pricing(capability_uuid("nonexistent"))
         assert pricing.compute() == 0
+
+
+# ---------------------------------------------------------------------------
+# Permanent vs transient load-error classification
+# ---------------------------------------------------------------------------
+
+
+class _PermanentFailStore:
+    """Raises a NeonQueryError with a permanent SQLSTATE on every fetch."""
+
+    def __init__(self, code: str = "42501") -> None:
+        self.call_count = 0
+        self._code = code
+
+    async def fetch_active_model(self, operator: str):
+        self.call_count += 1
+        from tollbooth.vaults.neon import NeonQueryError
+        raise NeonQueryError(
+            "permission denied for table operator_pricing_models",
+            code=self._code,
+        )
+
+
+class TestErrorClassification:
+    @pytest.mark.asyncio
+    async def test_permanent_sql_error_is_flagged(self) -> None:
+        store = _PermanentFailStore(code="42501")
+        resolver = PricingResolver(store=store, operator="npub1op")
+        await resolver._ensure_fresh()
+        assert resolver.neon_available is False
+        assert resolver.last_error_permanent is True
+        assert "permission denied" in resolver.last_error_summary
+
+    @pytest.mark.asyncio
+    async def test_permanent_sql_error_skips_retries(self) -> None:
+        """42501 cannot heal in 2 seconds — no backoff retries."""
+        store = _PermanentFailStore(code="42501")
+        resolver = PricingResolver(store=store, operator="npub1op")
+        await resolver._ensure_fresh()
+        assert store.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_undefined_table_is_permanent(self) -> None:
+        store = _PermanentFailStore(code="42P01")
+        resolver = PricingResolver(store=store, operator="npub1op")
+        await resolver._ensure_fresh()
+        assert resolver.last_error_permanent is True
+
+    @pytest.mark.asyncio
+    async def test_auth_failure_is_permanent(self) -> None:
+        store = _PermanentFailStore(code="28P01")
+        resolver = PricingResolver(store=store, operator="npub1op")
+        await resolver._ensure_fresh()
+        assert resolver.last_error_permanent is True
+
+    @pytest.mark.asyncio
+    async def test_codeless_error_is_transient_and_retries(self) -> None:
+        """Connection-level failures (no SQLSTATE) keep the retry loop."""
+        store = _MockStore(fail=True)
+        resolver = PricingResolver(store=store, operator="npub1op")
+        resolver._HYDRATION_BACKOFF = 0.01
+        await resolver._ensure_fresh()
+        assert resolver.neon_available is False
+        assert resolver.last_error_permanent is False
+        assert "Neon down" in resolver.last_error_summary
+        assert store.call_count == resolver._HYDRATION_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_recovery_clears_last_error(self) -> None:
+        store = _PermanentFailStore(code="42501")
+        resolver = PricingResolver(store=store, operator="npub1op", cache_ttl=0.01)
+        await resolver._ensure_fresh()
+        assert resolver.last_error_permanent is True
+
+        healed = _MockStore(model=_active_model())
+        resolver._store = healed
+        time.sleep(0.02)
+        await resolver._ensure_fresh()
+        assert resolver.neon_available is True
+        assert resolver.last_error_permanent is False
+        assert resolver.last_error_summary == ""

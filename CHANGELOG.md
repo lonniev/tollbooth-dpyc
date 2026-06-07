@@ -3,6 +3,52 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.43.0 — 2026-06-06
+
+Hardening from the 2026-06-06 excalibur-mcp double outage: a relay-purged
+bootstrap DM masked as a cold start, then a re-provisioning ACL wipe
+masked as the same cold start.
+
+### Added
+
+- `ErrorCode.PERSISTENCE_MISCONFIGURED` — paid-tool gate now distinguishes
+  permanent SQL errors (SQLSTATE classes 28/3D/42: permission denied,
+  missing relation, auth failure) from transient warm-up. Permanent
+  errors say so, carry the SQL detail, and skip the pointless retry
+  backoff. Transient errors keep the existing `warming_up` recipe.
+- `session_status` pricing-layer probe — "ready means ready." The
+  lifecycle no longer reports `ready` on vault health alone; the pricing
+  model must load too. New `misconfigured` lifecycle state for permanent
+  persistence errors.
+- `restore_operator_grants` — tenant provisioning now ends with an
+  idempotent `GRANT ALL ON ALL TABLES/SEQUENCES IN SCHEMA` to the
+  operator role. The ALTER OWNER + REVOKE sequence could strand tables
+  with an empty ACL (`relacl = {}`), stripping even the owner's implicit
+  privileges.
+- Opportunistic bootstrap DM re-publication (the OTS pattern) — the
+  Authority re-sends an operator's bootstrap config DM on the back of
+  `certify_credits` / `operator_status` traffic when the last send is
+  older than 7 days (stamped in `bootstrap_config`, in-process throttle,
+  fire-and-forget). Free relays purge kind-4 events (< 69 days observed),
+  so a one-shot publication guarantees an eventual cold-start outage.
+- `authority` optional extra (`pydantic-settings`) — the
+  `tollbooth.authority` subpackage's settings dependency is now declared
+  instead of assumed from the deployment.
+
+### Changed
+
+- `NeonQueryError` carries the Postgres SQLSTATE in `.code` when Neon
+  supplies one.
+- `send_bootstrap_config` parses relay replies strictly per NIP-20 —
+  `["OK", id, false, "rate-limited"]` no longer counts as published
+  (substring matching on "ok" did).
+- `receive_bootstrap_config` polls every relay and lets the newest
+  config win, instead of stopping at the first relay that answers — a
+  stale DM carries a rotated-away role password, which fails worse than
+  no DM at all.
+- Authority's `_resend_bootstrap_dm` runs the blocking relay publish in
+  a thread and stamps `bootstrap_dm_sent_at` on success.
+
 ## 0.42.0 — 2026-06-04
 
 ### Added — Claim-check async jobs

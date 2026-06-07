@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tollbooth-dpyc"
-version = "0.42.0"
+version = "0.43.0"
 description = "Don't Pester Your Customer™ — Bitcoin Lightning micropayments for MCP servers"
 readme = "README.md"
 license = "Apache-2.0"
@@ -34,6 +34,11 @@ dependencies = [
 [project.optional-dependencies]
 nostr = [
     "websocket-client>=1.6.0",
+]
+# The tollbooth.authority subpackage (register_authority_tools, tenant
+# provisioning) — Authority deployments install this extra.
+authority = [
+    "pydantic-settings>=2.0",
 ]
 qr = ["segno>=1.6.0"]
 ots = []  # Reserved — no extra deps needed (uses stdlib hashlib + existing httpx)

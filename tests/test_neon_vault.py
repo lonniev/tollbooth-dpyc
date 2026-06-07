@@ -113,6 +113,43 @@ class TestExecute:
         with pytest.raises(NeonQueryError, match="relation does not exist"):
             await vault._execute("SELECT * FROM nonexistent")
 
+    @pytest.mark.asyncio
+    async def test_query_error_carries_sqlstate_from_400_body(self) -> None:
+        """Neon 400 bodies include a SQLSTATE ``code`` — it must survive."""
+        vault = _vault()
+        vault._client.post = AsyncMock(
+            return_value=_response(
+                400,
+                {"message": "permission denied for table operator_pricing_models",
+                 "code": "42501"},
+            )
+        )
+        with pytest.raises(NeonQueryError, match="permission denied") as exc_info:
+            await vault._execute("SELECT 1")
+        assert exc_info.value.code == "42501"
+
+    @pytest.mark.asyncio
+    async def test_query_error_carries_sqlstate_from_200_body(self) -> None:
+        vault = _vault()
+        vault._client.post = AsyncMock(
+            return_value=_response(
+                200, {"message": "relation does not exist", "code": "42P01"}
+            )
+        )
+        with pytest.raises(NeonQueryError) as exc_info:
+            await vault._execute("SELECT 1")
+        assert exc_info.value.code == "42P01"
+
+    @pytest.mark.asyncio
+    async def test_query_error_code_defaults_empty(self) -> None:
+        vault = _vault()
+        vault._client.post = AsyncMock(
+            return_value=_response(200, {"message": "something odd"})
+        )
+        with pytest.raises(NeonQueryError) as exc_info:
+            await vault._execute("SELECT 1")
+        assert exc_info.value.code == ""
+
 
 # ---------------------------------------------------------------------------
 # store_ledger

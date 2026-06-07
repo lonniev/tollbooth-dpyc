@@ -43,6 +43,10 @@ class ErrorCode:
 
     # Lifecycle / infrastructure
     WARMING_UP = "warming_up"
+    # Persistence rejected the query with a permanent SQL error (permission
+    # denied, missing relation, auth failure). Unlike WARMING_UP this will
+    # NOT resolve by retrying — the operator must repair the database.
+    PERSISTENCE_MISCONFIGURED = "persistence_misconfigured"
     OPERATOR_NOT_REGISTERED = "operator_not_registered"
     VAULT_BOOTSTRAPPING = "vault_bootstrapping"
     SECURE_COURIER_UNAVAILABLE = "secure_courier_unavailable"

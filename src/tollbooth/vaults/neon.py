@@ -28,7 +28,17 @@ logger = logging.getLogger(__name__)
 
 
 class NeonQueryError(Exception):
-    """Raised when a Neon SQL query returns an error."""
+    """Raised when a Neon SQL query returns an error.
+
+    Carries the Postgres SQLSTATE in ``code`` when Neon supplied one
+    (e.g. ``42501`` permission denied, ``42P01`` undefined table), so
+    callers can distinguish permanent misconfiguration from transient
+    connectivity trouble. ``code`` is ``""`` when Neon gave no SQLSTATE.
+    """
+
+    def __init__(self, message: str, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class NeonVault:
@@ -159,7 +169,8 @@ class NeonVault:
             if isinstance(err_body, dict) and err_body.get("message"):
                 raise NeonQueryError(
                     f"Neon HTTP {resp.status_code}: {err_body['message']} "
-                    f"(query={query[:120]}…)"
+                    f"(query={query[:120]}…)",
+                    code=str(err_body.get("code") or ""),
                 )
             # Body wasn't JSON or didn't have a message — fall through to
             # raise_for_status so callers still see the HTTP error.
@@ -169,7 +180,7 @@ class NeonVault:
 
         # Neon returns SQL errors in the response body with a "message" field
         if isinstance(data, dict) and "message" in data and "rows" not in data:
-            raise NeonQueryError(data["message"])
+            raise NeonQueryError(data["message"], code=str(data.get("code") or ""))
 
         return data
 

@@ -17,6 +17,18 @@ from tollbooth.pricing_model import PipelineStep, PricingModel
 
 logger = logging.getLogger(__name__)
 
+# Postgres SQLSTATE classes that will never resolve by retrying — the
+# operator's database needs repair, not patience. Class 28 = invalid
+# authorization, class 3D = invalid catalog, class 42 = syntax errors and
+# access-rule violations (42501 permission denied, 42P01 undefined table).
+_PERMANENT_SQLSTATE_CLASSES = ("28", "3D", "42")
+
+
+def _is_permanent_sql_error(exc: Exception) -> bool:
+    """True when *exc* is a NeonQueryError carrying a permanent SQLSTATE."""
+    code = getattr(exc, "code", "")
+    return bool(code) and code[:2] in _PERMANENT_SQLSTATE_CLASSES
+
 
 class PricingResolver:
     """Runtime resolver for tool costs and constraint engines.
@@ -48,6 +60,7 @@ class PricingResolver:
         self._cached_tool_ids: set[str] | None = None
         self._cached_priced_map: dict[str, bool] | None = None
         self._neon_available: bool = False
+        self._last_error: Exception | None = None
         # Initialize to negative infinity so the first _is_stale() always
         # returns True — even if time.monotonic() is small (fresh CI runner).
         self._cache_ts: float = -self._cache_ttl - 1.0
@@ -59,6 +72,27 @@ class PricingResolver:
     def neon_available(self) -> bool:
         """True if we have successfully reached Neon at least once."""
         return self._neon_available
+
+    @property
+    def last_error_permanent(self) -> bool:
+        """True when the most recent load failure carries a permanent SQLSTATE.
+
+        Permanent means retrying cannot succeed (permission denied, missing
+        relation, auth failure) — the operator must repair the database.
+        Meaningful only while ``neon_available`` is False.
+        """
+        return self._last_error is not None and _is_permanent_sql_error(self._last_error)
+
+    @property
+    def last_error_summary(self) -> str:
+        """One-line summary of the most recent load failure, '' if none.
+
+        Safe to surface to callers: SQL error messages from Neon name the
+        table and SQLSTATE but never carry credentials.
+        """
+        if self._last_error is None:
+            return ""
+        return f"{type(self._last_error).__name__}: {self._last_error}"
 
     _HYDRATION_RETRIES = 3
     _HYDRATION_BACKOFF = 2.0  # seconds between retries
@@ -80,6 +114,7 @@ class PricingResolver:
             try:
                 model = await self._store.fetch_active_model(self._operator)
                 self._neon_available = True
+                self._last_error = None
                 self._cached_model = model
                 if model is not None:
                     self._cached_cost_map = model.tool_cost_map()
@@ -98,6 +133,10 @@ class PricingResolver:
                 return
             except Exception as exc:
                 last_exc = exc
+                if _is_permanent_sql_error(exc):
+                    # Permission denied / missing relation — retrying with
+                    # backoff cannot help; record and report immediately.
+                    break
                 if attempt < self._HYDRATION_RETRIES - 1:
                     logger.debug(
                         "Pricing model load attempt %d failed for %s (%s) — retrying in %.0fs",
@@ -106,10 +145,12 @@ class PricingResolver:
                     await asyncio.sleep(self._HYDRATION_BACKOFF)
 
         logger.warning(
-            "Pricing model load failed for %s after %d attempts (%s: %s)",
-            self._operator, self._HYDRATION_RETRIES,
+            "Pricing model load failed for %s (%s, %s: %s)",
+            self._operator,
+            "permanent SQL error" if _is_permanent_sql_error(last_exc) else f"{self._HYDRATION_RETRIES} attempts",
             type(last_exc).__name__, last_exc,
         )
+        self._last_error = last_exc
         self._neon_available = False
         self._cached_model = None
         self._cached_cost_map = None
