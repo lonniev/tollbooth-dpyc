@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pynostr.key import PrivateKey
 
+from tollbooth.constants import ErrorCode
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.nip44 import encrypt as nip44_encrypt
 from tollbooth.nip04 import _get_shared_secret
@@ -68,13 +69,43 @@ def _to_delimited(payload: dict) -> str:
     return "\n".join(f"{k} = @@@{v}@@@" for k, v in payload.items())
 
 
+# Default open-channel parameters shared across receive() tests. The
+# deterministic retrieve contract requires (sender_npub, service, poison) and a
+# pinned rendezvous relay, so tests seed a channel with these before receiving.
+_TEST_POISON = "bold-hawk-42"
+_TEST_RELAY = "wss://relay.test.com"
+
+
+def _seed_channel(
+    ex: NostrCredentialExchange,
+    sender_bech32: str,
+    *,
+    service: str = "x",
+    poison: str = _TEST_POISON,
+    relay: str = _TEST_RELAY,
+    expiry_offset: float = 600,
+) -> None:
+    """Seed an open Secure Courier channel so receive() can resolve the pin."""
+    ex._pending_poisons[(sender_bech32, service)] = (poison, time.time() + expiry_offset)
+    ex._pinned_relays[(sender_bech32, service)] = relay
+
+
 def _make_nip04_event(
     sender_privkey: PrivateKey,
     recipient_pubkey_hex: str,
     payload: dict | str,
     created_at: int | None = None,
+    poison: str | None = _TEST_POISON,
 ) -> dict:
-    """Build a kind 4 NIP-04 event dict for testing."""
+    """Build a kind 4 NIP-04 event dict for testing.
+
+    When *payload* is a dict and *poison* is set, the poison is folded into the
+    payload (unless already present) so the DM carries the channel's session
+    phrase. Pass ``poison=None`` to omit it (e.g. missing-poison tests).
+    """
+    if isinstance(payload, dict) and poison is not None and "poison" not in payload:
+        payload = {**payload, "poison": poison}
+
     import base64
     import os
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -112,6 +143,7 @@ def _make_gift_wrap_event(
     recipient_pubkey_hex: str,
     payload: dict,
     created_at: int | None = None,
+    poison: str | None = _TEST_POISON,
 ) -> dict:
     """Build a kind 1059 NIP-17 gift wrap event dict for testing.
 
@@ -119,7 +151,11 @@ def _make_gift_wrap_event(
     1. DM (kind 14): plaintext JSON payload
     2. Seal (kind 13): DM encrypted with NIP-44 (sender → recipient)
     3. Gift wrap (kind 1059): Seal encrypted with NIP-44 (random → recipient)
+
+    When *poison* is set it is folded into the payload (unless already present).
     """
+    if isinstance(payload, dict) and poison is not None and "poison" not in payload:
+        payload = {**payload, "poison": poison}
     now = created_at or int(time.time())
 
     # Layer 3: The actual DM content
@@ -256,11 +292,14 @@ class TestReceiveNip04:
         # Inject into buffer
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         # Mock relay fetch (already in buffer) and deletion
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         assert result["success"] is True
         assert result["service"] == "x"
@@ -280,13 +319,19 @@ class TestReceiveNip04:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "send_dm"), \
-             patch.object(ex, "_request_deletion"), \
-             pytest.raises(CourierValidationError, match="Scanned 1 DM"):
-            await ex.receive(sender.public_key.bech32())
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
+        # NIP-04 popped + NACK'd, no match → structured not-found
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
+        assert result["popped"] == 1
         # Event should be purged from the queue
         assert len(ex._received_events) == 0
 
@@ -310,10 +355,13 @@ class TestReceiveNip17:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         assert result["success"] is True
         assert result["service"] == "x"
@@ -336,17 +384,20 @@ class TestReceiveNip17:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         # The impersonator's gift wrap decrypts but the seal reveals
         # a different sender — it gets popped (undecryptable from the
         # expected sender's perspective) and the queue is drained.
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             patch.object(ex, "_pop_event") as mock_pop, \
-             pytest.raises(CourierValidationError, match="Scanned 1 DM"):
-            await ex.receive(sender.public_key.bech32())
+             patch.object(ex, "_pop_event") as mock_pop:
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
-        # The wrong-sender gift wrap was popped silently (no reply npub
-        # since we can't trust the sender identity from a failed decrypt)
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
+        # The wrong-sender gift wrap was popped (first arg is the event id)
         mock_pop.assert_called_once()
         assert mock_pop.call_args[0][0] == event["id"]
 
@@ -392,10 +443,17 @@ class TestReceiveValidation:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
-        with patch.object(ex, "_fetch_dms_from_relays"):
-            with pytest.raises(CourierValidationError):
-                await ex.receive(sender.public_key.bech32())
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
+        # Non-@@@ content can't carry the poison → popped, NACK'd, not found
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
 
     @pytest.mark.asyncio
     async def test_unknown_fields_silently_dropped(self):
@@ -413,9 +471,14 @@ class TestReceiveValidation:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
-        with patch.object(ex, "_fetch_dms_from_relays"):
-            result = await ex.receive(sender.public_key.bech32())
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
         assert result["success"] is True
         creds = result["credentials"]
         assert "rogue_field" not in creds
@@ -434,10 +497,16 @@ class TestReceiveValidation:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
-        with patch.object(ex, "_fetch_dms_from_relays"):
+        # Poison matches → DM accepted, then template validation fails → raises
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
+             patch.object(ex, "_request_deletion"):
             with pytest.raises(CourierValidationError, match="Missing required"):
-                await ex.receive(sender.public_key.bech32())
+                await ex.receive(
+                    sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+                )
 
 
 # ── Freshness and Replay Tests ────────────────────────────────────────
@@ -460,9 +529,14 @@ class TestFreshnessAndReplay:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
-        with patch.object(ex, "_fetch_dms_from_relays"):
-            result = await ex.receive(sender.public_key.bech32())
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
             assert result["success"] is True
 
     @pytest.mark.asyncio
@@ -477,27 +551,40 @@ class TestFreshnessAndReplay:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            # First receive succeeds
-            result = await ex.receive(sender.public_key.bech32())
+            # First receive succeeds and consumes the channel + event
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
             assert result["success"]
 
-            # Second receive fails (event consumed)
-            with pytest.raises(CourierTimeout):
-                await ex.receive(sender.public_key.bech32())
+            # Re-seed the channel; the event itself is consumed, so the
+            # second drain finds nothing → not-found (double-pickup prevented)
+            _seed_channel(ex, sender.public_key.bech32())
+            result2 = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
+            assert result2["success"] is False
+            assert result2["error_code"] == ErrorCode.COURIER_NOT_FOUND
 
     @pytest.mark.asyncio
-    async def test_no_dm_found_raises_timeout(self):
-        """No matching DM raises CourierTimeout."""
+    async def test_no_dm_found_returns_not_found(self):
+        """No matching DM returns a structured not-found result."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"):
-            with pytest.raises(CourierTimeout, match="No DM found"):
-                await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
 
 
 # ── Relay Subscription Tests ─────────────────────────────────────────
@@ -610,10 +697,14 @@ class TestTemplateMatching:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32(), service="openai")
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="openai", poison=_TEST_POISON,
+            )
             assert result["service"] == "openai"
 
     @pytest.mark.asyncio
@@ -628,10 +719,14 @@ class TestTemplateMatching:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
             assert result["service"] == "x"
 
 
@@ -684,10 +779,14 @@ class TestCredentialVault:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         assert result["success"] is True
         assert result["encryption"] == "nip04"
@@ -698,7 +797,7 @@ class TestCredentialVault:
 
     @pytest.mark.asyncio
     async def test_vault_hit_skips_relay(self):
-        """Second receive returns from vault without relay I/O."""
+        """receive_from_vault returns the vaulted blob without relay I/O."""
         operator = PrivateKey()
         sender = PrivateKey()
         vault = MockCredentialVault()
@@ -709,18 +808,24 @@ class TestCredentialVault:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
-        # First receive — from relay
+        # First receive — from relay (poison-scoped drain)
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result1 = await ex.receive(sender.public_key.bech32())
+            result1 = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         assert result1["encryption"] == "nip04"
 
-        # Second receive — should come from vault
+        # Returning session — vault-only read, no poison, no relay I/O
         with patch.object(ex, "_fetch_dms_from_relays") as mock_fetch, \
              patch.object(ex, "_find_dm_candidates") as mock_find:
-            result2 = await ex.receive(sender.public_key.bech32())
+            result2 = await ex.receive_from_vault(
+                sender.public_key.bech32(), service="x",
+            )
 
         assert result2["success"] is True
         assert result2["encryption"] == "vault"
@@ -743,10 +848,14 @@ class TestCredentialVault:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            await ex.receive(sender.public_key.bech32())
+            await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         blob = await vault.fetch_credentials("x", sender.public_key.bech32())
         assert blob is not None
@@ -769,10 +878,14 @@ class TestCredentialVault:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            await ex.receive(sender.public_key.bech32())
+            await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         # Vault should have credentials
         assert await vault.fetch_credentials("x", sender.public_key.bech32()) is not None
@@ -819,10 +932,14 @@ class TestCredentialVault:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         assert result["success"] is True
         assert result["encryption"] == "nip04"
@@ -842,10 +959,14 @@ class TestCredentialVault:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         assert result["success"] is True
         assert result["encryption"] == "nip04"  # Came from relay, not vault
@@ -864,11 +985,15 @@ class TestCredentialVault:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         # First receive stores in vault
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            await ex.receive(sender.public_key.bech32())
+            await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         # Forget
         await ex.forget(sender.public_key.bech32())
@@ -882,11 +1007,16 @@ class TestCredentialVault:
 
         with ex._lock:
             ex._received_events.append(new_event)
+        # Re-open the channel for the rotated delivery
+        _seed_channel(ex, sender.public_key.bech32())
 
         # Second receive should use relay (vault is empty)
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         assert result["credentials"]["api_key"] == "rotated"
         assert result["encryption"] == "nip04"
@@ -932,9 +1062,10 @@ class TestCredentialVault:
 
         # 4) receive — should restore from vault and succeed
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x",
+                sender.public_key.bech32(), service="x", poison=poison,
             )
 
         assert result["success"] is True
@@ -993,9 +1124,10 @@ class TestCredentialVault:
 
         # 4) receive — should restore agent from vault and decrypt
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                operator.public_key.bech32(), service="x",
+                operator.public_key.bech32(), service="x", poison=poison,
             )
 
         assert result["success"] is True
@@ -1349,8 +1481,11 @@ class TestRendezvousRelayPinning:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender_npub, service="x")
+            result = await ex.receive(
+                sender_npub, service="x", poison="bold-hawk-42",
+            )
 
         assert result["success"] is True
         assert (sender_npub, "x") not in ex._pinned_relays
@@ -1381,31 +1516,38 @@ class TestPoisonSlug:
 
     @pytest.mark.asyncio
     async def test_poison_validated_on_receive(self):
-        """Receive rejects payload with wrong poison (popped and acknowledged)."""
+        """Receive pops + NACKs a wrong-poison DM without leaking the phrase."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
 
-        # Register a poison
+        # Open a channel with the expected poison
         sender_npub = sender.public_key.bech32()
-        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
+        _seed_channel(ex, sender_npub)
 
         # Build a NIP-04 event with wrong poison
         payload = {"api_key": "k", "api_secret": "s", "poison": "wrong-slug-99"}
-        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        event = _make_nip04_event(
+            sender, operator.public_key.hex(), payload, poison=None,
+        )
         with ex._lock:
             ex._received_events.append(event)
 
-        # Wrong poison DM is popped with ack, then aggregate error raised
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             patch.object(ex, "_pop_event") as mock_pop, \
-             pytest.raises(CourierValidationError, match="Scanned 1 DM"):
-            await ex.receive(sender_npub)
+             patch.object(ex, "_pop_event") as mock_pop:
+            result = await ex.receive(
+                sender_npub, service="x", poison=_TEST_POISON,
+            )
 
-        # Verify the DM was popped with a rejection reason
+        # Wrong poison → not found, DM popped with a redacted NACK
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
         mock_pop.assert_called_once()
-        call_args = mock_pop.call_args[0]
-        assert "wrong anti-replay token" in (call_args[2] if len(call_args) > 2 else "")
+        reason = mock_pop.call_args[0][2]
+        # The NACK must NOT reveal the expected phrase or echo the wrong one
+        assert _TEST_POISON not in reason
+        assert "wrong-slug-99" not in reason
+        assert "session phrase" in reason
 
     @pytest.mark.asyncio
     async def test_poison_accepted_on_match(self):
@@ -1415,16 +1557,21 @@ class TestPoisonSlug:
         ex = _make_exchange(nsec=operator.nsec)
 
         sender_npub = sender.public_key.bech32()
-        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
+        _seed_channel(ex, sender_npub)
 
-        payload = {"api_key": "k", "api_secret": "s", "poison": "bold-hawk-42"}
-        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        payload = {"api_key": "k", "api_secret": "s", "poison": _TEST_POISON}
+        event = _make_nip04_event(
+            sender, operator.public_key.hex(), payload, poison=None,
+        )
         with ex._lock:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender_npub)
+            result = await ex.receive(
+                sender_npub, service="x", poison=_TEST_POISON,
+            )
 
         assert result["success"] is True
         # Poison should be consumed
@@ -1432,27 +1579,32 @@ class TestPoisonSlug:
 
     @pytest.mark.asyncio
     async def test_poison_expired(self):
-        """Receive rejects payload when poison has expired."""
+        """Receive returns token-expired when the channel window has elapsed."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
 
         sender_npub = sender.public_key.bech32()
         # Expired 10 seconds ago
-        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() - 10)
+        _seed_channel(ex, sender_npub, expiry_offset=-10)
 
-        payload = {"api_key": "k", "api_secret": "s", "poison": "bold-hawk-42"}
-        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        payload = {"api_key": "k", "api_secret": "s", "poison": _TEST_POISON}
+        event = _make_nip04_event(
+            sender, operator.public_key.hex(), payload, poison=None,
+        )
         with ex._lock:
             ex._received_events.append(event)
 
-        with patch.object(ex, "_fetch_dms_from_relays"), \
-             pytest.raises(CourierValidationError, match="expired"):
-            await ex.receive(sender_npub)
+        with patch.object(ex, "_fetch_dms_from_relays"):
+            result = await ex.receive(
+                sender_npub, service="x", poison=_TEST_POISON,
+            )
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_TOKEN_EXPIRED
 
     @pytest.mark.asyncio
-    async def test_no_poison_required_without_open_channel(self):
-        """Receive works without poison when no open_channel was called."""
+    async def test_no_open_channel_returns_not_found(self):
+        """Receive returns no-pending-record when no channel was opened."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -1464,9 +1616,13 @@ class TestPoisonSlug:
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
-        assert result["success"] is True
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NO_PENDING_RECORD
+        assert result["popped"] == 0
 
     @pytest.mark.asyncio
     async def test_poison_picks_correct_dm_from_multiple(self):
@@ -1476,16 +1632,20 @@ class TestPoisonSlug:
         ex = _make_exchange(nsec=operator.nsec)
 
         sender_npub = sender.public_key.bech32()
-        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
+        _seed_channel(ex, sender_npub)
 
         # Stale DM with old/wrong poison (injected first)
         stale_payload = {"api_key": "old_k", "api_secret": "old_s", "poison": "true-quill-26"}
-        stale_event = _make_nip04_event(sender, operator.public_key.hex(), stale_payload)
+        stale_event = _make_nip04_event(
+            sender, operator.public_key.hex(), stale_payload, poison=None,
+        )
         stale_event["id"] = "stale_event_001"
 
         # Valid DM with correct poison (injected second)
-        valid_payload = {"api_key": "correct_k", "api_secret": "correct_s", "poison": "bold-hawk-42"}
-        valid_event = _make_nip04_event(sender, operator.public_key.hex(), valid_payload)
+        valid_payload = {"api_key": "correct_k", "api_secret": "correct_s", "poison": _TEST_POISON}
+        valid_event = _make_nip04_event(
+            sender, operator.public_key.hex(), valid_payload, poison=None,
+        )
         valid_event["id"] = "valid_event_002"
 
         with ex._lock:
@@ -1493,8 +1653,11 @@ class TestPoisonSlug:
             ex._received_events.append(valid_event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion") as _mock_delete:
-            result = await ex.receive(sender_npub)
+            result = await ex.receive(
+                sender_npub, service="x", poison=_TEST_POISON,
+            )
 
         assert result["success"] is True
         assert result["credentials"]["api_key"] == "correct_k"
@@ -1503,30 +1666,35 @@ class TestPoisonSlug:
 
     @pytest.mark.asyncio
     async def test_stale_dms_get_deletion_requests(self):
-        """Stale DMs (wrong poison) get NIP-09 deletion requests."""
+        """Wrong-poison DMs scanned before the match get NIP-09 deletions."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
 
         sender_npub = sender.public_key.bech32()
-        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
+        _seed_channel(ex, sender_npub)
 
-        # Two stale DMs
+        # Two stale DMs (older timestamps so they sort before the match)
+        now = int(time.time())
         stale1 = _make_nip04_event(
             sender, operator.public_key.hex(),
             {"api_key": "k", "api_secret": "s", "poison": "old-slug-01"},
+            created_at=now - 20, poison=None,
         )
         stale1["id"] = "stale_001"
         stale2 = _make_nip04_event(
             sender, operator.public_key.hex(),
             {"api_key": "k", "api_secret": "s", "poison": "old-slug-02"},
+            created_at=now - 10, poison=None,
         )
         stale2["id"] = "stale_002"
 
-        # Valid DM
+        # Valid DM (newest → scanned first, but we want the stale ones
+        # scanned, so make it oldest)
         valid = _make_nip04_event(
             sender, operator.public_key.hex(),
-            {"api_key": "k", "api_secret": "s", "poison": "bold-hawk-42"},
+            {"api_key": "k", "api_secret": "s", "poison": _TEST_POISON},
+            created_at=now - 30, poison=None,
         )
         valid["id"] = "valid_003"
 
@@ -1534,37 +1702,41 @@ class TestPoisonSlug:
             ex._received_events.extend([stale1, stale2, valid])
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion") as mock_delete:
-            result = await ex.receive(sender_npub)
+            result = await ex.receive(
+                sender_npub, service="x", poison=_TEST_POISON,
+            )
 
+        # newest-first: stale_002, stale_001 (wrong → popped) then valid (match)
         assert result["success"] is True
-        # Should have deletion calls for stale events + the valid event
         deleted_ids = [call.args[0] for call in mock_delete.call_args_list]
         assert "stale_001" in deleted_ids
         assert "stale_002" in deleted_ids
-        # Stale events should be in consumed set
         assert "stale_001" in ex._consumed_ids
         assert "stale_002" in ex._consumed_ids
 
     @pytest.mark.asyncio
-    async def test_no_poison_match_reports_found_poisons(self):
-        """When no DM matches the expected poison, all are popped with ack."""
+    async def test_no_poison_match_returns_not_found(self):
+        """When no DM matches, all are popped + NACK'd without leaking phrases."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
 
         sender_npub = sender.public_key.bech32()
-        ex._pending_poisons[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
+        _seed_channel(ex, sender_npub)
 
         # Two DMs, neither with the correct poison
         dm1 = _make_nip04_event(
             sender, operator.public_key.hex(),
             {"api_key": "k", "api_secret": "s", "poison": "true-quill-26"},
+            poison=None,
         )
         dm1["id"] = "dm_001"
         dm2 = _make_nip04_event(
             sender, operator.public_key.hex(),
             {"api_key": "k", "api_secret": "s", "poison": "lazy-fox-99"},
+            poison=None,
         )
         dm2["id"] = "dm_002"
 
@@ -1572,18 +1744,21 @@ class TestPoisonSlug:
             ex._received_events.extend([dm1, dm2])
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             patch.object(ex, "_pop_event") as mock_pop, \
-             pytest.raises(CourierValidationError, match="Scanned 2 DM") as exc_info:
-            await ex.receive(sender_npub)
+             patch.object(ex, "_pop_event") as mock_pop:
+            result = await ex.receive(
+                sender_npub, service="x", poison=_TEST_POISON,
+            )
 
-        err = str(exc_info.value)
-        assert "request_credential_channel" in err
-
-        # Both DMs were popped with rejection reasons
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
+        assert result["popped"] == 2
+        # Both DMs were popped with redacted NACK reasons (no leaked phrases)
         assert mock_pop.call_count == 2
         reasons = [c[0][2] for c in mock_pop.call_args_list if len(c[0]) > 2]
-        assert any("true-quill-26" in r for r in reasons)
-        assert any("lazy-fox-99" in r for r in reasons)
+        assert all(_TEST_POISON not in r for r in reasons)
+        assert all("true-quill-26" not in r and "lazy-fox-99" not in r for r in reasons)
+        # The returned error must not reveal the expected phrase either
+        assert _TEST_POISON not in result["error"]
 
 
 # ── Concurrent Multi-Service Exchange Tests ──────────────────────────────
@@ -1645,17 +1820,20 @@ class TestConcurrentExchanges:
         )
 
         sender_npub = sender.public_key.bech32()
-        ex._pending_poisons[(sender_npub, "x")] = ("x-hawk-42", time.time() + 600)
-        ex._pending_poisons[(sender_npub, "openai")] = ("ai-fox-99", time.time() + 600)
+        _seed_channel(ex, sender_npub, service="x", poison="x-hawk-42")
+        _seed_channel(ex, sender_npub, service="openai", poison="ai-fox-99")
 
         payload = {"api_key": "k", "api_secret": "s", "poison": "x-hawk-42"}
-        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        event = _make_nip04_event(
+            sender, operator.public_key.hex(), payload, poison=None,
+        )
         with ex._lock:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender_npub, service="x")
+            result = await ex.receive(sender_npub, service="x", poison="x-hawk-42")
 
         assert result["success"] is True
         # X poison consumed
@@ -1678,19 +1856,24 @@ class TestConcurrentExchanges:
         )
 
         sender_npub = sender.public_key.bech32()
-        # Only set OpenAI poison — we're testing service="openai"
-        ex._pending_poisons[(sender_npub, "openai")] = ("ai-fox-99", time.time() + 600)
+        # Only open the OpenAI channel — we're testing service="openai"
+        _seed_channel(ex, sender_npub, service="openai", poison="ai-fox-99")
 
         # Payload has only api_key — valid for openai, also subset of x
         # No "service" field in payload
         payload = {"api_key": "sk-test-key", "poison": "ai-fox-99"}
-        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        event = _make_nip04_event(
+            sender, operator.public_key.hex(), payload, poison=None,
+        )
         with ex._lock:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender_npub, service="openai")
+            result = await ex.receive(
+                sender_npub, service="openai", poison="ai-fox-99",
+            )
 
         assert result["success"] is True
         # Template matched should be openai (validated field is api_key)
@@ -1755,11 +1938,14 @@ class TestConversationalDmFlow:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_request_deletion"), \
              patch.object(ex, "send_dm") as mock_send:
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         assert result["success"] is True
         mock_send.assert_called_once()
@@ -1805,14 +1991,18 @@ class TestConversationalDmFlow:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
-        # Pop-and-ack: _pop_event sends rejection via send_dm
+        # Pop-and-NACK: _pop_event sends the redacted rejection via send_dm
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "send_dm") as mock_send, \
              patch.object(ex, "_request_deletion"):
-            with pytest.raises(CourierValidationError, match="Scanned 1 DM"):
-                await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
         mock_send.assert_called_once()
         error_text = mock_send.call_args[0][1]
         assert "@@@" in error_text
@@ -1829,18 +2019,21 @@ class TestConversationalDmFlow:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_request_deletion"), \
              patch.object(ex, "send_dm", side_effect=Exception("relay down")):
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         assert result["success"] is True
         assert result["credentials"]["api_key"] == "sk-test-123"
 
     @pytest.mark.asyncio
     async def test_error_dm_failure_nonfatal(self):
-        """If the ack DM fails to send, the aggregate error still propagates."""
+        """If the NACK DM fails to send, receive still returns not-found."""
         import base64
         import os
 
@@ -1877,13 +2070,17 @@ class TestConversationalDmFlow:
 
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
-        # _pop_event catches send_dm failure internally; aggregate error still raised
+        # _pop_event catches send_dm failure internally; receive still returns
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_request_deletion"), \
              patch.object(ex, "send_dm", side_effect=Exception("relay down")):
-            with pytest.raises(CourierValidationError, match="Scanned 1 DM"):
-                await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
 
 
 # ── NIP-17 Subscription Tests ────────────────────────────────────────
@@ -2018,13 +2215,17 @@ class TestReceiveFormatEnforcement:
         event = _make_nip04_event(sender, operator.public_key.hex(), raw)
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
-             patch.object(ex, "_pop_event") as mock_pop, \
-             pytest.raises(CourierValidationError, match="Scanned 1 DM"):
-            await ex.receive(sender.public_key.bech32())
+             patch.object(ex, "_pop_event") as mock_pop:
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
-        # JSON payload popped with @@@ hint in rejection reason
+        # JSON payload (no @@@) popped with the @@@ hint in the NACK reason
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
         mock_pop.assert_called_once()
         reason = mock_pop.call_args[0][2] if len(mock_pop.call_args[0]) > 2 else ""
         assert "@@@" in reason
@@ -2036,14 +2237,21 @@ class TestReceiveFormatEnforcement:
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
 
-        raw = "api_key = @@@sk-test@@@\napi_secret = @@@secret@@@"
+        raw = (
+            "api_key = @@@sk-test@@@\napi_secret = @@@secret@@@\n"
+            f"poison = @@@{_TEST_POISON}@@@"
+        )
         event = _make_nip04_event(sender, operator.public_key.hex(), raw)
         with ex._lock:
             ex._received_events.append(event)
+        _seed_channel(ex, sender.public_key.bech32())
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender.public_key.bech32())
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
 
         assert result["success"] is True
         assert result["credentials"]["api_key"] == "sk-test"
@@ -2318,9 +2526,7 @@ class TestEphemeralAgentSelfDm:
         # Simulate self-DM: operator is both sender and recipient
         agent_key = PrivateKey()
         ex._ephemeral_agents[(operator.public_key.bech32(), "x")] = agent_key
-        ex._pending_poisons[(operator.public_key.bech32(), "x")] = (
-            "test-poison-42", time.time() + 900,
-        )
+        _seed_channel(ex, operator.public_key.bech32(), poison="test-poison-42")
 
         # Patron (operator) sends DM encrypted to the ephemeral agent's pubkey
         payload = {
@@ -2329,16 +2535,17 @@ class TestEphemeralAgentSelfDm:
             "poison": "test-poison-42",
         }
         event = _make_nip04_event(
-            operator, agent_key.public_key.hex(), payload,
+            operator, agent_key.public_key.hex(), payload, poison=None,
         )
 
         with ex._lock:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                operator.public_key.bech32(), service="x",
+                operator.public_key.bech32(), service="x", poison="test-poison-42",
             )
 
         assert result["success"] is True
@@ -2353,9 +2560,7 @@ class TestEphemeralAgentSelfDm:
 
         agent_key = PrivateKey()
         ex._ephemeral_agents[(operator.public_key.bech32(), "x")] = agent_key
-        ex._pending_poisons[(operator.public_key.bech32(), "x")] = (
-            "test-poison-99", time.time() + 900,
-        )
+        _seed_channel(ex, operator.public_key.bech32(), poison="test-poison-99")
 
         payload = {
             "api_key": "sk-wrapped-self",
@@ -2365,15 +2570,17 @@ class TestEphemeralAgentSelfDm:
         # Gift wrap encrypted to agent key (not operator key)
         event = _make_gift_wrap_event(
             operator, agent_key.hex(), agent_key.public_key.hex(), payload,
+            poison=None,
         )
 
         with ex._lock:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                operator.public_key.bech32(), service="x",
+                operator.public_key.bech32(), service="x", poison="test-poison-99",
             )
 
         assert result["success"] is True
@@ -2389,7 +2596,7 @@ class TestEphemeralAgentSelfDm:
         agent_key = PrivateKey()
         poison_key = (operator.public_key.bech32(), "x")
         ex._ephemeral_agents[poison_key] = agent_key
-        ex._pending_poisons[poison_key] = ("cleanup-test-11", time.time() + 900)
+        _seed_channel(ex, operator.public_key.bech32(), poison="cleanup-test-11")
 
         payload = {
             "api_key": "key",
@@ -2397,15 +2604,18 @@ class TestEphemeralAgentSelfDm:
             "poison": "cleanup-test-11",
         }
         event = _make_nip04_event(
-            operator, agent_key.public_key.hex(), payload,
+            operator, agent_key.public_key.hex(), payload, poison=None,
         )
 
         with ex._lock:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            await ex.receive(operator.public_key.bech32(), service="x")
+            await ex.receive(
+                operator.public_key.bech32(), service="x", poison="cleanup-test-11",
+            )
 
         # Both poison and ephemeral agent should be cleaned up
         assert poison_key not in ex._ephemeral_agents
@@ -2477,3 +2687,110 @@ class TestEphemeralAgentSelfDm:
             explicit_key.public_key.hex(),
         )
         assert plaintext == "test nip04 message"
+
+
+# ── Strict Pinned-Relay Drain Tests ──────────────────────────────────────
+
+
+class TestStrictPinnedRelayDrain:
+    """Tests for the deterministic, pinned-relay-only receive contract."""
+
+    @pytest.mark.asyncio
+    async def test_match_on_non_pinned_relay_not_found(self):
+        """A matching DM that arrived on a non-pinned relay is NOT drained."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+        sender_npub = sender.public_key.bech32()
+        _seed_channel(ex, sender_npub)  # pinned to _TEST_RELAY
+
+        payload = {"api_key": "k", "api_secret": "s"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        event["_relay"] = "wss://some-other.relay"  # arrived elsewhere
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                sender_npub, service="x", poison=_TEST_POISON,
+            )
+
+        # Strict pinned drain ignores the other-relay copy → not found
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_match_on_pinned_relay_found(self):
+        """A matching DM tagged with the pinned relay is accepted."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+        sender_npub = sender.public_key.bech32()
+        _seed_channel(ex, sender_npub)
+
+        payload = {"api_key": "k", "api_secret": "s"}
+        event = _make_nip04_event(sender, operator.public_key.hex(), payload)
+        event["_relay"] = _TEST_RELAY
+
+        with ex._lock:
+            ex._received_events.append(event)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                sender_npub, service="x", poison=_TEST_POISON,
+            )
+
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_pinned_relay_returns_error(self):
+        """A pending record without a pinned relay returns a strict error."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+        sender_npub = sender.public_key.bech32()
+        # Poison present but NO pin (and no vault to rehydrate one)
+        ex._pending_poisons[(sender_npub, "x")] = (_TEST_POISON, time.time() + 600)
+
+        result = await ex.receive(
+            sender_npub, service="x", poison=_TEST_POISON,
+        )
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_NO_PINNED_RELAY
+        assert result["popped"] == 0
+
+    @pytest.mark.asyncio
+    async def test_poison_mismatch_pops_nothing(self):
+        """A poison that doesn't match the open channel pops nothing."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+        sender_npub = sender.public_key.bech32()
+        _seed_channel(ex, sender_npub, poison="the-right-one-12")
+
+        with patch.object(ex, "_pop_event") as mock_pop:
+            result = await ex.receive(
+                sender_npub, service="x", poison="a-wrong-guess-99",
+            )
+
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_POISON_MISMATCH
+        assert result["popped"] == 0
+        mock_pop.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_poison_returns_error(self):
+        """An empty poison argument is rejected before any drain."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+        result = await ex.receive(
+            sender.public_key.bech32(), service="x", poison="",
+        )
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.POISON_MISSING

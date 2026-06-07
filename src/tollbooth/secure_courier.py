@@ -204,33 +204,52 @@ class SecureCourierService:
         sender_npub: str,
         service: str = "x",
         *,
+        poison: str = "",
         caller_id: str | None = None,
-        force_relay: bool = False,
     ) -> dict[str, Any]:
-        """Receive credentials from Secure Courier.
+        """Receive credentials via the deterministic Secure Courier drain.
 
-        1. Delegates to the exchange for relay polling / vault lookup.
-        2. On success, calls ``on_credentials_received`` if set.
-        3. Merges callback result into the response.
-        4. If *caller_id* provided, persists a session binding for cold-start
-           restoration.
-        5. **Always** strips credential values before returning.
+        1. Delegates to the exchange's poison-scoped, pinned-relay drain.
+        2. On success, runs the shared post-receive finalization (callback,
+           identity credential, session binding, credential card).
+        3. **Always** strips credential values before returning.
 
         Args:
             sender_npub: Patron's npub (bech32).
             service: Credential template service name.
+            poison: The session phrase returned by the matching
+                ``request_credential_channel`` — required; identifies which
+                pinned channel to drain.
             caller_id: Optional transport-layer caller ID (e.g. Horizon
                 user_id).  When provided and the vault supports session
                 bindings, the ``(caller_id, service) → npub`` mapping is
                 persisted for silent cold-start restoration.
-            force_relay: Skip the vault cache and poll Nostr relays directly.
 
         Returns:
             Dict with success, service, field count, and any callback-added
             metadata.  **NEVER** returns credential values.
         """
-        result = await self._exchange.receive(sender_npub, service=service, force_relay=force_relay)
+        result = await self._exchange.receive(
+            sender_npub, service=service, poison=poison,
+        )
+        return await self._finalize_receive(
+            result, sender_npub, service, caller_id,
+        )
 
+    async def _finalize_receive(
+        self,
+        result: dict[str, Any],
+        sender_npub: str,
+        service: str,
+        caller_id: str | None,
+    ) -> dict[str, Any]:
+        """Shared post-receive work for relay drains and vault restores.
+
+        Runs the operator callback, issues the identity credential, persists
+        the session binding, and generates the credential card, then strips
+        credential values. Card DMs are suppressed on vault restores (no fresh
+        relay receipt to acknowledge). Returns the (mutated) result dict.
+        """
         if result.get("success") and result.get("credentials"):
             credentials: dict[str, str] = result["credentials"]
             matched_service: str = result.get("service", service)
@@ -337,10 +356,13 @@ class SecureCourierService:
         This method:
 
         1. Looks up the persisted ``(caller_id, service) → npub`` binding.
-        2. Calls ``self.receive(npub, service, caller_id=caller_id)`` which
-           hits the vault-first fast path (no relay I/O).
-        3. The ``on_credentials_received`` callback fires, repopulating
-           the in-memory session.
+        2. Reads the credentials straight from the vault via
+           ``receive_from_vault`` (no relay I/O, no poison) — restoration is
+           NOT the courier protocol, so it does not use the poison-scoped
+           ``receive`` drain.
+        3. Runs the shared ``_finalize_receive`` so the
+           ``on_credentials_received`` callback fires and repopulates the
+           in-memory session.
 
         Returns:
             The restored npub on success, ``None`` on any failure.
@@ -359,7 +381,10 @@ class SecureCourierService:
             return None
 
         try:
-            result = await self.receive(npub, service, caller_id=caller_id)
+            result = await self._exchange.receive_from_vault(npub, service=service)
+            result = await self._finalize_receive(
+                result, npub, service, caller_id,
+            )
             if result.get("success"):
                 return npub
         except Exception as exc:
@@ -379,7 +404,7 @@ class SecureCourierService:
 
         Fast path: in-memory ``_sessions`` cache hit → return immediately.
         Cold-start path: ``restore_session()`` → vault binding lookup →
-        vault-first ``receive()`` → ``on_credentials_received`` callback →
+        ``receive_from_vault()`` → ``on_credentials_received`` callback →
         operator session re-established.
 
         Raises:

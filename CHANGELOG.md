@@ -3,6 +3,54 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.0 — 2026-06-07
+
+Deterministic, poison-scoped Secure Courier retrieval. Agentic clients kept
+failing the "pick up your reply" step because the MCP guessed which channel to
+drain and swept every configured relay. The retrieve tools now take an explicit
+`(sender_npub, service, poison)` and drain exactly the one rendezvous relay the
+request pinned — no guessing, one unambiguous answer.
+
+### Changed (breaking)
+
+- `receive_credentials`, `receive_patron_credentials`, and `receive_npub_proof`
+  now **require** `poison` (the session phrase / `proof_token` returned by the
+  matching `request_*`). Calls without it return `ErrorCode.POISON_MISSING`.
+  `receive_credentials` drops the `force_relay` argument.
+- `Exchange.receive(sender_npub, *, service, poison)` is now strict: it resolves
+  the pending channel for `(sender_npub, service)`, verifies the poison, and
+  drains **only** the pinned rendezvous relay. Wrong-poison / undecryptable /
+  malformed DMs are NIP-09 deleted and the sender is NACK'd; the first matching
+  DM is ACK'd and the scan **stops** (stop-at-match). No vault-first fallback.
+- Not-found, mismatch, expiry, and no-pin paths now return structured results
+  (`success: False` + `error_code` + `popped`) instead of raising
+  `CourierTimeout` / `CourierValidationError`.
+- NACK and not-found copy no longer reveal the expected poison phrase
+  (previously echoed `got X, expected Y`).
+- `receive_npub_proof` drops its 4×/2s retry loop for a single pinned-relay
+  drain — the call is human-gated, so one fetch is correct.
+
+### Added
+
+- `Exchange.receive_from_vault(sender_npub, *, service)` — vault-only,
+  poison-free credential read. `SecureCourier.restore_session` /
+  `ensure_identity` now use it for serverless cold-start session restoration,
+  so removing vault-first from the agent path does not break automatic restore.
+- `Exchange._resolve_pinned_record(...)` — verifies poison + resolves the pinned
+  relay, with cold-start rehydration of the poison, pin, and ephemeral agent key
+  from the `__pending__{service}` vault blob.
+- `ErrorCode` additions: `POISON_MISSING`, `COURIER_NO_PENDING_RECORD`,
+  `COURIER_POISON_MISMATCH`, `COURIER_TOKEN_EXPIRED`, `COURIER_NO_PINNED_RELAY`,
+  `COURIER_NOT_FOUND`.
+- Per-drain NACK cap (5) so a flood of junk DMs can't be amplified into a flood
+  of outbound replies; excess mismatches are popped + deleted silently.
+
+### Migration
+
+Consumers calling these tools must pass the `poison` they received from the
+matching `request_*` call (Studio and the React frontends are updated in lockstep).
+Credential-card redemption (`ncred1...`) is unchanged and needs no poison.
+
 ## 0.43.0 — 2026-06-06
 
 Hardening from the 2026-06-06 excalibur-mcp double outage: a relay-purged

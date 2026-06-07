@@ -42,6 +42,7 @@ from tollbooth.credential_templates import (
     validate_payload,
 )
 from tollbooth.credential_vault_backend import CredentialVaultBackend
+from tollbooth.constants import ErrorCode
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,46 @@ class NostrProfile:
 # Default freshness window (seconds)
 _DEFAULT_FRESHNESS = 900  # 15 minutes
 _DEFAULT_SUBSCRIBE_TIMEOUT = 10
+
+# NACK copy sent to the sender of a popped courier DM whose anti-replay
+# token did NOT match the open channel. Deliberately does NOT reveal the
+# expected poison phrase — telling an unknown sender the token they should
+# have used would defeat the anti-replay guarantee.
+_NACK_TOKEN = (
+    "Your message was popped from the courier queue, but its session "
+    "phrase didn't match an open request on this channel, so it has been "
+    "removed. Ask the service for the correct session phrase, then resend "
+    "your reply using the @@@ format from the welcome message."
+)
+
+# Cap on how many NACK DMs a single drain will send, so a flood of junk
+# DMs from one sender can't be amplified into a flood of outbound replies.
+# Beyond the cap, mismatched DMs are still popped + NIP-09 deleted silently.
+_MAX_NACKS_PER_DRAIN = 5
+
+# Patron-actionable prose for each courier-resolution failure. Keyed by the
+# ErrorCode the resolver returns; the agent branches on error_code, the human
+# reads the message.
+_COURIER_RESOLVE_ERRORS = {
+    ErrorCode.COURIER_NO_PENDING_RECORD: (
+        "No open courier channel for this npub and service. Call "
+        "request_credential_channel (or request_npub_proof) first, then "
+        "retrieve with the poison it returns."
+    ),
+    ErrorCode.COURIER_POISON_MISMATCH: (
+        "The supplied session phrase does not match the open channel for this "
+        "npub and service. Use the exact poison returned by the request, or "
+        "open a fresh channel."
+    ),
+    ErrorCode.COURIER_TOKEN_EXPIRED: (
+        "This courier channel's freshness window has elapsed. Call "
+        "request_credential_channel again for a fresh session phrase."
+    ),
+    ErrorCode.COURIER_NO_PINNED_RELAY: (
+        "The open channel has no pinned rendezvous relay on record, so there "
+        "is no single relay to drain. Open a fresh channel."
+    ),
+}
 
 
 def _npub_to_hex(npub: str) -> str:
@@ -904,7 +945,8 @@ class NostrCredentialExchange:
                 f"the correct message. It is not sensitive. "
                 f"They MUST reply on the rendezvous relay {committed_relay} "
                 f"(included in the DM body) using the @@@ format shown. "
-                f"Then call receive_credentials with their npub."
+                f"Then call receive_credentials with their npub, the service, "
+                f"and the session phrase \"{poison}\" as the poison argument."
             )
             result["relay_propagation_note"] = (
                 f"Reply must land on {committed_relay} — the courier listens there. "
@@ -921,333 +963,242 @@ class NostrCredentialExchange:
                 f"to {self._npub} from their Nostr client, including the session phrase "
                 f"\"{poison}\" — share this phrase in chat so they can include it. "
                 f"Reply with credentials using the @@@ format shown above. "
-                f"Then call receive_credentials with their npub."
+                f"Then call receive_credentials with their npub, the service, "
+                f"and the session phrase \"{poison}\" as the poison argument."
             )
 
         return result
 
-    async def receive(
+    async def receive_from_vault(
         self, sender_npub: str, *, service: str | None = None,
-        force_relay: bool = False,
     ) -> dict[str, Any]:
-        """Pick up and validate credentials from a sender.
+        """Vault-only credential lookup — no relay I/O, no poison.
 
-        If a credential vault is configured, checks it first.  On a vault
-        hit the credentials are returned immediately without any relay I/O.
-        On a miss (or no vault), falls back to the relay DM flow.
-        Set force_relay=True to skip the vault and always poll relays
-        (e.g. after resending corrected credentials).
+        This is the cold-start / returning-session path: it answers "do we
+        already hold complete credentials for this (service, npub)?" without
+        touching the Secure Courier relay protocol. Used by
+        ``SecureCourier.restore_session`` to re-establish an operator session
+        on a serverless cold start. It is deliberately separate from
+        ``receive()`` — the agent-facing courier retrieve is strict and
+        poison-scoped, while this is a plain encrypted-store read.
 
-        After a successful relay pickup the validated credentials are
-        encrypted and stored in the vault for future sessions.
+        Returns a success dict (``encryption: "vault"``) on a complete vault
+        hit, else ``{"success": False}``.
+        """
+        vault_service = self._resolve_service(service)
+        if self._credential_vault is None or not vault_service:
+            return {"success": False}
 
-        Args:
-            sender_npub: Patron's npub (bech32).
-            service: Optional service hint for vault lookup.  If omitted
-                and only one template is configured, that service is used.
+        vaulted = await self._vault_fetch(vault_service, sender_npub)
+        if vaulted is None:
+            return {"success": False}
+
+        template = self._templates[vault_service]
+        required_fields = {
+            name for name, spec in template.fields.items() if spec.required
+        }
+        if not required_fields.issubset(vaulted.keys()):
+            logger.info(
+                "Vault blob for %s/%s has %d fields but template requires %s.",
+                vault_service, sender_npub[:16],
+                len(vaulted), required_fields - vaulted.keys(),
+            )
+            return {"success": False}
+
+        sensitive_count = sum(
+            1 for name in vaulted
+            if template.fields.get(name, FieldSpec()).sensitive
+        )
+        return {
+            "success": True,
+            "service": vault_service,
+            "fields_received": len(vaulted),
+            "sensitive_fields": sensitive_count,
+            "encryption": "vault",
+            "credentials": vaulted,
+            "message": (
+                f"Credentials for {vault_service} restored from vault "
+                f"({len(vaulted)} fields). No relay I/O needed."
+            ),
+        }
+
+    async def receive(
+        self, sender_npub: str, *, service: str, poison: str,
+    ) -> dict[str, Any]:
+        """Pick up validated credentials via the deterministic courier drain.
+
+        The client names exactly which response it wants — ``(sender_npub,
+        service, poison)`` — and the drain is unambiguous:
+
+        1. Resolve the pending channel for ``(sender_npub, service)``, verify
+           ``poison`` matches it and hasn't expired, and read the pinned
+           rendezvous relay the original request committed to.
+        2. Drain ONLY that relay. Every popped DM whose poison is wrong (or is
+           undecryptable / lacks ``@@@`` markers) is NIP-09 deleted and the
+           sender is NACK'd (without revealing the expected poison). The first
+           DM whose poison matches is deleted, the sender is ACK'd, and the
+           scan STOPS (stop-at-match).
+        3. On a match the credentials are validated, vaulted, and returned.
+           If the relay drains with no match, a structured not-found result
+           is returned and the queue is now empty of the sought DM.
+
+        All three arguments are required — there is no vault-first fallback
+        and no guessing. (Returning-session vault reads go through
+        ``receive_from_vault``.)
 
         Returns:
-            Dict with success, service name, and field count.
-            The actual credential values are returned under a
-            ``credentials`` key for the caller to store.
+            On success, a dict with ``success: True``, ``credentials``, and
+            field counts. On failure, ``success: False`` with an
+            ``error_code`` from the ``COURIER_*`` family and ``popped``.
         """
         if not self._enabled:
             raise CourierNotReady(
                 "Secure Courier not available. Check logs for missing dependencies."
             )
 
+        if not poison:
+            return {
+                "success": False,
+                "error_code": ErrorCode.POISON_MISSING,
+                "popped": 0,
+                "error": (
+                    "poison is required — pass the session phrase returned by "
+                    "request_credential_channel."
+                ),
+            }
+
         try:
             sender_hex = _npub_to_hex(sender_npub)
         except Exception as exc:
             raise CourierValidationError(f"Invalid sender npub: {exc}") from exc
 
-        # Resolve service for vault lookup
-        vault_service = self._resolve_service(service)
-
-        # ── Vault-first lookup (skipped when force_relay) ─────────
-        if self._credential_vault is not None and vault_service and not force_relay:
-            vaulted = await self._vault_fetch(vault_service, sender_npub)
-            if vaulted is not None:
-                template = self._templates[vault_service]
-                # Check if vault blob satisfies the current template
-                required_fields = {
-                    name for name, spec in template.fields.items()
-                    if spec.required
-                }
-                if required_fields.issubset(vaulted.keys()):
-                    sensitive_count = sum(
-                        1 for name in vaulted
-                        if template.fields.get(name, FieldSpec()).sensitive
-                    )
-                    return {
-                        "success": True,
-                        "service": vault_service,
-                        "fields_received": len(vaulted),
-                        "sensitive_fields": sensitive_count,
-                        "encryption": "vault",
-                        "credentials": vaulted,
-                        "message": (
-                            f"Credentials for {vault_service} restored from vault "
-                            f"({len(vaulted)} fields). No relay I/O needed."
-                        ),
-                    }
-                logger.info(
-                    "Vault blob for %s/%s has %d fields but template requires %s "
-                    "— falling through to relay poll.",
-                    vault_service, sender_npub[:16],
-                    len(vaulted), required_fields - vaulted.keys(),
-                )
-
-        # ── Cold-start recovery: restore ephemeral agent before relay poll ──
-        #
-        # On cold start, the in-memory ephemeral agent keys are gone.
-        # Restore them from the vault BEFORE subscribing to relays, so
-        # the relay subscription filter includes the ephemeral pubkey
-        # and can find NIP-17 gift wraps addressed to it.
-        resolved_service_early = self._resolve_service(service)
-        poison_key_early = (sender_npub, resolved_service_early) if resolved_service_early else None
-        if (poison_key_early
-                and poison_key_early not in self._ephemeral_agents
-                and self._credential_vault is not None):
-            pending = await self._vault_fetch(
-                f"__pending__{resolved_service_early}", sender_npub,
-            )
-            if pending and "poison" in pending:
-                p_expiry = pending.get("expiry", 0)
-                if time.time() <= p_expiry:
-                    # Restore rendezvous pin from vault (cold-start
-                    # recovery — process restart loses in-memory pin)
-                    pinned_relay = pending.get("rendezvous_relay")
-                    if pinned_relay and poison_key_early not in self._pinned_relays:
-                        self._pinned_relays[poison_key_early] = pinned_relay
-                    agent_nsec_hex = pending.get("agent_nsec_hex")
-                    if agent_nsec_hex:
-                        from pynostr.key import PrivateKey as _PK
-                        restored_key = _PK(bytes.fromhex(agent_nsec_hex))
-                        self._ephemeral_agents[poison_key_early] = restored_key
-                        # Re-subscribe with the restored agent key
-                        self._subscribe_to_relays()
-                        logger.info(
-                            "Cold-start: restored ephemeral agent %s, re-subscribed relays",
-                            restored_key.public_key.bech32()[:20],
-                        )
-
-        # ── Relay DM flow (pop-and-acknowledge) ────────────────────
-        #
-        # Treat the relay like a message queue: pop every DM from the
-        # candidate pool, delete it from the relay, and send the sender
-        # an acknowledgement explaining why it was accepted or rejected.
-        # Stop on the first valid match, or exhaust the queue.
-        candidates = self._find_dm_candidates(sender_hex)
-        if not candidates:
-            self._fetch_dms_from_relays()
-            candidates = self._find_dm_candidates(sender_hex)
-
-        if not candidates:
-            # Log relay diagnostics for debugging
-            total_events = len(self._received_events)
-            consumed = len(self._consumed_ids)
-            logger.warning(
-                "receive_credentials: no DM candidates for %s. "
-                "Relay state: %d events received, %d consumed, "
-                "%d relays configured, freshness_window=%ds.",
-                sender_npub[:20], total_events, consumed,
-                len(self._relays), self._freshness_window,
-            )
-            if total_events > 0:
-                # Count by kind and consumed status
-                kinds: dict[int, int] = {}
-                consumed_count = 0
-                for evt in self._received_events:
-                    k = evt.get("kind", 0)
-                    kinds[k] = kinds.get(k, 0) + 1
-                    if evt.get("id", "") in self._consumed_ids:
-                        consumed_count += 1
-                kind_summary = ", ".join(
-                    f"kind{k}={n}" for k, n in sorted(kinds.items())
-                )
-                logger.warning(
-                    "receive_credentials: events by kind: %s, "
-                    "consumed=%d/%d, looking for sender=%s",
-                    kind_summary, consumed_count, total_events,
-                    sender_npub[:20],
-                )
-            raise CourierTimeout(
-                f"No DM found from {sender_npub} on configured relays. "
-                f"If you just sent your reply, Nostr relay propagation "
-                f"may take 10-30 seconds — wait a moment and try again. "
-                f"Otherwise, make sure you sent the DM from your Nostr "
-                f"client to the correct npub."
-            )
-
-        # Resolve poison expectation up front
+        # Channel state (poison, pin, ephemeral agent, __pending__ vault blob)
+        # is keyed by the RAW service to match open_channel's write. The
+        # resolved service is used only for template matching/validation later.
         resolved_service = self._resolve_service(service)
-        poison_key = (sender_npub, resolved_service) if resolved_service else None
-        expected = self._pending_poisons.get(poison_key) if poison_key else None
+        poison_key = (sender_npub, service)
 
-        # Cold-start recovery: restore pending state from vault
-        if expected is None and self._credential_vault is not None and poison_key:
-            pending = await self._vault_fetch(
-                f"__pending__{resolved_service}", sender_npub,
-            )
-            if pending and "poison" in pending:
-                p_expiry = pending.get("expiry", 0)
-                if time.time() <= p_expiry:
-                    self._pending_poisons[poison_key] = (
-                        pending["poison"], p_expiry,
-                    )
-                    # Restore rendezvous pin if persisted (challenges
-                    # opened before this restart used the old protocol
-                    # and won't have one; that's fine — receive falls
-                    # back to fan-out discovery)
-                    pinned_relay = pending.get("rendezvous_relay")
-                    if pinned_relay and poison_key not in self._pinned_relays:
-                        self._pinned_relays[poison_key] = pinned_relay
-                    # Restore ephemeral agent key if present
-                    agent_nsec_hex = pending.get("agent_nsec_hex")
-                    if agent_nsec_hex:
-                        from pynostr.key import PrivateKey as _PK
-                        restored_key = _PK(bytes.fromhex(agent_nsec_hex))
-                        self._ephemeral_agents[poison_key] = restored_key
-                        logger.info(
-                            "Restored ephemeral agent %s from vault for %s/%s",
-                            restored_key.public_key.bech32()[:20],
-                            sender_npub[:16], resolved_service,
-                        )
-                    expected = self._pending_poisons.get(poison_key)
-                    logger.info(
-                        "Restored pending poison from vault for %s/%s",
-                        sender_npub[:16], resolved_service,
-                    )
-                else:
-                    # Expired — clean up vault
-                    try:
-                        await self._credential_vault.delete_credentials(
-                            f"__pending__{resolved_service}", sender_npub,
-                        )
-                    except Exception:
-                        pass
-
-        if expected is not None:
-            expected_phrase, expiry = expected
-            if time.time() > expiry:
-                del self._pending_poisons[poison_key]
-                self._pinned_relays.pop(poison_key, None)
-                raise CourierValidationError(
-                    "Anti-replay token expired. Call request_credential_channel "
-                    "again to get a fresh token."
-                )
-        else:
-            expected_phrase = None
+        # Resolve + verify the pinned rendezvous relay for this exact
+        # (npub, service, poison). Handles cold-start vault rehydration and
+        # returns a structured error (popping nothing) when the channel can't
+        # be resolved.
+        pinned, error_code = await self._resolve_pinned_record(
+            sender_npub, service, poison,
+        )
+        if error_code is not None:
+            return {
+                "success": False,
+                "error_code": error_code,
+                "popped": 0,
+                "error": _COURIER_RESOLVE_ERRORS.get(
+                    error_code, "Could not resolve the courier channel.",
+                ),
+            }
 
         error_template = self._resolve_error_template(service)
 
-        # Resolve ephemeral agent key for self-DM decryption
-        agent_key = self._ephemeral_agents.get(
-            (sender_npub, resolved_service),
-        ) if resolved_service else None
+        # Self-DM decryption uses the ephemeral agent key restored by the
+        # resolver; falls back to the operator nsec for patron→operator DMs.
+        agent_key = self._ephemeral_agents.get(poison_key)
         decrypt_privkey = agent_key.hex() if agent_key else None
 
-        # Pop-and-acknowledge: decrypt each candidate, consume it from
-        # the queue regardless of validity, and reply with the outcome.
+        # ── Strict pinned-relay drain ──────────────────────────────────
+        # Fetch from ONLY the pinned relay, then consider only candidates that
+        # actually arrived on it (the buffer may hold cross-relay events from
+        # an earlier subscription). Events with no relay tag are not excluded:
+        # every real subscription stamps ``_relay`` (see _subscribe_one_relay),
+        # so an untagged event only appears in tests.
+        self._fetch_dms_from_relays([pinned])
+        candidates = [
+            c for c in self._find_dm_candidates(sender_hex)
+            if c.get("_relay") in (pinned, None)
+        ]
+
         dm = None
         plaintext = None
-        pop_count = 0
-        undecryptable = 0
+        popped = 0
+        nacks_sent = 0
 
         for candidate in candidates:
             event_id = candidate.get("id", "")
             kind = candidate.get("kind", 0)
 
-            # NIP-04 policy check
+            # Classify the candidate: either it matches (pt set) or it earns a
+            # NACK reason. The pop happens once, below, so the outbound-NACK
+            # cap is applied uniformly.
+            nack_reason: str | None = None
+            pt: str | None = None
+
             if kind == _KIND_ENCRYPTED_DM and self._nip44_only:
-                self._pop_event(event_id, sender_npub,
-                    "Rejected: NIP-04 DMs not accepted. "
-                    "Please use a modern Nostr client with NIP-44 support.")
-                pop_count += 1
-                continue
-
-            # Decrypt
-            try:
-                pt = self._decrypt_dm(
-                    candidate, sender_hex,
-                    decrypt_privkey_hex=decrypt_privkey,
+                nack_reason = (
+                    "Your NIP-04 message was popped and removed — this channel "
+                    "accepts only NIP-44. Use a modern Nostr client and resend."
                 )
-            except CourierValidationError:
-                self._pop_event(event_id)
-                undecryptable += 1
-                pop_count += 1
-                continue
-
-            # Parse @@@ fields
-            payload = _parse_delimited_credentials(pt)
-            if payload is None:
-                self._pop_event(event_id, sender_npub,
-                    "Rejected: could not find @@@ field markers in your message. "
-                    "Please use the format: field_name = @@@value@@@")
-                pop_count += 1
-                continue
-
-            # Poison check (if expected)
-            if expected_phrase is not None:
-                msg_poison = payload.get("poison", "")
-                if msg_poison != expected_phrase:
-                    reason = (
-                        f"Rejected: wrong anti-replay token "
-                        f"(got \"{msg_poison or '<missing>'}\", "
-                        f"expected \"{expected_phrase}\")"
-                    ) if msg_poison else (
-                        f"Rejected: anti-replay token missing from your message. "
-                        f"Expected: \"{expected_phrase}\""
+            else:
+                try:
+                    pt = self._decrypt_dm(
+                        candidate, sender_hex, decrypt_privkey_hex=decrypt_privkey,
                     )
-                    self._pop_event(event_id, sender_npub, reason)
-                    pop_count += 1
-                    continue
+                except Exception:
+                    pt = None
+                    nack_reason = _NACK_TOKEN
+                if pt is not None:
+                    payload = _parse_delimited_credentials(pt)
+                    if payload is None:
+                        nack_reason = (
+                            "Your message was popped but had no @@@ field "
+                            "markers. Resend using: field_name = @@@value@@@"
+                        )
+                    elif payload.get("poison", "") != poison:
+                        nack_reason = _NACK_TOKEN
 
-            # This DM is the valid match — pop it and stop scanning
-            dm = candidate
-            plaintext = pt
-            self._pop_event(event_id)  # no reply yet — success DM sent later
-            pop_count += 1
-            break
+            if nack_reason is None:
+                # Valid match — pop it (ACK sent after a successful vault write)
+                dm = candidate
+                plaintext = pt
+                self._pop_event(event_id)
+                popped += 1
+                break  # stop-at-match
+
+            # Mismatch — pop + NIP-09 delete, NACK the sender up to the cap so
+            # a flood of junk DMs can't be amplified into a flood of replies.
+            if nacks_sent < _MAX_NACKS_PER_DRAIN:
+                self._pop_event(event_id, sender_npub, nack_reason, target_relay=pinned)
+                nacks_sent += 1
+            else:
+                self._pop_event(event_id)
+            popped += 1
 
         logger.info(
-            "Popped %d DM(s) (%d undecryptable), match=%s",
-            pop_count, undecryptable, "found" if dm else "none",
+            "Courier drain on %s: popped %d, match=%s",
+            pinned, popped, "found" if dm else "none",
         )
 
         if dm is None:
-            token_hint = f" Expected token: \"{expected_phrase}\"." if expected_phrase else ""
-            raise CourierValidationError(
-                f"Scanned {pop_count} DM(s) from {sender_npub[:20]}... but none "
-                f"contained valid credentials with the expected anti-replay token.{token_hint} "
-                f"All have been acknowledged and deleted. "
-                f"Call request_credential_channel again for a fresh token."
-            )
+            return {
+                "success": False,
+                "error_code": ErrorCode.COURIER_NOT_FOUND,
+                "popped": popped,
+                "error": (
+                    f"Drained the pinned relay ({pinned}); none of the "
+                    f"{popped} message(s) carried the expected session phrase. "
+                    f"The queue is now empty of the sought reply — confirm the "
+                    f"patron replied on {pinned}, or request a fresh channel."
+                ),
+            }
 
-        # Consume the poison — one-time use
-        if poison_key and poison_key in self._pending_poisons:
-            del self._pending_poisons[poison_key]
-
-        # Release the rendezvous pin — one-time use
-        if poison_key:
-            self._pinned_relays.pop(poison_key, None)
-
-        # Discard ephemeral agent key — one-time use
-        if poison_key and poison_key in self._ephemeral_agents:
-            del self._ephemeral_agents[poison_key]
-
-        # Clean up vault pending state
-        if self._credential_vault is not None and resolved_service:
+        # ── Match: consume one-time channel state (keyed by raw service) ──
+        self._pending_poisons.pop(poison_key, None)
+        self._pinned_relays.pop(poison_key, None)
+        self._ephemeral_agents.pop(poison_key, None)
+        if self._credential_vault is not None:
             try:
                 await self._credential_vault.delete_credentials(
-                    f"__pending__{resolved_service}", sender_npub,
+                    f"__pending__{service}", sender_npub,
                 )
             except Exception:
                 pass  # best-effort cleanup
 
-        # Parse credential payload (already parsed above, but re-parse
-        # cleanly for the validation path below)
         payload = _parse_delimited_credentials(plaintext)
         if payload is None:
             self._send_error_dm(sender_npub, error_template)
@@ -1257,13 +1208,9 @@ class NostrCredentialExchange:
                 "field_name = @@@your_value@@@"
             )
 
-        # Remove poison from payload so it doesn't confuse template matching
         payload.pop("poison", None)
-
-        # Match template — use the server's resolved service, not the payload
         template = self._match_template(resolved_service, payload)
 
-        # Validate against template
         try:
             validated = validate_payload(payload, template)
         except TemplateValidationError as exc:
@@ -1275,13 +1222,11 @@ class NostrCredentialExchange:
         if self._credential_vault is not None:
             persisted = await self._vault_store(template.service, sender_npub, validated)
 
-        # Send success DM back to patron only if persistence actually worked.
-        # Telling the patron "we got it" when the vault didn't accept the
-        # write is the root of the lag-and-confusion bug class.
+        # ACK only if persistence actually worked — telling the patron "got it"
+        # when the vault write failed is the root of the lag-and-confusion bugs.
         if persisted:
-            self._send_success_dm(sender_npub)
+            self._send_success_dm(sender_npub, target_relay=pinned)
 
-        # Count sensitive vs non-sensitive fields
         sensitive_count = sum(
             1 for name in validated if template.fields.get(name, FieldSpec()).sensitive
         )
@@ -1294,6 +1239,7 @@ class NostrCredentialExchange:
             "encryption": dm.get("encryption", "unknown"),
             "credentials": validated,
             "persisted": persisted,
+            "popped": popped,
             "error_code": None if persisted else "credential_vault_unavailable",
             "error": None if persisted else (
                 "Credentials received and validated but the vault write "
@@ -1465,10 +1411,14 @@ class NostrCredentialExchange:
 
     # ── Conversational DM helpers ─────────────────────────────────────
 
-    def _send_success_dm(self, sender_npub: str) -> None:
-        """Send a success DM to the patron after credential pickup.
+    def _send_success_dm(
+        self, sender_npub: str, *, target_relay: str | None = None,
+    ) -> None:
+        """Send a success (ACK) DM to the patron after credential pickup.
 
         Non-fatal -- DM failure is logged but does not block the receive flow.
+        When *target_relay* is set the ACK is published only on that relay
+        (the pinned rendezvous relay the patron is already listening on).
         """
         success_text = (
             "\u2705 Your credentials have been securely stored. "
@@ -1477,7 +1427,7 @@ class NostrCredentialExchange:
             "the relay copy of your credentials has been deleted."
         )
         try:
-            self.send_dm(sender_npub, success_text)
+            self.send_dm(sender_npub, success_text, target_relay=target_relay)
         except Exception as exc:
             logger.debug(
                 "Success DM to %s failed (non-fatal): %s",
@@ -1489,6 +1439,8 @@ class NostrCredentialExchange:
         event_id: str,
         reply_npub: str | None = None,
         reason: str | None = None,
+        *,
+        target_relay: str | None = None,
     ) -> None:
         """Pop a DM from the local queue and relay.
 
@@ -1497,7 +1449,8 @@ class NostrCredentialExchange:
         request to all relays.
 
         If *reply_npub* and *reason* are provided, sends an acknowledgement
-        DM to the sender explaining why the message was rejected.
+        (NACK) DM to the sender explaining why the message was popped.
+        When *target_relay* is set the NACK is published only on that relay.
         Acknowledgement failures are non-fatal.
         """
         if not event_id:
@@ -1514,7 +1467,7 @@ class NostrCredentialExchange:
 
         if reply_npub and reason:
             try:
-                self.send_dm(reply_npub, reason)
+                self.send_dm(reply_npub, reason, target_relay=target_relay)
             except Exception as exc:
                 logger.debug(
                     "Ack DM to %s failed (non-fatal): %s",
@@ -1568,6 +1521,95 @@ class NostrCredentialExchange:
         if len(self._templates) == 1:
             return next(iter(self._templates.keys()))
         return service
+
+    async def _resolve_pinned_record(
+        self, sender_npub: str, service: str, poison: str,
+    ) -> tuple[str | None, str | None]:
+        """Resolve and verify the pinned rendezvous relay for a courier channel.
+
+        Looks up the pending record for ``(sender_npub, service)``, verifies
+        the supplied *poison* matches it and has not expired, and returns the
+        pinned rendezvous relay the original request committed to. Performs
+        cold-start recovery from the vault (restoring the in-memory poison,
+        pin, and ephemeral agent key) when the in-memory state is gone after
+        a process restart.
+
+        This is the gate for the deterministic Secure Courier retrieve path:
+        the client names ``(sender_npub, service, poison)`` and the drain
+        targets exactly the one relay returned here — no guessing, no fan-out.
+
+        Returns:
+            ``(pinned_relay, None)`` on success, or ``(None, error_code)``
+            where ``error_code`` is one of ``ErrorCode.COURIER_NO_PENDING_RECORD``
+            / ``COURIER_POISON_MISMATCH`` / ``COURIER_TOKEN_EXPIRED`` /
+            ``COURIER_NO_PINNED_RELAY``.
+        """
+        # Key by the RAW service — open_channel stores the pending record
+        # under the exact service string the request used (see open_channel:
+        # self._pending_poisons[(recipient_npub, service)] and
+        # __pending__{service}). _resolve_service is intentionally NOT applied
+        # here: for the proof service it would collapse to a credential
+        # template name when only one is configured, breaking the lookup.
+        poison_key = (sender_npub, service)
+
+        expected = self._pending_poisons.get(poison_key)
+        pinned = self._pinned_relays.get(poison_key)
+
+        # Cold-start recovery: rehydrate from the __pending__ vault blob when
+        # in-memory state was lost to a restart (mirrors open_channel's write).
+        if (expected is None or pinned is None) and self._credential_vault is not None:
+            pending = await self._vault_fetch(
+                f"__pending__{service}", sender_npub,
+            )
+            if pending and "poison" in pending:
+                p_expiry = pending.get("expiry", 0)
+                if time.time() > p_expiry:
+                    try:
+                        await self._credential_vault.delete_credentials(
+                            f"__pending__{service}", sender_npub,
+                        )
+                    except Exception:
+                        pass
+                    return None, ErrorCode.COURIER_TOKEN_EXPIRED
+                self._pending_poisons[poison_key] = (pending["poison"], p_expiry)
+                expected = self._pending_poisons[poison_key]
+                pin_url = pending.get("rendezvous_relay")
+                if pin_url:
+                    self._pinned_relays[poison_key] = pin_url
+                    pinned = pin_url
+                agent_nsec_hex = pending.get("agent_nsec_hex")
+                if agent_nsec_hex and poison_key not in self._ephemeral_agents:
+                    restored_key = PrivateKey(bytes.fromhex(agent_nsec_hex))
+                    self._ephemeral_agents[poison_key] = restored_key
+                    logger.info(
+                        "Cold-start: restored ephemeral agent %s for %s/%s",
+                        restored_key.public_key.bech32()[:20],
+                        sender_npub[:16], service,
+                    )
+
+        if expected is None:
+            return None, ErrorCode.COURIER_NO_PENDING_RECORD
+
+        expected_phrase, expiry = expected
+        if time.time() > expiry:
+            self._pending_poisons.pop(poison_key, None)
+            self._pinned_relays.pop(poison_key, None)
+            if self._credential_vault is not None:
+                try:
+                    await self._credential_vault.delete_credentials(
+                        f"__pending__{service}", sender_npub,
+                    )
+                except Exception:
+                    pass
+            return None, ErrorCode.COURIER_TOKEN_EXPIRED
+
+        if poison != expected_phrase:
+            return None, ErrorCode.COURIER_POISON_MISMATCH
+
+        if not pinned:
+            return None, ErrorCode.COURIER_NO_PINNED_RELAY
+
+        return pinned, None
 
     # ── Vault helpers ──────────────────────────────────────────────────
 
@@ -1677,15 +1719,22 @@ class NostrCredentialExchange:
         """
         self._subscribe_to_relays()
 
-    def _subscribe_to_relays(self) -> None:
-        """Subscribe to all relays for DMs addressed to us.
+    def _subscribe_to_relays(self, relays: list[str] | None = None) -> None:
+        """Subscribe to relays for DMs addressed to us.
 
         Uses multiple REQ filters to cover both NIP-04 (kind 4) and
         NIP-17 (kind 1059) DMs.  NIP-17 gift wraps may use a random
         ``p`` tag for metadata protection (per the NIP-17 spec), so we
         include a broad filter without a ``#p`` constraint — tightly
         limited — to catch those events too.
+
+        Args:
+            relays: Specific relays to subscribe to. Defaults to all
+                configured relays. The Secure Courier retrieve path passes
+                a single pinned rendezvous relay here so the drain touches
+                only the relay the original request committed to.
         """
+        target_relays = relays if relays is not None else self._relays
         since = int(time.time()) - self._freshness_window
 
         # Always subscribe to both NIP-04 and NIP-17 events.
@@ -1719,7 +1768,7 @@ class NostrCredentialExchange:
         filters = [filter_nip04, filter_giftwrap_tagged]
         sub_id = f"courier-{int(time.time())}"
 
-        for relay_url in self._relays:
+        for relay_url in target_relays:
             try:
                 self._subscribe_one_relay(relay_url, sub_id, filters)
             except Exception as exc:
@@ -1790,9 +1839,13 @@ class NostrCredentialExchange:
         finally:
             ws.close()
 
-    def _fetch_dms_from_relays(self) -> None:
-        """One-shot fetch of recent DMs from all relays."""
-        self._subscribe_to_relays()
+    def _fetch_dms_from_relays(self, relays: list[str] | None = None) -> None:
+        """One-shot fetch of recent DMs.
+
+        Defaults to all configured relays; pass a single-element list to
+        drain only a pinned rendezvous relay.
+        """
+        self._subscribe_to_relays(relays)
 
     def _find_dm_candidates(self, sender_hex: str) -> list[dict[str, Any]]:
         """Find unconsumed DM candidates from a sender, newest first.

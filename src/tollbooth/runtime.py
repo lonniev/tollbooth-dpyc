@@ -2722,30 +2722,35 @@ def register_standard_tools(
     @tool
     async def receive_credentials(
         sender_npub: str = "",
-        proof: str = "",
         service: str = "",
+        poison: str = "",
+        proof: str = "",
         credential_card: str = "",
-        force_relay: bool = False,
     ) -> dict[str, Any]:
         """Pick up credentials from the Secure Courier.
 
         **Call this only after the user confirms they have replied.**
-        This tool destructively drains ALL DMs from the sender on the
-        relay. If called before the user replies, their message will
-        never be found. Do NOT poll, loop, or retry.
+        Deterministic, one-shot retrieval: name the response you want with
+        ``(sender_npub, service, poison)`` and the tool drains ONLY the
+        rendezvous relay that channel was pinned to. Every popped DM with the
+        wrong session phrase is deleted and its sender is NACK'd; the first DM
+        with the matching phrase is accepted (ACK'd) and the scan stops. If
+        none match, the queue is drained and a ``courier_not_found`` result is
+        returned. Do NOT poll, loop, or retry.
 
-        Checks the vault first (instant), then reads Nostr relays for
-        encrypted DMs. If a credential_card (ncred1...) is provided,
-        redeems it directly without relay access. On success, the
-        payment processor client is reinitialized from the new
+        If a credential_card (ncred1...) is provided, it is redeemed directly
+        without any relay access (poison not required for that path). On
+        success, the payment processor client is reinitialized from the new
         credentials — no server restart needed.
 
         Args:
             sender_npub: Required. The npub that sent the credentials.
             service: Required. The credential service name (must match
                 the service used in request_credential_channel).
-            force_relay: Skip the vault cache and read Nostr relays
-                for new DMs. Use after resending corrected credentials.
+            poison: Required. The session phrase returned by
+                request_credential_channel for this exact channel.
+            credential_card: Optional. An ncred1... card to redeem directly
+                (bypasses the relay drain; poison not needed).
         Free.
         """
         if not sender_npub:
@@ -2767,6 +2772,16 @@ def register_standard_tools(
                     )
                 ),
             }
+        if not poison and not credential_card:
+            from tollbooth.constants import ErrorCode as _EC
+            return {
+                "success": False,
+                "error_code": _EC.POISON_MISSING,
+                "error": (
+                    "poison is required — pass the session phrase returned by "
+                    "request_credential_channel (or provide a credential_card)."
+                ),
+            }
         courier = await rt.courier()
         if courier is None:
             return {"success": False, "error": "Secure Courier not configured."}
@@ -2776,7 +2791,9 @@ def register_standard_tools(
                     credential_card, service=service,
                 )
             else:
-                result = await courier.receive(sender_npub, service=service, force_relay=force_relay)
+                result = await courier.receive(
+                    sender_npub, service=service, poison=poison,
+                )
 
             # Validate credentials via operator callback before accepting.
             # The courier strips credentials from the result for security,
@@ -2901,16 +2918,31 @@ def register_standard_tools(
         @tool
         async def receive_patron_credentials(
             sender_npub: str = "",
+            poison: str = "",
             proof: str = "",
             credential_card: str = "",
         ) -> dict[str, Any]:
             """Pick up patron credentials from the Secure Courier.
 
-            Checks the vault first, then polls Nostr relays.
+            Deterministic, one-shot retrieval: name the response with
+            ``(sender_npub, poison)`` and the tool drains ONLY the pinned
+            rendezvous relay for that channel, stopping at the matching DM.
+            Provide an ncred1... credential_card to redeem directly instead
+            (poison not required for that path). Do NOT poll or retry.
             Free.
             """
             if not sender_npub:
                 return {"success": False, "error": "sender_npub is required."}
+            if not poison and not credential_card:
+                from tollbooth.constants import ErrorCode as _EC
+                return {
+                    "success": False,
+                    "error_code": _EC.POISON_MISSING,
+                    "error": (
+                        "poison is required — pass the session phrase returned "
+                        "by request_patron_credentials (or a credential_card)."
+                    ),
+                }
             courier = await rt.courier()
             if courier is None:
                 return {"success": False, "error": "Secure Courier not configured."}
@@ -2920,7 +2952,7 @@ def register_standard_tools(
                     return await courier._exchange.redeem_credential_card(
                         credential_card, service=service,
                     )
-                return await courier.receive(sender_npub, service)
+                return await courier.receive(sender_npub, service, poison=poison)
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
@@ -3387,36 +3419,48 @@ def register_standard_tools(
     @tool
     async def receive_npub_proof(
         patron_npub: str = "",
+        poison: str = "",
     ) -> dict[str, Any]:
         """Receive npub ownership confirmation from a patron.
 
         **Call this only after the user confirms they have replied.**
-        This tool destructively drains ALL DMs from the patron on the
-        relay — popping every one regardless of validity — and looks
-        for the one with the matching anti-replay token. If called
-        before the user replies, their message will never be found.
-        Do NOT poll, loop, or retry.
+        Deterministic, one-shot retrieval: name the response with
+        ``(patron_npub, poison)`` — the poison being the ``proof_token``
+        returned by ``request_npub_proof``. The tool drains ONLY the pinned
+        rendezvous relay that challenge was published on, stopping at the DM
+        whose phrase matches. Mismatched DMs are deleted and NACK'd (without
+        revealing the expected phrase). If called before the user replies,
+        their message will never be found. Do NOT poll, loop, or retry.
 
         The signed DM itself proves npub ownership (the patron's nsec
-        signed it). On success, returns a ``proof_token`` — the same
-        poison phrase from ``request_npub_proof``. The calling
-        application MUST remember this token and pass it as the
-        ``proof`` parameter on every subsequent paid tool call.
-        The proof is stored in the vault keyed by a hash of the
+        signed it). On success, returns the ``proof_token`` — the same
+        poison phrase. The calling application MUST remember this token and
+        pass it as the ``proof`` parameter on every subsequent paid tool
+        call. The proof is stored in the vault keyed by a hash of the
         poison — the MCP never stores the raw poison itself. Free.
 
         Args:
             patron_npub: Required. The patron's npub to receive proof from.
+            poison: Required. The proof_token returned by request_npub_proof.
         """
         err = rt.npub_validation_error(patron_npub, param="patron_npub")
         if err is not None:
             return err
+        from tollbooth.constants import ErrorCode as _EC
+        if not poison:
+            return {
+                "success": False,
+                "error_code": _EC.POISON_MISSING,
+                "error": (
+                    "poison is required — pass the proof_token returned by "
+                    "request_npub_proof."
+                ),
+            }
         import time as _time
         resolved = resolve_npub(patron_npub)
 
         courier = await rt.courier()
         if courier is None:
-            from tollbooth.constants import ErrorCode as _EC
             return {
                 "success": False,
                 "error_code": _EC.SECURE_COURIER_UNAVAILABLE,
@@ -3426,33 +3470,32 @@ def register_standard_tools(
         exchange = courier._exchange
         from tollbooth.nostr_credentials import (
             _npub_to_hex, _parse_delimited_credentials,
+            _NACK_TOKEN, _MAX_NACKS_PER_DRAIN, _COURIER_RESOLVE_ERRORS,
         )
 
-        # Resolve expected poison for this service + patron
         patron_hex = _npub_to_hex(resolved)
-        resolved_service = exchange._resolve_service(_PROOF_SERVICE)
-        poison_key = (resolved, resolved_service) if resolved_service else None
-        expected = exchange._pending_poisons.get(poison_key) if poison_key else None
+        # Channel state is keyed by the RAW proof service (matching
+        # open_channel and _resolve_pinned_record), never the resolved
+        # credential template.
+        poison_key = (resolved, _PROOF_SERVICE)
 
-        # Cold-start recovery
-        if expected is None and exchange._credential_vault is not None and poison_key:
-            pending = await exchange._vault_fetch(
-                f"__pending__{resolved_service}", resolved,
-            )
-            if pending and "poison" in pending:
-                p_expiry = pending.get("expiry", 0)
-                if _time.time() <= p_expiry:
-                    exchange._pending_poisons[poison_key] = (
-                        pending["poison"], p_expiry,
-                    )
-                    # Restore the rendezvous pin so receive can clean up
-                    # the sibling dict on success even after a restart.
-                    pinned_relay = pending.get("rendezvous_relay")
-                    if pinned_relay and poison_key not in exchange._pinned_relays:
-                        exchange._pinned_relays[poison_key] = pinned_relay
-                    expected = exchange._pending_poisons.get(poison_key)
-
-        expected_phrase = expected[0] if expected else None
+        # Resolve + verify the pinned rendezvous relay for this exact
+        # (patron, proof-service, poison). Handles cold-start vault
+        # rehydration (poison, pin, ephemeral agent) and returns a
+        # structured error — popping nothing — when it can't be resolved.
+        pinned, error_code = await exchange._resolve_pinned_record(
+            resolved, _PROOF_SERVICE, poison,
+        )
+        if error_code is not None:
+            return {
+                "success": False,
+                "error_code": error_code,
+                "popped_dms": 0,
+                "error": _COURIER_RESOLVE_ERRORS.get(
+                    error_code, "Could not resolve the proof channel.",
+                ),
+            }
+        expected_phrase = poison
 
         # Load challenge timestamp — ignore DMs created before this
         challenge_ts = 0
@@ -3465,107 +3508,88 @@ def register_standard_tools(
         except Exception:
             pass
 
-        # Fetch DMs from relays — retry up to 4 times with short pauses
-        # because relay delivery is not instantaneous.
-        import asyncio as _aio
-        candidates = []
-        for _attempt in range(4):
-            exchange._fetch_dms_from_relays()
-            candidates = exchange._find_dm_candidates(patron_hex)
-            if candidates:
-                break
-            if _attempt < 3:
-                await _aio.sleep(2)
+        # Single drain of ONLY the pinned relay — the call is human-gated
+        # (the agent calls it after the user confirms a reply), so there is
+        # no retry loop. Consider only candidates that arrived on the pin.
+        exchange._fetch_dms_from_relays([pinned])
+        candidates = [
+            c for c in exchange._find_dm_candidates(patron_hex)
+            if c.get("_relay") in (pinned, None)
+        ]
 
         if not candidates:
             return {
                 "success": False,
+                "error_code": _EC.COURIER_NOT_FOUND,
+                "popped_dms": 0,
                 "error": (
-                    "No DMs from patron after 4 relay polls. "
-                    "Ensure the patron has replied, then try again."
+                    f"No reply found on the pinned relay ({pinned}). "
+                    f"Confirm the patron replied there, then try again."
                 ),
             }
 
-        # Drain loop: pop ALL candidates, find the match if any.
-        # DMs created before the challenge timestamp are stale — pop and skip.
-        # No per-DM rejection messages — one summary at the end.
+        # Drain loop, stop-at-match. Stale (pre-challenge) DMs are popped
+        # silently; mismatched DMs are NACK'd up to the cap.
+        # For self-DM proofs the reply is encrypted to the ephemeral agent
+        # npub, so decrypt with the agent key (restored by the resolver)
+        # and fall back to the operator nsec for patron→operator proofs.
         matched_payload = None
         last_failure = None
         popped = 0
-        stale_popped = 0
-        # For self-DM proofs (operator proves its OWN npub), the challenge
-        # was sent from an ephemeral agent npub, NOT from the operator's
-        # own. The patron's reply is therefore encrypted using the
-        # ephemeral ↔ patron ECDH pair, and decrypting with the operator's
-        # nsec produces garbage — the "undecryptable DM" symptom that
-        # made every drain return 0 matches. Mirror the credential-flow
-        # `receive` (nostr_credentials.py:1008-1012): look up the
-        # ephemeral agent's nsec for this (patron, service) pair and use
-        # IT to decrypt. Falls back to the operator nsec for non-self-DM
-        # flows (patron != operator).
-        agent_key = exchange._ephemeral_agents.get(poison_key) if poison_key else None
+        nacks_sent = 0
+        agent_key = exchange._ephemeral_agents.get(poison_key)
         decrypt_key = agent_key.hex() if agent_key else exchange._privkey_hex
 
         for candidate in candidates:
-            # Pop pre-challenge DMs without processing
+            event_id = candidate.get("id", "")
+
+            # Pop pre-challenge DMs without processing or NACK
             event_ts = candidate.get("created_at", 0)
             if challenge_ts and event_ts < challenge_ts - 5:  # 5s grace
-                exchange._pop_event(candidate.get("id", ""))
-                stale_popped += 1
+                exchange._pop_event(event_id)
                 popped += 1
                 continue
-            event_id = candidate.get("id", "")
-            popped += 1
 
-            # Decrypt
+            nack_reason: str | None = None
+            payload = None
             try:
                 plaintext = exchange._decrypt_dm(
-                    candidate, patron_hex,
-                    decrypt_privkey_hex=decrypt_key,
+                    candidate, patron_hex, decrypt_privkey_hex=decrypt_key,
                 )
             except Exception:
-                exchange._pop_event(event_id)  # pop without reply
+                plaintext = None
+                nack_reason = _NACK_TOKEN
                 last_failure = "undecryptable DM"
-                continue
 
-            if not plaintext:
-                exchange._pop_event(event_id)
+            if plaintext:
+                payload = _parse_delimited_credentials(plaintext)
+                if payload is None:
+                    nack_reason = _NACK_TOKEN
+                    last_failure = "no @@@ fields"
+                elif payload.get("poison", "") != expected_phrase:
+                    nack_reason = _NACK_TOKEN
+                    last_failure = "wrong token"
+            elif nack_reason is None:
+                nack_reason = _NACK_TOKEN
                 last_failure = "empty DM"
-                continue
 
-            # Parse @@@ fields
-            payload = _parse_delimited_credentials(plaintext)
-            if payload is None:
+            if nack_reason is None and payload is not None:
+                matched_payload = payload
                 exchange._pop_event(event_id)
-                last_failure = f"no @@@ fields: {plaintext[:60]}"
-                continue
+                popped += 1
+                break  # stop-at-match
 
-            # Poison check
-            if expected_phrase is not None:
-                msg_poison = payload.get("poison", "")
-                if msg_poison != expected_phrase:
-                    exchange._pop_event(event_id)
-                    last_failure = (
-                        f"wrong token (got '{msg_poison or '<missing>'}', "
-                        f"expected '{expected_phrase}')"
-                    )
-                    continue
+            if nacks_sent < _MAX_NACKS_PER_DRAIN:
+                exchange._pop_event(event_id, resolved, nack_reason, target_relay=pinned)
+                nacks_sent += 1
+            else:
+                exchange._pop_event(event_id)
+            popped += 1
 
-            # Match found — pop and stop
-            matched_payload = payload
-            exchange._pop_event(event_id)
-            break
-
-        # Pop any remaining candidates we didn't scan yet
-        # (drain the entire relay queue for this patron)
-        for candidate in candidates[popped:]:
-            exchange._pop_event(candidate.get("id", ""))
-
-        # Clean up poison state and rendezvous pin
-        if poison_key and poison_key in exchange._pending_poisons:
-            del exchange._pending_poisons[poison_key]
-        if poison_key:
-            exchange._pinned_relays.pop(poison_key, None)
+        # Clean up poison state and rendezvous pin (one-time use)
+        exchange._pending_poisons.pop(poison_key, None)
+        exchange._pinned_relays.pop(poison_key, None)
+        exchange._ephemeral_agents.pop(poison_key, None)
 
         # One summary DM to patron
         if matched_payload is not None:
@@ -3590,15 +3614,6 @@ def register_standard_tools(
             # Compute poison hash — the caller-supplied proof token for
             # future paid calls. The raw poison is returned to the caller
             # but never stored by the MCP.
-            if not expected_phrase:
-                return {
-                    "success": False,
-                    "error": (
-                        "Proof reply matched but the original poison phrase "
-                        "could not be recovered. Call request_npub_proof "
-                        "to start a fresh exchange."
-                    ),
-                }
             import hashlib as _hashlib
             poison_hash = _hashlib.sha256(
                 expected_phrase.encode(),
@@ -3655,21 +3670,19 @@ def register_standard_tools(
                 "message": confirmation_msg,
             }
         else:
-            summary = f"Scanned and cleaned {popped} DM(s) but none matched."
+            # NACKs already went to each mismatched sender during the drain;
+            # the returned error never reveals the expected phrase.
+            summary = (
+                f"Drained the pinned relay ({pinned}); cleaned {popped} DM(s) "
+                f"but none carried the expected proof phrase. The queue is now "
+                f"empty of the sought reply — confirm the patron replied on "
+                f"{pinned}, or call request_npub_proof for a fresh exchange."
+            )
             if last_failure:
-                summary += f" Last: {last_failure}"
-            if expected_phrase:
-                summary += (
-                    f" Expected anti-replay token '{expected_phrase}'. "
-                    f"Call request_npub_proof for a fresh exchange."
-                )
-            try:
-                exchange.send_dm(resolved, summary)
-            except Exception:
-                pass
-
+                summary += f" (last issue: {last_failure})"
             return {
                 "success": False,
+                "error_code": _EC.COURIER_NOT_FOUND,
                 "popped_dms": popped,
                 "error": summary,
             }

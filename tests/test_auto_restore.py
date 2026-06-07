@@ -144,12 +144,15 @@ def _make_courier_service(
 
     exchange = MagicMock()
     exchange._credential_vault = vault
-    exchange.receive = AsyncMock(return_value={
+    _vault_result = {
         "success": True,
         "service": "thebrain",
         "credentials": {"api_key": "k", "brain_id": "b"},
         "encryption": "vault",
-    })
+    }
+    exchange.receive = AsyncMock(return_value=_vault_result)
+    # Cold-start restore reads straight from the vault (no poison, no relay)
+    exchange.receive_from_vault = AsyncMock(return_value=dict(_vault_result))
     exchange.forget = AsyncMock(return_value={"success": True, "deleted": True})
     svc._exchange = exchange
 
@@ -160,7 +163,7 @@ class TestRestoreSession:
 
     @pytest.mark.asyncio
     async def test_restore_calls_receive(self):
-        """restore_session() calls receive() with the stored npub."""
+        """restore_session() reads from the vault (no poison) with the stored npub."""
         vault = MagicMock(spec=SessionBindingBackend)
         vault.fetch_session_binding = AsyncMock(return_value="npub1abc")
         vault.store_session_binding = AsyncMock()
@@ -171,8 +174,11 @@ class TestRestoreSession:
         result = await svc.restore_session("user_01", service="thebrain")
         assert result == "npub1abc"
 
-        # receive() was called on the exchange
-        exchange.receive.assert_called_once_with("npub1abc", service="thebrain", force_relay=False)
+        # Cold-start restore uses the vault-only read, NOT the poison-scoped drain
+        exchange.receive_from_vault.assert_called_once_with(
+            "npub1abc", service="thebrain",
+        )
+        exchange.receive.assert_not_called()
         # Callback fired
         callback.assert_called_once()
 
@@ -207,12 +213,12 @@ class TestRestoreSession:
 
     @pytest.mark.asyncio
     async def test_restore_receive_failure_returns_none(self):
-        """If receive() raises, restore returns None."""
+        """If the vault read raises, restore returns None."""
         vault = MagicMock(spec=SessionBindingBackend)
         vault.fetch_session_binding = AsyncMock(return_value="npub1abc")
 
         svc, exchange = _make_courier_service(vault=vault)
-        exchange.receive = AsyncMock(side_effect=RuntimeError("relay down"))
+        exchange.receive_from_vault = AsyncMock(side_effect=RuntimeError("vault down"))
 
         result = await svc.restore_session("user_01", service="thebrain")
         assert result is None

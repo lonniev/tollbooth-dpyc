@@ -51,6 +51,17 @@ class ErrorCode:
     VAULT_BOOTSTRAPPING = "vault_bootstrapping"
     SECURE_COURIER_UNAVAILABLE = "secure_courier_unavailable"
 
+    # Secure Courier deterministic retrieval (receive_credentials /
+    # receive_patron_credentials / receive_npub_proof). The client names
+    # the response it wants via (sender_npub, service, poison); these codes
+    # report why a poison-scoped, pinned-relay drain could not return it.
+    POISON_MISSING = "poison_missing"                      # poison argument empty
+    COURIER_NO_PENDING_RECORD = "courier_no_pending_record"  # no open channel for (npub, service)
+    COURIER_POISON_MISMATCH = "courier_poison_mismatch"    # poison does not match the open channel
+    COURIER_TOKEN_EXPIRED = "courier_token_expired"        # channel's freshness window has elapsed
+    COURIER_NO_PINNED_RELAY = "courier_no_pinned_relay"    # record has no rendezvous relay to drain
+    COURIER_NOT_FOUND = "courier_not_found"                # relay drained; no DM matched the poison
+
     # Billing / pricing
     INSUFFICIENT_BALANCE = "insufficient_balance"
     CONSTRAINT_DENIED = "constraint_denied"
