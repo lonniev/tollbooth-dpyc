@@ -128,7 +128,8 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
         supersedes=(
             "Replaces activate_session(passphrase). Passphrase-based "
             "session activation has been removed. Use the Secure "
-            "Courier flow: request_credential_channel + receive_credentials."
+            "Courier flow: request_credential_channel + "
+            "receive_credentials(sender_npub, service, poison)."
         ),
     ),
     ToolPathInfo(
@@ -314,8 +315,8 @@ OPERATOR_OBSOLETE_PRACTICES: list[ObsoletePractice] = [
     ObsoletePractice(
         pattern="activate_session(passphrase)",
         replaced_by=(
-            "receive_credentials(sender_npub) via the Secure Courier flow. "
-            "Call session_status to check state, then "
+            "receive_credentials(sender_npub, service, poison) via the Secure "
+            "Courier flow. Call session_status to check state, then "
             "request_credential_channel + receive_credentials if needed."
         ),
         reason=(
@@ -329,8 +330,8 @@ OPERATOR_OBSOLETE_PRACTICES: list[ObsoletePractice] = [
         pattern="register_credentials(api_key, brain_id, passphrase)",
         replaced_by=(
             "request_credential_channel(recipient_npub) to open a Secure "
-            "Courier channel, then receive_credentials(sender_npub) to "
-            "pick up the encrypted credentials from the Nostr relay."
+            "Courier channel, then receive_credentials(sender_npub, service, "
+            "poison) to pick up the encrypted credentials from the Nostr relay."
         ),
         reason=(
             "Typing credentials into the chat window is a security risk. "
@@ -427,9 +428,15 @@ class OperatorProtocol(Protocol):
         ...
 
     async def receive_credentials(
-        self, sender_npub: str, service: str, credential_card: str,
+        self, sender_npub: str, service: str, poison: str,
+        credential_card: str,
     ) -> dict[str, Any]:
-        """(hot) Pick up credentials from the Secure Courier."""
+        """(hot) Pick up credentials from the Secure Courier.
+
+        ``poison`` is the session phrase returned by
+        ``request_credential_channel`` — required for the deterministic,
+        pinned-relay drain (or omit it when redeeming a ``credential_card``).
+        """
         ...
 
     async def forget_credentials(

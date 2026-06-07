@@ -14,6 +14,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (request_npub_proof / request_patron_credentials / request_credential_channel),
   so the hint always names the tool that opens *that* channel. Same fix applied
   to the `poison_missing` and `courier_not_found` strings.
+- `OperatorProtocol.receive_credentials` and the obsolete-practice prose still
+  described the pre-0.44.0 `receive_credentials(sender_npub, service)` shape —
+  updated to include the now-required `poison` argument.
 
 ## 0.44.0 — 2026-06-07
 
