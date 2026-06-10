@@ -25,6 +25,7 @@ Reference: https://github.com/nostr-protocol/nips/blob/master/44.md (NIP-44)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -816,8 +817,13 @@ class NostrCredentialExchange:
         # Generate anti-replay poison slug
         poison = _generate_poison()
 
-        # Start background subscription
-        self._start_subscription()
+        # Drain the relay subscription off the event loop. The relay I/O is
+        # synchronous (websocket-client: connect + recv until EOSE, bounded by
+        # a per-relay timeout), so running it inline would block every other
+        # coroutine on this serverless event loop for up to that timeout per
+        # relay. We still await it, preserving the "buffer populated on return"
+        # contract — we just yield the loop while the sockets are in flight.
+        await asyncio.to_thread(self._start_subscription)
 
         # Build the welcome message for the patron
         from datetime import datetime, timezone
@@ -833,7 +839,8 @@ class NostrCredentialExchange:
 
         if is_self_dm:
             agent_key = PrivateKey()
-            self._ephemeral_agents[(recipient_npub, service)] = agent_key
+            with self._lock:
+                self._ephemeral_agents[(recipient_npub, service)] = agent_key
             logger.info(
                 "Self-DM detected — using ephemeral agent %s for %s/%s",
                 agent_key.public_key.bech32()[:20],
@@ -1121,7 +1128,8 @@ class NostrCredentialExchange:
         # an earlier subscription). Events with no relay tag are not excluded:
         # every real subscription stamps ``_relay`` (see _subscribe_one_relay),
         # so an untagged event only appears in tests.
-        self._fetch_dms_from_relays([pinned])
+        # Off the event loop — same blocking-relay-I/O reasoning as open_channel.
+        await asyncio.to_thread(self._fetch_dms_from_relays, [pinned])
         candidates = [
             c for c in self._find_dm_candidates(sender_hex)
             if c.get("_relay") in (pinned, None)
@@ -1594,7 +1602,8 @@ class NostrCredentialExchange:
                 agent_nsec_hex = pending.get("agent_nsec_hex")
                 if agent_nsec_hex and poison_key not in self._ephemeral_agents:
                     restored_key = PrivateKey(bytes.fromhex(agent_nsec_hex))
-                    self._ephemeral_agents[poison_key] = restored_key
+                    with self._lock:
+                        self._ephemeral_agents[poison_key] = restored_key
                     logger.info(
                         "Cold-start: restored ephemeral agent %s for %s/%s",
                         restored_key.public_key.bech32()[:20],
@@ -1755,9 +1764,14 @@ class NostrCredentialExchange:
         # Even in nip44_only mode we listen for kind 4 so we can
         # surface a clear rejection message during decrypt.
 
-        # Collect pubkeys to listen for: operator + any active ephemeral agents
+        # Collect pubkeys to listen for: operator + any active ephemeral agents.
+        # This runs in a worker thread (see open_channel/receive), so snapshot
+        # the ephemeral-agent values under the lock — a concurrent open_channel
+        # or cold-start restore may insert while we iterate.
         listen_pubkeys = [self._pubkey_hex]
-        for agent_key in self._ephemeral_agents.values():
+        with self._lock:
+            agent_keys = list(self._ephemeral_agents.values())
+        for agent_key in agent_keys:
             listen_pubkeys.append(agent_key.public_key.hex())
 
         # Filter 1: NIP-04 DMs addressed to us (p-tag match)

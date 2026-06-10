@@ -3,6 +3,20 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Changed
+
+- Relay drains no longer block the async event loop (audit P1). `open_channel`
+  and the `receive` pinned-relay drain do synchronous websocket I/O (connect +
+  recv-until-EOSE, bounded by a per-relay timeout); they now run on a worker
+  thread via `asyncio.to_thread` instead of inline, so a slow/timing-out relay
+  no longer freezes every other coroutine on the serverless event loop. The
+  "buffer populated on return" contract is preserved (the thread is awaited).
+  `_ephemeral_agents` access is now lock-guarded to stay safe under the
+  concurrency this unlocks. Regression test in
+  `tests/test_relay_io_nonblocking.py`.
+
 ## 0.44.2 — 2026-06-10
 
 Security and hardening release from the 2026-06-10 SDK audit.
