@@ -3,7 +3,9 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.44.3 — 2026-06-10
+
+Event-loop hardening from the 2026-06-10 SDK audit (P1).
 
 ### Changed
 
