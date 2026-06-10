@@ -2787,7 +2787,9 @@ def register_standard_tools(
             return {"success": False, "error": "Secure Courier not configured."}
         try:
             if credential_card:
-                result = await courier._exchange.redeem_credential_card(
+                # Route through the wrapper, not courier._exchange directly,
+                # so credential values are stripped before returning (audit S1).
+                result = await courier.redeem_card(
                     credential_card, service=service,
                 )
             else:
@@ -2949,7 +2951,9 @@ def register_standard_tools(
             try:
                 service = rt.patron_credential_service
                 if credential_card:
-                    return await courier._exchange.redeem_credential_card(
+                    # Route through the wrapper, not courier._exchange directly,
+                    # so credential values are stripped before returning (audit S1).
+                    return await courier.redeem_card(
                         credential_card, service=service,
                     )
                 return await courier.receive(

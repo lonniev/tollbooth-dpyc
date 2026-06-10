@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.2 — 2026-06-10
+
+Security and hardening release from the 2026-06-10 SDK audit.
+
+### Security
+
+- **Credential leak on the credential-card redemption path (audit S1).**
+  `receive_credentials` and `receive_patron_credentials` redeemed an `ncred`
+  card by calling `courier._exchange.redeem_credential_card()` directly and
+  returning its result, which still carried the raw `credentials` values —
+  bypassing the `SecureCourierService.redeem_card()` wrapper that strips them.
+  Raw credential values could surface in the tool result (→ agent context,
+  logs). Both tools now route through `courier.redeem_card()`, which vaults and
+  then strips. Vaulting is unchanged (it happens inside the exchange), so this
+  is a pure removal of the echoed values. Regression guard added in
+  `tests/test_credential_no_echo.py`.
+
+### Changed
+
+- Replay-protection set in `identity_proof` is now bounded by a hard cap
+  (`_CONSUMED_MAX_ENTRIES = 10000`) with eviction of expired-then-soonest-to-
+  expire ids (audit S2). Entries are only inserted after full signature +
+  freshness verification, so this is a memory backstop against a flood of
+  distinct valid proofs outrunning the 120s lazy cleanup, not a new gate.
+- PyPI classifier bumped from `Development Status :: 2 - Pre-Alpha` to
+  `4 - Beta` to reflect production use across the operator fleet.
+
+### CI
+
+- The `[x402]` optional extra is now installed in the test workflow, so the 15
+  `x402_client` tests run instead of being silently skipped. `pytest` now runs
+  with `-ra` so any future skipped module surfaces its reason in the log.
+
 ## 0.44.1 — 2026-06-07
 
 ### Fixed

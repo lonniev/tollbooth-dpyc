@@ -109,6 +109,13 @@ def create_ownership_proof(nsec: str) -> str:
 # Replay protection: track consumed proof event IDs within the window
 _consumed_proofs: dict[str, float] = {}  # event_id → expiry time
 _CONSUMED_CLEANUP_INTERVAL = 120  # seconds between cleanups
+# Hard cap on the consumed-proof set. Entries are only inserted after a proof
+# passes full signature + freshness verification, so this set cannot be filled
+# with arbitrary junk — but a flood of validly-signed, distinct proofs arriving
+# faster than the 120s cleanup could still grow it unbounded. The cap bounds
+# memory; 10k live entries is far above any honest operator's concurrent proof
+# volume within a single freshness window.
+_CONSUMED_MAX_ENTRIES = 10000
 _last_cleanup: float = 0.0
 
 
@@ -121,6 +128,29 @@ def _cleanup_consumed() -> None:
     expired = [k for k, v in _consumed_proofs.items() if now > v]
     for k in expired:
         del _consumed_proofs[k]
+
+
+def _record_consumed(event_id: str, expiry: float) -> None:
+    """Record a consumed proof id under a hard size cap.
+
+    The interval-based ``_cleanup_consumed`` drains expired ids lazily; this
+    cap is the backstop when distinct valid proofs arrive faster than that
+    cleanup runs. When full, already-expired ids are purged first; if still
+    full, the ids closest to expiry are evicted. Evicting soonest-to-expire is
+    safe: an evicted id can only be replayed in the sliver before its proof's
+    freshness window lapses, after which the age check rejects it regardless.
+    """
+    if len(_consumed_proofs) >= _CONSUMED_MAX_ENTRIES:
+        now = time.time()
+        for k in [k for k, v in _consumed_proofs.items() if now > v]:
+            del _consumed_proofs[k]
+        if len(_consumed_proofs) >= _CONSUMED_MAX_ENTRIES:
+            overflow = len(_consumed_proofs) - _CONSUMED_MAX_ENTRIES + 1
+            for k, _ in sorted(
+                _consumed_proofs.items(), key=lambda kv: kv[1]
+            )[:overflow]:
+                del _consumed_proofs[k]
+    _consumed_proofs[event_id] = expiry
 
 
 def verify_proof(
@@ -200,7 +230,7 @@ def verify_proof(
         logger.debug("identity_proof: replay rejected (event_id=%s)", event_id[:16])
         return False
     if event_id:
-        _consumed_proofs[event_id] = now + window_seconds
+        _record_consumed(event_id, now + window_seconds)
 
     return True
 

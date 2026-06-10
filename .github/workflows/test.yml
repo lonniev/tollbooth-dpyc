@@ -21,7 +21,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install -e ".[dev,nostr,qr,authority]"
+        run: pip install -e ".[dev,nostr,qr,authority,x402]"
 
       - name: Install ruff
         run: pip install ruff
@@ -30,4 +30,6 @@ jobs:
         run: ruff check .
 
       - name: Run tests
-        run: pytest tests/ -q --import-mode=importlib
+        # -ra surfaces skip reasons so a silently-skipped module (e.g. a missing
+        # optional extra) is visible in the log instead of reading as "all green".
+        run: pytest tests/ -q -ra --import-mode=importlib
