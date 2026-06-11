@@ -289,21 +289,14 @@ async def _get_authority_npub() -> str | None:
 
 
 async def _set_authority_npub(npub: str) -> None:
+    # Persist the certification-critical authority npub durably BEFORE caching
+    # it. A vault-write failure must propagate — caching in memory while the
+    # write failed would report false durability (the key vanishes on restart,
+    # silently breaking certificate verification). The caller aborts activation
+    # on this exception rather than reporting a phantom success.
     global _cached_authority_npub
-    try:
-        vault = await _get_runtime().vault()
-        await vault.set_config("authority_npub", npub)
-    except Exception:
-        # FIXME (M1.4 flagged, §2): swallowing a vault WRITE failure here makes
-        # the authority_npub look set (cached in memory) while it may be absent
-        # on restart — false durability on a certification-critical key. A
-        # re-raise is likely correct but changes the authority-registration
-        # flow; left swallowed pending an explicit decision. Logged loudly.
-        logger.warning(
-            "authority_npub vault persist FAILED; cached in memory only and "
-            "will be lost on restart — re-register if certification breaks",
-            exc_info=True,
-        )
+    vault = await _get_runtime().vault()
+    await vault.set_config("authority_npub", npub)
     _cached_authority_npub = npub
 
 
@@ -1191,7 +1184,16 @@ def register_authority_tools(
         except Exception as exc:
             return {"success": False, "error": f"No approval received from parent Authority: {exc}"}
 
-        await _set_authority_npub(candidate_npub)
+        try:
+            await _set_authority_npub(candidate_npub)
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": (
+                    f"Failed to persist authority npub to the vault: {exc}. "
+                    "Activation aborted — retry once the vault is reachable."
+                ),
+            }
 
         commit_url = ""
         try:

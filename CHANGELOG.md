@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.13 — 2026-06-11
+
+### Fixed
+
+- **Authority registration no longer reports phantom success on a failed npub
+  persist.** `_set_authority_npub` swallowed a vault **write** failure and then
+  cached the authority npub in memory anyway — so registration returned success
+  while the cert-critical `authority_npub` was never written, vanishing on the
+  next restart and silently breaking certificate verification. The write now
+  propagates on failure, the in-memory cache is updated only **after** a
+  successful write, and `check_authority_approval` aborts activation with a
+  clear "retry once the vault is reachable" error instead of marking the
+  Authority `activated`. Onboarding state is preserved on failure so the
+  operator can retry. Regression-tested. (Resolves the M1.4 §2 follow-up.)
+
 ## 0.44.12 — 2026-06-11
 
 ### Changed (audit M1.4)

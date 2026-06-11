@@ -438,3 +438,48 @@ async def test_check_approval_happy_activates_and_completes():
     set_npub.assert_awaited_once_with("npub1cand")
     assert r["commit_url"] == "https://commit"
     assert state.get() is None  # onboarding completed and cleared
+
+
+@pytest.mark.asyncio
+async def test_check_approval_aborts_when_authority_npub_persist_fails():
+    # A vault-write failure persisting the authority npub must abort activation
+    # cleanly — never report a phantom "activated" with the cert-critical key
+    # absent from the vault (it would vanish on restart, breaking certificate
+    # verification). Regression for the M1.4 §2 re-raise fix.
+    state = OnboardingState()
+    state.start_claim("npub1cand")
+    state.promote_to_approval("npub1parent")
+    exchange = SimpleNamespace(receive=AsyncMock())
+    with _tools() as tools:
+        with patch.object(at, "_onboarding", state), \
+             patch.object(at, "_get_nostr_exchange", MagicMock(return_value=exchange)), \
+             patch.object(at, "_set_authority_npub",
+                          AsyncMock(side_effect=RuntimeError("neon unreachable"))):
+            r = await tools["check_authority_approval"](candidate_npub="npub1cand")
+    assert r["success"] is False
+    assert "persist authority npub" in r["error"]
+    assert "neon unreachable" in r["error"]
+    assert r.get("activated") is not True
+    assert state.get() is not None  # onboarding NOT completed — retryable
+
+
+@pytest.mark.asyncio
+async def test_set_authority_npub_caches_only_after_successful_write():
+    vault = SimpleNamespace(set_config=AsyncMock())
+    rt = SimpleNamespace(vault=AsyncMock(return_value=vault))
+    with patch.object(at, "_get_runtime", MagicMock(return_value=rt)), \
+         patch.object(at, "_cached_authority_npub", None):
+        await at._set_authority_npub("npub1xyz")
+        vault.set_config.assert_awaited_once_with("authority_npub", "npub1xyz")
+        assert at._cached_authority_npub == "npub1xyz"
+
+
+@pytest.mark.asyncio
+async def test_set_authority_npub_propagates_write_failure_without_caching():
+    vault = SimpleNamespace(set_config=AsyncMock(side_effect=RuntimeError("neon down")))
+    rt = SimpleNamespace(vault=AsyncMock(return_value=vault))
+    with patch.object(at, "_get_runtime", MagicMock(return_value=rt)), \
+         patch.object(at, "_cached_authority_npub", None):
+        with pytest.raises(RuntimeError, match="neon down"):
+            await at._set_authority_npub("npub1xyz")
+        assert at._cached_authority_npub is None  # never cached on failed write
