@@ -3,6 +3,28 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.9 — 2026-06-11
+
+### Fixed
+
+- **Credit tranche expiration was silently disabled fleet-wide.**
+  `resolve_tranche_lifetime()` called a non-existent `ensure_pricing_store()`
+  method since the 2026-03-31 tranche-expiration refactor; the `AttributeError`
+  was swallowed by a bare `except`, so it always returned `None`. As the only
+  reader of the pricing model's `tranche_lifetime` (used on the billing and
+  purchase/restore/reconcile paths), this meant operators who configured a
+  tranche lifetime had patron credits that **never expired**. Fixed to build the
+  `PricingModelStore` inline (as everywhere else) and to log rather than swallow
+  failures. **Behavior change:** pricing models with `tranche_lifetime` set will
+  now expire credits on schedule, as originally intended. Regression-tested.
+
+### CI (audit M2.5)
+
+- Ruff now enforces `F821` (undefined names); forward-ref imports resolved via
+  `TYPE_CHECKING`.
+- Coverage ratchet gate: `--cov-fail-under=67` (a floor, not a target; measured
+  ~70%). CI now fails on a coverage regression.
+
 ## 0.44.8 — 2026-06-11
 
 ### Changed (internal)
