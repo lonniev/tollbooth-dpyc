@@ -17,6 +17,91 @@ def list_constraint_types() -> list[dict[str, Any]]:
     return [s.to_dict() for s in get_all_schemas()]
 
 
+def build_pricing_preview(
+    tool_id: str,
+    tool_name: str,
+    pricing: Any,
+    parsed_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the base ``check_price`` result (pricing type + costs), pre-constraints.
+
+    Pure: takes a resolved ``ToolPricing`` and parsed kwargs, returns the
+    result skeleton the constraint pass then augments. Extracted from the
+    ``check_price`` closure (audit M2.1b) so the percent / flat / flat+multipliers
+    branching is unit-testable without a runtime.
+    """
+    result: dict[str, Any] = {
+        "success": True,
+        "tool_id": tool_id,
+        "tool_name": tool_name,
+        "constraints_enabled": False,
+        "constraint_effects": [],
+    }
+
+    if pricing.rate_percent > 0:
+        result["pricing_type"] = "percent"
+        result["rate_percent"] = pricing.rate_percent
+        result["rate_param"] = pricing.rate_param
+        result["min_cost_sats"] = pricing.min_cost
+        if parsed_kwargs:
+            base_cost = pricing.compute(**parsed_kwargs)
+            result["base_cost_api_sats"] = base_cost
+            result["effective_cost_api_sats"] = base_cost
+        else:
+            result["base_cost_api_sats"] = None
+            result["effective_cost_api_sats"] = None
+            result["hint"] = (
+                f"Pass tool_kwargs with '{pricing.rate_param}' "
+                f"to preview the cost (e.g. '{{\"{pricing.rate_param}\": 1000}}')."
+            )
+    else:
+        # Flat pricing may still scale by categorical multipliers — pass
+        # parsed_kwargs through so lookup tables resolve against the preview.
+        base_cost = pricing.compute(**parsed_kwargs)
+        result["pricing_type"] = "flat" if not pricing.multipliers else "flat+multipliers"
+        result["base_cost_api_sats"] = base_cost
+        result["effective_cost_api_sats"] = base_cost
+        if pricing.multipliers:
+            result["multipliers"] = {
+                param: {k: v for k, v in lookup}
+                for param, lookup in pricing.multipliers
+            }
+
+    return result
+
+
+def apply_constraint_preview(
+    result: dict[str, Any],
+    base_cost: int,
+    effective: int,
+    denial: dict[str, Any] | None,
+    demand_count: int,
+) -> None:
+    """Augment a ``build_pricing_preview`` result with constraint-chain effects.
+
+    Pure: mutates ``result`` in place from a ConstraintGate evaluation's
+    ``(denial, effective)`` plus the tool's current demand. Extracted so the
+    denied / discount / credit formatting is unit-testable.
+    """
+    if demand_count > 0:
+        result["current_demand"] = demand_count
+    if denial:
+        result["effective_cost_api_sats"] = 0
+        result["constraint_effects"].append({
+            "type": "denied",
+            "reason": denial.get("constraint_reason", "blocked"),
+        })
+    else:
+        result["effective_cost_api_sats"] = effective
+        if effective != base_cost:
+            effect_type = "credit" if effective < 0 else "discount"
+            result["constraint_effects"].append({
+                "type": effect_type,
+                "from": int(base_cost),
+                "to": effective,
+            })
+
+
 def _validate_tool_chains(model: PricingModel) -> list[str]:
     """Validate every tool's constraint chain against the registry.
 

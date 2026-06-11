@@ -4070,45 +4070,11 @@ def register_standard_tools(
         pricing = await resolver.get_tool_pricing(tool_id)
 
         name = rt.mcp_name_for(tool_id)
-        result: dict[str, Any] = {
-            "success": True,
-            "tool_id": tool_id,
-            "tool_name": name,
-            "constraints_enabled": False,
-            "constraint_effects": [],
-        }
-
-        if pricing.rate_percent > 0:
-            result["pricing_type"] = "percent"
-            result["rate_percent"] = pricing.rate_percent
-            result["rate_param"] = pricing.rate_param
-            result["min_cost_sats"] = pricing.min_cost
-            if parsed_kwargs:
-                base_cost = pricing.compute(**parsed_kwargs)
-                result["base_cost_api_sats"] = base_cost
-                result["effective_cost_api_sats"] = base_cost
-            else:
-                result["base_cost_api_sats"] = None
-                result["effective_cost_api_sats"] = None
-                result["hint"] = (
-                    f"Pass tool_kwargs with '{pricing.rate_param}' "
-                    f"to preview the cost (e.g. '{{\"{pricing.rate_param}\": 1000}}')."
-                )
-        else:
-            # Flat pricing may still scale by categorical multipliers
-            # (0.37.0+ ToolPricing feature). Pass parsed_kwargs through
-            # so the lookup tables resolve against the caller's preview.
-            base_cost = pricing.compute(**parsed_kwargs)
-            result["pricing_type"] = "flat" if not pricing.multipliers else "flat+multipliers"
-            result["base_cost_api_sats"] = base_cost
-            result["effective_cost_api_sats"] = base_cost
-            if pricing.multipliers:
-                # Expose the table so the FE can render a price-by-selection
-                # matrix instead of just the current point.
-                result["multipliers"] = {
-                    param: {k: v for k, v in lookup}
-                    for param, lookup in pricing.multipliers
-                }
+        from tollbooth.tools.pricing import (
+            apply_constraint_preview,
+            build_pricing_preview,
+        )
+        result = build_pricing_preview(tool_id, name, pricing, parsed_kwargs)
 
         base_cost = result.get("base_cost_api_sats") or 0
         # Preview the chain for this tool, if it has one.  The cached
@@ -4159,23 +4125,9 @@ def register_standard_tools(
                     global_demand=demand,
                     coupon_redemptions=coupon_map,
                 )
-                if demand.get(name, 0) > 0:
-                    result["current_demand"] = demand[name]
-                if denial:
-                    result["effective_cost_api_sats"] = 0
-                    result["constraint_effects"].append({
-                        "type": "denied",
-                        "reason": denial.get("constraint_reason", "blocked"),
-                    })
-                else:
-                    result["effective_cost_api_sats"] = effective
-                    if effective != base_cost:
-                        effect_type = "credit" if effective < 0 else "discount"
-                        result["constraint_effects"].append({
-                            "type": effect_type,
-                            "from": int(base_cost),
-                            "to": effective,
-                        })
+                apply_constraint_preview(
+                    result, int(base_cost), effective, denial, demand.get(name, 0),
+                )
             except ValueError:
                 result["constraint_effects"].append({
                     "type": "info",
