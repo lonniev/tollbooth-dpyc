@@ -43,7 +43,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-import json
 import logging
 import os
 import signal
@@ -2868,8 +2867,7 @@ def register_standard_tools(
     # -- OAuth2 tools (only if oauth_provider is configured) ----------------
 
     if rt._oauth_provider is not None:
-        _opc = rt._oauth_provider  # OAuthProviderConfig
-        _OAUTH_SERVICE = _opc.service_name
+        # Tool bodies live in tollbooth.tools.oauth (they read rt._oauth_provider).
 
         @tool
         async def begin_oauth(npub: str, proof: str) -> dict[str, Any]:
@@ -2885,101 +2883,8 @@ def register_standard_tools(
                 npub: Your DPYC patron npub (npub1...).
                 proof: A kind-27235 Nostr event signed by npub for this tool.
             """
-            if err := await rt.require_caller_proof(npub, proof, "begin_oauth"):
-                return err
-            resolved = resolve_npub(npub)
-
-            # Load operator credentials using vendor field names
-            _id_field = _opc.client_id_field
-            _secret_field = _opc.client_secret_field
-            try:
-                creds = await rt.load_credentials(
-                    [_id_field, _secret_field],
-                )
-            except Exception:
-                return {
-                    "success": False,
-                    "error": (
-                        f"Operator API credentials ({_id_field}) have not been delivered yet. "
-                        "This is not an error — the operator needs to deliver credentials "
-                        "via Secure Courier (request_credential_channel / receive_credentials) "
-                        "before OAuth can start."
-                    ),
-                }
-
-            client_id = creds.get(_id_field, "")
-            if not client_id:
-                return {
-                    "success": False,
-                    "error": (
-                        f"Operator API credentials ({_id_field}) have not been delivered yet. "
-                        "This is not an error — the operator needs to deliver credentials "
-                        "via Secure Courier (request_credential_channel / receive_credentials) "
-                        "before OAuth can start."
-                    ),
-                }
-
-            # Resolve collector redirect URI
-            try:
-                from tollbooth.registry import resolve_service_by_name
-                svc = await resolve_service_by_name("tollbooth-oauth2-callback")
-                redirect_uri = svc["url"].rstrip("/")
-            except Exception as e:
-                return {"success": False, "error": f"OAuth2 collector not found: {e}"}
-
-            from tollbooth.oauth2_collector import (
-                build_authorize_url,
-                generate_pkce_pair,
-            )
-
-            extra_params: dict[str, str] = {}
-            verifier = ""
-            if _opc.pkce:
-                verifier, challenge = generate_pkce_pair()
-                extra_params["code_challenge"] = challenge
-                extra_params["code_challenge_method"] = "S256"
-
-            authorize_url = build_authorize_url(
-                _opc.authorize_url,
-                client_id,
-                redirect_uri,
-                resolved,  # state = patron npub
-                scope=_opc.scopes or None,
-                extra_params=extra_params or None,
-            )
-
-            # Store PKCE verifier and redirect_uri for check_oauth_status
-            vault_data: dict[str, str] = {"redirect_uri": redirect_uri}
-            if verifier:
-                vault_data["pkce_verifier"] = verifier
-            await rt.store_patron_session(
-                resolved, vault_data, service=f"_oauth_pending_{_OAUTH_SERVICE}",
-            )
-
-            # Try to shorten the URL
-            short_url = None
-            try:
-                from tollbooth.shortlinks import create_shortlink
-                short_url = await create_shortlink(authorize_url)
-            except Exception:
-                pass
-
-            result: dict[str, Any] = {
-                "success": True,
-                "status": "pending",
-                "authorize_url": authorize_url,
-                "message": (
-                    "Open authorize_url in the browser (the full URL, not the "
-                    "short one — redirects may truncate query parameters). "
-                    "Then call check_oauth_status with the same npub."
-                ),
-            }
-            if short_url:
-                result["authorize_url_short"] = short_url
-                result["message"] += (
-                    f" For display: {short_url}"
-                )
-            return result
+            from tollbooth.tools.oauth import begin_oauth_tool
+            return await begin_oauth_tool(rt, npub, proof)
 
         @tool
         async def check_oauth_status(npub: str, proof: str) -> dict[str, Any]:
@@ -2994,111 +2899,8 @@ def register_standard_tools(
                 npub: The same Nostr public key (npub1...) used in begin_oauth.
                 proof: A kind-27235 Nostr event signed by npub for this tool.
             """
-            if err := await rt.require_caller_proof(npub, proof, "check_oauth_status"):
-                return err
-            resolved = resolve_npub(npub)
-
-            # Load pending state (PKCE verifier, redirect_uri)
-            pending = await rt.load_patron_session(
-                resolved, service=f"_oauth_pending_{_OAUTH_SERVICE}",
-            )
-            if not pending or "redirect_uri" not in pending:
-                return {
-                    "success": False,
-                    "error": "No pending OAuth flow. Call begin_oauth first.",
-                }
-            redirect_uri = pending["redirect_uri"]
-            verifier = pending.get("pkce_verifier")
-
-            # Load operator credentials (vendor field names → OAuth protocol names)
-            _cid_field = _opc.client_id_field
-            _csec_field = _opc.client_secret_field
-            try:
-                creds = await rt.load_credentials(
-                    [_cid_field, _csec_field],
-                )
-            except Exception as e:
-                logger.error("Failed to load operator credentials: %s", e, exc_info=True)
-                return {"success": False, "error": "Operator credentials could not be loaded. Check operator logs."}
-
-            client_id = creds.get(_cid_field, "")
-            client_secret = creds.get(_csec_field, "")
-
-            # Poll collector for the authorization code
-            try:
-                from tollbooth.registry import resolve_service_by_name
-                svc = await resolve_service_by_name("tollbooth-oauth2-collector")
-                collector_url = svc["url"]
-            except Exception as e:
-                return {"success": False, "error": f"OAuth2 collector: {e}"}
-
-            from tollbooth.oauth2_collector import (
-                retrieve_code_from_collector,
-                exchange_code_for_token,
-            )
-
-            code = await retrieve_code_from_collector(collector_url, resolved)
-            if code is None:
-                return {
-                    "success": True,
-                    "status": "pending",
-                    "message": (
-                        "Waiting for browser authorization. "
-                        "Open the URL from begin_oauth."
-                    ),
-                }
-
-            # Exchange code for tokens
-            try:
-                token = await exchange_code_for_token(
-                    code, client_id, client_secret, redirect_uri,
-                    _opc.token_url,
-                    code_verifier=verifier,
-                )
-            except Exception as e:
-                logger.error("Token exchange failed for %s: %s", resolved[:16], e, exc_info=True)
-                return {"success": False, "error": "Token exchange failed. Check operator logs."}
-
-            # Build vault data from token.
-            # Store both the raw token_json (for operators that expect the
-            # full blob) and individual fields (for direct access).
-            vault_data = {
-                "token_json": json.dumps(token),
-                "access_token": token.get("access_token", ""),
-                "token_type": token.get("token_type", "Bearer"),
-            }
-            if token.get("refresh_token"):
-                vault_data["refresh_token"] = token["refresh_token"]
-            if token.get("expires_at"):
-                vault_data["expires_at"] = str(token["expires_at"])
-
-            # Operator callback (e.g., fetch_account_hash for Schwab)
-            if _opc.on_token_received is not None:
-                try:
-                    extra = await _opc.on_token_received(resolved, token)
-                    if extra:
-                        vault_data.update({k: str(v) for k, v in extra.items()})
-                except Exception as e:
-                    return {"success": False, "error": f"Post-token callback: {e}"}
-
-            # Persist tokens to vault
-            stored = await rt.store_patron_session(
-                resolved, vault_data, service=_OAUTH_SERVICE,
-            )
-            if not stored:
-                return {
-                    "success": False,
-                    "error": (
-                        "OAuth tokens received but could not be persisted to the vault. "
-                        "This is a server-side storage issue — try again or check operator logs."
-                    ),
-                }
-
-            return {
-                "success": True,
-                "status": "completed",
-                "message": "Authorization successful. Session activated.",
-            }
+            from tollbooth.tools.oauth import check_oauth_status_tool
+            return await check_oauth_status_tool(rt, npub, proof)
 
     # Prune registry if OAuth not configured
     if rt._oauth_provider is None:
