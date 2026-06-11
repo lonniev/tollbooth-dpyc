@@ -2627,25 +2627,15 @@ def register_standard_tools(
                     creds = await rt.load_patron_session(resolved, service=opc.service_name)
                 except Exception:
                     creds = None
-                if creds and creds.get("access_token"):
-                    import time as _t
-                    expires_at = 0.0
-                    try:
-                        expires_at = float(creds.get("expires_at", "0") or 0)
-                    except (TypeError, ValueError):
-                        expires_at = 0.0
-                    has_refresh = bool(creds.get("refresh_token"))
-                    block: dict[str, Any] = {
-                        "service": opc.service_name,
-                        "has_access_token": True,
-                        "has_refresh_token": has_refresh,
-                        "refresh_enabled": opc.refresh_enabled,
-                    }
-                    if expires_at > 0:
-                        block["access_token_expires_at"] = expires_at
-                        block["access_token_expires_in_seconds"] = max(
-                            0, int(expires_at - _t.time()),
-                        )
+                import time as _t
+                from tollbooth.tools.status import build_upstream_oauth_block
+                block = build_upstream_oauth_block(
+                    creds,
+                    service_name=opc.service_name,
+                    refresh_enabled=opc.refresh_enabled,
+                    now_ts=_t.time(),
+                )
+                if block is not None:
                     result["upstream_oauth"] = block
         return result
 

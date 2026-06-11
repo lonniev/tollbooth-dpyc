@@ -60,3 +60,38 @@ def build_service_status(
         "process_id": process_id,
         "build_info": build_info or None,
     }
+
+
+def build_upstream_oauth_block(
+    creds: Mapping[str, Any] | None,
+    *,
+    service_name: str,
+    refresh_enabled: bool,
+    now_ts: float,
+) -> dict[str, Any] | None:
+    """Build the ``session_status`` ``upstream_oauth`` block from stored creds.
+
+    Returns ``None`` when there is no usable access token (the caller then
+    omits the block). Expiry math is runtime-derived: ``expires_at`` is parsed
+    defensively (stored as a string), and ``expires_in_seconds`` is clamped at
+    zero. Extracted from the session_status closure (audit M2.1e) so the
+    token-expiry arithmetic is testable without a runtime.
+    """
+    if not creds or not creds.get("access_token"):
+        return None
+
+    try:
+        expires_at = float(creds.get("expires_at", "0") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0.0
+
+    block: dict[str, Any] = {
+        "service": service_name,
+        "has_access_token": True,
+        "has_refresh_token": bool(creds.get("refresh_token")),
+        "refresh_enabled": refresh_enabled,
+    }
+    if expires_at > 0:
+        block["access_token_expires_at"] = expires_at
+        block["access_token_expires_in_seconds"] = max(0, int(expires_at - now_ts))
+    return block
