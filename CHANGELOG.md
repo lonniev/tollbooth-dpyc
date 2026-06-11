@@ -3,6 +3,28 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.6 — 2026-06-11
+
+### Fixed
+
+- Proof tools no longer block the async event loop. `receive_npub_proof` and
+  `request_npub_proof` called `exchange._fetch_dms_from_relays()` synchronously
+  (the pinned drain and the stale-DM purge) — the same latent block fixed for
+  the courier in 0.44.3 (P1). Both now run via `asyncio.to_thread`, verified by
+  a teeth-checked non-blocking test.
+
+### Changed (internal)
+
+- Courier tools join the `register_standard_tools` decomposition (audit M2.1).
+  `request_credential_channel`, `receive_credentials`, `forget_credentials`,
+  and the patron variants moved to `tools/courier.py` (functions over `rt`),
+  leaving thin shims. §2-sensitive credential flow, so behavior-preserving:
+  `receive_credentials`' operator-credential validation-callback flow (validator
+  passes → cashier reset; fails → forget bad creds + rejection DM + structured
+  error) is pinned by `tests/test_courier_tools_characterization.py`, which
+  stays green against the extracted code. `runtime.py` is now 3938 lines
+  (4757 at the start of this audit pass). No wire-API changes.
+
 ## 0.44.5 — 2026-06-11
 
 Internal maintenance: the proof tools join the `register_standard_tools`
