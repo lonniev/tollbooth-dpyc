@@ -3320,19 +3320,20 @@ def register_standard_tools(
         except Exception as exc:
             steps.append({"step": "PricingModelStore.ensure_schema", "ok": False, "error": str(exc)[:500]})
 
-        # Credential vault and proven-npub cache live on the same Neon —
-        # only re-create their schemas if those subsystems are already
-        # configured (operators without credentials don't need this).
-        #
-        # KNOWN-DEAD BRANCH (flagged by mypy M2.5): OperatorRuntime has no
-        # `_credential_vault` attribute — the live vault is at
-        # `rt._courier._exchange._credential_vault`. This getattr therefore
-        # always returns None, so the credential-vault schema is never
-        # re-created here. Behavior preserved pending a verified fix to the
-        # restore path; bound to a local only to satisfy the type checker.
-        cred_vault = getattr(rt, "_credential_vault", None)
-        if cred_vault is not None:
+        # Credential vault tables live on the same Neon. The live vault is on
+        # the courier's exchange, not the runtime — but for schema creation we
+        # only need a NeonCredentialVault bound to the same NeonVault we already
+        # have (CREATE TABLE IF NOT EXISTS, idempotent). Build one directly, the
+        # way the PricingModelStore block above does, so restore re-creates the
+        # credential schema even on a cold runtime whose courier hasn't
+        # materialized yet. (Previously this read a non-existent
+        # `rt._credential_vault` attribute and silently never ran.)
+        try:
+            from tollbooth.vaults.neon import NeonCredentialVault
+            cred_vault = NeonCredentialVault(neon_vault=vault)
             await _try("CredentialVault.ensure_schema", cred_vault.ensure_schema())
+        except Exception as exc:
+            steps.append({"step": "CredentialVault.ensure_schema", "ok": False, "error": str(exc)[:500]})
 
         all_ok = all(s.get("ok") for s in steps)
         return {

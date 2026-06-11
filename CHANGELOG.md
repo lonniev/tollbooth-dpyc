@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.14 — 2026-06-11
+
+### Fixed
+
+- **`restore_neon_schema` never re-created the credential-vault schema.** The
+  step guarded on `getattr(rt, "_credential_vault", None)`, but
+  `OperatorRuntime` has no such attribute (the live vault lives on
+  `rt._courier._exchange._credential_vault`), so it was always None and the
+  branch was dead — a restore left the credential tables uncreated. Now builds a
+  `NeonCredentialVault` directly from the operator's `NeonVault` (idempotent
+  `CREATE TABLE IF NOT EXISTS`), mirroring the `PricingModelStore` step, so a
+  restore re-creates the credential schema even on a cold runtime whose courier
+  hasn't materialized. Per-step failures are surfaced inline like the other
+  steps. Regression-tested. (Resolves the second M2.5/M1.4 §2 follow-up.)
+
 ## 0.44.13 — 2026-06-11
 
 ### Fixed
