@@ -635,62 +635,9 @@ class OperatorRuntime:
             }
 
         # ── Pricing ───────────────────────────────────────────
-        # Code says "free" → cost is 0, Neon not consulted.
-        # Everything else requires Neon, a model, and an explicit price.
-        cost = 0
-        if category != "free":
-            resolver = await self.pricing_resolver()
-            await resolver._ensure_fresh()
-            if not resolver.neon_available:
-                if resolver.last_error_permanent:
-                    return {
-                        "success": False,
-                        "error_code": ErrorCode.PERSISTENCE_MISCONFIGURED,
-                        "error": (
-                            "The operator's database rejected the pricing-model "
-                            "query with a permanent error — this will NOT resolve "
-                            "by retrying. The operator must repair the database "
-                            f"(detail: {resolver.last_error_summary}). "
-                            "Free tools remain available."
-                        ),
-                        "next_steps": [
-                            "Notify the operator — this is an operator-side "
-                            "database repair, not a patron-actionable error"
-                        ],
-                    }
-                return {
-                    "success": False,
-                    "error_code": ErrorCode.WARMING_UP,
-                    "error": (
-                        "Service is warming up — the pricing model could not be "
-                        "loaded from the database yet. This typically resolves shortly "
-                        "after a cold start. Retry your request. "
-                        "Free tools (check_balance, check_payment, proof exchange) "
-                        "remain available during warm-up."
-                    ),
-                    "next_steps": ["Retry the same call shortly"],
-                }
-
-            if not await resolver.has_tool(tool_id):
-                return {
-                    "success": False,
-                    "error_code": ErrorCode.TOOL_NOT_PRICED,
-                    "error": (
-                        f"Tool '{name}' is not yet in the pricing model. "
-                        f"Add it to the pricing model before use."
-                    ),
-                }
-            if not await resolver.is_priced(tool_id):
-                return {
-                    "success": False,
-                    "error_code": ErrorCode.TOOL_NOT_PRICED,
-                    "error": (
-                        f"Tool '{name}' has not been priced yet (TBD). "
-                        f"Set a price in the pricing model before use."
-                    ),
-                }
-            pricing = await resolver.get_tool_pricing(tool_id)
-            cost = pricing.compute(**(tool_kwargs or {}))
+        cost, price_err = await self._resolve_pricing(tool_id, name, category, tool_kwargs)
+        if price_err is not None:
+            return price_err
 
         # ── Resolve caller ────────────────────────────────────
         # Paid tools always require an npub.  Free tools work
@@ -718,55 +665,170 @@ class OperatorRuntime:
         effective_cost = cost
         consumed_coupon_ids: list[str] = []
         if npub and category != "free":
-            try:
-                resolver = await self.pricing_resolver()
-                chain = await resolver.get_chain(tool_id)
-                if chain:
-                    cache = await self.ledger_cache()
-                    ledger = await cache.get(npub)
-                    demand = await self.get_global_demand(name)
-                    gate = self._constraint_gate
-                    if gate is None:
-                        from tollbooth.constraints.gate import ConstraintGate
-                        gate = ConstraintGate()
-                        gate.attach_resolver(resolver)
-                        self._constraint_gate = gate
-                    # Pre-load coupon redemptions for any coupon steps so
-                    # the chain walk stays synchronous.
-                    coupon_map = None
-                    coupon_ids = gate.collect_coupon_ids(chain)
-                    if coupon_ids:
-                        try:
-                            cv = await self.coupons_vault()
-                            redemptions = await cv.fetch_redemptions_for_chain(
-                                npub, coupon_ids,
-                            )
-                            from tollbooth.coupons import CouponRedemptionMap
-                            coupon_map = CouponRedemptionMap(
-                                entries=tuple(redemptions.items()),
-                            )
-                        except Exception as ce:
-                            logger.warning(
-                                "Coupon redemption pre-load failed for %s: %s",
-                                name, ce,
-                            )
-                    denial, effective_signed, consumed_coupon_ids = gate.evaluate_chain(
-                        chain=chain,
-                        tool_name=name,
-                        base_cost=cost,
-                        ledger=ledger,
-                        npub=npub,
-                        global_demand=demand,
-                        proof=proof,
-                        coupon_redemptions=coupon_map,
-                    )
-                    if denial is not None:
-                        denial["error_code"] = ErrorCode.CONSTRAINT_DENIED
-                        return denial
-                    effective_cost = effective_signed
-            except Exception as exc:
-                logger.warning("Constraint evaluation failed for %s: %s", name, exc)
-                # Fall through with base cost — don't block the call
+            effective_cost, consumed_coupon_ids, denial = await self._evaluate_constraints(
+                tool_id, name, npub, cost, proof,
+            )
+            if denial is not None:
+                return denial
+
+        # ── Billing ───────────────────────────────────────────
+        return await self._apply_billing(npub, name, effective_cost, consumed_coupon_ids)
+
+    async def _resolve_pricing(
+        self,
+        tool_id: str,
+        name: str,
+        category: str,
+        tool_kwargs: dict[str, Any] | None,
+    ) -> tuple[int, dict[str, Any] | None]:
+        """Pricing stage of ``debit_or_deny``: resolve the base cost.
+
+        Returns ``(cost, None)`` to proceed, or ``(0, error_dict)`` to deny.
+        Code says "free" → cost is 0, Neon not consulted. Everything else
+        requires Neon, a model, and an explicit price.
+        """
+        from tollbooth.constants import ErrorCode
+
+        if category == "free":
+            return 0, None
+
+        resolver = await self.pricing_resolver()
+        await resolver._ensure_fresh()
+        if not resolver.neon_available:
+            if resolver.last_error_permanent:
+                return 0, {
+                    "success": False,
+                    "error_code": ErrorCode.PERSISTENCE_MISCONFIGURED,
+                    "error": (
+                        "The operator's database rejected the pricing-model "
+                        "query with a permanent error — this will NOT resolve "
+                        "by retrying. The operator must repair the database "
+                        f"(detail: {resolver.last_error_summary}). "
+                        "Free tools remain available."
+                    ),
+                    "next_steps": [
+                        "Notify the operator — this is an operator-side "
+                        "database repair, not a patron-actionable error"
+                    ],
+                }
+            return 0, {
+                "success": False,
+                "error_code": ErrorCode.WARMING_UP,
+                "error": (
+                    "Service is warming up — the pricing model could not be "
+                    "loaded from the database yet. This typically resolves shortly "
+                    "after a cold start. Retry your request. "
+                    "Free tools (check_balance, check_payment, proof exchange) "
+                    "remain available during warm-up."
+                ),
+                "next_steps": ["Retry the same call shortly"],
+            }
+
+        if not await resolver.has_tool(tool_id):
+            return 0, {
+                "success": False,
+                "error_code": ErrorCode.TOOL_NOT_PRICED,
+                "error": (
+                    f"Tool '{name}' is not yet in the pricing model. "
+                    f"Add it to the pricing model before use."
+                ),
+            }
+        if not await resolver.is_priced(tool_id):
+            return 0, {
+                "success": False,
+                "error_code": ErrorCode.TOOL_NOT_PRICED,
+                "error": (
+                    f"Tool '{name}' has not been priced yet (TBD). "
+                    f"Set a price in the pricing model before use."
+                ),
+            }
+        pricing = await resolver.get_tool_pricing(tool_id)
+        return pricing.compute(**(tool_kwargs or {})), None
+
+    async def _evaluate_constraints(
+        self,
+        tool_id: str,
+        name: str,
+        npub: str,
+        cost: int,
+        proof: str,
+    ) -> tuple[int, list[str], dict[str, Any] | None]:
+        """Constraint stage of ``debit_or_deny``.
+
+        Walks the tool's per-tool constraint chain (if any): steps can deny
+        access (temporal windows, supply caps) or transform the price
+        (discounts, surcharges, even drive it negative into a credit).
+        Returns ``(effective_cost, consumed_coupon_ids, denial_or_None)``. A
+        chain-evaluation exception falls through with the base cost — it never
+        blocks the call. Caller gates this on ``npub and category != "free"``.
+        """
+        from tollbooth.constants import ErrorCode
+
+        effective_cost = cost
+        consumed_coupon_ids: list[str] = []
+        try:
+            resolver = await self.pricing_resolver()
+            chain = await resolver.get_chain(tool_id)
+            if chain:
+                cache = await self.ledger_cache()
+                ledger = await cache.get(npub)
+                demand = await self.get_global_demand(name)
+                gate = self._constraint_gate
+                if gate is None:
+                    from tollbooth.constraints.gate import ConstraintGate
+                    gate = ConstraintGate()
+                    gate.attach_resolver(resolver)
+                    self._constraint_gate = gate
+                # Pre-load coupon redemptions for any coupon steps so
+                # the chain walk stays synchronous.
+                coupon_map = None
+                coupon_ids = gate.collect_coupon_ids(chain)
+                if coupon_ids:
+                    try:
+                        cv = await self.coupons_vault()
+                        redemptions = await cv.fetch_redemptions_for_chain(
+                            npub, coupon_ids,
+                        )
+                        from tollbooth.coupons import CouponRedemptionMap
+                        coupon_map = CouponRedemptionMap(
+                            entries=tuple(redemptions.items()),
+                        )
+                    except Exception as ce:
+                        logger.warning(
+                            "Coupon redemption pre-load failed for %s: %s",
+                            name, ce,
+                        )
+                denial, effective_signed, consumed_coupon_ids = gate.evaluate_chain(
+                    chain=chain,
+                    tool_name=name,
+                    base_cost=cost,
+                    ledger=ledger,
+                    npub=npub,
+                    global_demand=demand,
+                    proof=proof,
+                    coupon_redemptions=coupon_map,
+                )
+                if denial is not None:
+                    denial["error_code"] = ErrorCode.CONSTRAINT_DENIED
+                    return cost, [], denial
+                effective_cost = effective_signed
+        except Exception as exc:
+            logger.warning("Constraint evaluation failed for %s: %s", name, exc)
+            # Fall through with base cost — don't block the call
+        return effective_cost, consumed_coupon_ids, None
+
+    async def _apply_billing(
+        self,
+        npub: str,
+        name: str,
+        effective_cost: int,
+        consumed_coupon_ids: list[str],
+    ) -> dict[str, Any] | int:
+        """Billing stage of ``debit_or_deny``: no-charge / credit / debit.
+
+        Returns the (signed) cost to proceed, or an INSUFFICIENT_BALANCE error.
+        """
+        from tollbooth.constants import ErrorCode
 
         async def _burn_consumed_coupons() -> None:
             """Burn one use per consumed coupon id.  Best-effort —
