@@ -3,6 +3,32 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.4 — 2026-06-11
+
+Internal maintenance from the 2026-06-10 audit: coverage measurement in CI and
+the first tranche of the `register_standard_tools` decomposition (M0.2 + M2.1).
+No wire-API changes — tool names, signatures, and behavior are identical.
+
+### CI
+
+- Coverage is now measured on every CI run (pytest-cov, branch + thread),
+  printed as a `term-missing` report. **Report-only** — no `--cov-fail-under`
+  gate yet (that ratchet lands once the extraction raises the floor). Baseline
+  recorded in `CONTRIBUTING.md`: 64%.
+
+### Changed (internal)
+
+- Standard tool bodies are moving out of the ~2,600-line
+  `register_standard_tools` closure into testable `tools/` functions, leaving
+  thin proof-gate + delegate shims. This release extracts the coupon CRUD
+  (`tools/coupons.py`), the `check_price` pure core
+  (`build_pricing_preview` / `apply_constraint_preview` in `tools/pricing.py`),
+  `list_canonical_identities` (`tools/identities.py`), and the `service_status`
+  / `session_status` assembly (`tools/status.py`). `runtime.py` drops from 4757
+  to 4461 lines; the extracted logic — previously untested in closures — is now
+  covered 80–100% by direct unit tests. Function names are preserved so
+  `mcp_name_for` keeps producing identical runtime tool names.
+
 ## 0.44.3 — 2026-06-10
 
 Event-loop hardening from the 2026-06-10 SDK audit (P1).
