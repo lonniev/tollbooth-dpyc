@@ -246,7 +246,9 @@ def render_account_infographic(
     # ── Header ────────────────────────────────────────────────────────
     header_h = 80
     parts.append(_card(cy, header_h, theme))
-    parts.append(_text(CARD_X + 48, cy + 38, escape(theme.service_name),
+    # _text() escapes its content (see _text); pass the raw name to avoid the
+    # double-escape that turned "<x>" into "&amp;lt;x&amp;gt;".
+    parts.append(_text(CARD_X + 48, cy + 38, theme.service_name,
                        size=22, weight="bold", family="sans-serif",
                        fill=theme.text_white))
     parts.append(_text(CARD_X + 48, cy + 60, theme.header_subtitle,

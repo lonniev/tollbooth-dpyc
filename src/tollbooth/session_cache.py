@@ -34,9 +34,35 @@ class SessionCache(Generic[T]):
     holding an API client, credentials, etc.).
     """
 
-    def __init__(self, ttl_seconds: int = 3600) -> None:
+    def __init__(self, ttl_seconds: int = 3600, max_size: int | None = None) -> None:
+        """Create a cache.
+
+        Args:
+            ttl_seconds: How long an entry stays valid after its last ``set``.
+            max_size: Optional hard cap on the number of live entries. When set,
+                ``set`` evicts the least-recently-written entries to stay within
+                the bound. ``None`` (default) is unbounded — TTL is the only
+                bound, which suits small per-operator caches.
+        """
         self._ttl = ttl_seconds
+        self._max_size = max_size
         self._entries: dict[str, tuple[T, float]] = {}
+
+    def _sweep_expired(self) -> int:
+        """Drop every expired entry. Returns the count removed.
+
+        Cheap O(n) hygiene so a ``set``-heavy workload (where ``get`` never
+        revisits old keys to lazily expire them) cannot accumulate stale
+        entries unbounded.
+        """
+        now = time.time()
+        expired = [
+            key for key, (_, created_at) in self._entries.items()
+            if (now - created_at) > self._ttl
+        ]
+        for key in expired:
+            del self._entries[key]
+        return len(expired)
 
     def get(self, key: str) -> T | None:
         """Return the session for *key*, or None if absent/expired."""
@@ -50,8 +76,21 @@ class SessionCache(Generic[T]):
         return session
 
     def set(self, key: str, session: T) -> T:
-        """Store *session* under *key* with a fresh TTL. Returns *session*."""
+        """Store *session* under *key* with a fresh TTL. Returns *session*.
+
+        Opportunistically sweeps expired entries first, then enforces
+        ``max_size`` (if configured) by evicting the least-recently-written
+        entries. Re-setting an existing key moves it to most-recent.
+        """
+        self._sweep_expired()
+        # Move-to-end on re-set so eviction is least-recently-written, not
+        # first-inserted (dict updates keep the original position otherwise).
+        self._entries.pop(key, None)
         self._entries[key] = (session, time.time())
+        if self._max_size is not None:
+            while len(self._entries) > self._max_size:
+                oldest_key = next(iter(self._entries))
+                del self._entries[oldest_key]
         return session
 
     def clear(self, key: str) -> T | None:

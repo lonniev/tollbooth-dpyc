@@ -3,6 +3,42 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.15 — 2026-06-11
+
+### Added (audit M3 — quality & polish)
+
+- **`SessionCache`** gains an optional `max_size` bound (evicts
+  least-recently-written entries) and an **opportunistic expiry sweep on
+  `set()`** so a write-heavy cache can't accumulate stale entries unbounded.
+  Default remains unbounded — TTL-only — so existing callers are unchanged.
+- **Developer tooling**: a `Makefile` (`dev`/`test`/`lint`/`type`/`cov`/`all`)
+  and a refreshed `CONTRIBUTING.md` documenting the mypy + coverage gates and a
+  dependency-pinning policy (exact pins for behavior-critical deps, security
+  floor for `cryptography`).
+- Tests for previously-uncovered modules: `infographic.py` and
+  `constraints/patron_proof.py`.
+
+### Fixed
+
+- **Account infographic double-escaped the service name** — it was passed
+  through `escape()` twice (once at the call site, once inside `_text`),
+  rendering `<x>` as `&amp;lt;x&amp;gt;`. XSS-safe either way, but the name now
+  displays correctly. Surfaced by the new infographic tests.
+- **Poison-format proof feedback (S4)**: a proof token of the
+  `<word>-<word>-<n>` shape that can't be validated as a cached proof (no cache
+  wired, or a miss) now returns a clear "refresh your token / pass an inline
+  Schnorr proof" message instead of falling through to a confusing "Invalid
+  identity proof". Changes only the denial message — never what is accepted (a
+  real Schnorr proof is JSON and never matches the token shape).
+
+### Docs
+
+- `vault_encryption.encrypt` documents the AES-GCM random-nonce volume ceiling
+  (~2**32 encryptions/key per NIST SP 800-38D) and that nsec rotation is the
+  mitigation — far beyond any per-operator vault's write cadence.
+- Test flakiness: the background-flush test now waits on a bounded
+  wait-until-condition helper instead of a fixed `asyncio.sleep(0.3)`.
+
 ## 0.44.14 — 2026-06-11
 
 ### Fixed

@@ -327,6 +327,30 @@ async def require_proof(
             ],
         }
 
+    # S4: a poison-shaped token reaching here was NOT accepted as a cached
+    # proof (this runtime wired no proven_cache, or the cache-miss branch above
+    # already returned). It is definitely not an inline Schnorr event (those are
+    # JSON and never match _POISON_RE), so don't fall through to a confusing
+    # "malformed Schnorr" error — tell the caller their token isn't valid here
+    # and how to refresh. This changes only the denial message, never what is
+    # accepted.
+    if _POISON_RE.match(proof):
+        return {
+            "success": False,
+            "error_code": ErrorCode.PROOF_REFRESH_NEEDED,
+            "error": (
+                "That looks like a proof_token, but it isn't a currently-valid "
+                "cached proof here. Refresh it, or pass an inline kind-27235 "
+                "Schnorr proof instead."
+            ),
+            "next_steps": [
+                "request_npub_proof(patron_npub=<patron_npub>)",
+                "Reply to the DM challenge from your Nostr client",
+                "receive_npub_proof(patron_npub=<patron_npub>) to cache a "
+                "fresh proof_token",
+            ],
+        }
+
     # Tactic 2: inline Schnorr-signed kind-27235 event
     if not verify_proof(proof, npub, tool_name, window_seconds=window_seconds):
         return {

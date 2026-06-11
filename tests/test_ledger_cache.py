@@ -15,6 +15,20 @@ from tollbooth.ledger_cache import LedgerCache
 # ---------------------------------------------------------------------------
 
 
+async def _wait_until(predicate, timeout: float = 2.0) -> bool:
+    """Poll until predicate() is true or timeout elapses.
+
+    Returns whether it became true. Bounded wait-until-condition — returns as
+    soon as the condition holds (no fixed sleep guessing at flush timing).
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_event_loop().time() > deadline:
+            return False
+        await asyncio.sleep(0.01)
+    return True
+
+
 def _mock_vault(ledger_json: str | None = None, fail_store: bool = False):
     """Create a mock vault with fetch_ledger/store_ledger."""
     vault = AsyncMock()
@@ -310,8 +324,9 @@ class TestLedgerCacheBackgroundFlush:
         ledger.credit_deposit(77, "test")
         cache.mark_dirty("user1")
         await cache.start_background_flush()
-        await asyncio.sleep(0.3)  # wait for at least one flush cycle
+        flushed = await _wait_until(lambda: vault.store_ledger.called)
         await cache.stop()
+        assert flushed, "background flush did not write within timeout"
         vault.store_ledger.assert_called()
 
     @pytest.mark.asyncio

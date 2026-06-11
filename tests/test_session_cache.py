@@ -90,3 +90,43 @@ class TestSessionCache:
     def test_ttl_property(self):
         cache: SessionCache[FakeSession] = SessionCache(ttl_seconds=42)
         assert cache.ttl_seconds == 42
+
+    # ── M3.2: max-size eviction + opportunistic expiry sweep ──────────────
+
+    def test_unbounded_by_default(self):
+        cache: SessionCache[FakeSession] = SessionCache()
+        for i in range(50):
+            cache.set(f"u{i}", FakeSession("k", f"u{i}"))
+        assert len(cache) == 50  # no eviction without max_size
+
+    def test_max_size_evicts_oldest_written(self):
+        cache: SessionCache[FakeSession] = SessionCache(max_size=2)
+        cache.set("a", FakeSession("k", "a"))
+        cache.set("b", FakeSession("k", "b"))
+        cache.set("c", FakeSession("k", "c"))  # over cap → evict oldest (a)
+        assert len(cache) == 2
+        assert cache.get("a") is None
+        assert cache.get("b") is not None
+        assert cache.get("c") is not None
+
+    def test_reset_moves_to_most_recent_for_eviction(self):
+        cache: SessionCache[FakeSession] = SessionCache(max_size=2)
+        cache.set("a", FakeSession("k", "a"))
+        cache.set("b", FakeSession("k", "b"))
+        cache.set("a", FakeSession("k", "a2"))  # a is now most-recently-written
+        cache.set("c", FakeSession("k", "c"))   # evicts b (least recent), not a
+        assert cache.get("a") is not None
+        assert cache.get("b") is None
+        assert cache.get("c") is not None
+
+    def test_set_sweeps_expired_entries(self):
+        cache: SessionCache[FakeSession] = SessionCache(ttl_seconds=10)
+        cache.set("a", FakeSession("k", "a"))
+        cache.set("b", FakeSession("k", "b"))
+        # Backdate "a" past its TTL
+        session, _ = cache._entries["a"]
+        cache._entries["a"] = (session, time.time() - 20)
+        # A subsequent set proactively sweeps the expired "a"
+        cache.set("c", FakeSession("k", "c"))
+        assert "a" not in cache._entries  # swept, not lingering
+        assert len(cache) == 2  # b + c

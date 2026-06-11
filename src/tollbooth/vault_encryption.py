@@ -56,6 +56,16 @@ class VaultCipher:
         ``aad`` (Additional Authenticated Data) binds the ciphertext to
         its context (e.g., vault key). Prevents cross-entry ciphertext
         swapping. Must be the same on decrypt.
+
+        Nonce-volume guidance: the 96-bit nonce is random per call, so AES-GCM
+        safety rests on the birthday bound for nonce collisions under a single
+        key. NIST SP 800-38D puts the practical ceiling at ~2**32 encryptions
+        per key with random nonces. A per-operator vault writes at the cadence
+        of ledger/credential/OAuth updates — many orders of magnitude below that
+        — and the key is derived from the operator's nsec (see ``__init__``), so
+        rotating the nsec rotates the key and resets the count. No single key is
+        expected to approach the limit; if an operator ever did, nsec rotation
+        is the mitigation.
         """
         AESGCM = _get_aesgcm()
         nonce = os.urandom(self._NONCE_SIZE)
