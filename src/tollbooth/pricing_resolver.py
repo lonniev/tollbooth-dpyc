@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from tollbooth.pricing import ToolPricing
 
 from tollbooth.pricing_model import PipelineStep, PricingModel
 

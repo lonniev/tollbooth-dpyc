@@ -46,7 +46,10 @@ import inspect
 import logging
 import os
 import signal
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from tollbooth.tool_identity import ToolIdentity
 
 from tollbooth.identity_proof import require_proof
 from tollbooth.tool_identity import capability_uuid
@@ -109,7 +112,6 @@ class OperatorRuntime:
     ) -> None:
         self._nsec_env_var = nsec_env_var
         self._credential_validator = credential_validator
-        from tollbooth.tool_identity import ToolIdentity  # noqa: F811
         # Registry keyed by UUID — the sole economic key.
         # Exclude OTS tools when notarization is disabled so they
         # don't appear in the pricing model as stale entries.

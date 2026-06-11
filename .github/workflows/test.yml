@@ -32,6 +32,7 @@ jobs:
       - name: Run tests
         # -ra surfaces skip reasons so a silently-skipped module (e.g. a missing
         # optional extra) is visible in the log instead of reading as "all green".
-        # Coverage is report-only for now (no --cov-fail-under gate yet — that
-        # ratchet lands with M2.5 once the tools/ extraction raises the floor).
-        run: pytest tests/ -q -ra --cov=tollbooth --cov-report=term-missing:skip-covered --import-mode=importlib
+        # Coverage ratchet (audit M2.5): --cov-fail-under is a floor, not a target.
+        # Measured ~70% (2026-06-11); gate set at 67 for env/noise headroom. Raise
+        # it as coverage climbs — never lower it.
+        run: pytest tests/ -q -ra --cov=tollbooth --cov-report=term-missing:skip-covered --cov-fail-under=67 --import-mode=importlib
