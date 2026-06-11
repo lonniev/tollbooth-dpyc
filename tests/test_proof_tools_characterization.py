@@ -253,3 +253,68 @@ async def test_match_clears_channel_state(patron):
     # one-time-use cleanup removed the poison/pin state
     assert key not in ex._pending_poisons
     assert key not in ex._pinned_relays
+
+
+# ── request_npub_proof ────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_request_sends_challenge_and_returns_token(patron):
+    ex = FakeExchange(candidates=[])  # nothing stale to purge
+    rt = OperatorRuntime(tool_registry={}, service_name="Test Operator")
+    rt._courier = SimpleNamespace(
+        _exchange=ex,
+        open_channel=AsyncMock(return_value={
+            "success": True, "poison": "bold-hawk-42", "rendezvous_relay": PIN,
+        }),
+    )
+    rt.store_patron_session = AsyncMock()
+    tools = _register(rt)
+
+    r = await tools["request_npub_proof"](patron_npub=patron)
+    assert r["success"] is True
+    assert r["proof_token"] == "bold-hawk-42"
+    assert r["rendezvous_relay"] == PIN
+    assert PIN in r["message"]
+    # opened the channel on the proof service
+    assert rt._courier.open_channel.await_args.args[0] == "npub_ownership"
+
+
+@pytest.mark.asyncio
+async def test_request_propagates_open_channel_failure(patron):
+    ex = FakeExchange(candidates=[])
+    rt = OperatorRuntime(tool_registry={}, service_name="Test")
+    rt._courier = SimpleNamespace(
+        _exchange=ex,
+        open_channel=AsyncMock(return_value={"success": False, "error": "relay down"}),
+    )
+    rt.store_patron_session = AsyncMock()
+    tools = _register(rt)
+
+    r = await tools["request_npub_proof"](patron_npub=patron)
+    assert r["success"] is False and r["error"] == "relay down"
+
+
+# ── check_proof_status ────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,frag", [
+    ("valid", "Proof is valid"),
+    ("expired", "Proof has expired"),
+    ("missing", "No proof record found"),
+])
+async def test_check_proof_status_messages(patron, status, frag):
+    rt = OperatorRuntime(tool_registry={}, service_name="Test")
+    cache = SimpleNamespace(proof_status=AsyncMock(
+        return_value={"status": status, "expires_in_seconds": 123},
+    ))
+    rt.proven_npub_cache = AsyncMock(return_value=cache)
+    tools = _register(rt)
+
+    r = await tools["check_proof_status"](patron_npub=patron, proof_token="bold-hawk-42")
+    assert r["success"] is True
+    assert r["status"] == status
+    assert r["expires_in_seconds"] == 123
+    assert frag in r["message"]
+    # queried by sha256(proof_token)
+    import hashlib
+    assert cache.proof_status.await_args.args[0] == hashlib.sha256(b"bold-hawk-42").hexdigest()
