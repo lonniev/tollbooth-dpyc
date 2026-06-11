@@ -3,6 +3,29 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.8 — 2026-06-11
+
+### Changed (internal)
+
+- The money gate `debit_or_deny` is decomposed (audit M2.2). Its 306-line
+  pipeline is split into three self-contained, independently-testable async
+  methods on `OperatorRuntime` — `_resolve_pricing`, `_evaluate_constraints`,
+  and `_apply_billing` — with `debit_or_deny` keeping only the tightly-coupled
+  header stages (identity / proof / restricted-access / caller-resolve) and
+  orchestrating the three. Strictly behavior-preserving (stage methods, not a
+  separate state object; no reordering). 306 → 116 lines. No wire-API change.
+
+### Tests
+
+- Characterization net for `debit_or_deny` (`tests/test_credit_gate.py`, 15
+  tests) pinning every stage, including the previously-unexercised constraint
+  denial / discount / credit and coupon-burn paths — the safety net under the
+  decomposition.
+- The `authority/` subpackage gains broad coverage (audit M2.4): 23% → 71%,
+  with the Schnorr cert signing round-trip, anti-replay tracker, onboarding
+  state machine, role-isolation provisioning, and the `certify_credits`
+  cert/fee engine now tested.
+
 ## 0.44.7 — 2026-06-11
 
 Completes the `register_standard_tools` decomposition (audit M2.1). No wire-API
