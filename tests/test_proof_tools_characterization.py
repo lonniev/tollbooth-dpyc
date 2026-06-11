@@ -11,7 +11,9 @@ NOT a redesign — every assertion captures existing behavior verbatim.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,10 +38,11 @@ def _delimited(**fields) -> str:
 class FakeExchange:
     """Drives receive_npub_proof's drain loop with canned candidates."""
 
-    def __init__(self, *, candidates, pinned=PIN, resolve_error=None):
+    def __init__(self, *, candidates, pinned=PIN, resolve_error=None, fetch_delay=0.0):
         self._candidates = candidates
         self._pinned = pinned
         self._resolve_error = resolve_error
+        self._fetch_delay = fetch_delay
         self._privkey_hex = "ab" * 32
         self._ephemeral_agents: dict = {}
         self._pending_poisons: dict = {}
@@ -57,6 +60,9 @@ class FakeExchange:
         return self._pinned, None
 
     def _fetch_dms_from_relays(self, relays=None):
+        # Simulate a slow/timing-out relay (blocking, like websocket-client).
+        if self._fetch_delay:
+            time.sleep(self._fetch_delay)
         return None
 
     def _find_dm_candidates(self, patron_hex):
@@ -318,3 +324,36 @@ async def test_check_proof_status_messages(patron, status, frag):
     # queried by sha256(proof_token)
     import hashlib
     assert cache.proof_status.await_args.args[0] == hashlib.sha256(b"bold-hawk-42").hexdigest()
+
+
+# ── event loop not blocked by the relay drain (to_thread follow-up) ────
+
+@pytest.mark.asyncio
+async def test_receive_drain_does_not_block_event_loop(patron):
+    poison = "bold-hawk-42"
+    # Slow relay fetch: if it ran inline, a concurrent coroutine couldn't run
+    # until it finished. With asyncio.to_thread the loop stays responsive.
+    ex = FakeExchange(
+        candidates=[{"id": "e1", "_relay": PIN, "_plaintext": _delimited(poison=poison)}],
+        fetch_delay=0.25,
+    )
+    rt, _ = _runtime_with_exchange(ex)
+    tools = _register(rt)
+
+    progressed: list[float] = []
+
+    async def _ticker():
+        await asyncio.sleep(0.05)
+        progressed.append(time.monotonic())
+
+    start = time.monotonic()
+    r, _ = await asyncio.gather(
+        tools["receive_npub_proof"](patron_npub=patron, poison=poison),
+        _ticker(),
+    )
+    assert r["success"] is True
+    assert progressed, "ticker never ran"
+    # tick landed during the 0.25s drain, not after it
+    assert progressed[0] - start < 0.18, (
+        f"event loop blocked: tick at {progressed[0] - start:.3f}s"
+    )

@@ -12,6 +12,7 @@ constant below; nothing else changed. The drain loop is pinned by
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -45,8 +46,10 @@ async def request_npub_proof_tool(
 
     import time as _t
 
-    # Purge stale DMs for this patron before sending a fresh challenge
-    try:
+    # Purge stale DMs for this patron before sending a fresh challenge. The
+    # fetch and NIP-09 deletes are blocking websocket I/O, so run them off the
+    # event loop (same reasoning as the courier drains in 0.44.3 / M1.2).
+    def _purge_stale() -> int:
         from tollbooth.nostr_credentials import _npub_to_hex
         exchange = courier._exchange
         patron_hex = _npub_to_hex(patron_npub)
@@ -54,8 +57,12 @@ async def request_npub_proof_tool(
         stale = exchange._find_dm_candidates(patron_hex)
         for candidate in stale:
             exchange._pop_event(candidate.get("id", ""))
-        if stale:
-            logger.info("Purged %d stale DM(s) for %s", len(stale), patron_npub[:20])
+        return len(stale)
+
+    try:
+        n_purged = await asyncio.to_thread(_purge_stale)
+        if n_purged:
+            logger.info("Purged %d stale DM(s) for %s", n_purged, patron_npub[:20])
     except Exception:
         pass  # best-effort purge
 
@@ -177,7 +184,8 @@ async def receive_npub_proof_tool(
         pass
 
     # Single drain of ONLY the pinned relay — human-gated, no retry loop.
-    exchange._fetch_dms_from_relays([pinned])
+    # Off the event loop — blocking websocket I/O (0.44.3 / M1.2 reasoning).
+    await asyncio.to_thread(exchange._fetch_dms_from_relays, [pinned])
     candidates = [
         c for c in exchange._find_dm_candidates(patron_hex)
         if c.get("_relay") in (pinned, None)
