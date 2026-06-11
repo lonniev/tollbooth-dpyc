@@ -3,6 +3,31 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.12 — 2026-06-11
+
+### Changed (audit M1.4)
+
+- **Error-handling pass: no more silent `except Exception: pass`.** All 35 bare
+  `except Exception` swallows now log with context at an appropriate level —
+  the exact pattern that hid the 0.44.9 tranche bug and 0.44.10 proof bug.
+  Levels chosen by risk: `logger.debug` for best-effort cleanup / cold-start /
+  diagnostics; `logger.warning` for surge-demand increments, the authority-npub
+  vault ops, and operator callbacks. **Money path:** the credit-rollback failure
+  handler (`runtime.py`) now logs `ERROR` — a swallowed rollback means a patron
+  may have been charged without delivery, which now surfaces for reconciliation
+  instead of vanishing. Behavior-preserving (logging only); no control-flow
+  change. The 9 narrow specific-exception handlers (`asyncio.CancelledError`,
+  ISO-date / NIP / JSON parse-fallbacks, `add_signal_handler` platform fallback,
+  `parse_duration` default) are intentionally left quiet — a typed `except` is a
+  reasoned swallow, not the anti-pattern.
+
+### Flagged for follow-up
+
+- `authority/tools.py::_set_authority_npub` swallows a vault **write** failure
+  then caches the npub in memory — false durability on a certification-critical
+  key. Now logs `warning`; a re-raise is likely correct but is a §2
+  authority-flow change, left for an explicit decision.
+
 ## 0.44.11 — 2026-06-11
 
 ### Added (audit M2.5)

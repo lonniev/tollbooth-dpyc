@@ -98,7 +98,7 @@ async def begin_oauth_tool(rt: Any, npub: str, proof: str) -> dict[str, Any]:
         from tollbooth.shortlinks import create_shortlink
         short_url = await create_shortlink(authorize_url)
     except Exception:
-        pass
+        logger.debug("OAuth URL shortening failed; using full URL", exc_info=True)
 
     result: dict[str, Any] = {
         "success": True,

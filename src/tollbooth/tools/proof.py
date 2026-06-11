@@ -62,7 +62,7 @@ async def request_npub_proof_tool(
         if n_purged:
             logger.info("Purged %d stale DM(s) for %s", n_purged, patron_npub[:20])
     except Exception:
-        pass  # best-effort purge
+        logger.debug("best-effort stale-DM purge failed", exc_info=True)
 
     try:
         _greeting = rt._npub_proof_greeting or (
@@ -243,7 +243,9 @@ async def receive_npub_proof_tool(
                     PROOF_SERVICE, resolved, matched_payload,
                 )
             except Exception:
-                pass
+                logger.debug(
+                    "best-effort proof persistence to vault failed", exc_info=True,
+                )
 
         # Operator callback (e.g., taxsort stores passphrase hash)
         if rt._on_npub_proven is not None:
@@ -300,7 +302,7 @@ async def receive_npub_proof_tool(
         try:
             exchange.send_dm(resolved, confirmation_msg)
         except Exception:
-            pass
+            logger.debug("proof confirmation DM send failed", exc_info=True)
 
         return {
             "success": True,

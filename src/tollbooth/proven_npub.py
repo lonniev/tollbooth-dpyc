@@ -313,4 +313,6 @@ class ProvenNpubCache:
         try:
             await self._vault.set_config(_vault_key(poison_hash, npub), "")
         except Exception:
-            pass  # best-effort cleanup
+            logger.debug(
+                "best-effort proven-npub vault delete failed", exc_info=True,
+            )

@@ -1236,7 +1236,10 @@ class NostrCredentialExchange:
                     f"__pending__{service}", sender_npub,
                 )
             except Exception:
-                pass  # best-effort cleanup
+                logger.debug(
+                    "best-effort __pending__ cleanup (post-match) failed",
+                    exc_info=True,
+                )
 
         payload = _parse_delimited_credentials(plaintext)
         if payload is None:
@@ -1610,7 +1613,10 @@ class NostrCredentialExchange:
                             f"__pending__{service}", sender_npub,
                         )
                     except Exception:
-                        pass
+                        logger.debug(
+                            "best-effort __pending__ cleanup (expired) failed",
+                            exc_info=True,
+                        )
                     return None, ErrorCode.COURIER_TOKEN_EXPIRED
                 self._pending_poisons[poison_key] = (pending["poison"], p_expiry)
                 expected = self._pending_poisons[poison_key]
@@ -1642,7 +1648,10 @@ class NostrCredentialExchange:
                         f"__pending__{service}", sender_npub,
                     )
                 except Exception:
-                    pass
+                    logger.debug(
+                        "best-effort __pending__ cleanup (token expired) failed",
+                        exc_info=True,
+                    )
             return None, ErrorCode.COURIER_TOKEN_EXPIRED
 
         if poison != expected_phrase:

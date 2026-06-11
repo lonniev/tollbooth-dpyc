@@ -166,7 +166,7 @@ def test_ws_connectivity(
         try:
             ws.close()
         except Exception:
-            pass
+            logger.debug("best-effort websocket close failed", exc_info=True)
         return {
             "relay": relay_url,
             "connected": True,
@@ -346,7 +346,7 @@ def _test_subscription_filter(
         try:
             ws.send(json.dumps(["CLOSE", sub_id]))
         except Exception:
-            pass
+            logger.debug("best-effort CLOSE frame send failed", exc_info=True)
 
         return {
             "accepted": accepted,
@@ -359,7 +359,7 @@ def _test_subscription_filter(
         try:
             ws.close()
         except Exception:
-            pass
+            logger.debug("best-effort websocket close failed", exc_info=True)
 
 
 def _self_dm_roundtrip(
@@ -422,12 +422,12 @@ def _self_dm_roundtrip(
                     "error": f"relay rejected event: {ok_msg[3] if len(ok_msg) > 3 else 'unknown'}",
                 }
         except Exception:
-            pass
+            logger.debug("error awaiting relay OK confirmation", exc_info=True)
     finally:
         try:
             ws.close()
         except Exception:
-            pass
+            logger.debug("best-effort websocket close failed", exc_info=True)
 
     # Subscribe to verify receipt
     sub_id = f"diag-selfping-{uuid.uuid4().hex[:8]}"
@@ -482,7 +482,7 @@ def _self_dm_roundtrip(
         try:
             ws2.send(json.dumps(["CLOSE", sub_id]))
         except Exception:
-            pass
+            logger.debug("best-effort CLOSE frame send failed", exc_info=True)
 
         return {
             "success": found,
@@ -501,7 +501,7 @@ def _self_dm_roundtrip(
         try:
             ws2.close()
         except Exception:
-            pass
+            logger.debug("best-effort websocket close failed", exc_info=True)
 
 
 async def courier_health(
@@ -758,7 +758,7 @@ async def courier_ping(
             try:
                 ws.close()
             except Exception:
-                pass
+                logger.debug("best-effort websocket close failed", exc_info=True)
 
     return {
         "success": confirmed_count > 0,

@@ -11,7 +11,10 @@ credential-no-echo (S1) regression test.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 async def request_credential_channel_tool(
@@ -121,7 +124,10 @@ async def receive_credentials_tool(
                     if vault:
                         await vault.store_credentials(service, rt.operator_npub(), "")
                 except Exception:
-                    pass
+                    logger.debug(
+                        "best-effort forget of rejected credentials failed",
+                        exc_info=True,
+                    )
                 # DM the sender about the problem
                 rejection_msg = (
                     "Credential rejection from " + (service_name or slug) + ":\n\n"
@@ -135,7 +141,7 @@ async def receive_credentials_tool(
                     )
                     result["rejection_dm_sent"] = True
                 except Exception:
-                    pass
+                    logger.debug("rejection DM send failed", exc_info=True)
                 return {
                     "success": False,
                     "validation_errors": errors,
@@ -180,7 +186,9 @@ async def forget_credentials_tool(
             try:
                 rt._on_forget(service, target_npub)
             except Exception:
-                pass
+                logger.warning(
+                    "on_forget callback failed for service %s", service, exc_info=True,
+                )
         return result
     except Exception as e:
         return {"success": False, "error": str(e)}

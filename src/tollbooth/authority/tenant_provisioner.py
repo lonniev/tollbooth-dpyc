@@ -107,7 +107,7 @@ async def create_operator_role(vault: Any, schema: str, password: str) -> None:
             try:
                 resp_text = exc.response.text.lower()
             except Exception:
-                pass
+                logger.debug("could not read error response body", exc_info=True)
         if "already exists" in exc_text or "already exists" in resp_text:
             await vault._execute(
                 f'ALTER ROLE "{schema}" WITH PASSWORD \'{password}\''
@@ -139,7 +139,12 @@ async def transfer_schema_ownership(vault: Any, schema: str) -> None:
                 f'ALTER TABLE "{schema}".{table} OWNER TO "{schema}"'
             )
         except Exception:
-            pass  # table may not exist if operator never fully initialized
+            # Table may not exist if the operator never fully initialized —
+            # expected during partial provisioning, but log for visibility.
+            logger.debug(
+                "ALTER TABLE OWNER skipped for %s.%s (table may not exist)",
+                schema, table, exc_info=True,
+            )
 
 
 async def revoke_authority_access(

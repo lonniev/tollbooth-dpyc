@@ -950,7 +950,14 @@ class OperatorRuntime:
                 ledger.credit_deposit(cost, f"rollback:{self.mcp_name_for(tool_id)}")
                 cache.mark_dirty(npub)
         except Exception:
-            pass  # best-effort rollback
+            # Money path: a failed rollback means the patron may have been
+            # charged for a tool call that did not deliver. Loud, not silent —
+            # surfaces in logs for manual reconciliation.
+            logger.error(
+                "credit rollback FAILED after a failed tool call (tool_id=%s) — "
+                "patron may have been charged without delivery; reconcile manually",
+                tool_id, exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Onboarding
@@ -968,7 +975,10 @@ class OperatorRuntime:
         try:
             await self.courier()
         except Exception:
-            pass
+            logger.debug(
+                "courier late-attach during status check failed (cold start)",
+                exc_info=True,
+            )
 
         # 1. Identity check
         identity_ok = False
@@ -1088,7 +1098,10 @@ class OperatorRuntime:
         try:
             await self.courier()
         except Exception:
-            pass
+            logger.debug(
+                "courier late-attach during status check failed (cold start)",
+                exc_info=True,
+            )
 
         vault_creds = await self._load_vault_creds(
             self._patron_credential_template.service,
@@ -1719,7 +1732,7 @@ class OperatorRuntime:
             if warning:
                 result["low_balance_warning"] = warning
         except Exception:
-            pass
+            logger.debug("low-balance warning enrichment failed; omitting", exc_info=True)
         return result
 
     # ------------------------------------------------------------------
@@ -1745,7 +1758,7 @@ class OperatorRuntime:
             if total:
                 result[f"{tool_name}:{self._SUPPLY_TOTAL_KEY}"] = total
         except Exception:
-            pass
+            logger.debug("demand read failed; omitting from result", exc_info=True)
         return result
 
     def fire_and_forget_demand_increment(self, tool_name: str) -> None:
@@ -1759,7 +1772,10 @@ class OperatorRuntime:
                     tool_name, self._demand_window_key(),
                 )
             except Exception:
-                pass
+                logger.warning(
+                    "demand-window increment for %s failed; surge counters may drift",
+                    tool_name, exc_info=True,
+                )
 
         asyncio.create_task(_increment())
 
@@ -1774,7 +1790,10 @@ class OperatorRuntime:
                     tool_name, self._SUPPLY_TOTAL_KEY,
                 )
             except Exception:
-                pass
+                logger.warning(
+                    "demand-total increment for %s failed; surge counters may drift",
+                    tool_name, exc_info=True,
+                )
 
         asyncio.create_task(_increment())
 
@@ -2039,7 +2058,7 @@ class OperatorRuntime:
                 if purged:
                     logger.info("Purged %d expired async job(s)", purged)
             except Exception:
-                pass
+                logger.warning("async-job purge failed", exc_info=True)
 
         asyncio.create_task(_purge())
 
@@ -2369,7 +2388,10 @@ def register_standard_tools(
                         f"— {service_name or slug}",
                     )
             except Exception:
-                pass  # DM is a courtesy, never blocks
+                logger.debug(
+                    "purchase-confirmation DM failed (courtesy, non-blocking)",
+                    exc_info=True,
+                )
 
         return result
 
@@ -2520,7 +2542,7 @@ def register_standard_tools(
             import importlib.metadata
             wheel_version = importlib.metadata.version("tollbooth-dpyc")
         except Exception:
-            pass
+            logger.debug("wheel version lookup failed", exc_info=True)
 
         # Operator npub: None signals "couldn't resolve" so the assembler can
         # distinguish that from a resolved-but-empty value (still fingerprinted).
@@ -3374,7 +3396,10 @@ def register_standard_tools(
                 if identity is not None:
                     tool_id = resolved_id
             except Exception:
-                pass
+                logger.debug(
+                    "capability_uuid fallback resolution failed for %s",
+                    tool_id, exc_info=True,
+                )
         if identity is None:
             return {
                 "success": False,

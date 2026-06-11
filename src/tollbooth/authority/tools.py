@@ -282,7 +282,9 @@ async def _get_authority_npub() -> str | None:
             _cached_authority_npub = npub
             return npub
     except Exception:
-        pass
+        logger.warning(
+            "authority_npub vault read failed; treating as unset", exc_info=True,
+        )
     return None
 
 
@@ -292,7 +294,16 @@ async def _set_authority_npub(npub: str) -> None:
         vault = await _get_runtime().vault()
         await vault.set_config("authority_npub", npub)
     except Exception:
-        pass
+        # FIXME (M1.4 flagged, §2): swallowing a vault WRITE failure here makes
+        # the authority_npub look set (cached in memory) while it may be absent
+        # on restart — false durability on a certification-critical key. A
+        # re-raise is likely correct but changes the authority-registration
+        # flow; left swallowed pending an explicit decision. Logged loudly.
+        logger.warning(
+            "authority_npub vault persist FAILED; cached in memory only and "
+            "will be lost on restart — re-register if certification breaks",
+            exc_info=True,
+        )
     _cached_authority_npub = npub
 
 

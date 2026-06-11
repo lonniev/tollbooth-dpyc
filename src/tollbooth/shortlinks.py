@@ -30,7 +30,10 @@ async def _resolve_shortlinks_url() -> str:
         if url:
             return _ensure_mcp_path(url)
     except Exception:
-        pass
+        logger.debug(
+            "shortlinks service registry lookup failed; using fallback URL",
+            exc_info=True,
+        )
     return _FALLBACK_URL
 
 
