@@ -4006,21 +4006,10 @@ def register_standard_tools(
 
         Free, no side effects.
         """
-        items: list[dict[str, Any]] = []
-        for tool_id, identity in rt._tool_registry.items():
-            items.append({
-                "tool_id": tool_id,
-                "mcp_name": rt.mcp_name_for(tool_id),
-                "category": identity.category,
-                "intent": identity.intent,
-                "capability": identity.capability,
-            })
-        return {
-            "success": True,
-            "operator_npub": rt.operator_npub(),
-            "count": len(items),
-            "tools": items,
-        }
+        from tollbooth.tools.identities import build_canonical_identities
+        return build_canonical_identities(
+            rt._tool_registry, rt.mcp_name_for, rt.operator_npub(),
+        )
 
     # -- Constraint Engine tools ---------------------------------------
 
