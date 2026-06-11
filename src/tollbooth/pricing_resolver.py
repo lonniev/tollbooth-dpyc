@@ -150,7 +150,7 @@ class PricingResolver:
         logger.warning(
             "Pricing model load failed for %s (%s, %s: %s)",
             self._operator,
-            "permanent SQL error" if _is_permanent_sql_error(last_exc) else f"{self._HYDRATION_RETRIES} attempts",
+            "permanent SQL error" if (last_exc is not None and _is_permanent_sql_error(last_exc)) else f"{self._HYDRATION_RETRIES} attempts",
             type(last_exc).__name__, last_exc,
         )
         self._last_error = last_exc

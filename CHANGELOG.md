@@ -3,6 +3,37 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.11 — 2026-06-11
+
+### Added (audit M2.5)
+
+- **mypy is now a blocking CI gate.** The package type-checks clean at default
+  strictness (`[tool.mypy]`, run in the `Type check` job on every matrix
+  Python). Do not silence new errors with per-file overrides — fix the type.
+  Adopting it cleared a 27-error backlog and surfaced the bugs below.
+
+### Fixed
+
+- **Cold-start courier rehydration could crash on a JSON expiry.**
+  `_resolve_pinned_record` compared `time.time() > p_expiry` where `p_expiry`
+  came from a JSON blob and can be a string → `TypeError: '>' not supported
+  between 'float' and 'str'`. Now coerced to float before comparison.
+- **Dead `_patron_npubs` handling removed from constraint config.**
+  `build_constraint` read a key (`_patron_npubs`) nothing serialized and set an
+  attribute nothing read; live patron-group scoping is `PricingStep.patron_npubs`
+  (`constraints/gate.py`), which enforces its own max-10 rule. Removed.
+- **x402 client now narrows the V1|V2 union explicitly.** `_sign_payment`
+  implements the current (V2) protocol; a V1 payment-required response now
+  raises a clear "upgrade upstream" error instead of an attribute crash.
+
+### Internal
+
+- Type-narrowing None-guards across `proven_npub`, `ledger`, `pricing_resolver`,
+  `nostr_credentials`, `runtime`, `coupons/vault`; `ToolConstraint.schema()` is
+  now a declared abstract classmethod. The restore-path `_credential_vault`
+  branch in `runtime.py` is documented as known-dead (always None — the live
+  vault is on `_courier._exchange`); flagged for a separate verified fix.
+
 ## 0.44.10 — 2026-06-11
 
 ### Fixed

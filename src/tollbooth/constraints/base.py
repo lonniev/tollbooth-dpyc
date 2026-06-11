@@ -230,3 +230,9 @@ class ToolConstraint(ABC):
     def from_dict(cls, data: dict[str, Any]) -> ToolConstraint:
         """Deserialize from a JSON-compatible dict."""
         ...
+
+    @classmethod
+    @abstractmethod
+    def schema(cls) -> ConstraintSchema:
+        """Return this constraint type's parameter schema (for editors)."""
+        ...

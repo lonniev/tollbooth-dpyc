@@ -26,6 +26,11 @@ from tollbooth.coupons.models import (
 
 logger = logging.getLogger(__name__)
 
+# Sentinel for "leave this column alone" in update() — distinct from None,
+# which is a meaningful value ("clear this column"). Typed Any so it can be
+# the default for int | None parameters without tripping the type checker.
+_UNSET: Any = object()
+
 
 class CouponAlreadyExists(Exception):
     """Operator tried to mint two coupons with the same name."""
@@ -182,8 +187,8 @@ class CouponsVault:
         discount_percent: float | None = None,
         valid_from: datetime | None = None,
         valid_until: datetime | None = None,
-        uses_per_patron: int | None = ...,  # sentinel for "leave alone"
-        total_uses: int | None = ...,
+        uses_per_patron: int | None = _UNSET,  # sentinel for "leave alone"
+        total_uses: int | None = _UNSET,
     ) -> Coupon:
         """Patch a coupon's editable fields.  Operator-scoped — refuses
         to touch another operator's row."""
@@ -202,10 +207,10 @@ class CouponsVault:
         if valid_until is not None:
             params.append(_to_iso(valid_until))
             sets.append(f"valid_until = ${len(params)}::timestamptz")
-        if uses_per_patron is not ...:
+        if uses_per_patron is not _UNSET:
             params.append(uses_per_patron)
             sets.append(f"uses_per_patron = ${len(params)}")
-        if total_uses is not ...:
+        if total_uses is not _UNSET:
             params.append(total_uses)
             sets.append(f"total_uses = ${len(params)}")
 

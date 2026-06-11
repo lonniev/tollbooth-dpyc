@@ -17,7 +17,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -362,7 +362,7 @@ class UserLedger:
         target = None
         if active:
             with_expiry = [t for t in active if t.expires_at is not None]
-            target = min(with_expiry, key=lambda t: t.expires_at) if with_expiry else active[0]
+            target = min(with_expiry, key=lambda t: cast(datetime, t.expires_at)) if with_expiry else active[0]
         if target:
             target.remaining_sats += api_sats
             target.original_sats += api_sats

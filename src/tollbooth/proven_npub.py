@@ -86,9 +86,10 @@ def parse_duration(text: str) -> int | None:
     if amount_str.isdigit():
         amount = int(amount_str)
     else:
-        amount = _WORD_NUMBERS.get(amount_str)
-        if amount is None:
+        word = _WORD_NUMBERS.get(amount_str)
+        if word is None:
             raise ValueError(f"Cannot parse number: {amount_str!r} in {text!r}")
+        amount = word
     unit_secs = _UNIT_SECONDS.get(unit_str)
     if unit_secs is None:
         raise ValueError(f"Unknown time unit: {unit_str!r} in {text!r}")
@@ -279,6 +280,8 @@ class ProvenNpubCache:
     # -- Vault helpers --------------------------------------------------------
 
     async def _vault_store(self, record: ProvenNpub) -> None:
+        if self._vault is None:
+            return
         try:
             encrypted = self._vault._encrypt(record.to_json())
             await self._vault.set_config(
@@ -292,6 +295,8 @@ class ProvenNpubCache:
             logger.warning("Vault store for proven npub failed (non-fatal): %s", exc)
 
     async def _vault_fetch(self, poison_hash: str, npub: str) -> ProvenNpub | None:
+        if self._vault is None:
+            return None
         try:
             raw = await self._vault.get_config(_vault_key(poison_hash, npub))
             if raw is None:
@@ -303,6 +308,8 @@ class ProvenNpubCache:
             return None
 
     async def _vault_delete(self, poison_hash: str, npub: str) -> None:
+        if self._vault is None:
+            return
         try:
             await self._vault.set_config(_vault_key(poison_hash, npub), "")
         except Exception:

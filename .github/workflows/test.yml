@@ -29,6 +29,12 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      - name: Type check
+        # Blocking gate (audit M2.5). Config in [tool.mypy]; mypy installed via
+        # the dev extra. Surfaced the 0.44.9 tranche bug and 0.44.10 proof bug —
+        # fix new errors, never silence them with per-file overrides.
+        run: mypy
+
       - name: Run tests
         # -ra surfaces skip reasons so a silently-skipped module (e.g. a missing
         # optional extra) is visible in the log instead of reading as "all green".

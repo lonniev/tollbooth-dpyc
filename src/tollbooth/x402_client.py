@@ -43,6 +43,8 @@ _HEADER_PAYMENT_SIGNATURE = "X-PAYMENT"
 try:
     from x402 import (
         PaymentPayload,
+        PaymentRequired,
+        PaymentRequirements,
         parse_payment_required,
     )
 
@@ -188,12 +190,24 @@ class X402Client:
         raw = base64.b64decode(payment_header)
         pr_dict = json.loads(raw)
         payment_required = parse_payment_required(pr_dict)
+        # parse_payment_required returns a V1|V2 union; this client implements
+        # the current (V2) protocol only. A V1 response is an upstream-version
+        # situation, not a crash — narrow explicitly (also satisfies mypy).
+        if not isinstance(payment_required, PaymentRequired):
+            raise ValueError(
+                "Unsupported x402 payment-required version (expected V2). "
+                "Upgrade the upstream x402 service."
+            )
 
         if not payment_required.accepts:
             raise ValueError("No payment options in 402 response")
 
         # Select the first acceptable payment requirement
         selected = payment_required.accepts[0]
+        if not isinstance(selected, PaymentRequirements):
+            raise ValueError(
+                "Unsupported x402 payment-requirements version (expected V2)."
+            )
 
         import time
         import os

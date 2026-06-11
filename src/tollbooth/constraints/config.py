@@ -70,15 +70,12 @@ def load_constraint(data: dict[str, Any]) -> ToolConstraint:
             f"Known types: {sorted(CONSTRAINT_REGISTRY)}"
         )
 
-    constraint = cls.from_dict(data)
-    npubs = data.get("_patron_npubs", [])
-    if len(npubs) > 10:
-        raise ConfigError(
-            f"_patron_npubs exceeds max group size of 10 (got {len(npubs)}). "
-            "Clone the constraint for additional patron groups."
-        )
-    constraint._patron_npubs = npubs
-    return constraint
+    # Patron-group scoping lives on PricingStep.patron_npubs (see
+    # constraints/gate.py), which enforces its own max-10 rule. The former
+    # constraint-level `_patron_npubs` handling here was dead: it read a key
+    # (`_patron_npubs`) nothing ever serialized, and nothing read the attribute
+    # back. Removed in M2.5.
+    return cls.from_dict(data)
 
 
 def validate_step(data: dict[str, Any]) -> list[str]:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tollbooth-dpyc"
-version = "0.44.10"
+version = "0.44.11"
 description = "Don't Pester Your Customer™ — Bitcoin Lightning micropayments for MCP servers"
 readme = "README.md"
 license = "Apache-2.0"
@@ -51,6 +51,7 @@ dev = [
     "pytest>=9.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
+    "mypy>=1.11",
 ]
 
 [project.urls]
@@ -82,3 +83,10 @@ concurrency = ["thread"]
 show_missing = true
 # Report-only for now; a ratchet gate (--cov-fail-under) lands with M2.5
 # once the tools/ extraction (M2.1) raises the measured floor.
+
+[tool.mypy]
+# Blocking gate (audit M2.5). The package type-checks clean at default
+# strictness; do NOT add per-file overrides to silence new errors — fix the
+# type, the way the 0.44.9 tranche bug and the 0.44.10 proof bug were caught.
+files = ["src/tollbooth"]
+ignore_missing_imports = true

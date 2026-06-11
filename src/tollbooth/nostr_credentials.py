@@ -833,11 +833,13 @@ class NostrCredentialExchange:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         payload_lines = render_credential_payload_lines(template)
 
-        # Detect self-DM (operator onboarding themselves)
-        is_self_dm = recipient_npub == self._npub
+        # Detect self-DM (operator onboarding themselves). The explicit
+        # not-None check also narrows recipient_npub to str for the branch.
+        is_self_dm = recipient_npub is not None and recipient_npub == self._npub
         agent_key: PrivateKey | None = None
 
         if is_self_dm:
+            assert recipient_npub is not None  # implied by is_self_dm
             agent_key = PrivateKey()
             with self._lock:
                 self._ephemeral_agents[(recipient_npub, service)] = agent_key
@@ -1114,6 +1116,18 @@ class NostrCredentialExchange:
                 "popped": 0,
                 "error": _courier_resolve_error(error_code, request_tool),
             }
+        if pinned is None:
+            # _resolve_pinned_record returns a non-None relay whenever
+            # error_code is None; this guard narrows the type and trips only
+            # on an internal contract break.
+            return {
+                "success": False,
+                "error_code": ErrorCode.COURIER_NO_PINNED_RELAY,
+                "popped": 0,
+                "error": _courier_resolve_error(
+                    ErrorCode.COURIER_NO_PINNED_RELAY, request_tool,
+                ),
+            }
 
         error_template = self._resolve_error_template(service)
 
@@ -1208,6 +1222,9 @@ class NostrCredentialExchange:
                     f"fresh channel."
                 ),
             }
+
+        # dm is set ⇒ the match branch ran, which assigned a non-None plaintext.
+        assert plaintext is not None
 
         # ── Match: consume one-time channel state (keyed by raw service) ──
         self._pending_poisons.pop(poison_key, None)
@@ -1584,7 +1601,9 @@ class NostrCredentialExchange:
                 f"__pending__{service}", sender_npub,
             )
             if pending and "poison" in pending:
-                p_expiry = pending.get("expiry", 0)
+                # JSON round-trips numbers as strings; coerce before comparing
+                # (a bare str would raise "float > str" at runtime).
+                p_expiry = float(pending.get("expiry", 0) or 0)
                 if time.time() > p_expiry:
                     try:
                         await self._credential_vault.delete_credentials(

@@ -153,6 +153,9 @@ class OperatorRuntime:
         self._npub_proof_greeting = npub_proof_greeting
         self._on_npub_proven = on_npub_proven  # async callback(npub, payload)
         self._oauth_provider = oauth_provider  # OAuthProviderConfig or None
+        # Cost computed by the most recent debit_or_deny, stashed so a paid
+        # tool body (e.g. certify_credits) can read it without recomputing.
+        self._last_debit_cost: int = 0
         # Claim-check async jobs (see tollbooth/async_jobs.py)
         self._job_runners: dict[str, Callable[..., Any]] = {}
         self._async_jobs_purge_last: float = 0.0  # monotonic, rate-limits purges
@@ -1646,7 +1649,7 @@ class OperatorRuntime:
         api_key = creds.get("btcpay_api_key")
         store_id = creds.get("btcpay_store_id")
 
-        if not all([host, api_key, store_id]):
+        if host is None or api_key is None or store_id is None or not all([host, api_key, store_id]):
             raise ValueError(
                 "BTCPay not configured. Deliver btcpay_host, btcpay_api_key, "
                 "btcpay_store_id via Secure Courier (request_credential_channel)."
@@ -3298,8 +3301,16 @@ def register_standard_tools(
         # Credential vault and proven-npub cache live on the same Neon —
         # only re-create their schemas if those subsystems are already
         # configured (operators without credentials don't need this).
-        if getattr(rt, "_credential_vault", None) is not None:
-            await _try("CredentialVault.ensure_schema", rt._credential_vault.ensure_schema())
+        #
+        # KNOWN-DEAD BRANCH (flagged by mypy M2.5): OperatorRuntime has no
+        # `_credential_vault` attribute — the live vault is at
+        # `rt._courier._exchange._credential_vault`. This getattr therefore
+        # always returns None, so the credential-vault schema is never
+        # re-created here. Behavior preserved pending a verified fix to the
+        # restore path; bound to a local only to satisfy the type checker.
+        cred_vault = getattr(rt, "_credential_vault", None)
+        if cred_vault is not None:
+            await _try("CredentialVault.ensure_schema", cred_vault.ensure_schema())
 
         all_ok = all(s.get("ok") for s in steps)
         return {
