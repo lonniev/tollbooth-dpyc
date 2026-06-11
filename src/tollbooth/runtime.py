@@ -2663,36 +2663,8 @@ def register_standard_tools(
                 from get_operator_onboarding_status or get_patron_onboarding_status).
         Free.
         """
-        if not sender_npub:
-            return {
-                "success": False,
-                "error": "sender_npub is required.",
-            }
-        if not service:
-            return {
-                "success": False,
-                "error": (
-                    "service is required. Use the credential_service "
-                    "from get_operator_onboarding_status or get_patron_onboarding_status. Available: "
-                    + ", ".join(
-                        s for s in [
-                            rt.operator_credential_service,
-                            rt.patron_credential_service,
-                        ] if s
-                    )
-                ),
-            }
-        courier = await rt.courier()
-        if courier is None:
-            return {"success": False, "error": "Secure Courier not configured."}
-        try:
-            return await courier.open_channel(
-                service,
-                greeting=rt._operator_credential_greeting,
-                recipient_npub=sender_npub,
-            )
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        from tollbooth.tools.courier import request_credential_channel_tool
+        return await request_credential_channel_tool(rt, sender_npub, service)
 
     @tool
     async def receive_credentials(
@@ -2728,91 +2700,11 @@ def register_standard_tools(
                 (bypasses the relay drain; poison not needed).
         Free.
         """
-        if not sender_npub:
-            return {
-                "success": False,
-                "error": "sender_npub is required.",
-            }
-        if not service:
-            return {
-                "success": False,
-                "error": (
-                    "service is required. Use the same service from "
-                    "request_credential_channel. Available: "
-                    + ", ".join(
-                        s for s in [
-                            rt.operator_credential_service,
-                            rt.patron_credential_service,
-                        ] if s
-                    )
-                ),
-            }
-        if not poison and not credential_card:
-            from tollbooth.constants import ErrorCode as _EC
-            return {
-                "success": False,
-                "error_code": _EC.POISON_MISSING,
-                "error": (
-                    "poison is required — pass the session phrase returned by "
-                    "request_credential_channel (or provide a credential_card)."
-                ),
-            }
-        courier = await rt.courier()
-        if courier is None:
-            return {"success": False, "error": "Secure Courier not configured."}
-        try:
-            if credential_card:
-                # Route through the wrapper, not courier._exchange directly,
-                # so credential values are stripped before returning (audit S1).
-                result = await courier.redeem_card(
-                    credential_card, service=service,
-                )
-            else:
-                result = await courier.receive(
-                    sender_npub, service=service, poison=poison,
-                )
-
-            # Validate credentials via operator callback before accepting.
-            # The courier strips credentials from the result for security,
-            # so reload them from the vault where they were just stored.
-            if result.get("success") and service == rt.operator_credential_service and rt._credential_validator:
-                try:
-                    creds = await rt.load_credentials(list(rt._operator_credential_template.fields.keys()))
-                except Exception:
-                    creds = {}
-                errors = rt._credential_validator(creds)
-                if errors:
-                    # Reject: forget the bad creds
-                    try:
-                        vault = courier._exchange._credential_vault
-                        if vault:
-                            await vault.store_credentials(service, rt.operator_npub(), "")
-                    except Exception:
-                        pass
-                    # DM the sender about the problem
-                    rejection_msg = (
-                        "Credential rejection from " + (service_name or slug) + ":\n\n"
-                        + "\n".join(f"  - {e}" for e in errors)
-                        + "\n\nPlease correct and resend."
-                    )
-                    try:
-                        await courier.send(
-                            recipient_npub=sender_npub,
-                            message=rejection_msg,
-                        )
-                        result["rejection_dm_sent"] = True
-                    except Exception:
-                        pass
-                    return {
-                        "success": False,
-                        "validation_errors": errors,
-                        "error": "Credentials received but failed validation: " + "; ".join(errors),
-                        "message": "A rejection DM has been sent. Please correct and resend.",
-                    }
-                rt._cashier = None
-            return result
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        from tollbooth.tools.courier import receive_credentials_tool
+        return await receive_credentials_tool(
+            rt, sender_npub, service, poison, credential_card,
+            service_name=service_name, slug=slug,
+        )
 
     @tool
     async def forget_credentials(
@@ -2832,38 +2724,8 @@ def register_standard_tools(
             proof: A kind-27235 Nostr event signed by npub for this tool.
         Free.
         """
-        if not service:
-            return {
-                "success": False,
-                "error": (
-                    "service is required. Available: "
-                    + ", ".join(
-                        s for s in [
-                            rt.operator_credential_service,
-                            rt.patron_credential_service,
-                        ] if s
-                    )
-                ),
-            }
-        if err := await rt.require_caller_proof(npub, proof, "forget_credentials"):
-            return err
-        target_npub = npub
-        courier = await rt.courier()
-        if courier is None:
-            return {"success": False, "error": "Secure Courier not configured."}
-        try:
-            result = await courier.forget(target_npub, service)
-            if service == rt.operator_credential_service:
-                rt._cashier = None
-            # Fire on_forget callback so operators can clear caches
-            if rt._on_forget and result.get("success"):
-                try:
-                    rt._on_forget(service, target_npub)
-                except Exception:
-                    pass
-            return result
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        from tollbooth.tools.courier import forget_credentials_tool
+        return await forget_credentials_tool(rt, service, npub, proof)
 
     # -- Patron credential tools (only if patron template is set) ------
 
@@ -2878,19 +2740,8 @@ def register_standard_tools(
             Sends a welcome DM with a credential template to the patron.
             Free.
             """
-            if not sender_npub:
-                return {"success": False, "error": "sender_npub is required."}
-            courier = await rt.courier()
-            if courier is None:
-                return {"success": False, "error": "Secure Courier not configured."}
-            try:
-                return await courier.open_channel(
-                    rt.patron_credential_service,
-                    greeting=rt._patron_credential_greeting,
-                    recipient_npub=sender_npub,
-                )
-            except Exception as e:
-                return {"success": False, "error": str(e)}
+            from tollbooth.tools.courier import request_patron_credentials_tool
+            return await request_patron_credentials_tool(rt, sender_npub)
 
         @tool
         async def receive_patron_credentials(
@@ -2908,35 +2759,10 @@ def register_standard_tools(
             (poison not required for that path). Do NOT poll or retry.
             Free.
             """
-            if not sender_npub:
-                return {"success": False, "error": "sender_npub is required."}
-            if not poison and not credential_card:
-                from tollbooth.constants import ErrorCode as _EC
-                return {
-                    "success": False,
-                    "error_code": _EC.POISON_MISSING,
-                    "error": (
-                        "poison is required — pass the session phrase returned "
-                        "by request_patron_credentials (or a credential_card)."
-                    ),
-                }
-            courier = await rt.courier()
-            if courier is None:
-                return {"success": False, "error": "Secure Courier not configured."}
-            try:
-                service = rt.patron_credential_service
-                if credential_card:
-                    # Route through the wrapper, not courier._exchange directly,
-                    # so credential values are stripped before returning (audit S1).
-                    return await courier.redeem_card(
-                        credential_card, service=service,
-                    )
-                return await courier.receive(
-                    sender_npub, service, poison=poison,
-                    request_tool="request_patron_credentials",
-                )
-            except Exception as e:
-                return {"success": False, "error": str(e)}
+            from tollbooth.tools.courier import receive_patron_credentials_tool
+            return await receive_patron_credentials_tool(
+                rt, sender_npub, poison, credential_card,
+            )
 
     # Prune registry entries for conditionally-skipped tools so they
     # don't appear in the pricing model or mismatch detection.

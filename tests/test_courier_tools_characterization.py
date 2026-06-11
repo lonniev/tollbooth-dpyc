@@ -189,3 +189,42 @@ async def test_forget_requires_service():
     tools = _register(rt)
     r = await tools["forget_credentials"](service="", npub=OP, proof="ok")
     assert "service is required" in r["error"]
+
+
+# ── patron credential variants ────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_request_patron_opens_on_patron_service():
+    courier = FakeCourier()
+    rt = _runtime(courier)
+    rt._patron_credential_greeting = "hi patron"
+    tools = _register(rt)
+
+    r = await tools["request_patron_credentials"](sender_npub=SENDER)
+    assert r == {"success": True, "poison": "p"}
+    assert courier.open_channel.await_args.args[0] == "test-patron"
+
+
+@pytest.mark.asyncio
+async def test_receive_patron_missing_poison_and_card():
+    rt = _runtime(FakeCourier())
+    tools = _register(rt)
+    r = await tools["receive_patron_credentials"](sender_npub=SENDER)
+    assert r["error_code"] == ErrorCode.POISON_MISSING
+
+
+@pytest.mark.asyncio
+async def test_receive_patron_poison_branch_drains():
+    captured = {}
+
+    class _C(FakeCourier):
+        async def receive(self, sender_npub, service=None, poison=None, request_tool=None):
+            captured.update(service=service, poison=poison, request_tool=request_tool)
+            return {"success": True, "service": service}
+
+    rt = _runtime(_C())
+    tools = _register(rt)
+    r = await tools["receive_patron_credentials"](sender_npub=SENDER, poison="ph")
+    assert r["success"] is True
+    assert captured == {"service": "test-patron", "poison": "ph",
+                        "request_tool": "request_patron_credentials"}
