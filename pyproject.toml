@@ -50,6 +50,7 @@ constraints = []  # No external deps — stdlib only (datetime, zoneinfo, re)
 dev = [
     "pytest>=9.0",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
 ]
 
 [project.urls]
@@ -69,3 +70,15 @@ ignore = ["E501", "F821"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["tollbooth"]
+branch = true
+# Relay drains and audit/notify publishers run on worker threads
+# (asyncio.to_thread / threading.Thread) — measure them too.
+concurrency = ["thread"]
+
+[tool.coverage.report]
+show_missing = true
+# Report-only for now; a ratchet gate (--cov-fail-under) lands with M2.5
+# once the tools/ extraction (M2.1) raises the measured floor.
