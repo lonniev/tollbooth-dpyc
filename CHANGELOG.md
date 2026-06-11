@@ -3,6 +3,30 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.5 — 2026-06-11
+
+Internal maintenance: the proof tools join the `register_standard_tools`
+decomposition (audit M2.1). No wire-API changes.
+
+### Changed (internal)
+
+- `request_npub_proof`, `receive_npub_proof`, and `check_proof_status` moved
+  from inline closures into `tools/proof.py` (functions over `rt`). These are
+  identity-proof orchestrators (the deterministic, poison-scoped Secure Courier
+  drain loop + proven-npub cache), so the move is strictly behavior-preserving.
+  It was done characterize-then-extract: the `receive_npub_proof` drain loop —
+  previously ~0% covered — is now pinned by
+  `tests/test_proof_tools_characterization.py`, which stays green against the
+  extracted code (the faithfulness proof). `runtime.py` drops 4461 → 4112 lines;
+  `tools/proof.py` is covered to 81%.
+
+### Known issue (tracked)
+
+- `receive_npub_proof` / `request_npub_proof` still call
+  `exchange._fetch_dms_from_relays()` synchronously — a latent event-loop block
+  of the same class fixed for the courier in 0.44.3 (P1). Deliberately left out
+  of this pure move; a separate `asyncio.to_thread` follow-up will address it.
+
 ## 0.44.4 — 2026-06-11
 
 Internal maintenance from the 2026-06-10 audit: coverage measurement in CI and
