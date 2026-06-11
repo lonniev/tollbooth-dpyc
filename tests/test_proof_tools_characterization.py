@@ -216,20 +216,24 @@ async def test_missing_poison_rejected(patron):
 
 
 @pytest.mark.asyncio
-async def test_pre_challenge_dm_popped_silently(patron):
-    # A DM older than the challenge timestamp is popped without a NACK and
-    # never matched — then the drain ends empty → not_found.
+async def test_old_timestamp_dm_with_correct_poison_matches(patron):
+    # Regression for the 0.44.10 fix: a reply whose created_at predates the
+    # challenge (clock skew / human-paced reply / relay lag) used to be
+    # silently dropped by a 5s timestamp gate. The one-time poison is the sole
+    # scoping mechanism now, so an old-but-correct reply MUST match.
+    poison = "bold-hawk-42"
     ex = FakeExchange(candidates=[
         {"id": "old", "_relay": PIN, "created_at": 100,
-         "_plaintext": _delimited(poison="bold-hawk-42")},
+         "_plaintext": _delimited(poison=poison)},
     ])
-    rt, _ = _runtime_with_exchange(ex)
-    rt.load_patron_session = AsyncMock(return_value={"challenge_ts": "1000"})
+    rt, cache = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    r = await tools["receive_npub_proof"](patron_npub=patron, poison="bold-hawk-42")
-    assert r["success"] is False
-    assert ex.popped == [("old", False)]  # silent pop, no NACK
+    r = await tools["receive_npub_proof"](patron_npub=patron, poison=poison)
+    assert r["success"] is True
+    assert r["proven_npub"] == patron
+    assert ex.popped == [("old", False)]  # matched, popped without NACK
+    cache.mark_proven.assert_awaited_once()
 
 
 @pytest.mark.asyncio

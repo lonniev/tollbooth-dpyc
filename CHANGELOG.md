@@ -3,6 +3,26 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.10 — 2026-06-11
+
+### Fixed
+
+- **`receive_npub_proof` silently dropped valid proof replies.** The drain loop
+  carried a pre-challenge timestamp gate (`created_at < challenge_ts - 5s`) that
+  popped any reply older than the stored challenge timestamp **without a NACK** —
+  so a correctly-signed reply, carrying the correct one-time poison, on the
+  correct pinned relay, was discarded as "too old" whenever the patron's Nostr
+  client clock skewed behind the server or the human replied at human pace. The
+  one-time poison phrase is already the sole anti-replay scoping mechanism (a
+  stale reply carries a stale poison → caught as `wrong token`), so the timestamp
+  gate added zero security while introducing a hard failure mode. **Removed the
+  gate** (and the now-dead `challenge_ts` store/load on the
+  `_proof_pending_npub_ownership` session). The relay purge-on-request stays — it
+  keeps the rendezvous relay clean between attempts. Regression-tested: a reply
+  with `created_at` before the challenge but the correct poison now matches.
+  Surfaced live while exercising the proof flow; same shape as the 0.44.9 tranche
+  bug — a guard clause swallowing the happy path.
+
 ## 0.44.9 — 2026-06-11
 
 ### Fixed

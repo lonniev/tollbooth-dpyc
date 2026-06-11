@@ -44,8 +44,6 @@ async def request_npub_proof_tool(
             "error": "Secure Courier not configured.",
         }
 
-    import time as _t
-
     # Purge stale DMs for this patron before sending a fresh challenge. The
     # fetch and NIP-09 deletes are blocking websocket I/O, so run them off the
     # event loop (same reasoning as the courier drains in 0.44.3 / M1.2).
@@ -66,9 +64,6 @@ async def request_npub_proof_tool(
     except Exception:
         pass  # best-effort purge
 
-    # Record challenge timestamp — receive_npub_proof ignores DMs before this
-    challenge_ts = int(_t.time())
-
     try:
         _greeting = rt._npub_proof_greeting or (
             f"Hi — {service_name or 'this service'} needs to verify "
@@ -88,16 +83,6 @@ async def request_npub_proof_tool(
     # Extract the poison phrase and rendezvous relay from the channel result.
     poison = result.get("poison", "")
     rendezvous_relay = result.get("rendezvous_relay", "")
-
-    # Store challenge timestamp in vault for receive_npub_proof
-    try:
-        await rt.store_patron_session(
-            patron_npub,
-            {"challenge_ts": str(challenge_ts)},
-            service=f"_proof_pending_{PROOF_SERVICE}",
-        )
-    except Exception:
-        pass
 
     response: dict[str, Any] = {
         "success": True,
@@ -172,17 +157,6 @@ async def receive_npub_proof_tool(
         }
     expected_phrase = poison
 
-    # Load challenge timestamp — ignore DMs created before this
-    challenge_ts = 0
-    try:
-        pending_proof = await rt.load_patron_session(
-            resolved, service=f"_proof_pending_{PROOF_SERVICE}",
-        )
-        if pending_proof:
-            challenge_ts = int(float(pending_proof.get("challenge_ts", "0")))
-    except Exception:
-        pass
-
     # Single drain of ONLY the pinned relay — human-gated, no retry loop.
     # Off the event loop — blocking websocket I/O (0.44.3 / M1.2 reasoning).
     await asyncio.to_thread(exchange._fetch_dms_from_relays, [pinned])
@@ -202,8 +176,11 @@ async def receive_npub_proof_tool(
             ),
         }
 
-    # Drain loop, stop-at-match. Stale (pre-challenge) DMs are popped silently;
-    # mismatched DMs are NACK'd up to the cap. For self-DM proofs the reply is
+    # Drain loop, stop-at-match. The poison phrase is the sole scoping
+    # mechanism — a reply carrying the current one-time poison is by definition
+    # the right reply, regardless of wall-clock timing (no timestamp gate, which
+    # raced clock skew + human-paced replies and silently dropped valid proofs).
+    # Mismatched DMs are NACK'd up to the cap. For self-DM proofs the reply is
     # encrypted to the ephemeral agent npub, so decrypt with the agent key
     # (restored by the resolver) and fall back to the operator nsec.
     matched_payload = None
@@ -215,13 +192,6 @@ async def receive_npub_proof_tool(
 
     for candidate in candidates:
         event_id = candidate.get("id", "")
-
-        # Pop pre-challenge DMs without processing or NACK
-        event_ts = candidate.get("created_at", 0)
-        if challenge_ts and event_ts < challenge_ts - 5:  # 5s grace
-            exchange._pop_event(event_id)
-            popped += 1
-            continue
 
         nack_reason: str | None = None
         payload = None
