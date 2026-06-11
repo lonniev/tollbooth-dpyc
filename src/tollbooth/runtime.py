@@ -2451,40 +2451,25 @@ def register_standard_tools(
         except Exception:
             pass
 
-        # Collect FastMCP / Horizon build info from env
-        build_info: dict[str, str] = {}
-        for key in (
-            "FASTMCP_CLOUD_URL",
-            "FASTMCP_CLOUD_GIT_COMMIT_SHA",
-            "FASTMCP_CLOUD_GIT_REPO",
-        ):
-            val = os.environ.get(key)
-            if val:
-                build_info[key.lower()] = val
-
-        # Operator npub fingerprint — short hash for patron verification
-        import hashlib
-        op_npub = ""
-        op_npub_hash = ""
+        # Operator npub: None signals "couldn't resolve" so the assembler can
+        # distinguish that from a resolved-but-empty value (still fingerprinted).
         try:
-            op_npub = rt.operator_npub()
-            op_npub_hash = hashlib.sha256(op_npub.encode()).hexdigest()[:12]
+            op_npub: str | None = rt.operator_npub()
         except Exception:
-            pass
+            op_npub = None
 
-        result: dict[str, Any] = {
-            "success": True,
-            "service": service_name or slug,
-            "slug": slug,
-            "version": service_version,
-            "tollbooth_dpyc_version": wheel_version,
-            "vault_configured": vault_ok,
-            "courier_has_vault": courier_ok,
-            "operator_npub_hash": op_npub_hash,
-            "process_id": os.getpid(),
-            "build_info": build_info or None,
-        }
-        return result
+        from tollbooth.tools.status import build_service_status
+        return build_service_status(
+            service=service_name or slug,
+            slug=slug,
+            version=service_version,
+            tollbooth_version=wheel_version,
+            vault_ok=vault_ok,
+            courier_ok=courier_ok,
+            operator_npub=op_npub,
+            process_id=os.getpid(),
+            env=os.environ,
+        )
 
     # -- Onboarding ----------------------------------------------------
 

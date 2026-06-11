@@ -1,0 +1,62 @@
+"""service_status response assembly (audit M2.1d).
+
+Extracted from the ``service_status`` closure. The shim keeps the rt/infra
+probing (vault + courier lazy-init, wheel version, operator npub, pid) because
+those have side effects and runtime coupling; this pure assembler shapes the
+result, parses Horizon build-info from the environment, and fingerprints the
+operator npub — all testable without a runtime.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Mapping
+from typing import Any
+
+_BUILD_INFO_KEYS = (
+    "FASTMCP_CLOUD_URL",
+    "FASTMCP_CLOUD_GIT_COMMIT_SHA",
+    "FASTMCP_CLOUD_GIT_REPO",
+)
+
+
+def build_service_status(
+    *,
+    service: str,
+    slug: str,
+    version: str,
+    tollbooth_version: str,
+    vault_ok: bool,
+    courier_ok: bool,
+    operator_npub: str | None,
+    process_id: int,
+    env: Mapping[str, str],
+) -> dict[str, Any]:
+    """Assemble the service_status payload.
+
+    ``operator_npub`` is ``None`` only when the runtime could not resolve it
+    (the shim caught an exception); a resolved value — even an empty string —
+    is fingerprinted, preserving the original closure's behavior.
+    """
+    build_info: dict[str, str] = {}
+    for key in _BUILD_INFO_KEYS:
+        val = env.get(key)
+        if val:
+            build_info[key.lower()] = val
+
+    op_npub_hash = ""
+    if operator_npub is not None:
+        op_npub_hash = hashlib.sha256(operator_npub.encode()).hexdigest()[:12]
+
+    return {
+        "success": True,
+        "service": service,
+        "slug": slug,
+        "version": version,
+        "tollbooth_dpyc_version": tollbooth_version,
+        "vault_configured": vault_ok,
+        "courier_has_vault": courier_ok,
+        "operator_npub_hash": op_npub_hash,
+        "process_id": process_id,
+        "build_info": build_info or None,
+    }
