@@ -3,6 +3,28 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.44.7 — 2026-06-11
+
+Completes the `register_standard_tools` decomposition (audit M2.1). No wire-API
+changes.
+
+### Changed (internal)
+
+- The OAuth2 tools (`begin_oauth`, `check_oauth_status`) moved to
+  `tools/oauth.py` (functions over `rt`), the last section of the extraction.
+  `check_oauth_status` performs the code→token exchange and persists OAuth
+  tokens, so the move is behavior-preserving and characterize-then-extract:
+  `tests/test_oauth_tools_characterization.py` pins both tools (PKCE +
+  authorize-URL build + verifier persist; token exchange + vault persist +
+  `on_token_received` merge) and stays green against the extracted code.
+- With this, every standard tool body lives in a tested `tollbooth.tools.*`
+  module (coupons, pricing/`check_price`, identities, status, proof, courier,
+  oauth) behind a thin proof-gate shim. `register_standard_tools` is now a
+  registration layer rather than a 2,600-line god function; `runtime.py` is
+  3741 lines (4757 at the start of this audit pass). Logic that was trapped in
+  closures — including the §2-sensitive proof drain loop, courier validation
+  flow, and OAuth token exchange — is now unit-tested.
+
 ## 0.44.6 — 2026-06-11
 
 ### Fixed
