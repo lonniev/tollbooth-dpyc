@@ -266,6 +266,33 @@ async def test_consumed_coupons_are_burned():
     burn.assert_awaited_once_with("coupon-1", PATRON)
 
 
+# ── resolve_tranche_lifetime (regression: was silently broken 2026-03-31 →
+#    2026-06-11; called a non-existent ensure_pricing_store, masked by bare except) ──
+
+@pytest.mark.asyncio
+async def test_resolve_tranche_lifetime_reads_ttl_from_pricing_model():
+    rt = OperatorRuntime(tool_registry={}, nsec_env_var="__UNUSED__")
+    rt._operator_npub = PATRON
+    rt.vault = AsyncMock(return_value=MagicMock())
+    with patch("tollbooth.pricing_store.PricingModelStore"), \
+         patch("tollbooth.tools.pricing.get_pricing_model_tool",
+               new=AsyncMock(return_value={"status": "ok", "tranche_lifetime": {"ttl_days": 7}})):
+        ttl = await rt.resolve_tranche_lifetime()
+    assert ttl == 7 * 86400  # honors the pricing model's tranche lifetime
+
+
+@pytest.mark.asyncio
+async def test_resolve_tranche_lifetime_none_when_unset():
+    rt = OperatorRuntime(tool_registry={}, nsec_env_var="__UNUSED__")
+    rt._operator_npub = PATRON
+    rt.vault = AsyncMock(return_value=MagicMock())
+    with patch("tollbooth.pricing_store.PricingModelStore"), \
+         patch("tollbooth.tools.pricing.get_pricing_model_tool",
+               new=AsyncMock(return_value={"status": "ok"})):  # no tranche_lifetime
+        ttl = await rt.resolve_tranche_lifetime()
+    assert ttl is None
+
+
 @pytest.mark.asyncio
 async def test_constraint_credit_deposits_and_returns_signed():
     registry, tid = _registry()

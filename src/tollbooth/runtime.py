@@ -1675,7 +1675,9 @@ class OperatorRuntime:
         Reads the ``tranche_lifetime`` field from the active pricing model.
         """
         try:
-            store = await self.ensure_pricing_store()
+            vault = await self.vault()
+            from tollbooth.pricing_store import PricingModelStore
+            store = PricingModelStore(neon_vault=vault)
             from tollbooth.tools.pricing import get_pricing_model_tool
             result = await get_pricing_model_tool(store, self.operator_npub())
             if result.get("status") == "ok":
@@ -1683,7 +1685,10 @@ class OperatorRuntime:
                 if isinstance(tl, dict) and tl.get("ttl_days") is not None:
                     return int(tl["ttl_days"]) * 86400
         except Exception:
-            pass
+            logger.warning(
+                "resolve_tranche_lifetime failed; credits will not expire",
+                exc_info=True,
+            )
         return None
 
     # ------------------------------------------------------------------
