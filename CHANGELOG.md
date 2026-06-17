@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.45.2 — 2026-06-17
+
+### Changed — orphan stays orphan until it's publicly discoverable
+
+- **An operator that can't yet resolve its own entry in the public DPYC registry now reads as `not_registered` (orphan), not a scary `Bootstrap failed`.** After an Authority approves an adoption, the public members file (`read-only-lookup-cache.json`, served via GitHub raw CDN) takes a few minutes to propagate. During that window the operator was surfacing *"Bootstrap failed: Cannot resolve Authority … Operator may not be registered"* — alarming, when it's simply not yet discoverable. `session_status` now classifies the registry-not-found / cannot-resolve-authority case as the `not_registered` lifecycle with calm propagation guidance ("the public registry is still propagating … the operator bootstraps automatically once its entry appears"), and `get_operator_onboarding_status` reports "awaiting registry propagation" instead of "bootstrap pending" for that case. The public registry — not the Authority's say-so — is the source of truth for "adopted"; no operator-side state is tracked. The operator auto-heals the moment it's discoverable.
+
 ## 0.45.1 — 2026-06-17
 
 ### Fixed — request_adoption now works for the orphan it's meant for

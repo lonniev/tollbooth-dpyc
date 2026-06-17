@@ -1059,7 +1059,12 @@ class OperatorRuntime:
             if not identity_ok:
                 parts.append(f"Set {self._nsec_env_var} to boot")
             if not vault_ok:
-                parts.append("bootstrap pending — restart or call get_operator_config")
+                be = bootstrap_error.lower()
+                if "not found in dpyc registry" in be or "cannot resolve authority" in be:
+                    parts.append("awaiting registry propagation — adoption may still be "
+                                 "propagating to the public DPYC registry (a few minutes)")
+                else:
+                    parts.append("bootstrap pending — restart or call get_operator_config")
             if secret_missing:
                 names = ", ".join(m["field"] for m in secret_missing)
                 parts.append(f"{len(secret_missing)} secret(s) needed via Secure Courier: {names}")
@@ -2638,13 +2643,33 @@ def register_standard_tools(
                 vault_ok = True
             except Exception as exc:
                 exc_str = str(exc)
-                if "not registered" in exc_str.lower() or "no neon url" in exc_str.lower():
+                exc_lower = exc_str.lower()
+                # An operator that can't find ITS OWN entry in the public DPYC
+                # registry is an orphan — whether it was never adopted, or an
+                # Authority just approved it and the public members file hasn't
+                # propagated yet (GitHub raw CDN ~5 min). Either way it stays
+                # not_registered until it's discoverable, then bootstraps
+                # automatically. The public registry is the source of truth —
+                # "known only to the Authority" is not yet adopted — so no
+                # operator-side state is tracked.
+                orphan_markers = (
+                    "not registered",
+                    "no neon url",
+                    "not found in dpyc registry",
+                    "cannot resolve authority",
+                )
+                if any(m in exc_lower for m in orphan_markers):
                     return {
                         "success": True,
                         "lifecycle": "not_registered",
                         "operator_npub": npub,
-                        "message": "Operator is not yet registered with an Authority. "
-                                   "Call register_operator to provision persistence.",
+                        "message": "Operator is not yet listed in the DPYC community "
+                                   "registry. If an Authority just approved your adoption, "
+                                   "the public registry is still propagating (usually a few "
+                                   "minutes) — the operator bootstraps automatically once "
+                                   "its entry appears. Otherwise, request adoption from an "
+                                   "Authority (request_adoption).",
+                        "detail": exc_str,
                     }
                 # Bootstrap failed for another reason — still warming up
                 return {
