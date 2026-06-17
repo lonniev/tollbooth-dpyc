@@ -37,8 +37,13 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
+from tollbooth.constants import ErrorCode
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
-from tollbooth.identity_proof import require_proof
+from tollbooth.identity_proof import (
+    ADOPTION_PROOF_TOOL,
+    require_proof,
+    verify_proof,
+)
 from tollbooth.nostr_diagnostics import resolve_relays as _resolve_relays
 from tollbooth.registry import (
     DEFAULT_REGISTRY_URL,
@@ -53,6 +58,7 @@ from tollbooth.tool_identity import (
     capability_uuid,
 )
 
+from tollbooth.authority import adoption_store
 from tollbooth.authority.nostr_signing import AuthorityNostrSigner
 from tollbooth.authority.onboarding import ONBOARDING_TEMPLATES, OnboardingState
 from tollbooth.authority.replay import ReplayTracker
@@ -103,6 +109,12 @@ CHECK_DPYC_MEMBERSHIP_UUID    = "644bfdbc-aefd-58df-914f-e155aef2a94e"
 REGISTER_AUTHORITY_NPUB_UUID  = "0ce23a58-eab1-5a66-b9e4-f62219f5f6d2"
 CONFIRM_AUTHORITY_CLAIM_UUID  = "0c32c30f-4a1f-51d9-9b46-785de2d3e15a"
 CHECK_AUTHORITY_APPROVAL_UUID = "c901360d-a32e-53ea-b965-df35a66af68a"
+# Deferred operator adoption (the courtship)
+RECEIVE_ADOPTION_REQUEST_UUID = "b77747af-dda0-51be-9952-33e815b4dc5f"
+LIST_ADOPTION_REQUESTS_UUID   = "d68a9b0b-dae6-5095-8d9a-1ed6f0b96edc"
+APPROVE_ADOPTION_UUID         = "104c741c-4647-5e8c-bd6d-3ba49ea44be7"
+REJECT_ADOPTION_UUID          = "7dbcfa85-f776-5306-a6dc-9032f1dcb9b3"
+GET_ADOPTION_STATUS_UUID      = "45c1b7b4-93ac-52e3-ad5a-8fac1b05fad1"
 
 
 AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
@@ -169,6 +181,37 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         capability="check_authority_approval",
         category="free",
         intent="Step 3/3 of Authority onboarding — check parent approval.",
+    ),
+    # -- Deferred operator adoption --
+    ToolIdentity(
+        tool_id=RECEIVE_ADOPTION_REQUEST_UUID,
+        capability="receive_adoption_request",
+        category="free",
+        intent="Inbound: record an operator's request to be adopted (operator-proof gated).",
+    ),
+    ToolIdentity(
+        tool_id=LIST_ADOPTION_REQUESTS_UUID,
+        capability="list_adoption_requests",
+        category="restricted",
+        intent="Operator-owner queue: list pending operator-adoption requests.",
+    ),
+    ToolIdentity(
+        tool_id=APPROVE_ADOPTION_UUID,
+        capability="approve_adoption",
+        category="restricted",
+        intent="Approve a pending operator-adoption request and provision the operator.",
+    ),
+    ToolIdentity(
+        tool_id=REJECT_ADOPTION_UUID,
+        capability="reject_adoption",
+        category="restricted",
+        intent="Reject a pending operator-adoption request.",
+    ),
+    ToolIdentity(
+        tool_id=GET_ADOPTION_STATUS_UUID,
+        capability="get_adoption_status",
+        category="free",
+        intent="Read the status of an operator's adoption request.",
     ),
 ]
 
@@ -587,6 +630,80 @@ async def _maybe_refresh_bootstrap_dm(npub: str) -> None:
         logger.debug("Bootstrap DM refresh check skipped for %s: %s", npub[:16], exc)
 
 
+async def _provision_operator(
+    runtime: OperatorRuntime,
+    npub: str,
+    service_url: str,
+) -> dict[str, Any]:
+    """Provision an operator: ledger row + isolated Neon tenant + registry.
+
+    The single source of truth for *what adoption does*. Both the inline-
+    consent path (``register_operator``, consent supplied at call time) and
+    the deferred-courtship path (``approve_adoption``, consent supplied
+    later via the owner's review) call this, so the two paths produce a
+    byte-identical effect. Proof/consent gating lives in the callers, never
+    here.
+    """
+    cache = await runtime.ledger_cache()
+    ledger = await cache.get(npub)
+    cache.mark_dirty(npub)
+    await cache.flush_user(npub)
+
+    # Provision isolated Neon schema with per-operator role
+    neon_url = ""
+    try:
+        vault = await runtime.vault()
+        from tollbooth.authority.tenant_provisioner import (
+            ensure_bootstrap_table,
+            provision_operator_schema,
+            store_operator_config,
+            neon_url_for_operator,
+        )
+        await ensure_bootstrap_table(vault)
+        s = _get_settings()
+        schema, password = await provision_operator_schema(
+            vault, npub,
+            base_url=s.neon_database_url,
+            authority_nsec_hex=getattr(s, "tollbooth_nostr_operator_nsec_hex", ""),
+        )
+        if s.neon_database_url:
+            neon_url = neon_url_for_operator(s.neon_database_url, schema, password)
+            await store_operator_config(vault, npub, "neon_database_url", neon_url)
+            await store_operator_config(vault, npub, "schema", schema)
+            if getattr(vault, "_cipher", None):
+                encrypted_pw = vault._encrypt(password)
+            else:
+                encrypted_pw = password
+            await store_operator_config(vault, npub, "role_password", encrypted_pw)
+            logger.info("Provisioned Neon tenant for operator %s schema=%s (role-isolated)", npub[:16], schema)
+            await _resend_bootstrap_dm(npub)
+    except Exception as exc:
+        logger.warning("Neon tenant provisioning failed (non-fatal): %s", exc)
+
+    # Register in community registry via Oracle
+    commit_url = ""
+    try:
+        signer = _get_nostr_signer()
+        commit_url = await _register_operator_via_oracle(
+            operator_npub=npub,
+            display_name=npub[:16] + "...",
+            service_url=service_url,
+            authority_npub=signer.npub,
+        )
+    except Exception as exc:
+        logger.warning("Oracle operator registration failed (non-fatal): %s", exc)
+
+    return {
+        "success": True,
+        "npub": npub,
+        "balance_sats": ledger.balance_api_sats,
+        "dpyc_npub": npub,
+        "neon_database_url": neon_url,
+        "commit_url": commit_url,
+        "message": f"Operator {npub} registered. Use purchase_credits to fund your balance.",
+    }
+
+
 # ======================================================================
 # register_authority_tools — the public mixin
 # ======================================================================
@@ -682,64 +799,8 @@ def register_authority_tools(
         if err:
             return err
 
-        cache = await runtime.ledger_cache()
-        ledger = await cache.get(npub)
-        cache.mark_dirty(npub)
-        await cache.flush_user(npub)
-
-        # Provision isolated Neon schema with per-operator role
-        neon_url = ""
-        try:
-            vault = await runtime.vault()
-            from tollbooth.authority.tenant_provisioner import (
-                ensure_bootstrap_table,
-                provision_operator_schema,
-                store_operator_config,
-                neon_url_for_operator,
-            )
-            await ensure_bootstrap_table(vault)
-            s = _get_settings()
-            schema, password = await provision_operator_schema(
-                vault, npub,
-                base_url=s.neon_database_url,
-                authority_nsec_hex=getattr(s, "tollbooth_nostr_operator_nsec_hex", ""),
-            )
-            if s.neon_database_url:
-                neon_url = neon_url_for_operator(s.neon_database_url, schema, password)
-                await store_operator_config(vault, npub, "neon_database_url", neon_url)
-                await store_operator_config(vault, npub, "schema", schema)
-                if getattr(vault, "_cipher", None):
-                    encrypted_pw = vault._encrypt(password)
-                else:
-                    encrypted_pw = password
-                await store_operator_config(vault, npub, "role_password", encrypted_pw)
-                logger.info("Provisioned Neon tenant for operator %s schema=%s (role-isolated)", npub[:16], schema)
-                await _resend_bootstrap_dm(npub)
-        except Exception as exc:
-            logger.warning("Neon tenant provisioning failed (non-fatal): %s", exc)
-
-        # Register in community registry via Oracle
-        commit_url = ""
-        try:
-            signer = _get_nostr_signer()
-            commit_url = await _register_operator_via_oracle(
-                operator_npub=npub,
-                display_name=npub[:16] + "...",
-                service_url=service_url,
-                authority_npub=signer.npub,
-            )
-        except Exception as exc:
-            logger.warning("Oracle operator registration failed (non-fatal): %s", exc)
-
-        return {
-            "success": True,
-            "npub": npub,
-            "balance_sats": ledger.balance_api_sats,
-            "dpyc_npub": npub,
-            "neon_database_url": neon_url,
-            "commit_url": commit_url,
-            "message": f"Operator {npub} registered. Use purchase_credits to fund your balance.",
-        }
+        # Inline-consent path: provisioning is the shared effect.
+        return await _provision_operator(runtime, npub, service_url)
 
     @tool
     async def update_operator(
@@ -1039,6 +1100,225 @@ def register_authority_tools(
             return {"success": False, "error": str(e)}
         finally:
             await registry.close()
+
+    # ------------------------------------------------------------------
+    # Deferred operator adoption (the courtship)
+    # ------------------------------------------------------------------
+
+    async def _notify_owner_of_request(operator_npub: str, service_url: str) -> None:
+        """Best-effort heads-up DM to the Authority owner. Never raises.
+
+        The durable queue (``list_adoption_requests``) is the source of
+        truth; this DM is only a "check your queue" ping. Fire-and-forget so
+        relay I/O never blocks the inbound request.
+        """
+        try:
+            exchange = _get_nostr_exchange()
+            await exchange.open_channel(
+                "operator_adoption",
+                greeting=(
+                    f"Operator {operator_npub[:16]}... ({service_url}) requests "
+                    "adoption. Review pending requests with list_adoption_requests "
+                    "and approve/reject in the Pricing Studio."
+                ),
+                recipient_npub=runtime.operator_npub(),
+            )
+        except Exception as exc:
+            logger.info("Owner-notification DM skipped for %s: %s", operator_npub[:16], exc)
+
+    @tool
+    async def receive_adoption_request(
+        operator_npub: Annotated[
+            str,
+            Field(description="The operator's Nostr npub requesting adoption."),
+        ] = "",
+        proof: Annotated[
+            str,
+            Field(description=(
+                "Inline kind-27235 proof signed by the operator's nsec, bound "
+                "to the canonical adoption sentinel. request_adoption mints "
+                "this automatically."
+            )),
+        ] = "",
+        service_url: Annotated[
+            str,
+            Field(description="The operator's MCP endpoint URL."),
+        ] = "",
+    ) -> dict[str, Any]:
+        """Inbound: record an operator's request to be adopted by this Authority.
+
+        Called MCP-to-MCP by the operator's ``request_adoption``. Verifies the
+        operator controls ``operator_npub`` (inline Schnorr bound to the
+        adoption sentinel — no relay round-trip), records a durable ``pending``
+        row, and fires a best-effort owner-notification DM. Does NOT provision —
+        provisioning waits for the owner's ``approve_adoption``.
+        """
+        if not operator_npub:
+            return {"success": False, "error": "operator_npub is required."}
+        # Verify the operator owns the npub (inline proof bound to the sentinel).
+        if not verify_proof(proof, operator_npub, ADOPTION_PROOF_TOOL):
+            return {
+                "success": False,
+                "error_code": ErrorCode.PROOF_INVALID,
+                "error": (
+                    "Invalid operator adoption proof. The request must carry a "
+                    "fresh kind-27235 proof signed by operator_npub. Call "
+                    "request_adoption on the operator (it mints this inline)."
+                ),
+            }
+        try:
+            vault = await runtime.vault()
+            await adoption_store.ensure_schema(vault)
+            await adoption_store.upsert_pending(vault, operator_npub, service_url)
+        except Exception as exc:
+            return {"success": False, "error": f"Could not record request: {exc}"}
+
+        await _notify_owner_of_request(operator_npub, service_url)
+        return {
+            "success": True,
+            "status": adoption_store.PENDING,
+            "operator_npub": operator_npub,
+            "message": (
+                "Adoption request received and pending the Authority owner's "
+                "decision. Poll get_adoption_status for progress."
+            ),
+        }
+
+    @tool
+    async def list_adoption_requests(
+        authority_proof: Annotated[
+            str,
+            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
+        ] = "",
+    ) -> dict[str, Any]:
+        """Owner queue: list pending operator-adoption requests.
+
+        Restricted to the Authority owner (consent proof). This is the
+        review-on-your-own-time surface the Pricing Studio renders.
+        """
+        err = await _require_authority_consent(
+            runtime, authority_proof, runtime.runtime_name("list_adoption_requests"),
+        )
+        if err:
+            return err
+        try:
+            vault = await runtime.vault()
+            await adoption_store.ensure_schema(vault)
+            await adoption_store.prune_expired(vault)
+            pending = await adoption_store.list_pending(vault)
+        except Exception as exc:
+            return {"success": False, "error": f"Could not list requests: {exc}"}
+        return {"success": True, "count": len(pending), "requests": pending}
+
+    @tool
+    async def approve_adoption(
+        operator_npub: Annotated[
+            str,
+            Field(description="The operator npub to approve and provision."),
+        ] = "",
+        authority_proof: Annotated[
+            str,
+            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
+        ] = "",
+    ) -> dict[str, Any]:
+        """Approve a pending request and provision the operator.
+
+        The deferred-courtship counterpart to register_operator: same
+        ``authority_proof`` consent, same provisioning effect
+        (``_provision_operator``) — just supplied later, after review.
+        """
+        err = await _require_authority_consent(
+            runtime, authority_proof, runtime.runtime_name("approve_adoption"),
+        )
+        if err:
+            return err
+        try:
+            vault = await runtime.vault()
+            await adoption_store.ensure_schema(vault)
+            row = await adoption_store.get(vault, operator_npub)
+        except Exception as exc:
+            return {"success": False, "error": f"Could not read request: {exc}"}
+        if row is None:
+            return {
+                "success": False,
+                "error_code": ErrorCode.ADOPTION_NOT_FOUND,
+                "error": f"No adoption request found for {operator_npub[:16]}...",
+            }
+        if row.get("status") == adoption_store.PROVISIONED:
+            return {
+                "success": False,
+                "error_code": ErrorCode.ADOPTION_ALREADY_PROVISIONED,
+                "error": f"Operator {operator_npub[:16]}... is already provisioned.",
+            }
+
+        result = await _provision_operator(runtime, operator_npub, row.get("service_url", ""))
+        await adoption_store.mark(vault, operator_npub, adoption_store.PROVISIONED)
+        result["adoption"] = "approved"
+        return result
+
+    @tool
+    async def reject_adoption(
+        operator_npub: Annotated[
+            str,
+            Field(description="The operator npub to reject."),
+        ] = "",
+        authority_proof: Annotated[
+            str,
+            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
+        ] = "",
+        reason: Annotated[str, Field(description="Optional human-readable reason.")] = "",
+    ) -> dict[str, Any]:
+        """Reject a pending operator-adoption request (owner consent)."""
+        err = await _require_authority_consent(
+            runtime, authority_proof, runtime.runtime_name("reject_adoption"),
+        )
+        if err:
+            return err
+        try:
+            vault = await runtime.vault()
+            await adoption_store.ensure_schema(vault)
+            hit = await adoption_store.mark(vault, operator_npub, adoption_store.REJECTED)
+        except Exception as exc:
+            return {"success": False, "error": f"Could not reject request: {exc}"}
+        if not hit:
+            return {
+                "success": False,
+                "error_code": ErrorCode.ADOPTION_NOT_FOUND,
+                "error": f"No adoption request found for {operator_npub[:16]}...",
+            }
+        return {
+            "success": True,
+            "status": adoption_store.REJECTED,
+            "operator_npub": operator_npub,
+            "reason": reason,
+        }
+
+    @tool
+    async def get_adoption_status(
+        operator_npub: Annotated[
+            str,
+            Field(description="The operator npub whose request status to read."),
+        ] = "",
+    ) -> dict[str, Any]:
+        """Read an operator's adoption-request status (free, no proof).
+
+        Status (pending/approved/rejected/provisioned) isn't sensitive — it's
+        the operator's own request — so the operator can poll it openly via
+        its ``adoption_status`` tool.
+        """
+        try:
+            vault = await runtime.vault()
+            await adoption_store.ensure_schema(vault)
+            row = await adoption_store.get(vault, operator_npub)
+        except Exception as exc:
+            return {"success": False, "error": f"Could not read status: {exc}"}
+        if row is None:
+            return {
+                "success": False,
+                "error_code": ErrorCode.ADOPTION_NOT_FOUND,
+                "error": f"No adoption request found for {operator_npub[:16]}...",
+            }
+        return {"success": True, "status": row.get("status"), "operator_npub": operator_npub}
 
     # ------------------------------------------------------------------
     # Authority Onboarding (3-step Nostr DM challenge-response)

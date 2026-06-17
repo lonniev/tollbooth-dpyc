@@ -3261,6 +3261,120 @@ def register_standard_tools(
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    async def _remote_authority_call(
+        authority_npub: str, tool_suffix: str, args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve a chosen Authority's MCP URL from the registry and call a
+        tool on it MCP-to-MCP, matching by name suffix (slug-independent).
+
+        Returns the remote tool's structured dict, or raises on failure.
+        """
+        from tollbooth.registry import DEFAULT_REGISTRY_URL, DPYCRegistry
+        from fastmcp import Client
+
+        registry = DPYCRegistry(url=DEFAULT_REGISTRY_URL)
+        try:
+            member = await registry.check_membership(authority_npub)
+        finally:
+            await registry.close()
+        services = member.get("services") or []
+        if not services:
+            raise RuntimeError(
+                f"Authority {authority_npub[:16]}... has no service URL in the registry."
+            )
+        url = services[0]["url"]
+
+        async with Client(url) as client:
+            tools = await client.list_tools()
+            name = next(
+                (t.name for t in tools if t.name.endswith(tool_suffix)), None
+            )
+            if name is None:
+                raise RuntimeError(
+                    f"Authority at {url} exposes no '*{tool_suffix}' tool."
+                )
+            result = await client.call_tool(name, args)
+
+        data = getattr(result, "data", None)
+        if isinstance(data, dict):
+            return data
+        import json as _json
+        for block in getattr(result, "content", []) or []:
+            text = getattr(block, "text", None)
+            if text:
+                try:
+                    return _json.loads(text)
+                except (ValueError, TypeError):
+                    return {"raw": text}
+        return {}
+
+    @tool
+    async def request_adoption(
+        authority_npub: str, proof: str = "", service_url: str = "", note: str = "",
+    ) -> dict[str, Any]:
+        """Ask a chosen Authority to adopt this operator (deferred courtship).
+
+        RESTRICTED to the operator — requires proof the caller controls this
+        operator's npub. Resolves the Authority's MCP endpoint from the
+        community registry, mints an inline ownership proof with this
+        operator's nsec, and delivers the request MCP-to-MCP. The Authority
+        records it as pending; its owner approves on their own time. Poll
+        ``adoption_status`` for progress; the operator flips to ``ready``
+        once the Authority provisions it.
+
+        Args:
+            authority_npub: npub of the Authority to request adoption from.
+            proof: operator-npub ownership proof (inline kind-27235 or cached token).
+            service_url: this operator's MCP endpoint (advertised to the Authority).
+            note: optional message for the Authority owner.
+        """
+        if not proof:
+            return {"success": False, "error": "Only the operator can request adoption — provide proof."}
+        err = await rt.require_caller_proof(rt.operator_npub(), proof, "request_adoption")
+        if err:
+            return err
+        if not authority_npub.startswith("npub1"):
+            return {"success": False, "error": "authority_npub must be a valid npub1..."}
+
+        from tollbooth.identity_proof import ADOPTION_PROOF_TOOL, create_proof
+        nsec = rt._get_nsec()
+        if not nsec:
+            return {"success": False, "error": "Operator nsec not configured — cannot sign the adoption request."}
+        adoption_proof = create_proof(nsec, ADOPTION_PROOF_TOOL)
+
+        try:
+            result = await _remote_authority_call(
+                authority_npub,
+                "receive_adoption_request",
+                {
+                    "operator_npub": rt.operator_npub(),
+                    "proof": adoption_proof,
+                    "service_url": service_url,
+                },
+            )
+        except Exception as exc:
+            return {"success": False, "error": f"Could not reach the Authority: {exc}"}
+        result.setdefault("authority_npub", authority_npub)
+        return result
+
+    @tool
+    async def adoption_status(authority_npub: str, proof: str = "") -> dict[str, Any]:
+        """Check this operator's adoption-request status at a chosen Authority.
+
+        Free. Polls the Authority MCP-to-MCP for the status of this operator's
+        request (pending / approved / rejected / provisioned).
+        """
+        if not authority_npub.startswith("npub1"):
+            return {"success": False, "error": "authority_npub must be a valid npub1..."}
+        try:
+            return await _remote_authority_call(
+                authority_npub,
+                "get_adoption_status",
+                {"operator_npub": rt.operator_npub()},
+            )
+        except Exception as exc:
+            return {"success": False, "error": f"Could not reach the Authority: {exc}"}
+
     @tool
     async def restore_neon_schema(proof: str = "") -> dict[str, Any]:
         """Re-run ``ensure_schema()`` on every NeonVault this operator uses.

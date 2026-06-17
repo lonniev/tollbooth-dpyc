@@ -178,6 +178,10 @@ REDEEM_COUPON_UUID                   = "359cdb8d-3e39-58ef-91b4-42f786891b1e"
 LIST_MY_COUPONS_UUID                 = "6f41dfc6-9141-518c-84c9-07b0fdb3fa34"
 FORGET_COUPON_UUID                   = "08fc1a2b-5924-5761-9f8d-bc334001776e"
 
+# Operator adoption (deferred courtship) — operator-side
+REQUEST_ADOPTION_UUID                = "26114c4d-eeb4-50dd-9dec-024fc7a76fda"
+ADOPTION_STATUS_UUID                 = "4b966aa3-e1ca-5615-bb2b-33d600ac702d"
+
 
 _STANDARD_LIST: list[ToolIdentity] = [
     # -- Credit tools --
@@ -308,6 +312,15 @@ _STANDARD_LIST: list[ToolIdentity] = [
                  intent="List the patron's redeemed coupons on this operator."),
     ToolIdentity(tool_id=FORGET_COUPON_UUID, capability="forget_coupon", category="free",
                  intent="Remove a coupon from the patron's redemption list."),
+
+    # -- Operator adoption (deferred courtship) --
+    # request_adoption is operator-restricted: only someone proving the
+    # operator's own npub may ask an Authority to adopt this service.
+    # adoption_status is a free read of the operator's own request state.
+    ToolIdentity(tool_id=REQUEST_ADOPTION_UUID, capability="request_adoption", category="restricted",
+                 intent="Operator-only: ask a chosen Authority to adopt this operator."),
+    ToolIdentity(tool_id=ADOPTION_STATUS_UUID, capability="adoption_status", category="free",
+                 intent="Check this operator's pending adoption request at a chosen Authority."),
 ]
 
 # Build the UUID-keyed dict from the list.

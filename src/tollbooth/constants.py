@@ -41,6 +41,11 @@ class ErrorCode:
     TOOL_NOT_REGISTERED = "tool_not_registered"
     TOOL_NOT_PRICED = "tool_not_priced"
 
+    # Operator adoption (deferred courtship)
+    ADOPTION_PENDING = "adoption_pending"                  # request awaiting owner decision
+    ADOPTION_NOT_FOUND = "adoption_not_found"              # no request for this operator npub
+    ADOPTION_ALREADY_PROVISIONED = "adoption_already_provisioned"  # idempotent re-approve guard
+
     # Lifecycle / infrastructure
     WARMING_UP = "warming_up"
     # Persistence rejected the query with a permanent SQL error (permission

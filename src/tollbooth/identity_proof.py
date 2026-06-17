@@ -57,6 +57,15 @@ DEFAULT_WINDOW_SECONDS = 60
 OWNERSHIP_SENTINEL = "npub_ownership"
 """Sentinel tool name for npub ownership proofs (not tied to a specific tool)."""
 
+ADOPTION_PROOF_TOOL = "operator_adoption_request"
+"""Sentinel tool name binding an operator's adoption-request proof.
+
+A canonical, slug-independent ``u``-tag value so an Operator can mint an
+inline kind-27235 proof (with its own service nsec) that any chosen
+Authority verifies without either side knowing the other's tool-slug. Used
+by ``request_adoption`` (operator mints) and ``receive_adoption_request``
+(Authority verifies)."""
+
 
 def _npub_to_hex(npub: str) -> str:
     """Convert a bech32 npub to a hex pubkey string."""
