@@ -3,6 +3,22 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.45.0 — 2026-06-16
+
+### Added — deferred operator adoption (the courtship)
+
+- **Operators can ask a chosen Authority to adopt them, and the Authority owner approves on their own time** — instead of adoption only happening by the Authority calling `register_operator` out of band. New operator tools `request_adoption(authority_npub, …)` and `adoption_status(authority_npub)` reach the chosen Authority MCP-to-MCP (FastMCP `Client`, matched by tool-name suffix so neither side needs the other's slug). New Authority tools: `receive_adoption_request` (inbound, gated by an inline operator-ownership proof), `list_adoption_requests` / `approve_adoption` / `reject_adoption` (Authority-owner consent), and `get_adoption_status` (free).
+- Pending requests are **durable** in a per-Authority Neon table (`authority/adoption_store.py`), keyed by operator npub, so concurrent requests survive Horizon cold starts — unlike the in-memory Authority-onboarding singleton.
+- `approve_adoption` and `register_operator` now share one provisioning core (`_provision_operator`), so the deferred-courtship and inline-consent paths produce a byte-identical effect (ledger row + isolated Neon tenant + community-registry registration + bootstrap DM).
+- Operator-ownership is proven inline against a canonical sentinel (`identity_proof.ADOPTION_PROOF_TOOL`) — no relay round-trip on the request leg.
+- A best-effort owner-notification DM ("review your queue") accompanies each request; the durable queue remains the source of truth.
+- New error codes: `adoption_pending`, `adoption_not_found`, `adoption_already_provisioned`. Lifecycle is unchanged — an operator stays `not_registered` until approval provisions its Neon tenant, then the existing bootstrap path takes it to `ready`.
+
+### Deferred (follow-ups — flagged, not dropped)
+
+- Phase 2 — approve-by-Nostr-reply (`check_adoption_replies`): reply "yes + poison" to the notification DM to approve without the Studio. Needs poison plumbing through the courier; today the Studio approve action (cryptographic consent) is the approval path.
+- Pricing Studio "Pending Adoptions" queue UI (separate Swift work).
+
 ## 0.44.15 — 2026-06-11
 
 ### Added (audit M3 — quality & polish)
