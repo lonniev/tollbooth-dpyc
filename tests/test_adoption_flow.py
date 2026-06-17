@@ -225,9 +225,11 @@ def _register_operator_tools(rt):
 
 def _operator_rt():
     rt = MagicMock()
-    rt.require_caller_proof = AsyncMock(return_value=None)
     rt.operator_npub = MagicMock(return_value="npub1op")
+    rt.runtime_name = MagicMock(return_value="test_request_adoption")
     rt._get_nsec = MagicMock(return_value="nsec1operator")
+    # An orphan has no vault — touching it is the regression we guard against.
+    rt.vault = AsyncMock(side_effect=AssertionError("request_adoption must not touch the vault"))
     return rt
 
 
@@ -237,11 +239,33 @@ async def test_request_adoption_requires_proof():
     assert r["success"] is False and "provide proof" in r["error"]
 
 
+async def test_request_adoption_verifies_proof_inline_without_vault():
+    # Regression: request_adoption verifies the caller's proof INLINE
+    # (proven_cache=None) so an un-adopted orphan — which has no vault — can
+    # still request adoption. Previously it went through the vault-backed
+    # proven-npub cache, forcing a bootstrap that an orphan cannot complete.
+    captured: dict = {}
+
+    async def fake_require_proof(npub, proof, tool_name, *, proven_cache=None, **kw):
+        captured["proven_cache_is_none"] = proven_cache is None
+        return None  # proof accepted
+
+    tools = _register_operator_tools(_operator_rt())
+    with patch("tollbooth.identity_proof.require_proof", side_effect=fake_require_proof):
+        # Bad authority npub so the call returns at the guard right after the
+        # proof check — proving the gate was passed without the remote leg.
+        r = await tools["request_adoption"](authority_npub="not-an-npub", proof="p")
+
+    assert captured.get("proven_cache_is_none") is True
+    assert r["success"] is False and "valid npub1" in r["error"]
+
+
 async def test_request_adoption_rejects_bad_authority_npub():
-    # require_caller_proof passes; the bad-npub guard returns before the
+    # Proof accepted (patched); the bad-npub guard returns before the
     # MCP-to-MCP leg (which needs fastmcp, not an SDK test dep).
     tools = _register_operator_tools(_operator_rt())
-    r = await tools["request_adoption"](authority_npub="not-an-npub", proof="p")
+    with patch("tollbooth.identity_proof.require_proof", AsyncMock(return_value=None)):
+        r = await tools["request_adoption"](authority_npub="not-an-npub", proof="p")
     assert r["success"] is False and "valid npub1" in r["error"]
 
 

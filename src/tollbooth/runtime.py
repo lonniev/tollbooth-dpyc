@@ -3330,7 +3330,16 @@ def register_standard_tools(
         """
         if not proof:
             return {"success": False, "error": "Only the operator can request adoption — provide proof."}
-        err = await rt.require_caller_proof(rt.operator_npub(), proof, "request_adoption")
+        # Verify the caller's proof INLINE only (proven_cache=None). The vault-
+        # backed proven-npub cache would force an operator bootstrap, but an
+        # un-adopted orphan has no vault yet — bootstrapping is precisely what
+        # adoption provisions. The caller holds the operator nsec and signs an
+        # inline kind-27235 proof; require_proof verifies it with no cache.
+        from tollbooth.identity_proof import require_proof
+        err = await require_proof(
+            rt.operator_npub(), proof, rt.runtime_name("request_adoption"),
+            proven_cache=None,
+        )
         if err:
             return err
         if not authority_npub.startswith("npub1"):

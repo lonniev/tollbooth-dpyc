@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.45.1 — 2026-06-17
+
+### Fixed — request_adoption now works for the orphan it's meant for
+
+- **`request_adoption` no longer requires the operator's vault to verify the caller's proof.** It gated through `require_caller_proof`, which builds the vault-backed proven-npub cache and therefore forced an operator bootstrap — but an un-adopted orphan has no vault yet (bootstrapping is exactly what adoption provisions). The result was a chicken-and-egg failure (`Bootstrap failed: Cannot resolve Authority … Operator may not be registered with an Authority`) on the precise case the tool exists for. It now verifies the caller's **inline kind-27235 proof directly** (`require_proof(..., proven_cache=None)`) — no vault touched. The gate is unchanged (the caller must still hold the operator nsec and sign); only the cached-poison tactic (impossible without a vault) is dropped for this tool. Regression test asserts the vault is never touched.
+
 ## 0.45.0 — 2026-06-16
 
 ### Added — deferred operator adoption (the courtship)
