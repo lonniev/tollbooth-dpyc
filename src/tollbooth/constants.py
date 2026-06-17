@@ -73,6 +73,10 @@ class ErrorCode:
 
     # Generic execution
     TOOL_EXECUTION_FAILED = "tool_execution_failed"
+    # A caller-facing input problem the operator signalled by raising
+    # ValueError (bad key, invalid params, lifecycle situation). Its message
+    # is surfaced verbatim so the caller can self-correct.
+    TOOL_INPUT_INVALID = "tool_input_invalid"
     UPSTREAM_AUTH_REFRESH_NEEDED = "upstream_auth_refresh_needed"
 
     # OAuth session-restoration situations (from

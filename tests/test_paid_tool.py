@@ -415,6 +415,25 @@ class TestErrorCodeMapping:
         assert result["error_code"] == ErrorCode.TOOL_EXECUTION_FAILED
 
     @pytest.mark.asyncio
+    async def test_value_error_surfaces_message_for_caller(self):
+        # A ValueError is the operator's caller-facing signal — its message is
+        # surfaced (under tool_input_invalid) instead of the generic
+        # "check operator logs", so the caller can self-correct. Refund-on-raise
+        # still applies (the debit is rolled back before the message is built).
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        await _inject_fake_cache(rt, balance=1000)
+
+        @rt.paid_tool(capability_uuid("my_tool"))
+        async def my_tool(npub: str = "", proof: str = "") -> dict:
+            raise ValueError("No published query named 'nope'. Ask the operator which keys are available.")
+
+        result = await my_tool(npub=VALID_NPUB, proof=_make_proof())
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.TOOL_INPUT_INVALID
+        assert "No published query named 'nope'" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_upstream_401_routes_to_oauth_refresh_code(self):
         """Exception text containing '401' or 'unauthorized' maps to upstream_auth_refresh_needed."""
         from tollbooth.constants import ErrorCode

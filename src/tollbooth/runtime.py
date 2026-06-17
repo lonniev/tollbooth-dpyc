@@ -2154,6 +2154,20 @@ class OperatorRuntime:
                                     "check_oauth_status(npub=<patron_npub>) promptly after Allow",
                                 ],
                             }
+                        # A ValueError is the operator's deliberate,
+                        # caller-facing signal (unknown key, invalid params,
+                        # lifecycle situation) — surface its message so the
+                        # caller can self-correct, instead of the generic
+                        # "check operator logs" that misreads a caller mistake
+                        # as an operator fault. The debit was already rolled
+                        # back above, so this stays a no-charge outcome. Other
+                        # exception types stay sanitized (no internal leakage).
+                        if isinstance(exc, ValueError):
+                            return {
+                                "success": False,
+                                "error_code": _EC.TOOL_INPUT_INVALID,
+                                "error": str(exc),
+                            }
                         return {
                             "success": False,
                             "error_code": _EC.TOOL_EXECUTION_FAILED,

@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.45.3 — 2026-06-17
+
+### Changed — caller-facing errors survive refund-on-raise
+
+- **A paid tool that raises `ValueError` now surfaces that message to the caller** (under new error code `tool_input_invalid`) instead of the blanket "Tool execution failed. Check operator logs." A `ValueError` is the operator's deliberate caller-facing signal — unknown key, invalid params, a lifecycle situation — so the caller can self-correct rather than being misdirected to operator logs for their own mistake. Surfaced live by cypher-mcp's first-light test: calling `execute_query_by_key` with an unknown key correctly refunded (refund-on-raise intact) but reported a generic failure instead of "No published query named '…'". The debit is still rolled back before the message is built, so this stays a no-charge outcome; non-`ValueError` exceptions remain sanitized (no internal leakage).
+
 ## 0.45.2 — 2026-06-17
 
 ### Changed — orphan stays orphan until it's publicly discoverable
