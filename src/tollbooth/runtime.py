@@ -121,6 +121,11 @@ class OperatorRuntime:
             registry = {k: v for k, v in registry.items() if v.capability not in _OTS_CAPABILITIES}
         self._tool_registry: dict[str, ToolIdentity] = registry
         self._slug: str = ""  # set by register_standard_tools
+        # Set by register_standard_tools so runtime-synthesized (dynamic)
+        # tools can be (de)registered later: the FastMCP app + the slug-
+        # prefixed @tool decorator.
+        self._mcp: Any = None
+        self._tool: Any = None
         self._tool_func_names: dict[str, str] = {}  # UUID → Python function name, populated by paid_tool
         self._mcp_name_cache: dict[str, str] = {}  # UUID → resolved MCP name, built lazily
         self._pricing_resolver: Any | None = None  # lazily created after vault
@@ -2191,6 +2196,121 @@ class OperatorRuntime:
             return wrapper
         return decorator
 
+    # ------------------------------------------------------------------
+    # Runtime tool synthesis — operator-defined tools registered at runtime
+    # ------------------------------------------------------------------
+
+    def register_dynamic_tool(
+        self,
+        *,
+        name: str,
+        param_schema: dict[str, Any],
+        runner: Callable[..., Any],
+        intent: str = "",
+        category: str = "read",
+        uuid: str | None = None,
+    ) -> str:
+        """Synthesize and register a typed MCP tool at runtime.
+
+        The tool exposes one flat, typed param per ``param_schema`` entry
+        (plus ``npub`` / ``proof``) and delegates to
+        ``runner(params, npub, proof)``. It is inserted into the tool
+        registry so pricing, ``check_price``, ``debit_or_deny``, and
+        ``list_canonical_identities`` all see it — but it carries **no**
+        pricing hint, so it stays unpriced until the operator prices it in
+        the pricing model (calls return the standard "not priced yet (TBD)"
+        lifecycle message). The wrapped body still gets debit / refund-on-
+        raise from :meth:`paid_tool`.
+
+        ``runner`` is a coroutine ``async (params: dict, npub: str, proof:
+        str) -> dict``. ``name`` must match ``^[a-z][a-z0-9_]*$`` (it becomes
+        the ``{slug}_{name}`` wire name). ``uuid`` defaults to a deterministic
+        ``capability_uuid("dyn:" + name)`` so the same name always maps to the
+        same pricing identity.
+
+        Idempotent: re-registering an existing identity replaces the prior
+        tool. Returns the full wire tool name. Requires
+        :func:`register_standard_tools` to have run (for the FastMCP app +
+        slug decorator).
+        """
+        from tollbooth.dynamic_tools import (
+            VALID_TOOL_NAME,
+            build_dynamic_handler,
+            validate_param_schema,
+        )
+        from tollbooth.tool_identity import ToolIdentity, capability_uuid
+
+        if not VALID_TOOL_NAME.match(name or ""):
+            raise ValueError(
+                f"dynamic tool name '{name}' must match ^[a-z][a-z0-9_]*$ "
+                "(it becomes a wire tool name)."
+            )
+        if errs := validate_param_schema(param_schema or {}):
+            raise ValueError("invalid param_schema: " + "; ".join(errs))
+        if self._tool is None or self._mcp is None:
+            raise RuntimeError(
+                "register_dynamic_tool requires register_standard_tools "
+                "to have run first."
+            )
+
+        tool_id = uuid or capability_uuid(f"dyn:{name}")
+
+        # Idempotent replace: drop any prior registration of this identity.
+        self.unregister_dynamic_tool(tool_id, _quiet=True)
+
+        self._tool_registry[tool_id] = ToolIdentity(
+            tool_id=tool_id, category=category, intent=intent, capability=name,
+        )
+        handler = build_dynamic_handler(
+            name, param_schema or {}, runner, intent=intent,
+        )
+        # paid_tool records _tool_func_names[tool_id] = handler.__name__ (== name);
+        # the slug decorator registers it as {slug}_{name}.
+        self._tool(self.paid_tool(tool_id)(handler))
+        self._mcp_name_cache.pop(tool_id, None)
+        return self.mcp_name_for(tool_id)
+
+    def unregister_dynamic_tool(
+        self, name_or_uuid: str, *, _quiet: bool = False
+    ) -> bool:
+        """Remove a runtime-synthesized tool by wire name, capability, or UUID.
+
+        Drops the FastMCP tool and its registry/cache entries. Returns True
+        if a tool was removed. With ``_quiet`` (used by the idempotent
+        re-register path), a missing target is a no-op returning False rather
+        than raising.
+        """
+        from tollbooth.tool_identity import capability_uuid
+
+        tool_id: str | None = None
+        if name_or_uuid in self._tool_registry:
+            tool_id = name_or_uuid
+        else:
+            cand = capability_uuid(f"dyn:{name_or_uuid}")
+            if cand in self._tool_registry:
+                tool_id = cand
+            else:
+                for tid, ident in self._tool_registry.items():
+                    if ident.capability == name_or_uuid:
+                        tool_id = tid
+                        break
+
+        if tool_id is None:
+            if _quiet:
+                return False
+            raise ValueError(f"no dynamic tool registered as '{name_or_uuid}'")
+
+        tool_name = self.mcp_name_for(tool_id)
+        if self._mcp is not None:
+            try:
+                self._mcp.remove_tool(tool_name)
+            except Exception:
+                logger.debug("remove_tool(%s) failed", tool_name, exc_info=True)
+        self._tool_registry.pop(tool_id, None)
+        self._tool_func_names.pop(tool_id, None)
+        self._mcp_name_cache.pop(tool_id, None)
+        return True
+
 
 def _build_initial_pricing_model(
     rt: OperatorRuntime,
@@ -2275,6 +2395,10 @@ def register_standard_tools(
     # downstream clients can derive the slug unambiguously.
     oracle_tool = make_slug_tool(mcp, f"{slug}_oracle")
     rt._slug = slug
+    # Keep refs so the runtime can synthesize/remove dynamic tools later
+    # (register_dynamic_tool / unregister_dynamic_tool).
+    rt._mcp = mcp
+    rt._tool = tool
     rt._mcp_name_cache.clear()  # invalidate any cached names
 
     # -- Credit tools --------------------------------------------------

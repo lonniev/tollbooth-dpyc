@@ -1,0 +1,281 @@
+"""Runtime tool synthesis — param-schema language, handler builder, and the
+OperatorRuntime register/unregister surface.
+
+The wheel test env has no FastMCP (consumers bring it), so registration is
+exercised against a minimal fake MCP — the same approach as test_slug_tools.
+One opt-in test confirms real FastMCP schema generation when fastmcp is present.
+"""
+
+from __future__ import annotations
+
+import inspect
+from typing import Any, get_type_hints
+
+import pytest
+
+from tollbooth.dynamic_tools import (
+    build_dynamic_handler,
+    validate_param_schema,
+    validate_params,
+)
+from tollbooth.runtime import OperatorRuntime
+from tollbooth.slug_tools import make_slug_tool
+from tollbooth.tool_identity import capability_uuid
+
+
+# --------------------------------------------------------------------------
+# Param-schema language
+# --------------------------------------------------------------------------
+
+
+class TestValidateParamSchema:
+    def test_accepts_known_types(self) -> None:
+        schema = {
+            "a": {"type": "string"}, "b": {"type": "int"},
+            "c": {"type": "float"}, "d": {"type": "bool"}, "e": {"type": "list"},
+        }
+        assert validate_param_schema(schema) == []
+
+    def test_rejects_unknown_type(self) -> None:
+        errs = validate_param_schema({"a": {"type": "datetime"}})
+        assert any("unknown type 'datetime'" in e for e in errs)
+
+    def test_rejects_non_object_spec(self) -> None:
+        assert validate_param_schema({"a": "string"})  # spec must be a dict
+
+    def test_rejects_non_dict_schema(self) -> None:
+        assert validate_param_schema(["a", "b"])  # type: ignore[arg-type]
+
+
+class TestValidateParams:
+    schema = {
+        "from_city": {"type": "string"},
+        "to_city": {"type": "string"},
+        "max_stops": {"type": "int", "required": False},
+    }
+
+    def test_all_good(self) -> None:
+        assert validate_params(self.schema, {"from_city": "JFK", "to_city": "LHR"}) == []
+
+    def test_missing_required(self) -> None:
+        errs = validate_params(self.schema, {"from_city": "JFK"})
+        assert any("missing required param 'to_city'" in e for e in errs)
+
+    def test_optional_omitted_is_ok(self) -> None:
+        assert validate_params(self.schema, {"from_city": "JFK", "to_city": "LHR"}) == []
+
+    def test_type_mismatch(self) -> None:
+        errs = validate_params(self.schema, {"from_city": "JFK", "to_city": "LHR", "max_stops": "two"})
+        assert any("max_stops" in e and "int" in e for e in errs)
+
+    def test_bool_is_not_int(self) -> None:
+        # bool is a Python subtype of int; the language treats them distinctly.
+        errs = validate_params({"n": {"type": "int"}}, {"n": True})
+        assert any("must be of type int" in e for e in errs)
+
+    def test_unexpected_param(self) -> None:
+        errs = validate_params(self.schema, {"from_city": "JFK", "to_city": "LHR", "bogus": 1})
+        assert any("unexpected param 'bogus'" in e for e in errs)
+
+
+# --------------------------------------------------------------------------
+# Handler builder
+# --------------------------------------------------------------------------
+
+
+SCHEMA = {
+    "from_city": {"type": "string", "description": "origin"},
+    "to_city": {"type": "string", "description": "destination"},
+    "max_stops": {"type": "int", "description": "max layovers", "required": False},
+}
+
+
+class TestBuildDynamicHandler:
+    def test_signature_and_annotations(self) -> None:
+        async def runner(params: dict, npub: str, proof: str) -> dict:
+            return {}
+
+        h = build_dynamic_handler("find_airline_flights", SCHEMA, runner, intent="Find flights.")
+        assert h.__name__ == "find_airline_flights"
+        assert h.__doc__ == "Find flights."
+
+        params = inspect.signature(h).parameters
+        assert list(params) == ["from_city", "to_city", "max_stops", "npub", "proof"]
+        # required params have no default; optional + npub/proof do.
+        assert params["from_city"].default is inspect.Parameter.empty
+        assert params["max_stops"].default is None
+        assert params["npub"].default == ""
+
+        hints = get_type_hints(h)  # resolves Annotated → base type
+        assert hints["from_city"] is str
+        assert hints["max_stops"] is int
+        assert hints["return"] is dict
+
+    async def test_delegates_and_drops_omitted_optionals(self) -> None:
+        captured: dict[str, Any] = {}
+
+        async def runner(params: dict, npub: str, proof: str) -> dict:
+            captured["params"] = params
+            captured["npub"] = npub
+            captured["proof"] = proof
+            return {"ok": True}
+
+        h = build_dynamic_handler("find_airline_flights", SCHEMA, runner)
+        # max_stops omitted → must NOT appear as None in the runner's params.
+        out = await h(from_city="JFK", to_city="LHR", max_stops=None, npub="np", proof="pf")
+        assert out == {"ok": True}
+        assert captured["params"] == {"from_city": "JFK", "to_city": "LHR"}
+        assert captured["npub"] == "np" and captured["proof"] == "pf"
+
+    async def test_passes_supplied_optionals(self) -> None:
+        captured: dict[str, Any] = {}
+
+        async def runner(params: dict, npub: str, proof: str) -> dict:
+            captured["params"] = params
+            return {}
+
+        h = build_dynamic_handler("find_airline_flights", SCHEMA, runner)
+        await h(from_city="JFK", to_city="LHR", max_stops=1)
+        assert captured["params"] == {"from_city": "JFK", "to_city": "LHR", "max_stops": 1}
+
+
+# --------------------------------------------------------------------------
+# OperatorRuntime.register/unregister_dynamic_tool (fake MCP)
+# --------------------------------------------------------------------------
+
+
+class _FakeMCP:
+    """Minimal stand-in: a slug-prefixed tool() decorator + remove_tool()."""
+
+    def __init__(self) -> None:
+        self.registered: dict[str, Any] = {}
+        self.removed: list[str] = []
+
+    def tool(self, *, name: str):
+        def decorator(func):
+            self.registered[name] = func
+            return func
+        return decorator
+
+    def remove_tool(self, name: str, version: str | None = None) -> None:
+        self.removed.append(name)
+        self.registered.pop(name, None)
+
+
+def _wired_runtime(slug: str = "cypher") -> tuple[OperatorRuntime, _FakeMCP]:
+    rt = OperatorRuntime()
+    fake = _FakeMCP()
+    rt._slug = slug
+    rt._mcp = fake
+    rt._tool = make_slug_tool(fake, slug)
+    return rt, fake
+
+
+async def _runner(params: dict, npub: str, proof: str) -> dict:
+    return {"params": params}
+
+
+class TestRegisterDynamicTool:
+    def test_registers_typed_unpriced_tool(self) -> None:
+        rt, fake = _wired_runtime()
+        name = rt.register_dynamic_tool(
+            name="find_airline_flights", param_schema=SCHEMA, runner=_runner,
+            intent="Find flights.",
+        )
+        assert name == "cypher_find_airline_flights"
+        assert "cypher_find_airline_flights" in fake.registered
+
+        tool_id = capability_uuid("dyn:find_airline_flights")
+        ident = rt._tool_registry[tool_id]
+        assert ident.capability == "find_airline_flights"
+        assert ident.category == "read"
+        assert ident.pricing_hint_value == 0  # unpriced until Studio prices it
+        assert rt._tool_func_names[tool_id] == "find_airline_flights"
+        assert rt.mcp_name_for(tool_id) == "cypher_find_airline_flights"
+
+    def test_idempotent_replace(self) -> None:
+        rt, fake = _wired_runtime()
+        rt.register_dynamic_tool(name="q", param_schema={"a": {"type": "string"}}, runner=_runner)
+        rt.register_dynamic_tool(name="q", param_schema={"b": {"type": "int"}}, runner=_runner)
+        # one identity, the prior wire tool was removed before re-adding.
+        ids = [tid for tid, i in rt._tool_registry.items() if i.capability == "q"]
+        assert len(ids) == 1
+        assert "cypher_q" in fake.removed
+        assert "cypher_q" in fake.registered
+
+    def test_rejects_bad_name(self) -> None:
+        rt, _ = _wired_runtime()
+        with pytest.raises(ValueError, match="must match"):
+            rt.register_dynamic_tool(name="Find Flights", param_schema={}, runner=_runner)
+
+    def test_rejects_bad_schema(self) -> None:
+        rt, _ = _wired_runtime()
+        with pytest.raises(ValueError, match="invalid param_schema"):
+            rt.register_dynamic_tool(
+                name="q", param_schema={"a": {"type": "datetime"}}, runner=_runner,
+            )
+
+    def test_requires_register_standard_tools(self) -> None:
+        rt = OperatorRuntime()  # _mcp / _tool still None
+        with pytest.raises(RuntimeError, match="register_standard_tools"):
+            rt.register_dynamic_tool(name="q", param_schema={}, runner=_runner)
+
+    def test_custom_uuid_is_honored(self) -> None:
+        rt, _ = _wired_runtime()
+        rt.register_dynamic_tool(
+            name="q", param_schema={}, runner=_runner, uuid="11111111-1111-5111-8111-111111111111",
+        )
+        assert "11111111-1111-5111-8111-111111111111" in rt._tool_registry
+
+
+class TestUnregisterDynamicTool:
+    def test_removes_by_name(self) -> None:
+        rt, fake = _wired_runtime()
+        rt.register_dynamic_tool(name="find_airline_flights", param_schema=SCHEMA, runner=_runner)
+        assert rt.unregister_dynamic_tool("find_airline_flights") is True
+        assert "cypher_find_airline_flights" in fake.removed
+        assert capability_uuid("dyn:find_airline_flights") not in rt._tool_registry
+
+    def test_removes_by_uuid(self) -> None:
+        rt, fake = _wired_runtime()
+        rt.register_dynamic_tool(name="q", param_schema={}, runner=_runner)
+        tid = capability_uuid("dyn:q")
+        assert rt.unregister_dynamic_tool(tid) is True
+        assert tid not in rt._tool_registry
+
+    def test_missing_raises(self) -> None:
+        rt, _ = _wired_runtime()
+        with pytest.raises(ValueError, match="no dynamic tool"):
+            rt.unregister_dynamic_tool("nope")
+
+    def test_missing_quiet_is_false(self) -> None:
+        rt, _ = _wired_runtime()
+        assert rt.unregister_dynamic_tool("nope", _quiet=True) is False
+
+
+# --------------------------------------------------------------------------
+# Real FastMCP schema generation (opt-in — only where fastmcp is installed)
+# --------------------------------------------------------------------------
+
+
+def test_fastmcp_generates_typed_schema() -> None:
+    pytest.importorskip("fastmcp")
+    from fastmcp.tools import Tool
+
+    import functools
+
+    async def runner(params: dict, npub: str, proof: str) -> dict:
+        return {}
+
+    h = build_dynamic_handler("find_airline_flights", SCHEMA, runner)
+
+    # Simulate paid_tool's functools.wraps wrapper preserving the typed surface.
+    @functools.wraps(h)
+    async def wrapped(*a, **k):  # pragma: no cover - schema-gen path only
+        return await h(*a, **k)
+
+    t = Tool.from_function(wrapped, name="cypher_find_airline_flights")
+    props = t.parameters["properties"]
+    assert props["from_city"]["type"] == "string"
+    assert props["max_stops"]["type"] == "integer"
+    assert set(t.parameters["required"]) == {"from_city", "to_city"}

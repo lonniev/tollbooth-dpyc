@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.46.0 — 2026-06-18
+
+### Added — runtime tool synthesis (operator-defined dynamic tools)
+
+- **New `tollbooth.dynamic_tools` module + `OperatorRuntime.register_dynamic_tool` / `unregister_dynamic_tool`.** Operators can now synthesize first-class, typed MCP tools at runtime from a declarative parameter schema plus a `runner` callback — e.g. a named, parameter-bound stored query becomes `slug_find_airline_flights(from_city, to_city)`. The machinery is domain-agnostic (no graph/REST/SQL assumptions baked in); the `runner` (`async (params, npub, proof) -> dict`) supplies the behavior. `cypher-mcp` is the first consumer (named Cypher queries); any operator can back a synthesized tool with REST, SQL, a stored prompt, etc., and reuse the identical primitive.
+- **Correctly-typed schemas through the billing decorator.** `build_dynamic_handler` builds a handler carrying both `__signature__` and real `__annotations__` (FastMCP derives a tool's input schema from annotations, not `__signature__` alone), so the synthesized tool exposes flat, typed params. `paid_tool`'s `functools.wraps` preserves both, so synthesized tools get debit / refund-on-raise like any paid tool.
+- **Register-only; price in the App.** Synthesized tools are inserted into the tool registry (so `check_price`, `list_canonical_identities`, and the pricing model all see them) but carry **no pricing hint** — they stay unpriced ("not priced yet (TBD)") until the operator prices them in the pricing model. No price flows through the MCP; Pricing Studio stays the source of truth.
+- **Bootstrap wiring.** `register_standard_tools` now stashes the FastMCP app + slug decorator on the runtime so dynamic (de)registration can happen after bootstrap. Spec persistence and cold-start re-materialization stay with the consumer — the wheel registers/deregisters; it does not dictate where specs live.
+- The dynamic-tool param-schema language (`validate_param_schema` / `validate_params`; types `string`/`int`/`float`/`bool`/`list`) lives in `dynamic_tools` as the canonical implementation.
+
 ## 0.45.4 — 2026-06-17
 
 ### Fixed — tenant schema ownership no longer lags new tables
