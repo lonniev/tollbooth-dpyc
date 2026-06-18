@@ -87,6 +87,54 @@ async def test_certify_authority_refuses():
             await certifier.certify_credits(100)
 
 
+@pytest.mark.asyncio
+async def test_certify_propagates_error_code():
+    """The Authority's structured error_code rides on the exception so callers
+    can branch on it (e.g. surface a kind 'Authority is broke' situation)."""
+    error_response = {
+        "success": False,
+        "error_code": "insufficient_balance",
+        "error": "Insufficient balance: 0 sats available, 20 required for "
+                 "authority_certify_credits.",
+    }
+
+    mock_client = AsyncMock()
+    mock_client.call_tool = AsyncMock(return_value=[_text_block(error_response)])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+        certifier = AuthorityCertifier(
+            authority_url="https://authority.example.com/mcp",
+            operator_npub="npub1operator",
+        )
+        with pytest.raises(AuthorityCertifyError) as exc_info:
+            await certifier.certify_credits(100)
+
+    assert exc_info.value.error_code == "insufficient_balance"
+
+
+@pytest.mark.asyncio
+async def test_certify_error_code_empty_when_absent():
+    """A refusal without an error_code yields an empty string, not a crash."""
+    mock_client = AsyncMock()
+    mock_client.call_tool = AsyncMock(
+        return_value=[_text_block({"success": False, "error": "nope"})]
+    )
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+        certifier = AuthorityCertifier(
+            authority_url="https://authority.example.com/mcp",
+            operator_npub="npub1operator",
+        )
+        with pytest.raises(AuthorityCertifyError) as exc_info:
+            await certifier.certify_credits(100)
+
+    assert exc_info.value.error_code == ""
+
+
 # ---------------------------------------------------------------------------
 # certify() — connection failure
 # ---------------------------------------------------------------------------

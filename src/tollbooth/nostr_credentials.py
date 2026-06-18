@@ -445,6 +445,7 @@ class NostrCredentialExchange:
         message_text: str,
         *,
         target_relay: str | None = None,
+        extra_tags: list[list[str]] | None = None,
     ) -> None:
         """Send a DM via both NIP-17 gift wrap and NIP-04 legacy.
 
@@ -464,6 +465,11 @@ class NostrCredentialExchange:
                 When ``None`` (default), fan out to all configured relays
                 — used for profile publishes, deletions, and ack DMs that
                 don't need pinning.
+            extra_tags: Optional public tags appended to the NIP-04 (kind 4)
+                event only — that leg is signed by the operator's identity
+                key and is therefore author-queryable for relay-as-cache
+                dedup (see ``has_recent_tagged_dm``). The gift-wrap leg is
+                signed by an ephemeral key and intentionally untagged.
         """
         if not self._enabled:
             raise CourierNotReady("Secure Courier not enabled.")
@@ -515,7 +521,9 @@ class NostrCredentialExchange:
 
         # ── NIP-04 legacy DM (kind 4) ───────────────────────────────
         try:
-            message = self._build_nip04_dm(recipient_hex, message_text)
+            message = self._build_nip04_dm(
+                recipient_hex, message_text, extra_tags=extra_tags,
+            )
             if target_relay:
                 ok, detail = self._publish_to_one_relay(message, target_relay)
                 nip04_ok = ok
@@ -732,7 +740,11 @@ class NostrCredentialExchange:
         return wrap.to_message()
 
     def _build_nip04_dm(
-        self, recipient_hex: str, message_text: str,
+        self,
+        recipient_hex: str,
+        message_text: str,
+        *,
+        extra_tags: list[list[str]] | None = None,
     ) -> str:
         """Build a NIP-04 kind 4 encrypted DM.
 
@@ -741,6 +753,7 @@ class NostrCredentialExchange:
         """
         return self._build_nip04_dm_with(
             self._privkey_hex, self._pubkey_hex, recipient_hex, message_text,
+            extra_tags=extra_tags,
         )
 
     def _build_nip04_dm_with(
@@ -749,6 +762,8 @@ class NostrCredentialExchange:
         sender_pubkey_hex: str,
         recipient_hex: str,
         message_text: str,
+        *,
+        extra_tags: list[list[str]] | None = None,
     ) -> str:
         """Build a NIP-04 kind 4 encrypted DM with explicit sender keys.
 
@@ -765,15 +780,110 @@ class NostrCredentialExchange:
         )
         now = int(time.time())
         expiry = str(now + 600)  # NIP-40: expire after 10 minutes
+        tags = [["p", recipient_hex], ["expiration", expiry]]
+        if extra_tags:
+            tags.extend(extra_tags)
         event = Event(
             kind=_KIND_ENCRYPTED_DM,
             content=encrypted,
-            tags=[["p", recipient_hex], ["expiration", expiry]],
+            tags=tags,
             pubkey=sender_pubkey_hex,
             created_at=now,
         )
         event.sign(sender_privkey_hex)
         return event.to_message()
+
+    def has_recent_tagged_dm(
+        self,
+        recipient_npub: str,
+        tag_value: str,
+        *,
+        within_seconds: int = 600,
+        relays: list[str] | None = None,
+    ) -> bool:
+        """Return True if a recent kind-4 DM we sent to ``recipient_npub`` and
+        bearing the public marker ``["t", tag_value]`` is still on the relays.
+
+        This is the read side of relay-as-cache dedup: marker DMs self-expire
+        via NIP-40 (~10 min), so a True result means an equivalent message is
+        still "queued" and a fresh send would duplicate it. Best-effort — if
+        the relays dropped the event early (or never stored kind 4), this
+        returns False and the caller is free to (re)send.
+
+        Queries only the NIP-04 (kind 4) leg: it is signed by the operator's
+        identity key and is therefore matchable by ``authors`` + the public
+        ``#t`` tag without any decryption. The gift-wrap leg is ephemeral and
+        cannot be queried this way.
+
+        Args:
+            recipient_npub: Recipient npub (bech32).
+            tag_value: The ``t`` tag value to match (e.g. "dpyc-dunning").
+            within_seconds: Look-back window for the relay ``since`` filter.
+            relays: Specific relays to query. Defaults to all configured.
+        """
+        if not self._enabled:
+            return False
+        try:
+            recipient_hex = _npub_to_hex(recipient_npub)
+        except Exception:
+            return False
+
+        filt: dict[str, Any] = {
+            "kinds": [_KIND_ENCRYPTED_DM],
+            "authors": [self._pubkey_hex],
+            "#p": [recipient_hex],
+            "#t": [tag_value],
+            "since": int(time.time()) - within_seconds,
+            "limit": 1,
+        }
+        target_relays = relays if relays is not None else self._relays
+        sub_id = f"dedup-{int(time.time())}"
+        for relay_url in target_relays:
+            try:
+                if self._query_one_relay_has_event(relay_url, sub_id, filt):
+                    return True
+            except Exception as exc:
+                logger.debug(
+                    "dedup query on %s failed (non-fatal): %s", relay_url, exc,
+                )
+        return False
+
+    def _query_one_relay_has_event(
+        self, relay_url: str, sub_id: str, filt: dict[str, Any],
+    ) -> bool:
+        """Return True as soon as one event matching ``filt`` arrives.
+
+        A read-only sibling of ``_subscribe_one_relay`` that does NOT touch
+        shared receive state (``self._received_events``) — it only answers
+        "does a matching event exist?" for relay-as-cache dedup.
+        """
+        ws = create_connection(
+            relay_url, timeout=_DEFAULT_SUBSCRIBE_TIMEOUT, sslopt={},
+        )
+        try:
+            ws.send(json.dumps(["REQ", sub_id, filt]))
+            ws.settimeout(_DEFAULT_SUBSCRIBE_TIMEOUT)
+            while True:
+                try:
+                    raw = ws.recv()
+                except Exception:
+                    return False
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(msg, list) or len(msg) < 2:
+                    continue
+                if msg[0] == "EVENT" and len(msg) >= 3:
+                    return True
+                if msg[0] in ("EOSE", "CLOSED", "NOTICE"):
+                    return False
+        finally:
+            try:
+                ws.send(json.dumps(["CLOSE", sub_id]))
+            except Exception:
+                pass
+            ws.close()
 
     async def open_channel(
         self,

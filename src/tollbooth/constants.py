@@ -70,6 +70,12 @@ class ErrorCode:
     # Billing / pricing
     INSUFFICIENT_BALANCE = "insufficient_balance"
     CONSTRAINT_DENIED = "constraint_denied"
+    # The Operator's own balance at its certifying Authority is exhausted, so
+    # the Authority refused to certify a patron's credit purchase. This is the
+    # Operator's supply problem, not the patron's — surfaced as a kind "please
+    # be patient" situation while the Authority is dunned (out of band) to
+    # top up. Distinct from INSUFFICIENT_BALANCE (the patron's own balance).
+    AUTHORITY_INSUFFICIENT_BALANCE = "authority_insufficient_balance"
 
     # Generic execution
     TOOL_EXECUTION_FAILED = "tool_execution_failed"

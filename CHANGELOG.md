@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.47.0 — 2026-06-18
+
+### Changed — kind treatment when an Authority is out of certification credits
+
+- **`purchase_credits` no longer leaks the raw `Authority certification failed: … Insufficient balance: 0 sats available, …` string to patrons.** When the Operator's own balance at its certifying Authority is exhausted, certification is refused — that is the Operator's supply problem, not the patron's. The patron now gets a kind situation response (`error_code: authority_insufficient_balance`) naming the Authority and asking them to be patient and retry shortly, with `next_steps` and the `authority_npub`. Any other certification failure is unchanged.
+- **`AuthorityCertifier` propagates the Authority's structured `error_code`.** `AuthorityCertifyError` now carries the Authority's `error_code` (e.g. `insufficient_balance`) so callers branch on the code rather than parsing prose; `purchase_credits` prefers it and falls back to a message-text check for older Authorities. Empty for connection/transport failures.
+
+### Added — relay-deduped "Authority is out of credits" dunning
+
+- **The wheel now reminds the Authority to top up, automatically and at most once per ~10-minute window.** On an Authority-insufficient-balance refusal, the Operator sends a single marker-tagged DM (`["t", "dpyc-dunning"]`) to the Authority's npub asking its human to `purchase_credits`. Dispatch runs on a daemon thread so the patron's response is never delayed, and failures are swallowed (courtesy DM).
+- **Relay-as-cache dedup ("send-if-not-sent"), no new persistent state.** Before sending, `NostrCredentialExchange.has_recent_tagged_dm(...)` queries the relays for a recent kind-4 DM we authored to the Authority bearing the marker tag (`{kinds:[4], authors:[me], #p:[authority], #t:[…], since: now-600}`). The dunning DM self-expires via NIP-40 (~10 min), so the relay's own event store *is* the dedup cache — repeated patron attempts in the window send no duplicate, and a fresh reminder is allowed once the marker expires. Best-effort: if the relays dropped the event early, the caller is free to re-send.
+- **`send_dm` gained an opt-in `extra_tags` parameter** (appended to the NIP-04 kind-4 leg only — the leg signed by the operator's identity key, hence author-queryable; the ephemeral gift-wrap leg stays untagged). New `ErrorCode.AUTHORITY_INSUFFICIENT_BALANCE`.
+
 ## 0.46.1 — 2026-06-18
 
 ### Fixed

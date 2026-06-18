@@ -18,7 +18,17 @@ logger = logging.getLogger(__name__)
 
 
 class AuthorityCertifyError(Exception):
-    """Raised when Authority certification fails."""
+    """Raised when Authority certification fails.
+
+    Carries the Authority's structured ``error_code`` when the failure was a
+    tool-level refusal (e.g. ``insufficient_balance`` when the Authority's own
+    certification balance is exhausted), so callers can branch on the code
+    rather than parsing prose. Empty for connection/transport failures.
+    """
+
+    def __init__(self, message: str, *, error_code: str = "") -> None:
+        super().__init__(message)
+        self.error_code = error_code
 
 
 class AuthorityCertifier:
@@ -110,7 +120,8 @@ class AuthorityCertifier:
                         if data.get("success") is False:
                             raise AuthorityCertifyError(
                                 f"Authority refused certification: "
-                                f"{data.get('error', 'unknown error')}"
+                                f"{data.get('error', 'unknown error')}",
+                                error_code=str(data.get("error_code", "")),
                             )
                         if "certificate" in data:
                             return data
@@ -122,7 +133,8 @@ class AuthorityCertifier:
             if result.get("success") is False:
                 raise AuthorityCertifyError(
                     f"Authority refused certification: "
-                    f"{result.get('error', 'unknown error')}"
+                    f"{result.get('error', 'unknown error')}",
+                    error_code=str(result.get("error_code", "")),
                 )
             if "certificate" in result:
                 return result

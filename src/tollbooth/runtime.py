@@ -46,6 +46,7 @@ import inspect
 import logging
 import os
 import signal
+import threading
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -2368,6 +2369,63 @@ def _build_initial_pricing_model(
 # ======================================================================
 
 
+# Public marker tag stamped on Authority low-cert dunning DMs so the
+# relay-as-cache dedup query can match them without decryption.
+_AUTHORITY_DUNNING_TAG = "dpyc-dunning"
+
+
+def _dun_authority_low_certs(
+    courier: Any, authority_npub: str, operator_label: str,
+) -> None:
+    """Best-effort, relay-deduped reminder that an Authority is out of certs.
+
+    Fired when an Operator's ``purchase_credits`` is refused because the
+    Operator's own balance at its certifying Authority is exhausted. Sends a
+    single marker-tagged DM from the Operator to the Authority asking its
+    human to top up.
+
+    Relay-as-cache dedup: the marker DM self-expires (~10 min, NIP-40), so we
+    query the relays first and skip if one is still queued — at most one
+    reminder per window. All relay I/O runs on a daemon thread so the patron's
+    purchase response is never delayed; failures are swallowed (courtesy DM).
+    """
+    if courier is None:
+        return
+    exchange = getattr(courier, "_exchange", None)
+    if exchange is None or not authority_npub:
+        return
+
+    message = (
+        "⚡ DPYC Authority notice\n\n"
+        f"A patron just tried to buy credits from your Operator "
+        f"\"{operator_label}\", but certification was refused: your Authority's "
+        "own credit balance is empty, so it cannot certify new credit "
+        "purchases for resale.\n\n"
+        f"Patrons of {operator_label} cannot top off until you refill. "
+        "Please purchase_credits on your Authority to resume certifying.\n\n"
+        "(You will get at most one reminder per ~10 minutes while this lasts.)"
+    )
+
+    def _run() -> None:
+        try:
+            if exchange.has_recent_tagged_dm(
+                authority_npub, _AUTHORITY_DUNNING_TAG, within_seconds=600,
+            ):
+                return  # an equivalent reminder is still queued on the relay
+            exchange.send_dm(
+                authority_npub,
+                message,
+                extra_tags=[["t", _AUTHORITY_DUNNING_TAG]],
+            )
+        except Exception:
+            logger.debug(
+                "authority low-cert dunning DM failed (courtesy, non-blocking)",
+                exc_info=True,
+            )
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def register_standard_tools(
     mcp: Any,
     slug: str,
@@ -2472,14 +2530,62 @@ def register_standard_tools(
                 return {"success": False, "error": str(e)}
 
         # Certified mode: obtain Authority certificate first.
+        from tollbooth.authority_client import (
+            AuthorityCertifier,
+            AuthorityCertifyError,
+        )
+        from tollbooth.registry import resolve_authority_service
+        from tollbooth.constants import ErrorCode
+        auth_info: dict[str, Any] = {}
         try:
-            from tollbooth.authority_client import AuthorityCertifier
-            from tollbooth.registry import resolve_authority_service
             auth_info = await resolve_authority_service(rt.operator_npub())
             cert_result = await AuthorityCertifier(
                 auth_info["url"], rt.operator_npub(), rt._get_nsec(),
             ).certify_credits(amount_sats)
             certificate = cert_result.get("certificate", "")
+        except AuthorityCertifyError as e:
+            # An Authority that is itself out of certification credits is the
+            # Operator's supply problem, not the patron's. Surface a kind
+            # "be patient" situation and dun the Authority out of band rather
+            # than leaking the raw "Insufficient balance: 0 sats ..." string.
+            # Prefer the Authority's structured error_code; fall back to the
+            # message text for older Authorities that don't propagate it.
+            authority_broke = (
+                getattr(e, "error_code", "") == ErrorCode.INSUFFICIENT_BALANCE
+                or "insufficient balance" in str(e).lower()
+            )
+            if authority_broke:
+                authority_name = auth_info.get("name") or "for this service"
+                authority_npub = auth_info.get("npub", "")
+                if authority_npub:
+                    try:
+                        _dun_authority_low_certs(
+                            await rt.courier(),
+                            authority_npub,
+                            service_name or slug,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "could not dispatch authority dunning DM",
+                            exc_info=True,
+                        )
+                return {
+                    "success": False,
+                    "error_code": ErrorCode.AUTHORITY_INSUFFICIENT_BALANCE,
+                    "error": (
+                        f"The DPYC Authority {authority_name} is out of credits "
+                        "to certify new credit purchases for resale by this "
+                        "Operator. The Authority has been notified that it needs "
+                        "to purchase more credits. Please be patient and try "
+                        "again soon."
+                    ),
+                    "next_steps": [
+                        "Wait a few minutes, then retry purchase_credits — the "
+                        "Authority needs to refill its certification balance.",
+                    ],
+                    "authority_npub": authority_npub,
+                }
+            return {"success": False, "error": f"Authority certification failed: {e}"}
         except Exception as e:
             return {"success": False, "error": f"Authority certification failed: {e}"}
 
