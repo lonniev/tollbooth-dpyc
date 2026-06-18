@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.46.1 — 2026-06-18
+
+### Fixed
+
+- **`unregister_dynamic_tool` uses the current FastMCP tool-removal API.** Prefers `mcp.local_provider.remove_tool` (FastMCP 3.x) and falls back to the top-level `remove_tool` on older versions, so retiring a synthesized tool no longer trips a deprecation warning.
+
 ## 0.46.0 — 2026-06-18
 
 ### Added — runtime tool synthesis (operator-defined dynamic tools)

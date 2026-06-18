@@ -2302,8 +2302,16 @@ class OperatorRuntime:
 
         tool_name = self.mcp_name_for(tool_id)
         if self._mcp is not None:
+            # Prefer the current FastMCP API (mcp.local_provider.remove_tool);
+            # fall back to the top-level remove_tool on older versions. The
+            # wheel duck-types the app, so neither path is assumed present.
+            provider = getattr(self._mcp, "local_provider", None)
+            remover = getattr(provider, "remove_tool", None) or getattr(
+                self._mcp, "remove_tool", None
+            )
             try:
-                self._mcp.remove_tool(tool_name)
+                if remover is not None:
+                    remover(tool_name)
             except Exception:
                 logger.debug("remove_tool(%s) failed", tool_name, exc_info=True)
         self._tool_registry.pop(tool_id, None)
