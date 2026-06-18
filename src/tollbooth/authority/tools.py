@@ -115,6 +115,8 @@ LIST_ADOPTION_REQUESTS_UUID   = "d68a9b0b-dae6-5095-8d9a-1ed6f0b96edc"
 APPROVE_ADOPTION_UUID         = "104c741c-4647-5e8c-bd6d-3ba49ea44be7"
 REJECT_ADOPTION_UUID          = "7dbcfa85-f776-5306-a6dc-9032f1dcb9b3"
 GET_ADOPTION_STATUS_UUID      = "45c1b7b4-93ac-52e3-ad5a-8fac1b05fad1"
+# Tenant-schema ownership repair (owner consent)
+REPAIR_OPERATOR_SCHEMA_UUID   = "b626ee48-dcd7-5ef2-93dd-0be12364acbb"
 
 
 AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
@@ -212,6 +214,12 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         capability="get_adoption_status",
         category="free",
         intent="Read the status of an operator's adoption request.",
+    ),
+    ToolIdentity(
+        tool_id=REPAIR_OPERATOR_SCHEMA_UUID,
+        capability="repair_operator_schema",
+        category="restricted",
+        intent="Owner repair: reassign all table ownership in an operator's tenant schema to its own role.",
     ),
 ]
 
@@ -1291,6 +1299,59 @@ def register_authority_tools(
             "status": adoption_store.REJECTED,
             "operator_npub": operator_npub,
             "reason": reason,
+        }
+
+    @tool
+    async def repair_operator_schema(
+        operator_npub: Annotated[
+            str,
+            Field(description="The operator npub whose tenant-schema ownership to repair."),
+        ] = "",
+        authority_proof: Annotated[
+            str,
+            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
+        ] = "",
+    ) -> dict[str, Any]:
+        """Owner repair: reassign every table in an operator's tenant schema to
+        the operator's own role, then re-grant DML.
+
+        For tenants whose tables were created/owned by the provisioning role —
+        the operator role then cannot CREATE INDEX on them ("must be owner"),
+        which aborts the whole vault bootstrap. Unlike register_operator this
+        does NOT rotate the operator's DB password or re-send the bootstrap DM;
+        it only fixes ownership + grants in place. Idempotent.
+        """
+        err = await _require_authority_consent(
+            runtime, authority_proof, runtime.runtime_name("repair_operator_schema"),
+        )
+        if err:
+            return err
+        if not operator_npub.startswith("npub1"):
+            return {"success": False, "error": "operator_npub must be a valid npub1..."}
+        try:
+            from tollbooth.authority.tenant_provisioner import (
+                schema_name_for_npub,
+                transfer_schema_ownership,
+                restore_operator_grants,
+            )
+            vault = await runtime.vault()
+            schema = schema_name_for_npub(operator_npub)
+            # Ensure the Authority role can reassign ownership to the operator
+            # role (membership may pre-date this repair); harmless if present.
+            await vault._execute(f'GRANT "{schema}" TO CURRENT_USER')
+            await transfer_schema_ownership(vault, schema)
+            await restore_operator_grants(vault, schema)
+        except Exception as exc:
+            return {"success": False, "error": f"Schema repair failed: {exc}"}
+        return {
+            "success": True,
+            "operator_npub": operator_npub,
+            "schema": schema,
+            "message": (
+                "Reassigned all table ownership in the operator's schema to its "
+                "own role and re-granted DML. The operator bootstraps cleanly on "
+                "its next call — no password change, no re-bootstrap."
+            ),
         }
 
     @tool

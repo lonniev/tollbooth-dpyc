@@ -151,3 +151,44 @@ async def test_store_operator_config_upserts():
     sql, params = vault._execute.await_args.args[0], vault._execute.await_args.args[1]
     assert "ON CONFLICT (npub, key)" in sql
     assert params == ["npub", "schema", "op_abc"]
+
+
+@pytest.mark.asyncio
+async def test_transfer_schema_ownership_reassigns_every_enumerated_table():
+    # Regression: ownership transfer must enumerate the schema's tables, not a
+    # static list. The old list never gained `coupons` (added in 0.41.0), so
+    # the operator role couldn't CREATE INDEX on it and the vault bootstrap
+    # died with "must be owner". Enumeration reassigns every table.
+    executed: list[str] = []
+
+    class FakeVault:
+        async def _execute(self, sql, params=None):
+            executed.append(sql)
+            if "pg_tables" in sql:
+                return {"rows": [{"tablename": t} for t in
+                                 ("balances", "coupons", "patron_coupons", "async_jobs")]}
+            return {"rows": []}
+
+    await tp.transfer_schema_ownership(FakeVault(), "op_abc1234567890ab")
+
+    assert any('ALTER SCHEMA "op_abc1234567890ab" OWNER TO "op_abc1234567890ab"' in s for s in executed)
+    for t in ("balances", "coupons", "patron_coupons", "async_jobs"):
+        assert any(
+            f'ALTER TABLE "op_abc1234567890ab"."{t}" OWNER TO "op_abc1234567890ab"' in s
+            for s in executed
+        ), f"ownership not reassigned for {t}"
+
+
+@pytest.mark.asyncio
+async def test_transfer_schema_ownership_skips_unsafe_table_identifier():
+    executed: list[str] = []
+
+    class FakeVault:
+        async def _execute(self, sql, params=None):
+            executed.append(sql)
+            if "pg_tables" in sql:
+                return {"rows": [{"tablename": 'evil"; DROP TABLE x; --'}]}
+            return {"rows": []}
+
+    await tp.transfer_schema_ownership(FakeVault(), "op_safe")
+    assert not any("ALTER TABLE" in s for s in executed)

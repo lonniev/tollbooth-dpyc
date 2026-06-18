@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.45.4 — 2026-06-17
+
+### Fixed — tenant schema ownership no longer lags new tables
+
+- **`transfer_schema_ownership` now reassigns *every* table in an operator's schema, not a hand-maintained list.** The static `_PROVISIONER_TABLES` never gained `coupons` (added 0.41.0), so on tenants where that table was created by the provisioning role it stayed admin-owned — the operator role then couldn't `CREATE INDEX` on it ("must be owner of table coupons"), which aborts the entire vault bootstrap and strands the operator in `warming_up` with no paid tools. Ownership transfer now enumerates `pg_tables`, covering every table now and as the schema grows (unsafe identifiers are skipped). Removed the stale `_PROVISIONER_TABLES` constant.
+
+### Added — owner-side tenant repair
+
+- **New restricted Authority tool `repair_operator_schema(operator_npub, authority_proof)`** — reassigns all table ownership in an operator's tenant schema to its own role and re-grants DML, in place. Unlike `register_operator` it does not rotate the operator's DB password or re-send the bootstrap DM, so it repairs a mis-owned tenant (the failure above) without disrupting a working one. Idempotent.
+
 ## 0.45.3 — 2026-06-17
 
 ### Changed — caller-facing errors survive refund-on-raise

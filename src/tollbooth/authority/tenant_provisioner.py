@@ -75,12 +75,6 @@ def neon_url_for_operator(base_url: str, schema: str, password: str) -> str:
 
 # -- Per-operator Postgres role management ------------------------------------
 
-_PROVISIONER_TABLES = (
-    "balances", "transactions", "anchors", "tool_demand",
-    "operator_pricing_models", "credentials", "session_bindings",
-)
-
-
 _SAFE_IDENTIFIER = re.compile(r"^[a-z0-9_]+$")
 _SAFE_PASSWORD = re.compile(r"^[A-Za-z0-9_\-]+$")
 
@@ -131,19 +125,38 @@ async def create_operator_role(vault: Any, schema: str, password: str) -> None:
 
 
 async def transfer_schema_ownership(vault: Any, schema: str) -> None:
-    """Transfer schema and table ownership to the operator role."""
+    """Transfer schema and ALL table ownership to the operator role.
+
+    Enumerates the schema's tables rather than a hand-maintained list. The old
+    static list silently lagged new tables — ``coupons`` (added in 0.41.0) was
+    never added — leaving them owned by the provisioning role. The operator
+    role then could not ``CREATE INDEX`` on them (must-be-owner), which aborts
+    the whole vault bootstrap. Enumeration covers every table now and as the
+    schema grows. Idempotent: a table already owned by the operator role (or
+    not owned by the connecting role) is skipped.
+    """
     await vault._execute(f'ALTER SCHEMA "{schema}" OWNER TO "{schema}"')
-    for table in _PROVISIONER_TABLES:
+    try:
+        result = await vault._execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = $1", [schema]
+        )
+    except Exception:
+        logger.debug("Could not enumerate tables for %s", schema, exc_info=True)
+        return
+    for row in (result.get("rows") or []):
+        table = row["tablename"] if isinstance(row, dict) else row[0]
+        if not _SAFE_IDENTIFIER.match(table):
+            logger.warning("Skipping unsafe table identifier %r in %s", table, schema)
+            continue
         try:
             await vault._execute(
-                f'ALTER TABLE "{schema}".{table} OWNER TO "{schema}"'
+                f'ALTER TABLE "{schema}"."{table}" OWNER TO "{schema}"'
             )
         except Exception:
-            # Table may not exist if the operator never fully initialized —
-            # expected during partial provisioning, but log for visibility.
+            # Already operator-owned (or not owned by the connecting role) —
+            # fine to skip.
             logger.debug(
-                "ALTER TABLE OWNER skipped for %s.%s (table may not exist)",
-                schema, table, exc_info=True,
+                "ALTER TABLE OWNER skipped for %s.%s", schema, table, exc_info=True,
             )
 
 
