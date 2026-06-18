@@ -453,7 +453,7 @@ Per-tool opt-in: only tool handlers that hit x402 upstreams use the client. Requ
 
 ## Identity & Proofs
 
-Every participant is identified by a [Nostr](https://nostr.com/) keypair. The `npub` is your identity on the DPYC Honor Chain. The `nsec` stays with you — never shared, never sent to a service.
+Every participant is identified by a [Nostr](https://nostr.com/) keypair. The `npub` is your identity in the DPYC Social Contract. The `nsec` stays with you — never shared, never sent to a service.
 
 Every tool that accepts `npub` also requires `proof` — a JSON-serialized Schnorr-signed kind-27235 Nostr event proving ownership. No proof, no service.
 
@@ -507,7 +507,12 @@ Dependency flows one way: `your-mcp-server --> tollbooth-dpyc`. Authority is a n
 | [thebrain-mcp](https://github.com/lonniev/thebrain-mcp) | Production operator — PersonalBrain knowledge graph |
 | [excalibur-mcp](https://github.com/lonniev/excalibur-mcp) | Production operator — social media posting |
 | [schwab-mcp](https://github.com/lonniev/schwab-mcp) | Production operator — brokerage data with OAuth2 |
+| [cypher-mcp](https://github.com/lonniev/cypher-mcp) | Production operator — monetized graph answers via named Cypher templates over Neo4j/AuraDB |
+| [taxsort-mcp](https://github.com/lonniev/taxsort-mcp) | Production operator — tax sorting + classification with Cloudflare Pages UI |
+| [optionality-mcp](https://github.com/lonniev/optionality-mcp) | Production operator — options analytics |
+| [tollbooth-shortlinks](https://github.com/lonniev/tollbooth-shortlinks) | Community utility — URL shortener |
 | [tollbooth-oauth2-collector](https://github.com/lonniev/tollbooth-oauth2-collector) | Community utility — OAuth2 callback mailbox |
+| [tollbooth-pricing-studio](https://github.com/lonniev/tollbooth-pricing-studio) | iOS pricing editor — Nostr DMs, native crypto |
 
 ---
 

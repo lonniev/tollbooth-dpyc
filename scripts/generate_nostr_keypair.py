@@ -2,7 +2,7 @@
 """Generate a Nostr keypair for DPYC identity.
 
 Outputs an npub (public key) and nsec (private key) in bech32 format.
-The npub is used as your identity in the DPYC Honor Chain:
+The npub is used as your identity in the DPYC Social Contract:
 
   - Operators set DPYC_OPERATOR_NPUB in their .env
   - Authorities set DPYC_AUTHORITY_NPUB in their .env
