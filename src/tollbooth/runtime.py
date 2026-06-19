@@ -3816,9 +3816,39 @@ def register_standard_tools(
                 return {"success": False, "error": "tool_kwargs must be valid JSON."}
 
         resolver = await rt.pricing_resolver()
-        pricing = await resolver.get_tool_pricing(tool_id)
 
         name = rt.mcp_name_for(tool_id)
+
+        # Mirror debit_or_deny._resolve_pricing: a non-free tool absent from
+        # (or unpriced in) the loaded model is NOT previewable as flat/0 — the
+        # real call would be denied with tool_not_priced, so check_price must
+        # report the same rather than a misleading 0. Only gate when Neon is
+        # available; during warm-up we fall through to a best-effort preview.
+        if identity.category not in ("free", "restricted"):
+            from tollbooth.constants import ErrorCode
+
+            await resolver._ensure_fresh()
+            if resolver.neon_available:
+                if not await resolver.has_tool(tool_id):
+                    return {
+                        "success": False,
+                        "error_code": ErrorCode.TOOL_NOT_PRICED,
+                        "error": (
+                            f"Tool '{name}' is not yet in the pricing model. "
+                            f"Add it to the pricing model before use."
+                        ),
+                    }
+                if not await resolver.is_priced(tool_id):
+                    return {
+                        "success": False,
+                        "error_code": ErrorCode.TOOL_NOT_PRICED,
+                        "error": (
+                            f"Tool '{name}' has not been priced yet (TBD). "
+                            f"Set a price in the pricing model before use."
+                        ),
+                    }
+
+        pricing = await resolver.get_tool_pricing(tool_id)
         from tollbooth.tools.pricing import (
             apply_constraint_preview,
             build_pricing_preview,

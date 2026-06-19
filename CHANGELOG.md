@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.48.1 — 2026-06-19
+
+### Fixed — check_price no longer falsely previews unpriced tools as flat/0
+
+- **`check_price` now agrees with `debit_or_deny`.** A non-free tool that is
+  absent from (or unpriced/TBD in) the active pricing model used to preview as
+  `pricing_type: flat, effective_cost_api_sats: 0, success: true` — while the
+  real paid call denied it with `tool_not_priced`. `check_price` resolved the
+  UUID from the tool registry and returned a 0 default without consulting the
+  model. It now mirrors `_resolve_pricing`'s `has_tool`/`is_priced` gate (when
+  Neon is available) and returns `error_code: tool_not_priced` for such tools.
+  Surfaced while verifying newly-deployed (registry-present, model-absent) tools.
+
 ## 0.48.0 — 2026-06-19
 
 ### Changed — npub proof delegation cap raised 7 → 30 days
