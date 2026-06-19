@@ -5,7 +5,12 @@ import time
 
 import pytest
 
-from tollbooth.proven_npub import ProvenNpub, ProvenNpubCache
+from tollbooth.proven_npub import (
+    MAX_PROVEN_TTL,
+    ProvenNpub,
+    ProvenNpubCache,
+    parse_duration,
+)
 
 
 VALID_NPUB = "npub1l94pd4qu4eszrl6ek032ftcnsu3tt9a7xvq2zp7eaxeklp6mrpzssmq8pf"
@@ -130,3 +135,37 @@ async def test_proof_status_expired_does_not_evict():
     assert info["expires_in_seconds"] == 0
     # Record must still be in the cache — proof_status is read-only
     assert cache._cache._entries.get(key) is not None
+
+
+# ---------------------------------------------------------------------------
+# Delegation cap — patrons may choose their own duration up to 30 days.
+# ---------------------------------------------------------------------------
+
+
+def test_cap_is_thirty_days():
+    assert MAX_PROVEN_TTL == 2592000
+
+
+def test_parse_duration_honors_thirty_days():
+    """A 30-day delegation sits exactly at the cap and is honored verbatim."""
+    assert parse_duration("30 days") == MAX_PROVEN_TTL
+
+
+def test_parse_duration_clamps_above_cap():
+    """Durations beyond the cap clamp down rather than erroring."""
+    assert parse_duration("60 days") == MAX_PROVEN_TTL
+    assert parse_duration("10 weeks") == MAX_PROVEN_TTL
+
+
+def test_parse_duration_under_cap_unchanged():
+    """A sub-cap duration (e.g. a multi-day editorial session) is exact."""
+    assert parse_duration("7 days") == 7 * 86400
+
+
+@pytest.mark.asyncio
+async def test_mark_proven_clamps_ttl_override_to_cap():
+    cache = ProvenNpubCache(ttl_seconds=3600)
+    before = time.time()
+    record = await cache.mark_proven(HASH_A, VALID_NPUB, ttl_override=MAX_PROVEN_TTL * 5)
+    # Clamped: expiry lands at ~now + cap, not now + 5×cap.
+    assert record.expires_at - before == pytest.approx(MAX_PROVEN_TTL, abs=5)

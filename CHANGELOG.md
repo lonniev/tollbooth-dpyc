@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.48.0 — 2026-06-19
+
+### Changed — npub proof delegation cap raised 7 → 30 days
+
+- **`MAX_PROVEN_TTL` is now 30 days (was 7).** Patrons already choose their own
+  proof-delegation duration via `request_npub_proof` (`parse_duration` accepts
+  e.g. `"30 days"`, `"4 weeks"`); only the hard cap moved. Durations above the cap
+  still clamp down rather than erroring. This supports long-lived editorial
+  sessions and unattended automation (e.g. a scheduler that holds an operator
+  proof_token and cannot re-prove interactively). No API or call-site change.
+
 ## 0.47.0 — 2026-06-18
 
 ### Changed — kind treatment when an Authority is out of certification credits
