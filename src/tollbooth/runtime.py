@@ -3768,6 +3768,49 @@ def register_standard_tools(
             rt._tool_registry, rt.mcp_name_for, rt.operator_npub(),
         )
 
+    # -- Nostr profile (kind-0) tools ----------------------------------
+    # Self-sovereign patron profiles. The wheel READS any npub's public kind-0
+    # and RELAYS a client-signed kind-0 (verifying pubkey+signature) — it never
+    # holds a patron nsec. Frontends call these instead of doing relay I/O.
+
+    @tool
+    async def get_nostr_profile(npub: str = "") -> dict[str, Any]:
+        """Read an npub's public Nostr profile (NIP-01 kind-0 metadata).
+
+        Free, no proof — the data is already public on relays. Returns the
+        latest metadata fields (name, display_name, about, picture, banner,
+        nip05, website, lud16) or an empty profile if none is published.
+        """
+        if not npub:
+            return {"success": False, "error": "npub is required."}
+        from tollbooth.nostr_profile import fetch_profile
+        prof = await asyncio.to_thread(fetch_profile, npub, None)
+        return {"success": True, "npub": npub, "profile": prof or {}}
+
+    @tool
+    async def publish_nostr_profile(npub: str = "", signed_event: str = "") -> dict[str, Any]:
+        """Publish a CLIENT-SIGNED kind-0 profile to relays for an npub.
+
+        The wheel never holds a patron nsec. The frontend signs the kind-0
+        metadata event with the patron's session key or a NIP-07 extension and
+        passes the signed event (JSON) here; the wheel verifies the signature
+        matches the npub, then relays it to public relays. The signature is the
+        authorization — no proof token, no key custody. Free.
+
+        Args:
+            npub: The patron's Nostr public key the event must be signed by.
+            signed_event: A JSON-encoded, client-signed kind-0 event.
+        """
+        if not npub:
+            return {"success": False, "error": "npub is required."}
+        if not signed_event:
+            return {
+                "success": False,
+                "error": "signed_event is required — a client-signed kind-0 event (JSON).",
+            }
+        from tollbooth.nostr_profile import publish_profile_event
+        return await asyncio.to_thread(publish_profile_event, signed_event, npub, None)
+
     # -- Constraint Engine tools ---------------------------------------
 
     @tool

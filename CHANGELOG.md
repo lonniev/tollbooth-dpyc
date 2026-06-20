@@ -3,6 +3,28 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.51.0 — 2026-06-20
+
+### Added — Nostr kind-0 profile tools (self-sovereign patron profiles, no key custody)
+
+- **Two new free standard tools so every operator can serve patron profiles**
+  (and every frontend/agent reads/writes them via the backend instead of doing
+  relay I/O itself):
+  - **`get_nostr_profile(npub)`** — reads an npub's latest public kind-0
+    metadata (name, display_name, about, picture, banner, nip05, website,
+    lud16) across a broad relay set. Free, no proof — the data is already
+    public on relays.
+  - **`publish_nostr_profile(npub, signed_event)`** — relays a **client-signed**
+    kind-0 to relays after verifying `kind == 0`, `pubkey == npub`, and a valid
+    Schnorr signature. **The wheel never holds a patron nsec** — the frontend
+    signs (session key or NIP-07) and the wheel only fans the signed event out.
+    The signature is the authorization; no proof token, no escrow.
+- New module `tollbooth/nostr_profile.py` (`fetch_profile` / `publish_profile_event`),
+  self-contained raw-websocket relay I/O mirroring `bootstrap_relay.py`.
+- Rationale: kind-0 is public + self-signed, so it rightly lives on relays, not
+  the operator vault. Operator secrets stay in the vault via Secure Courier;
+  profiles are public and key-owned. We do NOT ask patrons for nsecs.
+
 ## 0.50.0 — 2026-06-20
 
 ### Changed — operator credential delivery is now merge-on-receive (single-secret deliveries)
