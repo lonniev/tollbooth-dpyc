@@ -7,8 +7,9 @@ The bootstrap sequence:
 4. Extract Neon URL from the encrypted config
 5. Connect to Neon with encryption
 
-The Authority sends the bootstrap config as a NIP-04 encrypted DM
-at registration time. The operator reads it on cold start — no OAuth,
+The Authority publishes the bootstrap config as a NIP-33 parameterized-
+replaceable event (kind 30078) at registration time; relays keep the latest,
+so it does not age off. The operator reads it on cold start — no OAuth,
 no MCP-to-MCP calls, no additional env vars beyond the nsec.
 """
 

@@ -3,6 +3,29 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.49.0 — 2026-06-19
+
+### Changed — operator bootstrap config is now a NIP-33 replaceable event (durability)
+
+- **The Authority publishes each operator's bootstrap config as a NIP-33
+  parameterized-replaceable event (kind 30078, NIP-78 app data) instead of a
+  kind-4 DM.** Relays keep only the latest replaceable per (Authority, kind,
+  per-operator `d` tag), so the config no longer ages off the way a stream of
+  kind-4 DMs does — which is what left operators unable to cold-start bootstrap
+  ("No bootstrap config on relays"). Content stays NIP-04-encrypted; discovery
+  still needs only the operator's nsec (resolve Authority from the registry →
+  read the Authority's replaceable event scoped by the operator's `d` tag). The
+  age (`since`) window is gone — a stable replaceable is the current config no
+  matter how old. `receive_bootstrap_config` dropped its unused `max_age_seconds`
+  parameter.
+- ⚠️ **Cold switchover — no transition code.** Operators on this wheel read only
+  kind-30078; existing configs were published as kind-4. After every Authority
+  is on ≥0.49.0, the Prime Authority must re-run `get_operator_config` (or
+  `register_operator`) once per operator to re-publish each config as the
+  replaceable event. Until then those operators bootstrap-fail by design. No
+  data is at risk — relays only ever carried the config pointer, never the Neon
+  tables.
+
 ## 0.48.1 — 2026-06-19
 
 ### Fixed — check_price no longer falsely previews unpriced tools as flat/0

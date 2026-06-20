@@ -1,8 +1,12 @@
 """Bootstrap config delivery and retrieval via Nostr relays.
 
-The Authority sends the operator's Neon URL as a NIP-44 encrypted DM
-at registration time. The operator reads it on cold start using only
-its nsec — no OAuth, no MCP-to-MCP calls, no additional env vars.
+The Authority publishes the operator's Neon URL as a NIP-33 parameterized-
+replaceable event (kind 30078, NIP-04-encrypted content), scoped by a
+per-operator ``d`` tag. Because relays keep only the latest replaceable per
+(author, kind, ``d``), the config does NOT age off the way a stream of kind-4
+DMs does — there is no heartbeat and no re-publish schedule to maintain. The
+operator reads it on cold start using only its nsec — no OAuth, no MCP-to-MCP
+calls, no additional env vars.
 
 Send side (Authority):
     send_bootstrap_config(
@@ -40,6 +44,16 @@ BOOTSTRAP_RELAYS = [
 ]
 
 
+def _config_d_tag(op_pubkey_hex: str) -> str:
+    """The NIP-33 ``d`` tag scoping the Authority's config for one operator.
+
+    Parameterized-replaceable identity is (author, kind, d); namespacing the
+    ``d`` by operator pubkey gives the Authority exactly one replaceable config
+    event per operator — re-publishing replaces it in place.
+    """
+    return f"{BOOTSTRAP_CONFIG_TAG}:{op_pubkey_hex}"
+
+
 def send_bootstrap_config(
     *,
     authority_nsec: str,
@@ -47,13 +61,14 @@ def send_bootstrap_config(
     config: dict[str, str],
     relays: list[str] | None = None,
 ) -> bool:
-    """Send bootstrap config to an operator via NIP-04 encrypted DM.
+    """Publish bootstrap config for an operator as a NIP-33 replaceable event.
 
-    Called by the Authority after provisioning a Neon schema.
-    The config is encrypted so only the operator can read it.
-
-    Uses NIP-04 (simpler, widely supported) rather than NIP-44/NIP-17
-    because this is infrastructure config, not a secret credential.
+    Called by the Authority after provisioning a Neon schema. The config is
+    published as a NIP-78 application-data event (kind 30078), which is a NIP-33
+    parameterized-replaceable event: relays keep only the latest per
+    (Authority, kind, ``d``-tag), so it does NOT age off the way a stream of
+    kind-4 DMs does. Content is NIP-04-encrypted so only the operator can read
+    it (infrastructure config, not a personal credential).
 
     Returns True if published to at least one relay.
     """
@@ -89,13 +104,15 @@ def send_bootstrap_config(
         plaintext=payload,
     )
 
-    # Build NIP-04 DM event (kind 4)
+    # Build NIP-33 parameterized-replaceable event (kind 30078, NIP-78 app data).
+    # The `d` tag scopes one replaceable config per operator; `p` lets the
+    # operator also be located as recipient.
     event = Event(
         pubkey=auth_pk.public_key.hex(),
-        kind=4,
+        kind=30078,
         content=ciphertext,
         created_at=int(time.time()),
-        tags=[["p", op_pubkey_hex]],
+        tags=[["d", _config_d_tag(op_pubkey_hex)], ["p", op_pubkey_hex]],
     )
     event.sign(auth_pk.hex())
 
@@ -143,13 +160,14 @@ def receive_bootstrap_config(
     operator_nsec: str,
     authority_pubkey_hex: str,
     relays: list[str] | None = None,
-    max_age_seconds: int = 365 * 24 * 3600,  # 1 year
 ) -> tuple[dict[str, str] | None, str]:
     """Read bootstrap config from Nostr relays.
 
-    Called by the operator on cold start. Polls relays for NIP-04
-    encrypted DMs from the Authority, decrypts, and returns the
-    config dict.
+    Called by the operator on cold start. Polls relays for the Authority's
+    NIP-33 parameterized-replaceable config event (kind 30078, scoped by the
+    per-operator ``d`` tag), decrypts the NIP-04 content, and returns the config
+    dict. No age window: a replaceable event is the current config regardless of
+    how long ago it was published.
 
     Returns the config dict or None if not found.
     """
@@ -176,14 +194,13 @@ def receive_bootstrap_config(
                      op_privkey_hex[:8], authority_pubkey_hex[:8], e)
         return None, f"key hex error: {e}"
 
-    since = int(time.time()) - max_age_seconds
-
-    # Build subscription filter: NIP-04 DMs (kind 4) from authority to operator
+    # Build subscription filter: the Authority's NIP-33 replaceable config event
+    # (kind 30078) scoped to this operator's `d` tag. No `since` — a replaceable
+    # is the current config however old it is.
     sub_filter = {
-        "kinds": [4],
+        "kinds": [30078],
         "authors": [authority_pubkey_hex],
-        "#p": [op_pubkey_hex],
-        "since": since,
+        "#d": [_config_d_tag(op_pubkey_hex)],
     }
 
     import websocket  # type: ignore[import-untyped]
@@ -234,10 +251,10 @@ def receive_bootstrap_config(
             ws.close()
 
             # No early break: poll EVERY relay and let the newest ``ts``
-            # win. Relays purge kind-4 events on different schedules, so
-            # the first relay to answer may hold a stale config — and a
-            # stale config carries a rotated-away role password, which
-            # fails worse than no config at all.
+            # win. Re-published replaceable events propagate unevenly, so one
+            # relay may still serve an older revision — and a stale config can
+            # carry a rotated-away role password, which fails worse than no
+            # config at all. Newest-wins across all relays guards that.
 
         except Exception as exc:
             relay_errors.append(f"{relay_url}: {exc}")
