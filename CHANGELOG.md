@@ -3,6 +3,29 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.50.0 — 2026-06-20
+
+### Changed — operator credential delivery is now merge-on-receive (single-secret deliveries)
+
+- **`receive_credentials` merges the delivered fields into the existing vault
+  blob instead of replacing it**, and accepts a *partial* delivery. An operator
+  can now open a Secure Courier channel and reply with just **one** secret
+  (e.g. a later `anthropic_api_key`) without re-sending — or clobbering — the
+  rest (`nostr_credentials.py` `receive()`: load existing → overlay delivered →
+  store merged).
+- **`validate_payload` gained `partial=True`** — skips the "missing required
+  fields" rejection while still enforcing field shape (type, non-empty if
+  present) and dropping unknown fields. Used by the merge path.
+- **Completeness is enforced by the readiness gate, not per-delivery.**
+  `session_status` / `get_operator_onboarding_status` already check the merged
+  vault has every required field; an incomplete interim state simply stays
+  `warming_up`. The operator-credential validator now runs **only when the
+  merged set is complete**, so a partial delivery is never flagged "missing X"
+  and wiped.
+- `receive_credentials` response now reports `stored_fields`,
+  `still_missing_required`, and `optional_missing` so callers (and Studio) can
+  show what's left. Re-sending the full batch behaves exactly as before.
+
 ## 0.49.0 — 2026-06-19
 
 ### Changed — operator bootstrap config is now a NIP-33 replaceable event (durability)

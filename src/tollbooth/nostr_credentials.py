@@ -1363,33 +1363,65 @@ class NostrCredentialExchange:
         payload.pop("poison", None)
         template = self._match_template(resolved_service, payload)
 
+        # Merge-on-receive: a reply may carry a SUBSET of the template's fields
+        # (e.g. one operator secret delivered later). Validate only the shape of
+        # what arrived (partial=True) and merge it into any previously-stored
+        # credentials instead of replacing the blob — a partial delivery must
+        # never clobber fields it didn't carry, nor be rejected for fields it
+        # omitted. Completeness ("all required present") is enforced by the
+        # readiness gate over the merged vault, not here.
         try:
-            validated = validate_payload(payload, template)
+            delivered = validate_payload(payload, template, partial=True)
         except TemplateValidationError as exc:
             self._send_error_dm(sender_npub, template)
             raise CourierValidationError(str(exc)) from exc
 
-        # Store in vault for next session, honestly report outcome.
+        if not delivered:
+            self._send_error_dm(sender_npub, template)
+            raise CourierValidationError(
+                "No known credential fields found in the reply. Expected one or "
+                f"more of: {', '.join(template.fields.keys())}."
+            )
+
+        existing: dict[str, str] = {}
+        if self._credential_vault is not None:
+            existing = await self._vault_fetch(template.service, sender_npub) or {}
+        merged = {**existing, **delivered}
+
+        # Store the MERGED blob, honestly report outcome.
         persisted = True
         if self._credential_vault is not None:
-            persisted = await self._vault_store(template.service, sender_npub, validated)
+            persisted = await self._vault_store(template.service, sender_npub, merged)
 
         # ACK only if persistence actually worked — telling the patron "got it"
         # when the vault write failed is the root of the lag-and-confusion bugs.
         if persisted:
             self._send_success_dm(sender_npub, target_relay=pinned)
 
+        # Completeness report over the merged result (readiness is the real gate).
+        required_fields = [n for n, s in template.fields.items() if s.required]
+        still_missing_required = [
+            n for n in required_fields if not str(merged.get(n, "")).strip()
+        ]
+        optional_missing = [
+            n for n, s in template.fields.items()
+            if not s.required and not str(merged.get(n, "")).strip()
+        ]
+
         sensitive_count = sum(
-            1 for name in validated if template.fields.get(name, FieldSpec()).sensitive
+            1 for name in delivered if template.fields.get(name, FieldSpec()).sensitive
         )
 
         return {
             "success": persisted or self._credential_vault is None,
             "service": template.service,
-            "fields_received": len(validated),
+            "fields_received": len(delivered),
             "sensitive_fields": sensitive_count,
             "encryption": dm.get("encryption", "unknown"),
-            "credentials": validated,
+            "credentials": delivered,
+            "stored_fields": sorted(merged.keys()),
+            "still_missing_required": still_missing_required,
+            "optional_missing": optional_missing,
             "persisted": persisted,
             "popped": popped,
             "error_code": None if persisted else "credential_vault_unavailable",
@@ -1399,14 +1431,17 @@ class NostrCredentialExchange:
                 "DM is gone from the relay; the agent must resend."
             ),
             "message": (
-                f"Credentials received for {template.service} "
-                f"({len(validated)} fields). "
-                f"Relay copy deletion requested."
+                f"Received {len(delivered)} field(s) for {template.service}."
                 + (
-                    " Credentials stored in vault for future sessions."
-                    if persisted and self._credential_vault is not None else
-                    " Vault write failed — patron must resend; retry receive_credentials in a moment."
+                    (" Merged and stored." if persisted else
+                     " Merge stored locally but the vault write failed — resend; "
+                     "retry receive_credentials in a moment.")
                     if self._credential_vault is not None else ""
+                )
+                + " Relay copy deletion requested."
+                + (
+                    f" Still needed: {', '.join(still_missing_required)}."
+                    if still_missing_required else " All required fields are now present."
                 )
             ),
         }

@@ -169,6 +169,22 @@ async def test_receive_validator_fails_rejects_and_dms():
     assert courier.sent and "api_key looks wrong" in courier.sent[0]
 
 
+@pytest.mark.asyncio
+async def test_receive_partial_skips_validator_until_complete():
+    """A partial delivery whose merged creds still lack a required field does
+    NOT run the operator validator and does NOT wipe — completeness is the
+    readiness gate's job, so an interim state can't be flagged 'missing' here."""
+    courier = FakeCourier()
+    rt = _runtime(courier, validator=lambda creds: ["api_key looks wrong"])
+    rt.load_credentials = AsyncMock(return_value={})  # nothing required present yet
+    tools = _register(rt)
+
+    r = await tools["receive_credentials"](sender_npub=SENDER, service="test-operator", poison="p")
+    assert r["success"] is True            # not rejected despite the failing validator
+    assert "validation_errors" not in r
+    courier.store_credentials.assert_not_awaited()  # nothing forgotten/wiped
+
+
 # ── forget_credentials ────────────────────────────────────────────────
 
 @pytest.mark.asyncio

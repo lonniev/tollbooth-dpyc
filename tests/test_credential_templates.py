@@ -109,6 +109,31 @@ class TestValidatePayload:
         with pytest.raises(TemplateValidationError, match="Missing required fields"):
             validate_payload(payload, tmpl)
 
+    def test_partial_allows_missing_required(self):
+        """partial=True (merge-on-receive) accepts a subset of required fields."""
+        tmpl = _x_api_template()
+        payload = {"api_key": "key1"}
+        result = validate_payload(payload, tmpl, partial=True)
+        assert result == {"api_key": "key1"}
+
+    def test_partial_single_optional_field(self):
+        """A lone optional field is accepted in partial mode."""
+        tmpl = _x_api_template()
+        result = validate_payload({"display_name": "solo"}, tmpl, partial=True)
+        assert result == {"display_name": "solo"}
+
+    def test_partial_still_rejects_empty_present_required(self):
+        """A present-but-empty required field is rejected even in partial mode."""
+        tmpl = _x_api_template()
+        with pytest.raises(TemplateValidationError, match="must not be empty"):
+            validate_payload({"api_key": "   "}, tmpl, partial=True)
+
+    def test_partial_still_drops_unknown(self):
+        """Unknown fields are dropped in partial mode too."""
+        tmpl = _x_api_template()
+        result = validate_payload({"api_key": "k", "bogus": "x"}, tmpl, partial=True)
+        assert result == {"api_key": "k"}
+
     def test_empty_required_field_rejected(self):
         """Required field with empty/whitespace value is rejected."""
         tmpl = _x_api_template()

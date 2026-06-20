@@ -485,8 +485,10 @@ class TestReceiveValidation:
         assert creds["api_secret"] == "secret"
 
     @pytest.mark.asyncio
-    async def test_missing_required_fields_rejected(self):
-        """Payload missing required fields is rejected."""
+    async def test_partial_payload_accepted_merge_on_receive(self):
+        """Merge-on-receive: a payload missing some required fields is ACCEPTED
+        (not rejected); the response reports what's still needed. Completeness
+        is the readiness gate's job, not a per-delivery rejection."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -498,14 +500,45 @@ class TestReceiveValidation:
             ex._received_events.append(event)
         _seed_channel(ex, sender.public_key.bech32())
 
-        # Poison matches → DM accepted, then template validation fails → raises
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            with pytest.raises(CourierValidationError, match="Missing required"):
-                await ex.receive(
-                    sender.public_key.bech32(), service="x", poison=_TEST_POISON,
-                )
+            result = await ex.receive(
+                sender.public_key.bech32(), service="x", poison=_TEST_POISON,
+            )
+
+        assert result["success"] is True
+        assert result["fields_received"] == 1
+        assert "api_secret" in result["still_missing_required"]
+
+    @pytest.mark.asyncio
+    async def test_partial_delivery_merges_into_existing_vault(self):
+        """A single-field delivery merges into existing vault creds without
+        clobbering the fields it didn't carry."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        vault = MockCredentialVault()
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=vault)
+        npub = sender.public_key.bech32()
+
+        # Pre-seed a complete prior credential set.
+        await ex._vault_store("x", npub, {"api_key": "old", "api_secret": "kept"})
+
+        # Deliver ONLY api_key now.
+        event = _make_nip04_event(sender, operator.public_key.hex(), {"api_key": "new"})
+        with ex._lock:
+            ex._received_events.append(event)
+        _seed_channel(ex, npub)
+
+        with patch.object(ex, "_fetch_dms_from_relays"), \
+             patch.object(ex, "send_dm"), \
+             patch.object(ex, "_request_deletion"):
+            result = await ex.receive(npub, service="x", poison=_TEST_POISON)
+
+        assert result["success"] is True
+        assert result["still_missing_required"] == []  # api_secret was preserved
+        merged = await ex._vault_fetch("x", npub)
+        assert merged == {"api_key": "new", "api_secret": "kept"}
 
 
 # ── Freshness and Replay Tests ────────────────────────────────────────

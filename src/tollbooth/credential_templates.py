@@ -43,20 +43,27 @@ class TemplateValidationError(ValueError):
 def validate_payload(
     payload: dict,
     template: CredentialTemplate,
+    partial: bool = False,
 ) -> dict[str, str]:
     """Validate a credential payload against a template.
 
     Args:
         payload: Decoded JSON dict from the Nostr DM.
         template: The operator-defined credential template.
+        partial: When True (merge-on-receive), do NOT reject the payload for
+            missing required fields — a single secret may be delivered on its
+            own and merged into previously-stored credentials. Field shape
+            (type, non-empty-if-present) is still validated, and completeness
+            ("all required present") is enforced by the readiness gate over the
+            merged vault, not per-delivery.
 
     Returns:
         Validated payload dict (only the declared fields, stripped of any
         ``service`` or ``version`` metadata keys).
 
     Raises:
-        TemplateValidationError: On missing required fields, unknown fields,
-            or type mismatches.
+        TemplateValidationError: On missing required fields (unless ``partial``),
+            or type mismatches / empty present-required values.
     """
     # Allow optional service/version metadata in the payload
     metadata_keys = {"service", "version"}
@@ -66,15 +73,16 @@ def validate_payload(
     known = set(template.fields.keys())
     payload_fields = {k: v for k, v in payload_fields.items() if k in known}
 
-    # Check required fields
-    missing = []
-    for name, spec in template.fields.items():
-        if spec.required and name not in payload_fields:
-            missing.append(name)
-    if missing:
-        raise TemplateValidationError(
-            f"Missing required fields: {', '.join(sorted(missing))}"
-        )
+    # Check required fields (skipped for partial/merge deliveries)
+    if not partial:
+        missing = []
+        for name, spec in template.fields.items():
+            if spec.required and name not in payload_fields:
+                missing.append(name)
+        if missing:
+            raise TemplateValidationError(
+                f"Missing required fields: {', '.join(sorted(missing))}"
+            )
 
     # Validate types (all values must be strings)
     for name, value in payload_fields.items():

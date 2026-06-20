@@ -111,12 +111,23 @@ async def receive_credentials_tool(
         # Validate credentials via operator callback before accepting.
         # The courier strips credentials from the result for security,
         # so reload them from the vault where they were just stored.
+        #
+        # Merge-on-receive: a partial delivery (one secret of several) leaves
+        # the merged set incomplete on purpose. Only run the operator's
+        # validator once EVERY required field is present — otherwise an
+        # incomplete-but-valid interim state would be flagged "missing X" and
+        # the freshly-stored secret wiped. Completeness/readiness is gated
+        # separately by session_status; the validator catches malformed VALUES,
+        # which is only meaningful on the complete set.
+        fields = rt._operator_credential_template.fields if rt._operator_credential_template else {}
+        required = [n for n, s in fields.items() if s.required]
         if result.get("success") and service == rt.operator_credential_service and rt._credential_validator:
             try:
-                creds = await rt.load_credentials(list(rt._operator_credential_template.fields.keys()))
+                creds = await rt.load_credentials(list(fields.keys()))
             except Exception:
                 creds = {}
-            errors = rt._credential_validator(creds)
+            complete = all(str(creds.get(n, "")).strip() for n in required)
+            errors = rt._credential_validator(creds) if complete else []
             if errors:
                 # Reject: forget the bad creds
                 try:
