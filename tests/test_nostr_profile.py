@@ -6,11 +6,16 @@ relay I/O itself (fetch_profile, the publish fan-out) is integration-only.
 """
 
 import json
+from unittest.mock import patch
 
 from pynostr.event import Event
 from pynostr.key import PrivateKey
 
-from tollbooth.nostr_profile import publish_profile_event
+from tollbooth import nostr_profile
+from tollbooth.nostr_profile import fetch_profile, publish_profile_event
+
+# A real npub so _npub_to_hex succeeds; the per-relay I/O is mocked.
+_NPUB = PrivateKey().public_key.bech32()
 
 
 def _signed_kind(sk: PrivateKey, kind: int, content: dict) -> dict:
@@ -64,3 +69,39 @@ def test_rejects_tampered_signature():
     r = publish_profile_event(ev, sk.public_key.bech32())
     assert r["success"] is False
     assert "signature is invalid" in r["error"].lower()
+
+
+# --- Parallel fetch selection (per-relay I/O mocked) ---
+
+def test_fetch_picks_newest_across_relays():
+    """The newest created_at wins regardless of which relay returns it."""
+    def fake(relay_url, sub_filter):
+        return {
+            "wss://relay.primal.net": (100, {"name": "old", "about": "stale"}),
+            "wss://nos.lol": (300, {"name": "new", "about": "fresh"}),
+            "wss://relay.damus.io": (200, {"name": "mid"}),
+            "wss://relay.nostr.band": None,  # dead relay — tolerated
+        }[relay_url]
+
+    with patch.object(nostr_profile, "_fetch_one", side_effect=fake):
+        profile = fetch_profile(_NPUB)
+    assert profile == {"name": "new", "about": "fresh"}
+
+
+def test_fetch_returns_none_when_all_relays_dead():
+    with patch.object(nostr_profile, "_fetch_one", return_value=None):
+        assert fetch_profile(_NPUB) is None
+
+
+def test_fetch_drops_unrecognized_fields():
+    def fake(relay_url, sub_filter):
+        return (100, {"name": "ok", "evil": "x", "lud16": "a@b.com"}) \
+            if relay_url == "wss://relay.primal.net" else None
+
+    with patch.object(nostr_profile, "_fetch_one", side_effect=fake):
+        profile = fetch_profile(_NPUB)
+    assert profile == {"name": "ok", "lud16": "a@b.com"}  # "evil" dropped
+
+
+def test_fetch_malformed_npub_is_none():
+    assert fetch_profile("not-an-npub") is None

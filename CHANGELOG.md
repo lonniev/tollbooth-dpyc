@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.52.1 — 2026-06-22
+
+### Fixed — Nostr profile read/publish no longer crawls relays sequentially
+
+- **`fetch_profile` and `publish_profile_event` now fan out to relays in parallel** (one thread per relay) instead of querying them one-at-a-time. Wall-clock is now bounded by the single slowest relay, not the sum across the whole set. A `get_nostr_profile`/`publish_nostr_profile` call that previously took 10–40s+ (and paid for every relay even after finding the profile) now returns in roughly one relay round-trip.
+- **Per-relay socket timeout cut from 10s to 5s** (`_TIMEOUT`), with `settimeout` applied to the read loop so a relay that connects but never sends EOSE can't hang the call. A dead or slow relay no longer holds the whole request hostage.
+- Extracted `_fetch_one` / `_publish_one` per-relay helpers (each swallows its own failures → a dead relay yields no result rather than breaking the fan-out). New unit tests pin newest-wins selection, dead-relay tolerance, and field whitelisting.
+
 ## 0.52.0 — 2026-06-22
 
 ### Changed — BREAKING: decouple `vault_source` and `purchase_mode`; add registry-derived certify-up

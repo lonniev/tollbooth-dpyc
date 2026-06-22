@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,11 @@ PROFILE_RELAYS = [
 ]
 
 _KIND_METADATA = 0
-_TIMEOUT = 10
+# Per-relay socket timeout. Relays are queried in PARALLEL (one thread each),
+# so total wall-clock is bounded by the single slowest relay (~_TIMEOUT), not
+# the sum across the set. Kept short: a profile read/publish should feel
+# instant, and a slow or dead relay must never hold the whole call hostage.
+_TIMEOUT = 5
 # Recognized kind-0 fields (NIP-01 + common extensions). Others are dropped.
 _PROFILE_FIELDS = {
     "name", "display_name", "about", "picture", "banner", "nip05", "website", "lud16",
@@ -43,11 +48,53 @@ def _npub_to_hex(npub: str) -> str:
     return PublicKey.from_npub(npub).hex()
 
 
+def _fetch_one(relay_url: str, sub_filter: dict) -> tuple[int, dict] | None:
+    """Fetch a single relay's latest kind-0 for the filter. (ts, content) or None.
+
+    Runs in its own thread; raises nothing — failures return None so a dead
+    relay never breaks the fan-out.
+    """
+    import websocket  # type: ignore[import-untyped]
+
+    best: dict | None = None
+    best_ts = -1
+    try:
+        ws = websocket.create_connection(relay_url, timeout=_TIMEOUT)
+        sub = f"prof-{int(time.time() * 1000)}"
+        try:
+            ws.settimeout(_TIMEOUT)
+            ws.send(json.dumps(["REQ", sub, sub_filter]))
+            deadline = time.time() + _TIMEOUT
+            while time.time() < deadline:
+                msg = json.loads(ws.recv())
+                if msg[0] == "EOSE":
+                    break
+                if msg[0] == "EVENT" and len(msg) >= 3:
+                    ev = msg[2]
+                    ts = int(ev.get("created_at", 0) or 0)
+                    if ev.get("kind") == _KIND_METADATA and ts > best_ts:
+                        try:
+                            content = json.loads(ev.get("content", "{}"))
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        if isinstance(content, dict):
+                            best, best_ts = content, ts
+            ws.send(json.dumps(["CLOSE", sub]))
+        finally:
+            ws.close()
+    except Exception as exc:
+        logger.debug("Profile fetch from %s failed: %s", relay_url, exc)
+        return None
+    return (best_ts, best) if best is not None else None
+
+
 def fetch_profile(npub: str, relays: list[str] | None = None) -> dict[str, str] | None:
     """Return the latest kind-0 metadata for ``npub`` (newest across relays).
 
-    Returns the recognized profile fields as a dict, or None if no profile is
-    found / npub is malformed / relays unreachable.
+    Queries all relays in parallel and keeps the newest result; wall-clock is
+    bounded by the slowest single relay (~_TIMEOUT), not their sum. Returns the
+    recognized profile fields as a dict, or None if no profile is found / npub
+    is malformed / relays unreachable.
     """
     relay_urls = relays or PROFILE_RELAYS
     try:
@@ -55,38 +102,19 @@ def fetch_profile(npub: str, relays: list[str] | None = None) -> dict[str, str] 
     except Exception:
         return None
 
-    import websocket  # type: ignore[import-untyped]
+    sub_filter = {"kinds": [_KIND_METADATA], "authors": [hex_pk], "limit": 1}
 
     best: dict | None = None
     best_ts = -1
-    sub_filter = {"kinds": [_KIND_METADATA], "authors": [hex_pk], "limit": 1}
-
-    for relay_url in relay_urls:
-        try:
-            ws = websocket.create_connection(relay_url, timeout=_TIMEOUT)
-            sub = f"prof-{int(time.time())}"
+    with ThreadPoolExecutor(max_workers=len(relay_urls)) as pool:
+        futures = {pool.submit(_fetch_one, url, sub_filter): url for url in relay_urls}
+        for future in as_completed(futures, timeout=_TIMEOUT + 2):
             try:
-                ws.send(json.dumps(["REQ", sub, sub_filter]))
-                deadline = time.time() + _TIMEOUT
-                while time.time() < deadline:
-                    msg = json.loads(ws.recv())
-                    if msg[0] == "EOSE":
-                        break
-                    if msg[0] == "EVENT" and len(msg) >= 3:
-                        ev = msg[2]
-                        ts = int(ev.get("created_at", 0) or 0)
-                        if ev.get("kind") == _KIND_METADATA and ts > best_ts:
-                            try:
-                                content = json.loads(ev.get("content", "{}"))
-                            except (json.JSONDecodeError, TypeError):
-                                continue
-                            if isinstance(content, dict):
-                                best, best_ts = content, ts
-                ws.send(json.dumps(["CLOSE", sub]))
-            finally:
-                ws.close()
-        except Exception as exc:
-            logger.debug("Profile fetch from %s failed: %s", relay_url, exc)
+                result = future.result()
+            except Exception:
+                continue
+            if result is not None and result[0] > best_ts:
+                best_ts, best = result[0], result[1]
 
     if best is None:
         return None
@@ -133,28 +161,45 @@ def publish_profile_event(
         return {"success": False, "error": f"Could not verify event: {exc}"}
 
     message = json.dumps(["EVENT", signed_event])
-    import websocket  # type: ignore[import-untyped]
-
     relay_urls = relays or PROFILE_RELAYS
+
     ok = 0
     errors: list[str] = []
-    for relay_url in relay_urls:
-        try:
-            ws = websocket.create_connection(relay_url, timeout=_TIMEOUT)
+    with ThreadPoolExecutor(max_workers=len(relay_urls)) as pool:
+        futures = {pool.submit(_publish_one, url, message): url for url in relay_urls}
+        for future in as_completed(futures, timeout=_TIMEOUT + 2):
+            url = futures[future]
             try:
-                ws.send(message)
-                raw = ws.recv()
-                try:
-                    ack = json.loads(raw)
-                    if isinstance(ack, list) and len(ack) >= 3 and ack[0] == "OK" and ack[2] is True:
-                        ok += 1
-                    else:
-                        errors.append(f"{relay_url}: {str(raw)[:120]}")
-                except (json.JSONDecodeError, IndexError):
-                    errors.append(f"{relay_url}: unparseable ack {str(raw)[:80]}")
-            finally:
-                ws.close()
-        except Exception as exc:
-            errors.append(f"{relay_url}: {exc}")
+                accepted, err = future.result()
+            except Exception as exc:
+                errors.append(f"{url}: {exc}")
+                continue
+            if accepted:
+                ok += 1
+            elif err:
+                errors.append(err)
 
     return {"success": ok > 0, "ok": ok, "total": len(relay_urls), "errors": errors}
+
+
+def _publish_one(relay_url: str, message: str) -> tuple[bool, str | None]:
+    """Relay one EVENT message to a single relay. (accepted, error) — never raises."""
+    import websocket  # type: ignore[import-untyped]
+
+    try:
+        ws = websocket.create_connection(relay_url, timeout=_TIMEOUT)
+        try:
+            ws.settimeout(_TIMEOUT)
+            ws.send(message)
+            raw = ws.recv()
+            try:
+                ack = json.loads(raw)
+                if isinstance(ack, list) and len(ack) >= 3 and ack[0] == "OK" and ack[2] is True:
+                    return (True, None)
+                return (False, f"{relay_url}: {str(raw)[:120]}")
+            except (json.JSONDecodeError, IndexError):
+                return (False, f"{relay_url}: unparseable ack {str(raw)[:80]}")
+        finally:
+            ws.close()
+    except Exception as exc:
+        return (False, f"{relay_url}: {exc}")
