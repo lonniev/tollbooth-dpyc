@@ -250,7 +250,8 @@ mcp = FastMCP("tollbooth-authority-mine", instructions="…")
 
 runtime = OperatorRuntime(
     tool_registry={**STANDARD_IDENTITIES, **AUTHORITY_TOOL_REGISTRY},
-    purchase_mode="direct",  # Authority is its own trust root
+    vault_source="env",      # Authority self-provisions its Neon from env
+    purchase_mode="auto",    # derive direct/certified from the registry chain
     ots_enabled=True,
     operator_credential_template=OPERATOR_CREDENTIAL_TEMPLATE,
 )
@@ -321,7 +322,8 @@ OperatorRuntime(
     relays=["wss://relay.damus.io"],                       # Override default relays
 
     # Billing
-    purchase_mode="certified",    # "certified" (default) or "direct" (trust-root only)
+    vault_source="authority",     # "authority" (default) or "env" (self-provisioned)
+    purchase_mode="auto",         # "certified", "direct", or "auto" (registry-derived)
     operator_settings={},         # Arbitrary operator config dict
 
     # Constraints
@@ -540,7 +542,7 @@ pip install tollbooth-dpyc[nostr,x402]
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `TOLLBOOTH_NOSTR_OPERATOR_NSEC` | Yes | The single bootstrap key. Identity, Secure Courier, audit signing. |
-| `NEON_DATABASE_URL` | Trust-root only | Neon Postgres URL. Only for `purchase_mode="direct"` (Authority). |
+| `NEON_DATABASE_URL` | Trust-root only | Neon Postgres URL. Only for `vault_source="env"` (self-provisioned Authority). |
 | `TOLLBOOTH_NOSTR_RELAYS` | No | Comma-separated relay URLs (overrides defaults). |
 
 Certified operators (the default) do **not** set `NEON_DATABASE_URL`. They discover it from the Authority via encrypted Nostr DM during bootstrap.

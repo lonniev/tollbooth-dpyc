@@ -23,7 +23,8 @@ Minimal Authority ``server.py``::
 
     runtime = OperatorRuntime(
         tool_registry={**STANDARD_IDENTITIES, **AUTHORITY_TOOL_REGISTRY},
-        purchase_mode="direct",
+        vault_source="env",       # Authority self-provisions its Neon
+        purchase_mode="auto",     # certify-up derived from the registry chain
         service_name="My Authority",
         ots_enabled=True,
         operator_credential_template=OPERATOR_CREDENTIAL_TEMPLATE,

@@ -16,7 +16,8 @@ Typical Authority ``server.py``::
 
     runtime = OperatorRuntime(
         tool_registry={**STANDARD_IDENTITIES, **AUTHORITY_TOOL_REGISTRY},
-        purchase_mode="direct",
+        vault_source="env",       # Authority self-provisions its Neon
+        purchase_mode="auto",     # certify-up derived from the registry chain
         service_name="My Authority",
         ots_enabled=True,
         operator_credential_template=OPERATOR_CREDENTIAL_TEMPLATE,
@@ -732,9 +733,10 @@ def register_authority_tools(
     Args:
         mcp: The FastMCP app instance.
         runtime: The OperatorRuntime instance, configured by the caller
-            with ``purchase_mode="direct"``, ``ots_enabled=True``,
-            and the Authority's tool_registry (``STANDARD_IDENTITIES``
-            merged with ``AUTHORITY_TOOL_REGISTRY``).
+            with ``vault_source="env"`` (Authorities self-provision Neon),
+            ``purchase_mode="auto"`` (derive certify-up from the registry
+            chain), ``ots_enabled=True``, and the Authority's tool_registry
+            (``STANDARD_IDENTITIES`` merged with ``AUTHORITY_TOOL_REGISTRY``).
         slug: Tool name prefix (default ``"authority"``).
     """
     global _runtime

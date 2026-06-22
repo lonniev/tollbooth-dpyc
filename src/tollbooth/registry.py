@@ -292,3 +292,56 @@ async def resolve_my_parent_npub(
         )
     finally:
         await registry.close()
+
+
+async def resolve_purchase_mode(
+    own_npub: str,
+    registry_url: str = DEFAULT_REGISTRY_URL,
+    cache_ttl_seconds: int = 300,
+) -> str:
+    """Derive an actor's purchase-certification mode from the registry chain.
+
+    Returns ``"certified"`` when the actor has an upstream Authority that runs
+    a certification MCP (so every purchase order must pay that parent), else
+    ``"direct"``. The rule, read from dpyc-community topology:
+
+    - No ``upstream_authority_npub`` (the actor is Prime / a trust root) →
+      ``"direct"``.
+    - The parent is Prime — the parent's own ``upstream_authority_npub`` is
+      empty → ``"direct"``. Prime is an npub anchor that runs no Authority
+      certify MCP, so a penultimate Authority self-funds.
+    - The parent is a non-Prime Authority that runs a certify MCP →
+      ``"certified"``.
+
+    This is the single source of truth for the certify-up cascade: an Operator
+    under any Authority, or a sub-Authority under a regional Authority (e.g.
+    NewEngland under NorthAmerica), resolves to ``"certified"`` and pays its
+    parent. Penultimate Authorities (NorthAmerica, Lonnie-Authority under
+    Prime) resolve to ``"direct"``.
+
+    Raises:
+        RegistryError: when the registry cannot be fetched.
+        ValueError: when ``own_npub`` is not in the registry.
+    """
+    registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
+    try:
+        members = await registry._fetch()
+        by_npub = {m.get("npub"): m for m in members}
+        me = by_npub.get(own_npub)
+        if me is None:
+            raise ValueError(
+                f"{own_npub[:16]}… is not in the dpyc-community registry; "
+                "cannot derive purchase_mode."
+            )
+        parent_npub = me.get("upstream_authority_npub")
+        if not parent_npub:
+            # I am Prime / a trust root — nothing above to certify against.
+            return "direct"
+        parent = by_npub.get(parent_npub)
+        if parent is None or not parent.get("upstream_authority_npub"):
+            # Parent is Prime (runs no certify MCP) or is unknown — treat as a
+            # trust root and self-fund.
+            return "direct"
+        return "certified"
+    finally:
+        await registry.close()

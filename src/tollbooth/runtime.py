@@ -104,6 +104,7 @@ class OperatorRuntime:
         on_forget: Any | None = None,
         operator_settings: dict[str, Any] | None = None,
         purchase_mode: str = "certified",
+        vault_source: str = "authority",
         credential_validator: Any | None = None,
         proven_npub_ttl_seconds: int = 3600,
         npub_proof_field: str = "confirm",
@@ -141,7 +142,17 @@ class OperatorRuntime:
         self._ots_calendars = ots_calendars
         self._on_forget = on_forget  # callback(service, npub) on credential forget
         self._operator_settings: dict[str, Any] = operator_settings or {}
-        self._purchase_mode = purchase_mode  # "certified" or "direct"
+        # Two orthogonal axes (historically conflated under purchase_mode):
+        #   purchase_mode — certify-up behavior on a purchase order:
+        #     "certified" (obtain a parent Authority cert + pay its fee),
+        #     "direct"    (trust root — no upstream cert), or
+        #     "auto"      (derive from the dpyc-community registry chain).
+        #   vault_source — where the Neon URL comes from:
+        #     "authority" (bootstrap from the parent's relay DM) or
+        #     "env"       (read NEON_DATABASE_URL; Authorities self-provision).
+        self._purchase_mode = purchase_mode  # "certified", "direct", or "auto"
+        self._vault_source = vault_source  # "authority" or "env"
+        self._resolved_purchase_mode: str | None = None  # cache for "auto"
 
         # Lazy singletons
         self._vault: Any | None = None
@@ -318,10 +329,13 @@ class OperatorRuntime:
     async def vault(self) -> Any:
         """Return the NeonVault, bootstrapping from Authority if needed.
 
-        Trust-root operators (purchase_mode="direct") read NEON_DATABASE_URL
-        from the environment — they have no upstream Authority to bootstrap
-        from.  All other operators discover their Neon URL from a Nostr
-        relay DM signed by their Authority.
+        Self-provisioning actors (vault_source="env" — Authorities, which
+        arrive with their own Neon) read NEON_DATABASE_URL from the
+        environment.  All other operators (vault_source="authority") discover
+        their Neon URL from a Nostr relay DM signed by their Authority.
+
+        This is independent of purchase_mode: a sub-Authority self-provisions
+        its vault from env yet still certifies its purchases up to its parent.
         """
         if self._vault is not None:
             return self._vault
@@ -330,18 +344,18 @@ class OperatorRuntime:
         import time as _time
         from tollbooth.vaults import NeonVault
 
-        if self._purchase_mode == "direct":
-            # Trust root: read Neon URL from env (set by deploy platform).
+        if self._vault_source == "env":
+            # Self-provisioning: read Neon URL from env (set by deploy platform).
             neon_url = os.environ.get("NEON_DATABASE_URL", "")
             if not neon_url:
                 raise ValueError(
-                    "NEON_DATABASE_URL is required for trust-root operators "
-                    "(purchase_mode='direct')."
+                    "NEON_DATABASE_URL is required for self-provisioning actors "
+                    "(vault_source='env')."
                 )
             self._vault = NeonVault(database_url=neon_url)
             await self._vault.ensure_schema()
             self._vault_ready_at = _time.monotonic()
-            logger.info("Vault initialized from NEON_DATABASE_URL (trust root)")
+            logger.info("Vault initialized from NEON_DATABASE_URL (vault_source=env)")
             return self._vault
 
         # Certified operators: bootstrap from Authority relay DM.
@@ -372,6 +386,39 @@ class OperatorRuntime:
         self._ledger_cache = LedgerCache(v)
         asyncio.ensure_future(self._ledger_cache.start_background_flush())
         return self._ledger_cache
+
+    async def _effective_purchase_mode(self) -> str:
+        """Resolve the effective purchase mode, honoring ``purchase_mode="auto"``.
+
+        Explicit ``"direct"``/``"certified"`` are returned as-is. ``"auto"`` is
+        derived once from the dpyc-community registry chain (an Operator or a
+        sub-Authority with a certifying parent → ``"certified"``; Prime and
+        penultimate trust roots → ``"direct"``) and cached for the process
+        lifetime.
+
+        On any registry failure it falls back to ``"direct"`` for this call
+        only (the historical trust-root behavior — purchases keep working and
+        the certify-up cascade resumes once the registry is reachable) and does
+        NOT cache the fallback, so a transient outage can't pin the actor.
+        """
+        if self._purchase_mode != "auto":
+            return self._purchase_mode
+        if self._resolved_purchase_mode is not None:
+            return self._resolved_purchase_mode
+        from tollbooth.registry import resolve_purchase_mode
+        try:
+            mode = await resolve_purchase_mode(self.operator_npub())
+        except Exception:
+            logger.warning(
+                "Could not derive purchase_mode from the registry; using "
+                "'direct' for this purchase (no upstream certification). Will "
+                "retry resolution on the next purchase.",
+                exc_info=True,
+            )
+            return "direct"
+        self._resolved_purchase_mode = mode
+        logger.info("Resolved purchase_mode=%s from the registry chain.", mode)
+        return mode
 
     # ------------------------------------------------------------------
     # Secure Courier
@@ -2517,7 +2564,7 @@ def register_standard_tools(
         except ValueError as e:
             return {"success": False, "error": str(e)}
 
-        if rt._purchase_mode == "direct":
+        if await rt._effective_purchase_mode() == "direct":
             # Trust-root mode: no upstream certificate needed.
             try:
                 cashier = await rt.ensure_cashier()
