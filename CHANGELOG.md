@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.52.0 — 2026-06-22
+
+### Changed — BREAKING: decouple `vault_source` and `purchase_mode`; add registry-derived certify-up
+
+- **Two orthogonal axes, no longer conflated:**
+  - **`vault_source`** — where the Neon URL comes from: `"env"` (NEON_DATABASE_URL, self-provisioned) or `"authority"` (default, bootstrap DM).
+  - **`purchase_mode`** — whether a purchase order certifies up to a parent Authority: `"direct"` (trust-root, no upstream cert), `"certified"` (certify up), or `"auto"` (derive from registry chain).
+- **Background:** Sub-Authorities (e.g., NewEngland under NorthAmerica) need `vault_source="env"` (self-provisioned Neon) **and** `purchase_mode="certified"` (certify-up). The old single-axis flag couldn't express this combination — bumping to direct would reroute vault bootstrap, breaking the sub-Authority's own Neon.
+- **New `resolve_purchase_mode(own_npub, registry_url)` in `tollbooth/registry.py`:**
+  - Reads `upstream_authority_npub` from the dpyc-community registry and applies the certify-up rule:
+    - No upstream → `"direct"` (Prime / trust-root)
+    - Parent is Prime → `"direct"` (no upstream cert)
+    - Non-Prime parent → `"certified"` (certify purchases to the parent Authority)
+  - Single source of truth; called lazily by `_effective_purchase_mode()` if `purchase_mode="auto"`.
+- **`OperatorRuntime` constructor changes:**
+  - Added `vault_source: str = "authority"` parameter (default unchanged).
+  - `purchase_mode` now accepts `"auto"` (new); existing `"direct"` and `"certified"` callers unchanged.
+  - `vault()` method now keys off `vault_source`, independent of `purchase_mode`.
+  - `purchase_credits()` calls `await rt._effective_purchase_mode()` for the certify-up decision.
+- **Authority examples updated** (`server.py` in all three authorities):
+  - `vault_source="env"` (self-provisions Neon from NEON_DATABASE_URL).
+  - `purchase_mode="auto"` (derives direct/certified from registry chain).
+  - Canonical Authority sits under Prime → resolves to `"direct"`.
+  - NorthAmerica sits under Prime → resolves to `"direct"`.
+  - NewEngland sits under NorthAmerica → resolves to `"certified"`.
+- **Test suite:** 12 tests in `tests/test_purchase_mode_decoupling.py` cover the rule, auto-caching, failsafe on registry unreachable, and vault source independence.
+
+### ⚠️ Migration
+
+- **If you hardcode `purchase_mode="direct"`**, update to `vault_source="env", purchase_mode="auto"` (or keep explicit `"direct"` if you want to opt out of future registry sync).
+- **If you hardcode `purchase_mode="certified"`**, keep it; or switch to `purchase_mode="auto"` to auto-derive.
+- **No changes required for operators** — the wheel handles it internally. Authorities and MCP servers using the SDK must update their `OperatorRuntime` constructor calls to include the new split params.
+
 ## 0.51.0 — 2026-06-20
 
 ### Added — Nostr kind-0 profile tools (self-sovereign patron profiles, no key custody)
