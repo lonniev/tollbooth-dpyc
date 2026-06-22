@@ -3,9 +3,9 @@
 Bitcoin Lightning micropayments for MCP servers.
 """
 
-from importlib.metadata import version as _meta_version
+from tollbooth.version import resolve_service_version
 
-__version__ = _meta_version("tollbooth-dpyc")
+__version__ = resolve_service_version("tollbooth-dpyc", __file__)
 
 from tollbooth.certificate import CertificateError, verify_certificate_auto, UNDERSTOOD_PROTOCOLS
 from tollbooth.registry import DPYCRegistry, RegistryError, resolve_authority_npub, resolve_authority_service, resolve_oracle_service, resolve_service_by_name, DEFAULT_REGISTRY_URL
