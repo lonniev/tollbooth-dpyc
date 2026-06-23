@@ -2416,20 +2416,24 @@ def _build_initial_pricing_model(
 # ======================================================================
 
 
-# Public marker tag stamped on Authority low-cert dunning DMs so the
+# Public marker tag stamped on low-cert-balance self-notice DMs so the
 # relay-as-cache dedup query can match them without decryption.
 _AUTHORITY_DUNNING_TAG = "dpyc-dunning"
 
 
-def _dun_authority_low_certs(
-    courier: Any, authority_npub: str, operator_label: str,
+def _dun_self_low_cert_balance(
+    courier: Any, self_npub: str, authority_name: str, operator_label: str,
 ) -> None:
-    """Best-effort, relay-deduped reminder that an Authority is out of certs.
+    """Best-effort, relay-deduped self-notice that our cert balance is dry.
 
-    Fired when an Operator's ``purchase_credits`` is refused because the
-    Operator's own balance at its certifying Authority is exhausted. Sends a
-    single marker-tagged DM from the Operator to the Authority asking its
-    human to top up.
+    Fired when this actor's ``purchase_credits`` is refused because *our own*
+    certification balance at our parent Authority is exhausted. The paid
+    ``certify_credits`` fee debits the **purchasing actor's** ledger at the
+    Authority (see ``debit_or_deny``), not the Authority's own funds — so the
+    party that must act is *this* Operator or sub-Authority, which refills by
+    calling its Authority's ``purchase_credits``. The reminder is therefore a
+    self-DM to our own npub (which Pricing Studio surfaces). The parent
+    Authority owner cannot fix a downstream balance and is not notified.
 
     Relay-as-cache dedup: the marker DM self-expires (~10 min, NIP-40), so we
     query the relays first and skip if one is still queued — at most one
@@ -2439,34 +2443,34 @@ def _dun_authority_low_certs(
     if courier is None:
         return
     exchange = getattr(courier, "_exchange", None)
-    if exchange is None or not authority_npub:
+    if exchange is None or not self_npub:
         return
 
     message = (
-        "⚡ DPYC Authority notice\n\n"
-        f"A patron just tried to buy credits from your Operator "
-        f"\"{operator_label}\", but certification was refused: your Authority's "
-        "own credit balance is empty, so it cannot certify new credit "
-        "purchases for resale.\n\n"
-        f"Patrons of {operator_label} cannot top off until you refill. "
-        "Please purchase_credits on your Authority to resume certifying.\n\n"
+        "⚡ DPYC certification balance low\n\n"
+        f"A patron just tried to buy credits from \"{operator_label}\", but the "
+        "purchase could not be certified: your certification balance at your "
+        f"Authority ({authority_name}) is exhausted.\n\n"
+        "Patrons cannot top off until you refill. Call your Authority's "
+        "purchase_credits to add certification credits, then patrons can "
+        "resume buying.\n\n"
         "(You will get at most one reminder per ~10 minutes while this lasts.)"
     )
 
     def _run() -> None:
         try:
             if exchange.has_recent_tagged_dm(
-                authority_npub, _AUTHORITY_DUNNING_TAG, within_seconds=600,
+                self_npub, _AUTHORITY_DUNNING_TAG, within_seconds=600,
             ):
                 return  # an equivalent reminder is still queued on the relay
             exchange.send_dm(
-                authority_npub,
+                self_npub,
                 message,
                 extra_tags=[["t", _AUTHORITY_DUNNING_TAG]],
             )
         except Exception:
             logger.debug(
-                "authority low-cert dunning DM failed (courtesy, non-blocking)",
+                "self low-cert-balance DM failed (courtesy, non-blocking)",
                 exc_info=True,
             )
 
@@ -2602,33 +2606,33 @@ def register_standard_tools(
                 or "insufficient balance" in str(e).lower()
             )
             if authority_broke:
-                authority_name = auth_info.get("name") or "for this service"
+                authority_name = auth_info.get("name") or "this service's Authority"
                 authority_npub = auth_info.get("npub", "")
-                if authority_npub:
-                    try:
-                        _dun_authority_low_certs(
-                            await rt.courier(),
-                            authority_npub,
-                            service_name or slug,
-                        )
-                    except Exception:
-                        logger.debug(
-                            "could not dispatch authority dunning DM",
-                            exc_info=True,
-                        )
+                try:
+                    _dun_self_low_cert_balance(
+                        await rt.courier(),
+                        rt.operator_npub(),
+                        authority_name,
+                        service_name or slug,
+                    )
+                except Exception:
+                    logger.debug(
+                        "could not dispatch self low-cert-balance DM",
+                        exc_info=True,
+                    )
                 return {
                     "success": False,
                     "error_code": ErrorCode.AUTHORITY_INSUFFICIENT_BALANCE,
                     "error": (
-                        f"The DPYC Authority {authority_name} is out of credits "
-                        "to certify new credit purchases for resale by this "
-                        "Operator. The Authority has been notified that it needs "
-                        "to purchase more credits. Please be patient and try "
-                        "again soon."
+                        "This service cannot certify new credit purchases right "
+                        "now: its certification balance at its Authority "
+                        f"({authority_name}) is exhausted. The operator has been "
+                        "notified to refill it. Please try again soon."
                     ),
                     "next_steps": [
                         "Wait a few minutes, then retry purchase_credits — the "
-                        "Authority needs to refill its certification balance.",
+                        "operator needs to refill its certification balance at "
+                        "the Authority.",
                     ],
                     "authority_npub": authority_npub,
                 }

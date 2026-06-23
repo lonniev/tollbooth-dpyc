@@ -21,9 +21,11 @@ class AuthorityCertifyError(Exception):
     """Raised when Authority certification fails.
 
     Carries the Authority's structured ``error_code`` when the failure was a
-    tool-level refusal (e.g. ``insufficient_balance`` when the Authority's own
-    certification balance is exhausted), so callers can branch on the code
-    rather than parsing prose. Empty for connection/transport failures.
+    tool-level refusal (e.g. ``insufficient_balance`` when the *purchasing
+    actor's* certification balance held at the Authority is exhausted — the
+    ``certify_credits`` fee debits the caller's ledger, not the Authority's
+    own funds), so callers can branch on the code rather than parsing prose.
+    Empty for connection/transport failures.
     """
 
     def __init__(self, message: str, *, error_code: str = "") -> None:

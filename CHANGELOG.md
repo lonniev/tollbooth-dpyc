@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.52.3 — 2026-06-23
+
+### Fixed — low-cert-balance reminder now self-notifies the actor who must refill (not the parent Authority)
+
+- **Bug:** when a purchase order was refused with `authority_insufficient_balance`, the SDK dunned the **parent Authority's** owner ("your Authority's own credit balance is empty… `purchase_credits` on your Authority") and the patron-facing situation claimed the Authority was out of credits "for resale." Both were wrong. `certify_credits` is a `paid_tool`, so its fee debits the **purchasing actor's** own ledger held at the Authority (`debit_or_deny(tool_id, npub=caller)`) — never the Authority's own funds. The party that must act is the Operator or sub-Authority itself, which refills by calling its Authority's `purchase_credits`. The parent Authority owner cannot fix a downstream balance and got spurious dunning, while the actor who needed to act was never told.
+- **Most visible in multi-level chains:** a secondary Authority (e.g. NewEngland) topping up / certifying up to a penultimate one (NorthAmerica) is itself the "operator" purchasing — so NorthAmerica's owner was dunned for NewEngland's depleted balance, and NewEngland's admin stayed in the dark.
+- **Fix:** `_dun_authority_low_certs` → `_dun_self_low_cert_balance`. The relay-deduped marker DM is now a **self-notice** to the purchasing actor's own npub (`rt.operator_npub()`), which Pricing Studio surfaces. Wording corrected on both the DM and the patron-facing situation; misleading docstrings in `authority_client.AuthorityCertifyError` updated. `error_code` (`authority_insufficient_balance`) is unchanged — it's a wire contract across consumers. No change to fee computation, certification, or the refill mechanism (which already worked); only who is notified and what they're told.
+
 ## 0.52.2 — 2026-06-22
 
 ### Added — `resolve_service_version()` (one fleet-wide version resolver)

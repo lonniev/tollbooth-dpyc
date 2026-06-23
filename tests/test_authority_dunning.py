@@ -1,17 +1,20 @@
-"""Tests for the Authority low-cert dunning path.
+"""Tests for the low-cert-balance self-notice path.
 
-When an Operator's ``purchase_credits`` is refused because the Operator's own
-balance at its certifying Authority is exhausted, the SDK:
+When an actor's ``purchase_credits`` is refused because *its own* balance at
+its certifying Authority is exhausted (the ``certify_credits`` fee debits the
+purchasing actor's ledger, not the Authority's), the SDK:
 
 1. Returns a kind ``authority_insufficient_balance`` situation to the patron
    instead of leaking the raw "Insufficient balance: 0 sats ..." string, and
-2. Sends a single marker-tagged reminder DM to the Authority, deduped against
-   the relay's own event store (relay-as-cache) so repeated patron attempts in
-   the ~10-minute NIP-40 window do not spam the Authority.
+2. Sends a single marker-tagged reminder DM to the actor's **own** npub (a
+   self-notice the operator/sub-Authority admin sees in Pricing Studio — the
+   party that must refill by calling its Authority's ``purchase_credits``),
+   deduped against the relay's own event store (relay-as-cache) so repeated
+   patron attempts in the ~10-minute NIP-40 window do not spam.
 
-These tests cover the two new units that implement that: the NIP-04 marker tag
-+ relay query helper (``nostr_credentials``) and the dunning dispatcher
-(``runtime._dun_authority_low_certs``).
+These tests cover the two units that implement that: the NIP-04 marker tag
++ relay query helper (``nostr_credentials``) and the self-notice dispatcher
+(``runtime._dun_self_low_cert_balance``).
 """
 
 from __future__ import annotations
@@ -145,30 +148,35 @@ def inline_threads(monkeypatch):
     monkeypatch.setattr(rt_mod.threading, "Thread", _InlineThread)
 
 
-def test_dun_sends_marker_tagged_dm_when_not_queued(inline_threads):
+def test_dun_sends_marker_tagged_dm_to_self_when_not_queued(inline_threads):
     ex = _FakeExchange(has_recent=False)
-    rt_mod._dun_authority_low_certs(
-        _FakeCourier(ex), "npub1authority", "optionality",
+    rt_mod._dun_self_low_cert_balance(
+        _FakeCourier(ex), "npub1self", "NorthAmerica", "optionality",
     )
 
     assert len(ex.sent) == 1
     npub, message, extra_tags = ex.sent[0]
-    assert npub == "npub1authority"
+    # Self-notice: the DM targets the purchasing actor's own npub, never the
+    # parent Authority's.
+    assert npub == "npub1self"
     assert extra_tags == [["t", rt_mod._AUTHORITY_DUNNING_TAG]]
     assert "optionality" in message
-    # deduped against a ~10-minute window
-    assert ex.recent_args == ("npub1authority", rt_mod._AUTHORITY_DUNNING_TAG, 600)
+    assert "NorthAmerica" in message
+    # deduped against a ~10-minute window, keyed on our own npub
+    assert ex.recent_args == ("npub1self", rt_mod._AUTHORITY_DUNNING_TAG, 600)
 
 
 def test_dun_skips_send_when_reminder_already_queued(inline_threads):
     ex = _FakeExchange(has_recent=True)
-    rt_mod._dun_authority_low_certs(
-        _FakeCourier(ex), "npub1authority", "optionality",
+    rt_mod._dun_self_low_cert_balance(
+        _FakeCourier(ex), "npub1self", "NorthAmerica", "optionality",
     )
     assert ex.sent == []
 
 
 def test_dun_noop_without_courier(inline_threads):
-    # No courier / no npub must never raise on the patron's critical path.
-    rt_mod._dun_authority_low_certs(None, "npub1authority", "optionality")
-    rt_mod._dun_authority_low_certs(_FakeCourier(_FakeExchange(False)), "", "x")
+    # No courier / no self npub must never raise on the patron's critical path.
+    rt_mod._dun_self_low_cert_balance(None, "npub1self", "NA", "optionality")
+    rt_mod._dun_self_low_cert_balance(
+        _FakeCourier(_FakeExchange(False)), "", "NA", "x",
+    )
