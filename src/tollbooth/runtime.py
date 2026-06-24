@@ -420,6 +420,24 @@ class OperatorRuntime:
         logger.info("Resolved purchase_mode=%s from the registry chain.", mode)
         return mode
 
+    async def _certifier(self) -> tuple[Any, dict[str, Any]]:
+        """Resolve this actor's parent Authority and build a client to it.
+
+        The single place that answers "who is my parent, and how do I talk to
+        it." Returns ``(AuthorityCertifier, auth_info)`` where ``auth_info`` is
+        the registry service record (``{"npub", "url", "name"}``). Used by both
+        the certify-up path (``purchase_credits``) and the balance-at-parent
+        read (``check_authority_balance``).
+        """
+        from tollbooth.authority_client import AuthorityCertifier
+        from tollbooth.registry import resolve_authority_service
+
+        auth_info = await resolve_authority_service(self.operator_npub())
+        certifier = AuthorityCertifier(
+            auth_info["url"], self.operator_npub(), self._get_nsec(),
+        )
+        return certifier, auth_info
+
     # ------------------------------------------------------------------
     # Secure Courier
     # ------------------------------------------------------------------
@@ -2581,18 +2599,12 @@ def register_standard_tools(
                 return {"success": False, "error": str(e)}
 
         # Certified mode: obtain Authority certificate first.
-        from tollbooth.authority_client import (
-            AuthorityCertifier,
-            AuthorityCertifyError,
-        )
-        from tollbooth.registry import resolve_authority_service
+        from tollbooth.authority_client import AuthorityCertifyError
         from tollbooth.constants import ErrorCode
         auth_info: dict[str, Any] = {}
         try:
-            auth_info = await resolve_authority_service(rt.operator_npub())
-            cert_result = await AuthorityCertifier(
-                auth_info["url"], rt.operator_npub(), rt._get_nsec(),
-            ).certify_credits(amount_sats)
+            certifier, auth_info = await rt._certifier()
+            cert_result = await certifier.certify_credits(amount_sats)
             certificate = cert_result.get("certificate", "")
         except AuthorityCertifyError as e:
             # An Authority that is itself out of certification credits is the
@@ -3461,12 +3473,7 @@ def register_standard_tools(
         This is the operator's own funding — not a patron balance. Free.
         """
         try:
-            from tollbooth.authority_client import AuthorityCertifier
-            from tollbooth.registry import resolve_authority_service
-            auth_info = await resolve_authority_service(rt.operator_npub())
-            certifier = AuthorityCertifier(
-                auth_info["url"], rt.operator_npub(), rt._get_nsec(),
-            )
+            certifier, _ = await rt._certifier()
             return await certifier.check_balance()
         except Exception as e:
             return {
