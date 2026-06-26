@@ -171,6 +171,12 @@ except ImportError:
     X402Client = None  # type: ignore[assignment,misc]
     x402_wallet_template = None  # type: ignore[assignment,misc]
 
+from tollbooth.upstream_payment import (
+    classify_upstream_payment,
+    is_x402_payment_challenge,
+    upstream_payment_situation,
+)
+
 try:
     from tollbooth.constraints import (
         ToolConstraint,
@@ -350,6 +356,9 @@ __all__ = [
     "OAuthProviderConfig",
     "X402Client",
     "x402_wallet_template",
+    "classify_upstream_payment",
+    "is_x402_payment_challenge",
+    "upstream_payment_situation",
     "resolve_npub",
     "VaultCipher",
     # Session Caches

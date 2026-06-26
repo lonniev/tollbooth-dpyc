@@ -84,6 +84,14 @@ class ErrorCode:
     # is surfaced verbatim so the caller can self-correct.
     TOOL_INPUT_INVALID = "tool_input_invalid"
     UPSTREAM_AUTH_REFRESH_NEEDED = "upstream_auth_refresh_needed"
+    # An upstream API answered HTTP 402 because the paid subscription / access
+    # tier tied to the credentials this service uses has lapsed or does not
+    # cover the request. This is NOT the x402 micropayment protocol (X402Client
+    # settles that transparently as Operator COGS) and NOT a patron-balance
+    # problem (INSUFFICIENT_BALANCE) — a human must renew or upgrade the plan at
+    # the upstream provider. Non-transient: retrying will not help until the
+    # subscription is restored. Built by tollbooth.upstream_payment.
+    UPSTREAM_SUBSCRIPTION_REQUIRED = "upstream_subscription_required"
 
     # OAuth session-restoration situations (from
     # OperatorRuntime.restore_oauth_session → oauth_situation_response).

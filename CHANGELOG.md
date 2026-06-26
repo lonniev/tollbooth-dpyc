@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.53.0 — 2026-06-25
+
+### Added — generic upstream HTTP 402 ("renew your subscription") handler
+
+- New module `tollbooth.upstream_payment` turns a **bare HTTP 402** from an upstream API into a structured, human-facing situation instead of an opaque error. Some upstreams (e.g. an X/Twitter developer plan whose billing lapsed, or a metered API past its quota) answer `402 Payment Required` to mean "the paid subscription/access tier tied to these credentials no longer covers this request." No payment this server can make settles it — a human must renew the plan at the provider.
+- `upstream_payment_situation(service=, renew_url=, audience=, detail=, status_code=)` builds the situation: `error_code` `upstream_subscription_required`, clear renewal advice woven with the provider's portal URL, `audience` phrasing for whose plan it is (`"operator"` vs `"patron"`), and `transient: False` so schedulers and retry loops stop hammering an endpoint that can't self-recover.
+- `classify_upstream_payment(response, ...)` duck-types an httpx-style response and returns the situation only for a bare 402, returning `None` for any other status.
+- `is_x402_payment_challenge(headers)` distinguishes this from the **x402 micropayment protocol**: a machine-payable challenge advertises on-chain terms in a `payment-required` header and belongs to `X402Client` (transparent Operator COGS); its absence on a 402 is the human-subscription case. `classify_upstream_payment` routes accordingly.
+- New `ErrorCode.UPSTREAM_SUBSCRIPTION_REQUIRED`. No heavy deps — the module is always importable (it does not require the optional `[x402]` extra). Exported from the package root.
+
 ## 0.52.3 — 2026-06-23
 
 ### Fixed — low-cert-balance reminder now self-notifies the actor who must refill (not the parent Authority)
