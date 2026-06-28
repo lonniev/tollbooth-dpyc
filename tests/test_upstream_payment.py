@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from tollbooth.constants import ErrorCode
 from tollbooth.upstream_payment import (
     classify_upstream_payment,
