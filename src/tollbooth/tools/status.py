@@ -20,6 +20,32 @@ _BUILD_INFO_KEYS = (
 )
 
 
+def build_docket_diagnostic(env: Mapping[str, str]) -> dict[str, Any]:
+    """Report the FastMCP background-task (Docket) backend — presence and scheme
+    only, NEVER the URL (a ``redis://`` URL carries credentials).
+
+    FastMCP falls back to an in-process ``memory://`` backend when
+    ``FASTMCP_DOCKET_URL`` is unset; that backend does not survive a container
+    recycle, so durable async jobs (the claim-check / ``start_async_job`` path)
+    require a ``redis``/``valkey`` URL. This block lets an operator confirm at a
+    glance whether their deployment can actually run long jobs to completion.
+    """
+    raw = (env.get("FASTMCP_DOCKET_URL") or "").strip()
+    if not raw:
+        return {
+            "docket_url_set": False,
+            "backend": "memory (default)",
+            "durable_across_recycles": False,
+        }
+    scheme = raw.split("://", 1)[0].lower() if "://" in raw else "unknown"
+    return {
+        "docket_url_set": True,
+        "backend": scheme,
+        # valkey speaks the redis wire protocol and uses redis(s):// URLs.
+        "durable_across_recycles": scheme in {"redis", "rediss"},
+    }
+
+
 def build_service_status(
     *,
     service: str,
@@ -59,6 +85,7 @@ def build_service_status(
         "operator_npub_hash": op_npub_hash,
         "process_id": process_id,
         "build_info": build_info or None,
+        "async_jobs": build_docket_diagnostic(env),
     }
 
 

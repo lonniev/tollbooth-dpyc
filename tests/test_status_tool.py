@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import hashlib
 
-from tollbooth.tools.status import build_service_status, build_upstream_oauth_block
+from tollbooth.tools.status import (
+    build_docket_diagnostic,
+    build_service_status,
+    build_upstream_oauth_block,
+)
 
 
 def _call(**over):
@@ -24,6 +28,37 @@ def test_core_fields_passthrough():
     assert r["tollbooth_dpyc_version"] == "0.44.3"
     assert r["vault_configured"] is True and r["courier_has_vault"] is True
     assert r["process_id"] == 4242
+
+
+def test_docket_diagnostic_unset_is_ephemeral_memory():
+    d = build_docket_diagnostic({})
+    assert d == {
+        "docket_url_set": False,
+        "backend": "memory (default)",
+        "durable_across_recycles": False,
+    }
+
+
+def test_docket_diagnostic_redis_is_durable_and_never_leaks_url():
+    secret = "rediss://user:s3cr3t@my-redis.example.com:6379/0"
+    d = build_docket_diagnostic({"FASTMCP_DOCKET_URL": secret})
+    assert d["docket_url_set"] is True
+    assert d["backend"] == "rediss" and d["durable_across_recycles"] is True
+    # The credential-bearing URL must NEVER appear in the diagnostic.
+    assert "s3cr3t" not in str(d) and secret not in str(d)
+
+
+def test_docket_diagnostic_memory_scheme_is_not_durable():
+    d = build_docket_diagnostic({"FASTMCP_DOCKET_URL": "memory://"})
+    assert d["docket_url_set"] is True
+    assert d["backend"] == "memory" and d["durable_across_recycles"] is False
+
+
+def test_service_status_includes_async_jobs_block():
+    assert _call(env={"FASTMCP_DOCKET_URL": "redis://h:6379"})["async_jobs"][
+        "durable_across_recycles"
+    ] is True
+    assert _call()["async_jobs"]["docket_url_set"] is False
 
 
 def test_operator_npub_fingerprint_is_sha256_prefix():
