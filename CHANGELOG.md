@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.53.2 — 2026-06-28
+
+### Added — `service_status` reports the Docket (async-job) backend
+
+- New `async_jobs` block in `service_status`: `docket_url_set`, `backend` (the URL **scheme only** — `redis`/`rediss`/`memory`/…, never the URL, which can carry credentials), and `durable_across_recycles` (true only for redis/valkey). Lets an operator confirm whether their FastMCP/Horizon deployment has a durable background-task backend, since the `start_async_job` claim-check path runs work via in-process `asyncio.create_task`, which does not survive a serverless container recycle without a redis-backed Docket. A test asserts the credential-bearing URL never appears in the diagnostic.
+
 ## 0.53.1 — 2026-06-28
 
 ### Fixed — `update_coupon` no longer fails saving a coupon with unchanged use caps
