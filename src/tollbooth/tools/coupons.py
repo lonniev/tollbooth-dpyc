@@ -140,21 +140,26 @@ async def update_coupon_tool(
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
 
-    upp: Any = ...
+    # Caps are tri-state: clear_* -> set unlimited (None); an explicit value
+    # -> set it; otherwise OMIT the kwarg entirely so the vault's own
+    # "leave alone" sentinel applies. Never pass a sentinel from here: the
+    # vault forwards unrecognised values straight into the SQL params, where
+    # a stray Ellipsis would blow up Neon's JSON encoder ("Object of type
+    # ellipsis is not JSON serializable").
+    cap_kwargs: dict[str, Any] = {}
     if clear_uses_per_patron:
-        upp = None
+        cap_kwargs["uses_per_patron"] = None
     elif uses_per_patron is not None:
         if int(uses_per_patron) <= 0:
             return {"success": False, "error": "uses_per_patron must be a positive integer."}
-        upp = int(uses_per_patron)
+        cap_kwargs["uses_per_patron"] = int(uses_per_patron)
 
-    tu: Any = ...
     if clear_total_uses:
-        tu = None
+        cap_kwargs["total_uses"] = None
     elif total_uses is not None:
         if int(total_uses) <= 0:
             return {"success": False, "error": "total_uses must be a positive integer."}
-        tu = int(total_uses)
+        cap_kwargs["total_uses"] = int(total_uses)
 
     from tollbooth.coupons.vault import CouponAlreadyExists, CouponNotFound
     try:
@@ -165,8 +170,7 @@ async def update_coupon_tool(
             discount_percent=float(discount_percent) if discount_percent is not None else None,
             valid_from=vf,
             valid_until=vu,
-            uses_per_patron=upp,
-            total_uses=tu,
+            **cap_kwargs,
         )
     except CouponAlreadyExists as exc:
         return {"success": False, "error": str(exc)}

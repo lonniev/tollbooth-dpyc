@@ -191,6 +191,21 @@ async def test_update_clear_flags_pass_none():
 
 
 @pytest.mark.asyncio
+async def test_update_unchanged_caps_omit_kwargs_no_ellipsis():
+    """Saving a coupon without touching the caps (no clear flag, no value)
+    must OMIT the cap kwargs so the vault's leave-alone default applies.
+    Regression: the tool used Ellipsis as its own sentinel, which the vault
+    didn't recognise and forwarded into the SQL params -> Neon JSON encoder
+    raised 'Object of type ellipsis is not JSON serializable'."""
+    cv = FakeVault(update=lambda cid, op, **kw: _coupon())
+    r = await ct.update_coupon_tool(cv, OP, "c-1", **_update_kw(name="EVALUATOR100"))
+    assert r["success"] is True
+    _, _, kw = cv.calls[0]
+    assert "uses_per_patron" not in kw and "total_uses" not in kw
+    assert ... not in kw.values()
+
+
+@pytest.mark.asyncio
 async def test_update_not_found():
     cv = FakeVault(update=CouponNotFound())
     r = await ct.update_coupon_tool(
