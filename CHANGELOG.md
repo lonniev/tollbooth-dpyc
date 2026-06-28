@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.53.1 — 2026-06-28
+
+### Fixed — `update_coupon` no longer fails saving a coupon with unchanged use caps
+
+- **Bug:** editing a coupon and saving without touching its use caps (e.g. renaming `EVALUATOR100` in Pricing Studio, or any save that left `uses_per_patron`/`total_uses` alone) failed with `update failed: Object of type ellipsis is not JSON serializable`. `update_coupon_tool` used `...` (Python `Ellipsis`) as its private "leave this cap alone" sentinel and passed it into `CouponVault.update()`, but the vault recognises only its own `_UNSET = object()` sentinel. The unrecognised `Ellipsis` was appended to the SQL params list, where Neon's HTTP JSON encoder rejected it. The bug fired on every save that didn't set both caps.
+- **Fix:** the tool no longer invents a second sentinel. It builds the cap kwargs conditionally and **omits** them when unchanged, letting the vault's own `_UNSET` default own the leave-alone semantics — one sentinel, one owner. Added a regression test pinning the unchanged-caps path (existing tests missed it because the test double recorded kwargs without JSON-serializing).
+
 ## 0.53.0 — 2026-06-25
 
 ### Added — generic upstream HTTP 402 ("renew your subscription") handler
