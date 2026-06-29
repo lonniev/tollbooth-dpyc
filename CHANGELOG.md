@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.55.2 — 2026-06-29
+
+### Fixed — detached dispatch actually reaches the standalone Prefect account
+
+- **`PrefectClosureExecutor` never authenticated to the operator's standalone Prefect account**, so on a host platform that sets its own `PREFECT_*` env (e.g. Prefect Horizon / FastMCP Cloud), `run_deployment`/poll targeted the *wrong* account (401 / deployment-not-found). `submit` raised, and `start_async_job`'s dispatch-failure handler silently fell back to the **in-process runner** — so detached execution never actually ran from the MCP front, and the very long jobs it exists to protect still died on serverless recycle. Quick jobs masked it by completing in-process before recycling.
+- Root cause: `poll` used `os.environ.setdefault(...)`, a **no-op** when the host already set those vars; `submit` set nothing at all. Replaced both with `temporary_settings({PREFECT_API_URL, PREFECT_API_KEY})` — which *re-derives* settings (not defaults them) and is contextvar-scoped so concurrent operators don't clobber each other — forcing the vaulted standalone-account creds for the duration of each `run_deployment` / client call. Verified against a deliberately-wrong ambient env (401 without the override; correct account inside it).
+
 ## 0.55.1 — 2026-06-29
 
 ### Fixed — closure-path failure semantics symmetric with in-process

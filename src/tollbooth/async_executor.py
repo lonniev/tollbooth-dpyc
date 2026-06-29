@@ -86,60 +86,78 @@ class PrefectClosureExecutor:
         self._api_key = api_key
         self._key_id = key_id
 
-    def _client_ctx(self) -> Any:
-        import os
+    def _settings_ctx(self) -> Any:
+        # Force THIS operator's standalone-account API URL/key for the duration
+        # of one call, overriding any ambient PREFECT_* the host sets for its
+        # OWN workspace. The MCP runs on a platform (e.g. Prefect Horizon) that
+        # populates PREFECT_API_URL/KEY for its own account, so a plain
+        # ``os.environ.setdefault`` is a no-op and the client would target the
+        # wrong account (401, or deployment-not-found) — which would silently
+        # drop us onto the in-process fallback. ``temporary_settings`` re-derives
+        # the settings instead, and is contextvar-scoped so concurrent operators
+        # don't clobber each other.
+        from prefect.settings import (
+            PREFECT_API_KEY,
+            PREFECT_API_URL,
+            temporary_settings,
+        )
 
-        from prefect.client.orchestration import get_client
-
-        # The MCP front carries no PREFECT_* env (creds live in the vault), so
-        # point the client at the standalone account explicitly.
-        os.environ.setdefault("PREFECT_API_URL", self._api_url)
-        os.environ.setdefault("PREFECT_API_KEY", self._api_key)
-        return get_client()
+        return temporary_settings(
+            updates={
+                PREFECT_API_URL: self._api_url,
+                PREFECT_API_KEY: self._api_key,
+            }
+        )
 
     async def submit(self, claim: str, closure_b64: str | None) -> str:
         from prefect.deployments import run_deployment
 
         # timeout=0 ⇒ fire-and-return: create + schedule the run, do NOT wait.
         # Only the ciphertext closure + the non-secret key_id selector cross —
-        # no secrets, no params, no code.
-        flow_run = await run_deployment(
-            name=self._deployment,
-            parameters={"closure_b64": closure_b64, "key_id": self._key_id},
-            timeout=0,
-        )
+        # no secrets, no params, no code. The settings ctx points run_deployment
+        # at the standalone account (NOT the host platform's own workspace).
+        with self._settings_ctx():
+            flow_run = await run_deployment(
+                name=self._deployment,
+                parameters={"closure_b64": closure_b64, "key_id": self._key_id},
+                timeout=0,
+            )
         return str(flow_run.id)
 
     async def poll(self, handle: str) -> dict[str, Any] | None:
         import json
         import uuid as _uuid
 
+        from prefect.client.orchestration import get_client
         from prefect.client.schemas.filters import (
             ArtifactFilter,
             ArtifactFilterFlowRunId,
         )
 
         run_id = _uuid.UUID(handle)
-        async with self._client_ctx() as client:
-            run = await client.read_flow_run(run_id)
-            state = run.state
-            if state is None or not state.is_final():
-                return None
-            if state.is_completed():
-                # The flow publishes its result as a Prefect Artifact (Prefect
-                # result storage defaults to the worker's local disk, which the
-                # MCP cannot read). Read it back by flow-run id.
-                arts = await client.read_artifacts(
-                    artifact_filter=ArtifactFilter(
-                        flow_run_id=ArtifactFilterFlowRunId(any_=[run_id])
-                    ),
-                    limit=1,
-                )
-                result: Any = None
-                if arts:
-                    data = arts[0].data
-                    result = json.loads(data) if isinstance(data, str) else data
-                return {"status": "completed", "result": result, "error": None}
-            # failed / crashed / cancelled — report only the state type, never
-            # the upstream body (it could echo a sealed value).
-            return {"status": "failed", "result": None, "error": str(state.type)}
+        # Sync settings override wraps the async client (run_deployment/get_client
+        # both read the current settings); temporary_settings is a sync CM.
+        with self._settings_ctx():
+            async with get_client() as client:
+                run = await client.read_flow_run(run_id)
+                state = run.state
+                if state is None or not state.is_final():
+                    return None
+                if state.is_completed():
+                    # The flow publishes its result as a Prefect Artifact (Prefect
+                    # result storage defaults to the worker's local disk, which
+                    # the MCP cannot read). Read it back by flow-run id.
+                    arts = await client.read_artifacts(
+                        artifact_filter=ArtifactFilter(
+                            flow_run_id=ArtifactFilterFlowRunId(any_=[run_id])
+                        ),
+                        limit=1,
+                    )
+                    result: Any = None
+                    if arts:
+                        data = arts[0].data
+                        result = json.loads(data) if isinstance(data, str) else data
+                    return {"status": "completed", "result": result, "error": None}
+                # failed / crashed / cancelled — report only the state type, never
+                # the upstream body (it could echo a sealed value).
+                return {"status": "failed", "result": None, "error": str(state.type)}

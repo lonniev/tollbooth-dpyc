@@ -358,8 +358,12 @@ async def test_dispatch_failure_without_runner_refunds(vault_and_rt):
 # PrefectClosureExecutor.submit — only ciphertext crosses (stubbed prefect)
 # ---------------------------------------------------------------------------
 
-async def test_prefect_submit_passes_only_ciphertext(monkeypatch):
-    captured = {}
+def _stub_prefect(monkeypatch, captured):
+    """Stub prefect.deployments + prefect.settings so submit() runs without a
+    real Prefect install. ``temporary_settings`` is faked as a no-op CM that
+    records the API URL/key updates so a test can assert submit targets the
+    operator's standalone account (NOT the host platform's ambient env)."""
+    import contextlib
 
     async def fake_run_deployment(*, name, parameters, timeout):
         captured["name"] = name
@@ -367,11 +371,27 @@ async def test_prefect_submit_passes_only_ciphertext(monkeypatch):
         captured["timeout"] = timeout
         return types.SimpleNamespace(id=uuid.uuid4())
 
+    @contextlib.contextmanager
+    def fake_temporary_settings(updates=None):
+        captured["settings_updates"] = updates
+        yield
+
     fake_pkg = types.ModuleType("prefect")
     fake_dep = types.ModuleType("prefect.deployments")
     fake_dep.run_deployment = fake_run_deployment
+    fake_settings = types.ModuleType("prefect.settings")
+    fake_settings.temporary_settings = fake_temporary_settings
+    # The real settings objects are keys; sentinels suffice for the stub.
+    fake_settings.PREFECT_API_URL = "PREFECT_API_URL"
+    fake_settings.PREFECT_API_KEY = "PREFECT_API_KEY"
     monkeypatch.setitem(sys.modules, "prefect", fake_pkg)
     monkeypatch.setitem(sys.modules, "prefect.deployments", fake_dep)
+    monkeypatch.setitem(sys.modules, "prefect.settings", fake_settings)
+
+
+async def test_prefect_submit_passes_only_ciphertext(monkeypatch):
+    captured: dict = {}
+    _stub_prefect(monkeypatch, captured)
 
     exe = PrefectClosureExecutor(
         deployment="dpyc-job-flow/dpyc-jobs", api_url="u", api_key="k", key_id="op16hex"
@@ -389,6 +409,25 @@ async def test_prefect_submit_passes_only_ciphertext(monkeypatch):
     assert captured["parameters"] == {"closure_b64": sealed, "key_id": "op16hex"}
     # the secret never appears in cleartext anywhere in the parameters
     assert ANTHROPIC_SECRET not in json.dumps(captured["parameters"])
+
+
+async def test_prefect_submit_targets_standalone_account(monkeypatch):
+    """submit() must force the operator's vaulted API URL/key via
+    temporary_settings — NOT rely on the host platform's ambient PREFECT_* env
+    (which points at a different account and would 401 → in-process fallback)."""
+    captured: dict = {}
+    _stub_prefect(monkeypatch, captured)
+
+    exe = PrefectClosureExecutor(
+        deployment="d/x", api_url="https://standalone", api_key="pnu_real", key_id="kid"
+    )
+    await exe.submit("claim-x", "sealed")
+
+    # the settings override carried THIS operator's creds into run_deployment
+    assert captured["settings_updates"] == {
+        "PREFECT_API_URL": "https://standalone",
+        "PREFECT_API_KEY": "pnu_real",
+    }
 
 
 # ---------------------------------------------------------------------------
