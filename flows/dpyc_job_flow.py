@@ -78,19 +78,21 @@ def _do_http_request(req: dict[str, Any]) -> dict[str, Any]:
         resp = client.request(
             method, url, headers=req.get("headers"), json=req.get("json")
         )
-    # A non-2xx means the requested call did not succeed: raise so this flow run
-    # is marked FAILED and the triggering MCP refunds the fare (symmetric with an
-    # in-process runner's raise_for_status). We include the upstream RESPONSE body
-    # in the error so the operator can debug from the Prefect flow logs (which are
-    # operator-only) — e.g. an Anthropic 400 names exactly which field is invalid.
-    # The body is the upstream's own error, NOT the request's auth headers (those
-    # are in the request, not the response). Caveat: if a downstream echoes the
-    # request body and that body carried a secret, it would surface here — keep
-    # request secrets in headers, not the JSON body (the http_request convention).
+    # Return the response for EVERY status — including non-2xx. The generic flow
+    # is a faithful messenger: deciding whether a status is a success or a failure
+    # is DOMAIN policy, which belongs in the triggering MCP's shape_result (it can
+    # classify the upstream error into a curated, frontend-facing situation). The
+    # status + body reach the MCP via the artifact (operator-only). We also log a
+    # non-2xx here so the operator sees the reason in the Prefect run logs; the
+    # body is the upstream's own error, not the request's auth headers. (Genuine
+    # transport errors — connection, timeout — still raise from httpx above and
+    # FAIL the run, which the MCP refunds generically.)
     if resp.is_error:
-        raise RuntimeError(
-            f"upstream {resp.status_code} {resp.reason_phrase} "
-            f"for {method} {url}: {resp.text[:2000]}"
+        from prefect import get_run_logger
+
+        get_run_logger().warning(
+            "upstream %s %s for %s %s: %s",
+            resp.status_code, resp.reason_phrase, method, url, resp.text[:2000],
         )
     out: dict[str, Any] = {"status": resp.status_code}
     try:

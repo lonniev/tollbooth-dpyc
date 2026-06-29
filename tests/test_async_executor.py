@@ -290,6 +290,96 @@ async def test_fetch_closure_completed_but_unshapeable_refunds(vault_and_rt):
     assert vault.rows[claim]["status"] == "error"
 
 
+async def test_fetch_closure_situation_surfaces_curated_fields(vault_and_rt):
+    """shape_result raising AsyncJobSituation -> fetch returns the curated code +
+    message + transient (the frontend's UX data), refunds, and persists it
+    structured so a later poll returns the same thing — no raw upstream body."""
+    from tollbooth.async_situation import AsyncJobSituation
+
+    vault, rt = vault_and_rt
+
+    async def build_closure(**params):
+        return {"op": "http_request", "request": {"url": "https://x"}}
+
+    def shape_result(raw):
+        # the operator classifies the raw upstream response into a situation;
+        # the raw body (with a fake request_id) must NOT reach the patron
+        assert raw["status"] == 400  # operator sees the raw status
+        raise AsyncJobSituation(
+            error_code="operator_llm_unfunded",
+            message="The AI provider is temporarily unavailable. No fare was charged.",
+            next_steps="Try again shortly.",
+            transient=False,
+        )
+
+    rt.register_job_spec("resolve", build_closure, shape_result)
+    rt.set_async_executor(RecordingExecutor(outcome={
+        "status": "completed",
+        "result": {"status": 400, "json": {"error": {"message": "credit balance too low",
+                                                      "request_id": "req_SECRET123"}}},
+        "error": None,
+    }))
+    refunds: list = []
+
+    async def fake_rollback(tool_id, npub, *, tool_kwargs=None):
+        refunds.append(tool_id)
+
+    rt.rollback_debit = fake_rollback
+    out = await rt.start_async_job(
+        "resolve", NPUB, {"prompt": "hi"},
+        tool_id=TOOL_ID, max_runtime_seconds=210, result_ttl_seconds=900,
+    )
+    claim = out["claim_check"]
+
+    fetched = await rt.fetch_async_job(claim, NPUB)
+    assert fetched["status"] == "error"
+    assert fetched["error_code"] == "operator_llm_unfunded"
+    assert fetched["transient"] is False
+    assert fetched["refunded"] is True
+    # the raw upstream body / request_id never reaches the patron
+    assert "req_SECRET123" not in json.dumps(fetched)
+    assert "credit balance too low" not in json.dumps(fetched)
+    assert refunds == [TOOL_ID]
+
+    # a SUBSEQUENT poll (row already 'error') returns the same structured situation
+    again = await rt.fetch_async_job(claim, NPUB)
+    assert again["error_code"] == "operator_llm_unfunded"
+    assert again["transient"] is False
+    assert "req_SECRET123" not in json.dumps(again)
+
+
+async def test_fetch_closure_generic_exception_never_leaks_on_repoll(vault_and_rt):
+    """A non-situation shape_result exception refunds generically AND the stored
+    row must not carry the raw exception text (fixes a latent leak on re-poll)."""
+    vault, rt = vault_and_rt
+
+    async def build_closure(**params):
+        return {"op": "http_request", "request": {"url": "https://x"}}
+
+    def shape_result(raw):
+        raise ValueError("RAW-SECRET-abc in the exception text")
+
+    rt.register_job_spec("resolve", build_closure, shape_result)
+    rt.set_async_executor(RecordingExecutor(outcome={
+        "status": "completed", "result": {"status": 500}, "error": None,
+    }))
+
+    async def fake_rollback(tool_id, npub, *, tool_kwargs=None):
+        pass
+
+    rt.rollback_debit = fake_rollback
+    out = await rt.start_async_job(
+        "resolve", NPUB, {"prompt": "hi"},
+        tool_id=TOOL_ID, max_runtime_seconds=210, result_ttl_seconds=900,
+    )
+    claim = out["claim_check"]
+    first = await rt.fetch_async_job(claim, NPUB)
+    second = await rt.fetch_async_job(claim, NPUB)  # row now 'error'
+    for resp in (first, second):
+        assert resp["status"] == "error" and resp["refunded"] is True
+        assert "RAW-SECRET-abc" not in json.dumps(resp)
+
+
 async def test_fetch_closure_still_running(vault_and_rt):
     vault, rt = vault_and_rt
     _register_http_spec(rt)

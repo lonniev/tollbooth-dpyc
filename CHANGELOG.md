@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.56.0 — 2026-06-29
+
+### Added — detached-job failure reasons reach the MCP as curated, frontend-facing situations
+
+- **New `AsyncJobSituation`** (exported from `tollbooth`) — a job runner or a spec's `shape_result` raises it to report a failure the calling FRONTEND should render as informative UX: a machine `error_code`, a safe human `message`, optional `next_steps`, and a `transient` flag. The raw upstream error stays operator-side; only these curated fields cross the tool boundary. Follows the "situations, not failures" convention.
+- **`fetch_async_job` and `_run_job` now surface situations.** When `shape_result`/the runner raises `AsyncJobSituation`, the job refunds and the structured fields are returned to the caller AND persisted on the job row (serialized), so a later poll returns the same structured situation (via `situation_response_from_row`). Any *other* (unclassified) exception still refunds with a GENERIC message.
+- **Fixed a latent leak:** the previous code stored `str(exc)` from a failed `shape_result` in the job row's `error`, which the already-error fetch branch returned to the patron on a subsequent poll. Now only a generic string (or a curated situation) is ever stored — a raw exception never reaches the patron.
+- **The generic `dpyc-job-flow` is now a faithful messenger:** `http_request` returns the response for *every* status (including non-2xx) instead of raising, so the upstream status + body reach the MCP's `shape_result` (which decides success vs failure — domain policy belongs in the operator, not the generic flow). A non-2xx is logged to the Prefect run logs (operator-only) for debugging. Genuine transport errors still fail the run. (Flow-repo change; re-deploy to pick it up.)
+
 ## 0.55.3 — 2026-06-29
 
 ### Changed — long-runner secrets are normal operator secrets (no separate credential service)

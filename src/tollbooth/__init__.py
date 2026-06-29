@@ -171,6 +171,10 @@ except ImportError:
     X402Client = None  # type: ignore[assignment,misc]
     x402_wallet_template = None  # type: ignore[assignment,misc]
 
+from tollbooth.async_situation import (
+    AsyncJobSituation,
+    situation_response_from_row,
+)
 from tollbooth.upstream_payment import (
     classify_upstream_payment,
     is_x402_payment_challenge,
@@ -359,6 +363,8 @@ __all__ = [
     "classify_upstream_payment",
     "is_x402_payment_challenge",
     "upstream_payment_situation",
+    "AsyncJobSituation",
+    "situation_response_from_row",
     "resolve_npub",
     "VaultCipher",
     # Session Caches

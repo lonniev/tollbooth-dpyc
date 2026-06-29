@@ -2178,6 +2178,8 @@ class OperatorRuntime:
         claim_for_run ensures exactly one container runs an attempt.
         """
         import asyncio
+
+        from tollbooth.async_situation import AsyncJobSituation
         try:
             store = await self.async_job_store()
             while True:
@@ -2199,6 +2201,18 @@ class OperatorRuntime:
                     return
                 try:
                     result = await runner(**job["params"])
+                except AsyncJobSituation as sit:
+                    # The runner classified a failure into a curated, frontend-
+                    # facing situation (machine code + safe message + transient).
+                    # Persist it structured; fetch surfaces it — no retry (the
+                    # runner decided this is a settled outcome, not a transient
+                    # infra blip), no raw text to the patron.
+                    logger.info("async job %s situation: %s", claim, sit.error_code)
+                    await store.fail(claim, sit.to_row())
+                    await self.rollback_debit(
+                        job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                    )
+                    return
                 except Exception as exc:
                     # Generic message to the patron (an exception string can
                     # carry anything); full detail to operator logs only —
@@ -2257,13 +2271,12 @@ class OperatorRuntime:
         if job["status"] == "done":
             return {"success": True, "status": "done", "result": job["result"]}
         if job["status"] == "error":
-            return {
-                "success": True,
-                "status": "error",
-                "error": job["error"],
-                "refunded": True,
-                "next_steps": "The fee was refunded. Start a new request to retry.",
-            }
+            # The row may hold a structured AsyncJobSituation (curated code +
+            # message + transient) or a plain safe string — never a raw upstream
+            # body. Rebuild the same frontend response either way.
+            from tollbooth.async_situation import situation_response_from_row
+
+            return situation_response_from_row(job["error"])
         # Still open. Closure path: poll the detached executor and settle here.
         kind = job["kind"]
         handle = job["run_handle"]
@@ -2271,29 +2284,41 @@ class OperatorRuntime:
             outcome = await self._async_executor.poll(handle)
             if outcome is None:
                 return {"success": True, "status": "running", "poll_after_seconds": 3}
-            settle_error: str | None = None
             if outcome.get("status") == "completed":
                 import inspect
+
+                from tollbooth.async_situation import AsyncJobSituation
 
                 try:
                     shaped = self._job_specs[kind]["shape"](outcome.get("result"))
                     shaped = await shaped if inspect.isawaitable(shaped) else shaped
+                except AsyncJobSituation as sit:
+                    # shape_result classified the upstream outcome into a curated,
+                    # frontend-facing situation. Persist it structured + refund;
+                    # the raw upstream body stays operator-side (Prefect logs).
+                    logger.info("async job %s situation: %s", claim, sit.error_code)
+                    await store.fail(claim, sit.to_row())
+                    await self.rollback_debit(
+                        job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                    )
+                    return sit.to_response()
                 except Exception as exc:
-                    # The detached run finished, but shaping its raw result
-                    # failed (e.g. an upstream non-2xx surfaced as the result, or
-                    # the op produced nothing usable). Treat as a job failure so
-                    # the fee is refunded — symmetric with the in-process runner,
-                    # which raises+refunds on the same conditions.
-                    logger.warning("async job %s result shaping failed: %s", claim, exc)
-                    settle_error = str(exc)
+                    # The detached run finished, but shaping its raw result failed
+                    # in an unclassified way. Refund with a GENERIC message — never
+                    # the exception text (it can carry anything). Operator sees the
+                    # detail in logs.
+                    logger.warning(
+                        "async job %s result shaping failed: %s", claim, exc, exc_info=True
+                    )
                 else:
                     await store.complete(claim, shaped)
                     return {"success": True, "status": "done", "result": shaped}
-            # failed / crashed / unshapeable — refund, generic message (never the
-            # upstream body, which could echo a sealed value).
-            await store.fail(
-                claim, settle_error or outcome.get("error") or "Detached job failed."
-            )
+            # failed / crashed / unshapeable — refund with a GENERIC message. The
+            # detached run's state detail (outcome["error"], e.g. the state type)
+            # is operator-side only; never surfaced to the patron.
+            if outcome.get("status") == "failed" and outcome.get("error"):
+                logger.info("async job %s detached run failed: %s", claim, outcome["error"])
+            await store.fail(claim, "Job execution failed.")
             await self.rollback_debit(
                 job["tool_id"], job["npub"], tool_kwargs=job["params"],
             )
@@ -2302,6 +2327,7 @@ class OperatorRuntime:
                 "status": "error",
                 "error": "Job execution failed.",
                 "refunded": True,
+                "transient": True,
                 "next_steps": "The fee was refunded. Start a new request to retry.",
             }
         # In-process path: re-kick an orphaned pending/stalled job (atomic) —
