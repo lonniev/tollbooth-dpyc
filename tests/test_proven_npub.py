@@ -1,4 +1,4 @@
-"""Tests for the poison-keyed proven npub ownership cache."""
+"""Tests for the dpop_token-keyed proven npub ownership cache."""
 
 import hashlib
 import time
@@ -14,10 +14,10 @@ from tollbooth.proven_npub import (
 
 
 VALID_NPUB = "npub1l94pd4qu4eszrl6ek032ftcnsu3tt9a7xvq2zp7eaxeklp6mrpzssmq8pf"
-POISON_A = "bold-hawk-42"
-POISON_B = "calm-reef-77"
-HASH_A = hashlib.sha256(POISON_A.encode()).hexdigest()
-HASH_B = hashlib.sha256(POISON_B.encode()).hexdigest()
+DPOP_TOKEN_A = "bold-hawk-42"
+DPOP_TOKEN_B = "calm-reef-77"
+HASH_A = hashlib.sha256(DPOP_TOKEN_A.encode()).hexdigest()
+HASH_B = hashlib.sha256(DPOP_TOKEN_B.encode()).hexdigest()
 
 
 @pytest.mark.asyncio
@@ -25,7 +25,7 @@ async def test_mark_proven_and_is_proven():
     cache = ProvenNpubCache(ttl_seconds=3600)
     record = await cache.mark_proven(HASH_A, VALID_NPUB)
     assert isinstance(record, ProvenNpub)
-    assert record.poison_hash == HASH_A
+    assert record.dpop_token_hash == HASH_A
     assert record.npub == VALID_NPUB
     assert await cache.is_proven(HASH_A, VALID_NPUB)
 
@@ -37,8 +37,8 @@ async def test_is_proven_false_initially():
 
 
 @pytest.mark.asyncio
-async def test_different_poison_not_proven():
-    """Proof with poison A does not extend to poison B."""
+async def test_different_dpop_token_not_proven():
+    """Proof with dpop_token A does not extend to dpop_token B."""
     cache = ProvenNpubCache(ttl_seconds=3600)
     await cache.mark_proven(HASH_A, VALID_NPUB)
     assert await cache.is_proven(HASH_A, VALID_NPUB)
@@ -64,7 +64,7 @@ async def test_expiry_removes_proven():
     entry = cache._cache._entries.get(key)
     if entry is not None:
         expired_record = ProvenNpub(
-            poison_hash=entry[0].poison_hash,
+            dpop_token_hash=entry[0].dpop_token_hash,
             npub=entry[0].npub,
             verified_at=entry[0].verified_at,
             expires_at=time.time() - 10,
@@ -74,10 +74,10 @@ async def test_expiry_removes_proven():
 
 
 @pytest.mark.asyncio
-async def test_record_has_poison_hash():
+async def test_record_has_dpop_token_hash():
     cache = ProvenNpubCache(ttl_seconds=3600)
     record = await cache.mark_proven(HASH_A, VALID_NPUB)
-    assert record.poison_hash == HASH_A
+    assert record.dpop_token_hash == HASH_A
     assert record.npub == VALID_NPUB
     assert record.expires_at > record.verified_at
 
@@ -85,7 +85,7 @@ async def test_record_has_poison_hash():
 @pytest.mark.asyncio
 async def test_json_round_trip():
     record = ProvenNpub(
-        poison_hash=HASH_A,
+        dpop_token_hash=HASH_A,
         npub=VALID_NPUB,
         verified_at=time.time(),
         expires_at=time.time() + 3600,
@@ -123,7 +123,7 @@ async def test_proof_status_expired_does_not_evict():
     entry = cache._cache._entries.get(key)
     assert entry is not None
     expired_record = ProvenNpub(
-        poison_hash=entry[0].poison_hash,
+        dpop_token_hash=entry[0].dpop_token_hash,
         npub=entry[0].npub,
         verified_at=entry[0].verified_at,
         expires_at=time.time() - 10,

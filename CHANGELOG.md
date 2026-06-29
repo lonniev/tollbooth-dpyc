@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.57.0 — 2026-06-29
+
+### Changed — BREAKING: one name for the possession token — `dpop_token` (retires `proof` / `proof_token` / `poison`)
+
+- **The Secure Courier possession token is now `dpop_token` everywhere it is caller- or code-visible.** It was spelled three ways for one value: `proof_token` (returned by `request_npub_proof`), `poison` (the receive param + the credential-DM wire field + internal symbols), and `proof` (the parameter on every paid/free tool call). Calling it `proof` was wrong — the *proof* is the cached hash the wheel derives; the token is the **D**emonstrated **P**r**o**of-**o**f-**P**ossession credential a caller presents to retrieve/assert it. One general name now spans both the npub-ownership-proof flow and the credential-delivery flow.
+- **Tool-signature change (this is the breaking part):** every paid/free tool that took `proof` now takes `dpop_token`. The `paid_tool` decorator extracts `kwargs["dpop_token"]`, so a consumer server must rename its paid-tool params **in lockstep** with this wheel — a server still declaring `proof` will fail every paid call with `proof_required`. No compat shim (clean cut).
+- **Wire + error surface:** the credential-DM field is now `dpop_token = @@@…@@@` (a reply drafted against an old `poison = …` template won't parse — re-request a fresh channel). `ErrorCode.POISON_MISSING`→`DPOP_TOKEN_MISSING`, `COURIER_POISON_MISMATCH`→`COURIER_DPOP_TOKEN_MISMATCH`. The `proof_required` denial text now names `dpop_token`. The drain/retry/relay-pinning behavior is byte-for-byte unchanged — this was a rename, never a protocol change.
+- **Removed vestigial `proof` params** from the bootstrap courier tools (`request_credential_channel`, `receive_credentials`, `request_patron_credentials`, `receive_patron_credentials`) — they never used them; a *request* tool issues the token, it does not receive one.
+
+### Added — frictionless cold start (proof-vs-credential disambiguation, free "do I need credentials?" probe)
+
+- **`service_status` now returns a free, unauthenticated `patron_auth` block** — `{"mode": "oauth"|"secure_courier"|"none", "patron_credentials_required": bool, ...}` — so an agent can learn whether an operator needs OAuth, a couriered secret, or nothing *before* proving anything. The same block is attached to every `proof_required` denial, killing the chicken-and-egg where the answer hid behind a proof-gated tool.
+- **Proof and credential flows now cross-reference each other** in their tool descriptions (`request_npub_proof`/`receive_npub_proof` ↔ `request_credential_channel`/`receive_credentials`), so "run the Secure Courier" is no longer ambiguous between proving npub ownership and delivering a secret.
+- **OAuth tool descriptions encode the "try live first" heuristic:** don't pre-emptively `begin_oauth`; a `pending` `check_oauth_status` is not proof of a lapsed session — attempt the live call and fall back only on an explicit `upstream_auth_refresh_needed`.
+
 ## 0.56.0 — 2026-06-29
 
 ### Added — detached-job failure reasons reach the MCP as curated, frontend-facing situations

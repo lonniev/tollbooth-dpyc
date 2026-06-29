@@ -22,11 +22,11 @@ class ErrorCode:
     NPUB_INVALID = "npub_invalid"
 
     # Npub ownership proof (from request_npub_proof / receive_npub_proof
-    # → cached as poison_hash in ProvenNpubCache).
+    # → cached as dpop_token_hash in ProvenNpubCache).
     PROOF_MISSING = "proof_missing"          # parameter empty
     PROOF_REQUIRED = "proof_required"        # restricted-tool path requiring inline Schnorr
     PROOF_INVALID = "proof_invalid"          # signature does not verify
-    PROOF_REFRESH_NEEDED = "proof_refresh_needed"  # poison-keyed proof_token cache miss
+    PROOF_REFRESH_NEEDED = "proof_refresh_needed"  # dpop_token-keyed dpop_token cache miss
 
     # Authority-side discretionary consent (register/update/deregister_operator).
     # The Authority's adoption of a new Operator (or modification of an
@@ -58,14 +58,14 @@ class ErrorCode:
 
     # Secure Courier deterministic retrieval (receive_credentials /
     # receive_patron_credentials / receive_npub_proof). The client names
-    # the response it wants via (sender_npub, service, poison); these codes
-    # report why a poison-scoped, pinned-relay drain could not return it.
-    POISON_MISSING = "poison_missing"                      # poison argument empty
+    # the response it wants via (sender_npub, service, dpop_token); these codes
+    # report why a dpop_token-scoped, pinned-relay drain could not return it.
+    DPOP_TOKEN_MISSING = "dpop_token_missing"                      # dpop_token argument empty
     COURIER_NO_PENDING_RECORD = "courier_no_pending_record"  # no open channel for (npub, service)
-    COURIER_POISON_MISMATCH = "courier_poison_mismatch"    # poison does not match the open channel
+    COURIER_DPOP_TOKEN_MISMATCH = "courier_dpop_token_mismatch"    # dpop_token does not match the open channel
     COURIER_TOKEN_EXPIRED = "courier_token_expired"        # channel's freshness window has elapsed
     COURIER_NO_PINNED_RELAY = "courier_no_pinned_relay"    # record has no rendezvous relay to drain
-    COURIER_NOT_FOUND = "courier_not_found"                # relay drained; no DM matched the poison
+    COURIER_NOT_FOUND = "courier_not_found"                # relay drained; no DM matched the dpop_token
 
     # Billing / pricing
     INSUFFICIENT_BALANCE = "insufficient_balance"

@@ -92,7 +92,7 @@ SCHEMA = {
 
 class TestBuildDynamicHandler:
     def test_signature_and_annotations(self) -> None:
-        async def runner(params: dict, npub: str, proof: str) -> dict:
+        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
             return {}
 
         h = build_dynamic_handler("find_airline_flights", SCHEMA, runner, intent="Find flights.")
@@ -100,8 +100,8 @@ class TestBuildDynamicHandler:
         assert h.__doc__ == "Find flights."
 
         params = inspect.signature(h).parameters
-        assert list(params) == ["from_city", "to_city", "max_stops", "npub", "proof"]
-        # required params have no default; optional + npub/proof do.
+        assert list(params) == ["from_city", "to_city", "max_stops", "npub", "dpop_token"]
+        # required params have no default; optional + npub/dpop_token do.
         assert params["from_city"].default is inspect.Parameter.empty
         assert params["max_stops"].default is None
         assert params["npub"].default == ""
@@ -114,23 +114,23 @@ class TestBuildDynamicHandler:
     async def test_delegates_and_drops_omitted_optionals(self) -> None:
         captured: dict[str, Any] = {}
 
-        async def runner(params: dict, npub: str, proof: str) -> dict:
+        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
             captured["params"] = params
             captured["npub"] = npub
-            captured["proof"] = proof
+            captured["dpop_token"] = dpop_token
             return {"ok": True}
 
         h = build_dynamic_handler("find_airline_flights", SCHEMA, runner)
         # max_stops omitted → must NOT appear as None in the runner's params.
-        out = await h(from_city="JFK", to_city="LHR", max_stops=None, npub="np", proof="pf")
+        out = await h(from_city="JFK", to_city="LHR", max_stops=None, npub="np", dpop_token="pf")
         assert out == {"ok": True}
         assert captured["params"] == {"from_city": "JFK", "to_city": "LHR"}
-        assert captured["npub"] == "np" and captured["proof"] == "pf"
+        assert captured["npub"] == "np" and captured["dpop_token"] == "pf"
 
     async def test_passes_supplied_optionals(self) -> None:
         captured: dict[str, Any] = {}
 
-        async def runner(params: dict, npub: str, proof: str) -> dict:
+        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
             captured["params"] = params
             return {}
 
@@ -171,7 +171,7 @@ def _wired_runtime(slug: str = "cypher") -> tuple[OperatorRuntime, _FakeMCP]:
     return rt, fake
 
 
-async def _runner(params: dict, npub: str, proof: str) -> dict:
+async def _runner(params: dict, npub: str, dpop_token: str) -> dict:
     return {"params": params}
 
 
@@ -264,7 +264,7 @@ def test_fastmcp_generates_typed_schema() -> None:
 
     import functools
 
-    async def runner(params: dict, npub: str, proof: str) -> dict:
+    async def runner(params: dict, npub: str, dpop_token: str) -> dict:
         return {}
 
     h = build_dynamic_handler("find_airline_flights", SCHEMA, runner)

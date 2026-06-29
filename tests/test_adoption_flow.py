@@ -79,14 +79,14 @@ async def test_receive_rejects_invalid_proof():
     with _authority_tools(_rt()) as tools:
         with patch.object(at, "verify_proof", MagicMock(return_value=False)):
             r = await tools["receive_adoption_request"](
-                operator_npub="npub1op", proof="bad", service_url="https://svc"
+                operator_npub="npub1op", dpop_token="bad", service_url="https://svc"
             )
     assert r["success"] is False and r["error_code"] == ErrorCode.PROOF_INVALID
 
 
 async def test_receive_requires_operator_npub():
     with _authority_tools(_rt()) as tools:
-        r = await tools["receive_adoption_request"](operator_npub="", proof="p")
+        r = await tools["receive_adoption_request"](operator_npub="", dpop_token="p")
     assert r["success"] is False and "operator_npub is required" in r["error"]
 
 
@@ -96,7 +96,7 @@ async def test_receive_happy_records_pending_and_notifies():
              patch.object(at.adoption_store, "ensure_schema", AsyncMock()), \
              patch.object(at.adoption_store, "upsert_pending", AsyncMock()) as upsert:
             r = await tools["receive_adoption_request"](
-                operator_npub="npub1op", proof="good", service_url="https://svc"
+                operator_npub="npub1op", dpop_token="good", service_url="https://svc"
             )
     assert r["success"] is True and r["status"] == "pending"
     upsert.assert_awaited_once()
@@ -235,7 +235,7 @@ def _operator_rt():
 
 async def test_request_adoption_requires_proof():
     tools = _register_operator_tools(_operator_rt())
-    r = await tools["request_adoption"](authority_npub="npub1auth", proof="")
+    r = await tools["request_adoption"](authority_npub="npub1auth", dpop_token="")
     assert r["success"] is False and "provide proof" in r["error"]
 
 
@@ -246,7 +246,7 @@ async def test_request_adoption_verifies_proof_inline_without_vault():
     # proven-npub cache, forcing a bootstrap that an orphan cannot complete.
     captured: dict = {}
 
-    async def fake_require_proof(npub, proof, tool_name, *, proven_cache=None, **kw):
+    async def fake_require_proof(npub, dpop_token, tool_name, *, proven_cache=None, **kw):
         captured["proven_cache_is_none"] = proven_cache is None
         return None  # proof accepted
 
@@ -254,7 +254,7 @@ async def test_request_adoption_verifies_proof_inline_without_vault():
     with patch("tollbooth.identity_proof.require_proof", side_effect=fake_require_proof):
         # Bad authority npub so the call returns at the guard right after the
         # proof check — proving the gate was passed without the remote leg.
-        r = await tools["request_adoption"](authority_npub="not-an-npub", proof="p")
+        r = await tools["request_adoption"](authority_npub="not-an-npub", dpop_token="p")
 
     assert captured.get("proven_cache_is_none") is True
     assert r["success"] is False and "valid npub1" in r["error"]
@@ -265,7 +265,7 @@ async def test_request_adoption_rejects_bad_authority_npub():
     # MCP-to-MCP leg (which needs fastmcp, not an SDK test dep).
     tools = _register_operator_tools(_operator_rt())
     with patch("tollbooth.identity_proof.require_proof", AsyncMock(return_value=None)):
-        r = await tools["request_adoption"](authority_npub="not-an-npub", proof="p")
+        r = await tools["request_adoption"](authority_npub="not-an-npub", dpop_token="p")
     assert r["success"] is False and "valid npub1" in r["error"]
 
 

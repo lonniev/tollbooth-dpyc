@@ -57,13 +57,13 @@ async def receive_credentials_tool(
     rt: Any,
     sender_npub: str,
     service: str,
-    poison: str,
+    dpop_token: str,
     credential_card: str,
     *,
     service_name: str,
     slug: str,
 ) -> dict[str, Any]:
-    """Pick up operator credentials (poison drain or ncred card) + validate."""
+    """Pick up operator credentials (dpop_token drain or ncred card) + validate."""
     if not sender_npub:
         return {
             "success": False,
@@ -83,13 +83,13 @@ async def receive_credentials_tool(
                 )
             ),
         }
-    if not poison and not credential_card:
+    if not dpop_token and not credential_card:
         from tollbooth.constants import ErrorCode as _EC
         return {
             "success": False,
-            "error_code": _EC.POISON_MISSING,
+            "error_code": _EC.DPOP_TOKEN_MISSING,
             "error": (
-                "poison is required — pass the session phrase returned by "
+                "dpop_token is required — pass the session phrase returned by "
                 "request_credential_channel (or provide a credential_card)."
             ),
         }
@@ -105,7 +105,7 @@ async def receive_credentials_tool(
             )
         else:
             result = await courier.receive(
-                sender_npub, service=service, poison=poison,
+                sender_npub, service=service, dpop_token=dpop_token,
             )
 
         # Validate credentials via operator callback before accepting.
@@ -166,7 +166,7 @@ async def receive_credentials_tool(
 
 
 async def forget_credentials_tool(
-    rt: Any, service: str, npub: str, proof: str,
+    rt: Any, service: str, npub: str, dpop_token: str,
 ) -> dict[str, Any]:
     """Delete vaulted credentials for (service, npub); proof of ownership required."""
     if not service:
@@ -182,7 +182,7 @@ async def forget_credentials_tool(
                 )
             ),
         }
-    if err := await rt.require_caller_proof(npub, proof, "forget_credentials"):
+    if err := await rt.require_caller_proof(npub, dpop_token, "forget_credentials"):
         return err
     target_npub = npub
     courier = await rt.courier()
@@ -225,18 +225,18 @@ async def request_patron_credentials_tool(
 
 
 async def receive_patron_credentials_tool(
-    rt: Any, sender_npub: str, poison: str, credential_card: str,
+    rt: Any, sender_npub: str, dpop_token: str, credential_card: str,
 ) -> dict[str, Any]:
-    """Pick up patron credentials (poison drain or ncred card)."""
+    """Pick up patron credentials (dpop_token drain or ncred card)."""
     if not sender_npub:
         return {"success": False, "error": "sender_npub is required."}
-    if not poison and not credential_card:
+    if not dpop_token and not credential_card:
         from tollbooth.constants import ErrorCode as _EC
         return {
             "success": False,
-            "error_code": _EC.POISON_MISSING,
+            "error_code": _EC.DPOP_TOKEN_MISSING,
             "error": (
-                "poison is required — pass the session phrase returned "
+                "dpop_token is required — pass the session phrase returned "
                 "by request_patron_credentials (or a credential_card)."
             ),
         }
@@ -252,7 +252,7 @@ async def receive_patron_credentials_tool(
                 credential_card, service=service,
             )
         return await courier.receive(
-            sender_npub, service, poison=poison,
+            sender_npub, service, dpop_token=dpop_token,
             request_tool="request_patron_credentials",
         )
     except Exception as e:

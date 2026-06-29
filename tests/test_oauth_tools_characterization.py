@@ -84,7 +84,7 @@ async def test_begin_oauth_happy_builds_url_and_stores_verifier():
                return_value="https://provider.example/authorize?x=1") as mk_url, \
          patch("tollbooth.shortlinks.create_shortlink",
                new=AsyncMock(return_value="https://s.example/abc")):
-        r = await tools["begin_oauth"](npub=PATRON, proof="ok")
+        r = await tools["begin_oauth"](npub=PATRON, dpop_token="ok")
 
     assert r["success"] is True and r["status"] == "pending"
     assert r["authorize_url"] == "https://provider.example/authorize?x=1"
@@ -102,7 +102,7 @@ async def test_begin_oauth_creds_not_delivered():
     rt = _runtime()
     rt.load_credentials = AsyncMock(side_effect=RuntimeError("no creds"))
     tools = _register(rt)
-    r = await tools["begin_oauth"](npub=PATRON, proof="ok")
+    r = await tools["begin_oauth"](npub=PATRON, dpop_token="ok")
     assert r["success"] is False and "have not been delivered yet" in r["error"]
 
 
@@ -111,7 +111,7 @@ async def test_begin_oauth_empty_client_id():
     rt = _runtime()
     rt.load_credentials = AsyncMock(return_value={"app_key": "", "secret": "x"})
     tools = _register(rt)
-    r = await tools["begin_oauth"](npub=PATRON, proof="ok")
+    r = await tools["begin_oauth"](npub=PATRON, dpop_token="ok")
     assert r["success"] is False and "have not been delivered yet" in r["error"]
 
 
@@ -121,7 +121,7 @@ async def test_begin_oauth_collector_not_found():
     tools = _register(rt)
     with patch("tollbooth.registry.resolve_service_by_name",
                new=AsyncMock(side_effect=RuntimeError("404"))):
-        r = await tools["begin_oauth"](npub=PATRON, proof="ok")
+        r = await tools["begin_oauth"](npub=PATRON, dpop_token="ok")
     assert r["success"] is False and "OAuth2 collector not found" in r["error"]
 
 
@@ -132,7 +132,7 @@ async def test_check_status_no_pending_flow():
     rt = _runtime()
     rt.load_patron_session = AsyncMock(return_value=None)
     tools = _register(rt)
-    r = await tools["check_oauth_status"](npub=PATRON, proof="ok")
+    r = await tools["check_oauth_status"](npub=PATRON, dpop_token="ok")
     assert r["success"] is False and "No pending OAuth flow" in r["error"]
 
 
@@ -145,7 +145,7 @@ async def test_check_status_code_pending():
                new=AsyncMock(return_value={"url": "https://collector.example"})), \
          patch("tollbooth.oauth2_collector.retrieve_code_from_collector",
                new=AsyncMock(return_value=None)):
-        r = await tools["check_oauth_status"](npub=PATRON, proof="ok")
+        r = await tools["check_oauth_status"](npub=PATRON, dpop_token="ok")
     assert r["success"] is True and r["status"] == "pending"
 
 
@@ -161,7 +161,7 @@ async def test_check_status_completes_and_persists_tokens():
                new=AsyncMock(return_value="AUTHCODE")), \
          patch("tollbooth.oauth2_collector.exchange_code_for_token",
                new=AsyncMock(return_value=token)) as mk_exch:
-        r = await tools["check_oauth_status"](npub=PATRON, proof="ok")
+        r = await tools["check_oauth_status"](npub=PATRON, dpop_token="ok")
 
     assert r["success"] is True and r["status"] == "completed"
     # code exchanged with the operator creds + PKCE verifier
@@ -184,7 +184,7 @@ async def test_check_status_exchange_failure():
                new=AsyncMock(return_value="AUTHCODE")), \
          patch("tollbooth.oauth2_collector.exchange_code_for_token",
                new=AsyncMock(side_effect=RuntimeError("boom"))):
-        r = await tools["check_oauth_status"](npub=PATRON, proof="ok")
+        r = await tools["check_oauth_status"](npub=PATRON, dpop_token="ok")
     assert r["success"] is False and "Token exchange failed" in r["error"]
 
 
@@ -200,7 +200,7 @@ async def test_check_status_on_token_received_merges_extra():
                new=AsyncMock(return_value="AUTHCODE")), \
          patch("tollbooth.oauth2_collector.exchange_code_for_token",
                new=AsyncMock(return_value=token)):
-        r = await tools["check_oauth_status"](npub=PATRON, proof="ok")
+        r = await tools["check_oauth_status"](npub=PATRON, dpop_token="ok")
 
     assert r["success"] is True
     stored = rt.store_patron_session.await_args.args[1]

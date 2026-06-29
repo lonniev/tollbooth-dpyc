@@ -37,7 +37,7 @@ async def test_ensure_schema_is_schema_qualified():
 
 async def test_upsert_pending_binds_params_and_upserts():
     v = FakeVault()
-    await adoption_store.upsert_pending(v, "npub1op", "https://svc", note="hi", poison_hash="h")
+    await adoption_store.upsert_pending(v, "npub1op", "https://svc", note="hi", dpop_token_hash="h")
     sql, params = v.calls[0]
     assert "INSERT INTO authority.operator_adoption_requests" in sql
     assert "ON CONFLICT (operator_npub) DO UPDATE" in sql

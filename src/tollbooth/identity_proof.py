@@ -17,10 +17,10 @@ caller chooses based on what credentials it has on hand:
            "sig": "<schnorr_signature>"
        }
 
-2. **Cached poison phrase** (format ``alpha-beta-42``): the
-   ``proof_token`` returned by a prior ``request_npub_proof`` →
+2. **Cached dpop_token phrase** (format ``alpha-beta-42``): the
+   ``dpop_token`` returned by a prior ``request_npub_proof`` →
    ``receive_npub_proof`` DM round-trip. Works when the caller holds
-   only the poison and not the nsec (e.g., a remote AI agent that's
+   only the dpop_token and not the nsec (e.g., a remote AI agent that's
    already proven ownership in this session). The gate hashes it and
    looks up the proven-npub cache supplied by the caller.
 
@@ -44,9 +44,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Poison phrases produced by request_npub_proof have the shape
+# Dpop_token phrases produced by request_npub_proof have the shape
 # ``<word>-<word>-<n>`` — three lowercase letters/digits segments.
-_POISON_RE = re.compile(r"^[a-z]+-[a-z]+-\d+$")
+_DPOP_TOKEN_RE = re.compile(r"^[a-z]+-[a-z]+-\d+$")
 
 PROOF_EVENT_KIND = 27235
 """NIP-98 HTTP Auth event kind, repurposed for MCP identity proofs."""
@@ -246,7 +246,7 @@ def verify_proof(
 
 async def require_proof(
     npub: str,
-    proof: str,
+    dpop_token: str,
     tool_name: str,
     *,
     proven_cache: "ProvenNpubCache | None" = None,
@@ -264,7 +264,7 @@ async def require_proof(
 
     **Tactics accepted, in this order:**
 
-    1. **Cached poison phrase** — when ``proof`` matches the
+    1. **Cached dpop_token phrase** — when ``proof`` matches the
        ``<word>-<word>-<n>`` shape and ``proven_cache`` is supplied,
        hash it (sha256) and check ``cache.is_proven(hash, npub)``. A
        hit means a prior ``receive_npub_proof`` saw a valid signed-DM
@@ -294,22 +294,22 @@ async def require_proof(
                 "least 60 characters."
             ),
         }
-    if not proof:
+    if not dpop_token:
         return {
             "success": False,
             "error_code": ErrorCode.PROOF_REQUIRED,
-            "error": "proof is required.",
+            "error": "dpop_token is required.",
             "next_steps": [
                 "Either: sign a kind-27235 Nostr event with your nsec and pass "
-                "it as `proof` (one-shot, no relay round-trip).",
+                "it as `dpop_token` (one-shot, no relay round-trip).",
                 "Or: call request_npub_proof, reply to the DM challenge from "
                 "your Nostr client, then call receive_npub_proof — pass the "
-                "returned proof_token as `proof` on every subsequent call.",
+                "returned dpop_token as `dpop_token` on every subsequent call.",
             ],
         }
 
-    # Tactic 1: cached poison phrase
-    if proven_cache is not None and _POISON_RE.match(proof):
+    # Tactic 1: cached dpop_token phrase
+    if proven_cache is not None and _DPOP_TOKEN_RE.match(dpop_token):
         # Lazy import to avoid identity_proof ↔ runtime circular dependency.
         from tollbooth.runtime import resolve_npub as _resolve_npub
         try:
@@ -318,8 +318,8 @@ async def require_proof(
             resolved = npub
 
         import hashlib as _hashlib
-        poison_hash = _hashlib.sha256(proof.encode()).hexdigest()
-        if await proven_cache.is_proven(poison_hash, resolved):
+        dpop_token_hash = _hashlib.sha256(dpop_token.encode()).hexdigest()
+        if await proven_cache.is_proven(dpop_token_hash, resolved):
             return None
         return {
             "success": False,
@@ -332,23 +332,23 @@ async def require_proof(
                 "request_npub_proof(patron_npub=<patron_npub>)",
                 "Reply to the DM challenge from your Nostr client",
                 "receive_npub_proof(patron_npub=<patron_npub>) to cache a "
-                "fresh proof_token",
+                "fresh dpop_token",
             ],
         }
 
-    # S4: a poison-shaped token reaching here was NOT accepted as a cached
+    # S4: a dpop_token-shaped token reaching here was NOT accepted as a cached
     # proof (this runtime wired no proven_cache, or the cache-miss branch above
     # already returned). It is definitely not an inline Schnorr event (those are
-    # JSON and never match _POISON_RE), so don't fall through to a confusing
+    # JSON and never match _DPOP_TOKEN_RE), so don't fall through to a confusing
     # "malformed Schnorr" error — tell the caller their token isn't valid here
     # and how to refresh. This changes only the denial message, never what is
     # accepted.
-    if _POISON_RE.match(proof):
+    if _DPOP_TOKEN_RE.match(dpop_token):
         return {
             "success": False,
             "error_code": ErrorCode.PROOF_REFRESH_NEEDED,
             "error": (
-                "That looks like a proof_token, but it isn't a currently-valid "
+                "That looks like a dpop_token, but it isn't a currently-valid "
                 "cached proof here. Refresh it, or pass an inline kind-27235 "
                 "Schnorr proof instead."
             ),
@@ -356,12 +356,12 @@ async def require_proof(
                 "request_npub_proof(patron_npub=<patron_npub>)",
                 "Reply to the DM challenge from your Nostr client",
                 "receive_npub_proof(patron_npub=<patron_npub>) to cache a "
-                "fresh proof_token",
+                "fresh dpop_token",
             ],
         }
 
     # Tactic 2: inline Schnorr-signed kind-27235 event
-    if not verify_proof(proof, npub, tool_name, window_seconds=window_seconds):
+    if not verify_proof(dpop_token, npub, tool_name, window_seconds=window_seconds):
         return {
             "success": False,
             "error_code": ErrorCode.PROOF_INVALID,

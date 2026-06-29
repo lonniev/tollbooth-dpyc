@@ -763,7 +763,7 @@ def register_authority_tools(
             str,
             Field(description="Your Nostr npub (bech32). Get one from the dpyc-oracle's how_to_join() tool."),
         ] = "",
-        proof: str = "",
+        dpop_token: str = "",
         service_url: Annotated[
             str,
             Field(description="Your MCP endpoint URL (e.g. 'https://my-service.fastmcp.app/mcp')."),
@@ -790,7 +790,7 @@ def register_authority_tools(
            ``npub``. Proves the requester really controls that npub. The
            operator typically calls ``request_npub_proof`` /
            ``receive_npub_proof`` against this Authority first to mint
-           a cached proof_token.
+           a cached dpop_token.
         2. ``authority_proof`` — Schnorr proof signed by the Authority's
            own npub. This is the Authority's human consent — only an
            agent with the Authority's nsec on hand can produce it. Apps
@@ -800,7 +800,7 @@ def register_authority_tools(
 
         Next step: Call purchase_credits to fund your credit balance.
         """
-        err = await require_proof(npub, proof, runtime.runtime_name("register_operator"), proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, dpop_token, runtime.runtime_name("register_operator"), proven_cache=await runtime.proven_npub_cache())
         if err:
             return err
         err = await _require_authority_consent(
@@ -815,7 +815,7 @@ def register_authority_tools(
     @tool
     async def update_operator(
         npub: Annotated[str, Field(description="Nostr npub of the Operator to update.")] = "",
-        proof: str = "",
+        dpop_token: str = "",
         service_url: Annotated[str, Field(description="New MCP endpoint URL (leave empty to keep current).")] = "",
         display_name: Annotated[str, Field(description="New display name (leave empty to keep current).")] = "",
         authority_proof: Annotated[
@@ -836,7 +836,7 @@ def register_authority_tools(
           Operator's nsec could redirect their own ``service_url`` under
           this Authority's signature without the Authority's awareness.
         """
-        err = await require_proof(npub, proof, runtime.runtime_name("update_operator"), proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, dpop_token, runtime.runtime_name("update_operator"), proven_cache=await runtime.proven_npub_cache())
         if err:
             return err
         err = await _require_authority_consent(
@@ -867,7 +867,7 @@ def register_authority_tools(
     @tool
     async def deregister_operator(
         npub: Annotated[str, Field(description="Nostr npub of the Operator to deregister.")] = "",
-        proof: str = "",
+        dpop_token: str = "",
         authority_proof: Annotated[
             str,
             Field(description=(
@@ -887,7 +887,7 @@ def register_authority_tools(
           Operator's public npub and held its nsec could remove themselves
           from this Authority's roster without the Authority noticing.
         """
-        err = await require_proof(npub, proof, runtime.runtime_name("deregister_operator"), proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, dpop_token, runtime.runtime_name("deregister_operator"), proven_cache=await runtime.proven_npub_cache())
         if err:
             return err
         err = await _require_authority_consent(
@@ -913,13 +913,13 @@ def register_authority_tools(
     @tool
     async def get_operator_config(
         npub: Annotated[str, Field(description="Your Nostr npub (bech32).")] = "",
-        proof: str = "",
+        dpop_token: str = "",
     ) -> dict[str, Any]:
         """Retrieve operator bootstrap configuration (Neon URL, schema).
 
         Gated by Schnorr signature proving ownership of the requested npub.
         """
-        err = await require_proof(npub, proof, runtime.runtime_name("get_operator_config"), proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, dpop_token, runtime.runtime_name("get_operator_config"), proven_cache=await runtime.proven_npub_cache())
         if err:
             return err
 
@@ -948,7 +948,7 @@ def register_authority_tools(
     @tool
     async def operator_status(
         npub: Annotated[str, Field(description="Nostr public key (npub1...). Defaults to operator identity if empty.")] = "",
-        proof: str = "",
+        dpop_token: str = "",
     ) -> dict[str, Any]:
         """View registration status, balance summary, and the Authority's Nostr npub.
 
@@ -959,7 +959,7 @@ def register_authority_tools(
         inspection is always allowed).
         """
         if npub:
-            err = await require_proof(npub, proof, runtime.runtime_name("operator_status"), proven_cache=await runtime.proven_npub_cache())
+            err = await require_proof(npub, dpop_token, runtime.runtime_name("operator_status"), proven_cache=await runtime.proven_npub_cache())
             if err:
                 return err
         user_id = _resolve_npub_or_operator(npub)
@@ -1004,7 +1004,7 @@ def register_authority_tools(
             str,
             Field(description="The operator's DPYC npub (from register_operator response)."),
         ] = "",
-        proof: str = "",
+        dpop_token: str = "",
         amount_sats: Annotated[
             int,
             Field(description="The total purchase amount in satoshis. Must be positive."),
@@ -1142,7 +1142,7 @@ def register_authority_tools(
             str,
             Field(description="The operator's Nostr npub requesting adoption."),
         ] = "",
-        proof: Annotated[
+        dpop_token: Annotated[
             str,
             Field(description=(
                 "Inline kind-27235 proof signed by the operator's nsec, bound "
@@ -1166,7 +1166,7 @@ def register_authority_tools(
         if not operator_npub:
             return {"success": False, "error": "operator_npub is required."}
         # Verify the operator owns the npub (inline proof bound to the sentinel).
-        if not verify_proof(proof, operator_npub, ADOPTION_PROOF_TOOL):
+        if not verify_proof(dpop_token, operator_npub, ADOPTION_PROOF_TOOL):
             return {
                 "success": False,
                 "error_code": ErrorCode.PROOF_INVALID,
@@ -1416,7 +1416,7 @@ def register_authority_tools(
                 "authority_claim",
                 greeting=(
                     "You are requesting to become the curator of this Authority. "
-                    "Reply with: claim = @@@yes@@@ and include the poison slug."
+                    "Reply with: claim = @@@yes@@@ and include the dpop_token slug."
                 ),
                 recipient_npub=candidate_npub,
             )
@@ -1430,7 +1430,7 @@ def register_authority_tools(
             "phase": challenge.phase,
             "instructions": (
                 f"A Nostr DM challenge has been sent to {candidate_npub[:16]}... "
-                "Reply with: claim = @@@yes@@@ and the poison slug. "
+                "Reply with: claim = @@@yes@@@ and the dpop_token slug. "
                 "Then call confirm_authority_claim(candidate_npub)."
             ),
             "message": result.get("message", "DM sent."),
@@ -1482,7 +1482,7 @@ def register_authority_tools(
                 greeting=(
                     f"{candidate_npub} requests to curate the Authority at "
                     f"npub {signer.npub[:16]}... "
-                    "Reply with: approval = @@@yes@@@ and the poison slug."
+                    "Reply with: approval = @@@yes@@@ and the dpop_token slug."
                 ),
                 recipient_npub=parent_npub,
             )

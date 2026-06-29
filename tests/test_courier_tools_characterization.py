@@ -55,10 +55,10 @@ class FakeCourier:
         self._exchange = SimpleNamespace(
             _credential_vault=SimpleNamespace(store_credentials=self.store_credentials),
         )
-        self.open_channel = AsyncMock(return_value={"success": True, "poison": "p"})
+        self.open_channel = AsyncMock(return_value={"success": True, "dpop_token": "p"})
         self.forget = AsyncMock(return_value=self.forget_result)
 
-    async def receive(self, sender_npub, service=None, poison=None, request_tool=None):
+    async def receive(self, sender_npub, service=None, dpop_token=None, request_tool=None):
         return dict(self.receive_result)
 
     async def redeem_card(self, ncred, service=None):
@@ -108,7 +108,7 @@ async def test_request_channel_opens_with_service_and_greeting():
     tools = _register(rt)
 
     r = await tools["request_credential_channel"](sender_npub=SENDER, service="test-operator")
-    assert r == {"success": True, "poison": "p"}
+    assert r == {"success": True, "dpop_token": "p"}
     assert courier.open_channel.await_args.args[0] == "test-operator"
     assert courier.open_channel.await_args.kwargs["recipient_npub"] == SENDER
 
@@ -125,11 +125,11 @@ async def test_request_channel_requires_sender_and_service():
 # ── receive_credentials validation-callback flow ──────────────────────
 
 @pytest.mark.asyncio
-async def test_receive_missing_poison_and_card():
+async def test_receive_missing_dpop_token_and_card():
     rt = _runtime(FakeCourier())
     tools = _register(rt)
     r = await tools["receive_credentials"](sender_npub=SENDER, service="test-operator")
-    assert r["error_code"] == ErrorCode.POISON_MISSING
+    assert r["error_code"] == ErrorCode.DPOP_TOKEN_MISSING
 
 
 @pytest.mark.asyncio
@@ -137,7 +137,7 @@ async def test_receive_no_validator_returns_result():
     courier = FakeCourier(receive_result={"success": True, "service": "test-operator", "ok": 1})
     rt = _runtime(courier, validator=None)
     tools = _register(rt)
-    r = await tools["receive_credentials"](sender_npub=SENDER, service="test-operator", poison="p")
+    r = await tools["receive_credentials"](sender_npub=SENDER, service="test-operator", dpop_token="p")
     assert r["ok"] == 1
 
 
@@ -148,7 +148,7 @@ async def test_receive_validator_passes_resets_cashier():
     rt._cashier = object()  # something to clear
     tools = _register(rt)
 
-    r = await tools["receive_credentials"](sender_npub=SENDER, service="test-operator", poison="p")
+    r = await tools["receive_credentials"](sender_npub=SENDER, service="test-operator", dpop_token="p")
     assert r["success"] is True
     assert rt._cashier is None  # cashier reset so it reinitializes from new creds
 
@@ -159,7 +159,7 @@ async def test_receive_validator_fails_rejects_and_dms():
     rt = _runtime(courier, validator=lambda creds: ["api_key looks wrong"])
     tools = _register(rt)
 
-    r = await tools["receive_credentials"](sender_npub=SENDER, service="test-operator", poison="p")
+    r = await tools["receive_credentials"](sender_npub=SENDER, service="test-operator", dpop_token="p")
     assert r["success"] is False
     assert r["validation_errors"] == ["api_key looks wrong"]
     assert "failed validation" in r["error"]
@@ -179,7 +179,7 @@ async def test_receive_partial_skips_validator_until_complete():
     rt.load_credentials = AsyncMock(return_value={})  # nothing required present yet
     tools = _register(rt)
 
-    r = await tools["receive_credentials"](sender_npub=SENDER, service="test-operator", poison="p")
+    r = await tools["receive_credentials"](sender_npub=SENDER, service="test-operator", dpop_token="p")
     assert r["success"] is True            # not rejected despite the failing validator
     assert "validation_errors" not in r
     courier.store_credentials.assert_not_awaited()  # nothing forgotten/wiped
@@ -194,7 +194,7 @@ async def test_forget_fires_on_forget_callback():
     rt = _runtime(courier, on_forget=lambda svc, npub: seen.append((svc, npub)))
     tools = _register(rt)
 
-    r = await tools["forget_credentials"](service="test-operator", npub=OP, proof="ok")
+    r = await tools["forget_credentials"](service="test-operator", npub=OP, dpop_token="ok")
     assert r["success"] is True
     assert seen == [("test-operator", OP)]
 
@@ -203,7 +203,7 @@ async def test_forget_fires_on_forget_callback():
 async def test_forget_requires_service():
     rt = _runtime(FakeCourier())
     tools = _register(rt)
-    r = await tools["forget_credentials"](service="", npub=OP, proof="ok")
+    r = await tools["forget_credentials"](service="", npub=OP, dpop_token="ok")
     assert "service is required" in r["error"]
 
 
@@ -217,30 +217,30 @@ async def test_request_patron_opens_on_patron_service():
     tools = _register(rt)
 
     r = await tools["request_patron_credentials"](sender_npub=SENDER)
-    assert r == {"success": True, "poison": "p"}
+    assert r == {"success": True, "dpop_token": "p"}
     assert courier.open_channel.await_args.args[0] == "test-patron"
 
 
 @pytest.mark.asyncio
-async def test_receive_patron_missing_poison_and_card():
+async def test_receive_patron_missing_dpop_token_and_card():
     rt = _runtime(FakeCourier())
     tools = _register(rt)
     r = await tools["receive_patron_credentials"](sender_npub=SENDER)
-    assert r["error_code"] == ErrorCode.POISON_MISSING
+    assert r["error_code"] == ErrorCode.DPOP_TOKEN_MISSING
 
 
 @pytest.mark.asyncio
-async def test_receive_patron_poison_branch_drains():
+async def test_receive_patron_dpop_token_branch_drains():
     captured = {}
 
     class _C(FakeCourier):
-        async def receive(self, sender_npub, service=None, poison=None, request_tool=None):
-            captured.update(service=service, poison=poison, request_tool=request_tool)
+        async def receive(self, sender_npub, service=None, dpop_token=None, request_tool=None):
+            captured.update(service=service, dpop_token=dpop_token, request_tool=request_tool)
             return {"success": True, "service": service}
 
     rt = _runtime(_C())
     tools = _register(rt)
-    r = await tools["receive_patron_credentials"](sender_npub=SENDER, poison="ph")
+    r = await tools["receive_patron_credentials"](sender_npub=SENDER, dpop_token="ph")
     assert r["success"] is True
-    assert captured == {"service": "test-patron", "poison": "ph",
+    assert captured == {"service": "test-patron", "dpop_token": "ph",
                         "request_tool": "request_patron_credentials"}

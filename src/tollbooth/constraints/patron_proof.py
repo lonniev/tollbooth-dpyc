@@ -35,21 +35,21 @@ class PatronProofConstraint(ToolConstraint):
         self.window_seconds = window_seconds
 
     def evaluate(self, context: ConstraintContext) -> ConstraintResult:
-        if not context.proof:
+        if not context.dpop_token:
             return ConstraintResult(
                 allowed=False,
                 reason="patron_proof_required",
                 message=(
                     "This tool requires patron identity proof. "
                     "Sign a kind-27235 Nostr event with your nsec "
-                    "and pass it as the proof parameter."
+                    "and pass it as the dpop_token parameter."
                 ),
             )
 
         from tollbooth.identity_proof import verify_proof
 
         if not verify_proof(
-            context.proof,
+            context.dpop_token,
             context.patron.npub,
             context.env.tool_name,
             window_seconds=self.window_seconds,
@@ -71,7 +71,7 @@ class PatronProofConstraint(ToolConstraint):
         )
 
     def describe(self) -> str:
-        return f"Patron proof: Schnorr signature required (window {self.window_seconds}s)"
+        return f"Patron dpop_token: Schnorr signature required (window {self.window_seconds}s)"
 
     def to_dict(self) -> dict[str, Any]:
         return {

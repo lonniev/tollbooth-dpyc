@@ -3,7 +3,7 @@
 Extracted verbatim from the ``request_npub_proof`` / ``receive_npub_proof`` /
 ``check_proof_status`` closures in ``register_standard_tools``. These are
 orchestrators over ``NostrCredentialExchange`` internals (the deterministic,
-poison-scoped drain loop) plus the proven-npub cache — §2-sensitive identity
+dpop_token-scoped drain loop) plus the proven-npub cache — §2-sensitive identity
 code, so the move is behavior-preserving: ``resolve_npub`` became
 ``rt.resolve_npub`` and the ``_PROOF_SERVICE`` closure local became the module
 constant below; nothing else changed. The drain loop is pinned by
@@ -80,13 +80,13 @@ async def request_npub_proof_tool(
     except Exception as e:
         return {"success": False, "error": f"Failed to send proof request: {e}"}
 
-    # Extract the poison phrase and rendezvous relay from the channel result.
-    poison = result.get("poison", "")
+    # Extract the dpop_token phrase and rendezvous relay from the channel result.
+    dpop_token = result.get("dpop_token", "")
     rendezvous_relay = result.get("rendezvous_relay", "")
 
     response: dict[str, Any] = {
         "success": True,
-        "proof_token": poison,
+        "dpop_token": dpop_token,
         "message": (
             "Proof request sent via Secure Courier. "
             "Call receive_npub_proof to complete."
@@ -105,19 +105,19 @@ async def request_npub_proof_tool(
 async def receive_npub_proof_tool(
     rt: Any,
     patron_npub: str,
-    poison: str,
+    dpop_token: str,
 ) -> dict[str, Any]:
     """Drain the pinned relay, verify the proof reply, and cache proven status."""
     err = rt.npub_validation_error(patron_npub, param="patron_npub")
     if err is not None:
         return err
     from tollbooth.constants import ErrorCode as _EC
-    if not poison:
+    if not dpop_token:
         return {
             "success": False,
-            "error_code": _EC.POISON_MISSING,
+            "error_code": _EC.DPOP_TOKEN_MISSING,
             "error": (
-                "poison is required — pass the proof_token returned by "
+                "dpop_token is required — pass the dpop_token returned by "
                 "request_npub_proof."
             ),
         }
@@ -140,13 +140,13 @@ async def receive_npub_proof_tool(
     patron_hex = _npub_to_hex(resolved)
     # Channel state is keyed by the RAW proof service (matching open_channel
     # and _resolve_pinned_record), never the resolved credential template.
-    poison_key = (resolved, PROOF_SERVICE)
+    dpop_token_key = (resolved, PROOF_SERVICE)
 
     # Resolve + verify the pinned rendezvous relay for this exact
-    # (patron, proof-service, poison). Handles cold-start vault rehydration
+    # (patron, dpop_token-service, dpop_token). Handles cold-start vault rehydration
     # and returns a structured error — popping nothing — when unresolved.
     pinned, error_code = await exchange._resolve_pinned_record(
-        resolved, PROOF_SERVICE, poison,
+        resolved, PROOF_SERVICE, dpop_token,
     )
     if error_code is not None:
         return {
@@ -155,7 +155,7 @@ async def receive_npub_proof_tool(
             "popped_dms": 0,
             "error": _courier_resolve_error(error_code, "request_npub_proof"),
         }
-    expected_phrase = poison
+    expected_phrase = dpop_token
 
     # Single drain of ONLY the pinned relay — human-gated, no retry loop.
     # Off the event loop — blocking websocket I/O (0.44.3 / M1.2 reasoning).
@@ -176,8 +176,8 @@ async def receive_npub_proof_tool(
             ),
         }
 
-    # Drain loop, stop-at-match. The poison phrase is the sole scoping
-    # mechanism — a reply carrying the current one-time poison is by definition
+    # Drain loop, stop-at-match. The dpop_token phrase is the sole scoping
+    # mechanism — a reply carrying the current one-time dpop_token is by definition
     # the right reply, regardless of wall-clock timing (no timestamp gate, which
     # raced clock skew + human-paced replies and silently dropped valid proofs).
     # Mismatched DMs are NACK'd up to the cap. For self-DM proofs the reply is
@@ -187,7 +187,7 @@ async def receive_npub_proof_tool(
     last_failure = None
     popped = 0
     nacks_sent = 0
-    agent_key = exchange._ephemeral_agents.get(poison_key)
+    agent_key = exchange._ephemeral_agents.get(dpop_token_key)
     decrypt_key = agent_key.hex() if agent_key else exchange._privkey_hex
 
     for candidate in candidates:
@@ -209,7 +209,7 @@ async def receive_npub_proof_tool(
             if payload is None:
                 nack_reason = _NACK_TOKEN
                 last_failure = "no @@@ fields"
-            elif payload.get("poison", "") != expected_phrase:
+            elif payload.get("dpop_token", "") != expected_phrase:
                 nack_reason = _NACK_TOKEN
                 last_failure = "wrong token"
         elif nack_reason is None:
@@ -229,10 +229,10 @@ async def receive_npub_proof_tool(
             exchange._pop_event(event_id)
         popped += 1
 
-    # Clean up poison state and rendezvous pin (one-time use)
-    exchange._pending_poisons.pop(poison_key, None)
-    exchange._pinned_relays.pop(poison_key, None)
-    exchange._ephemeral_agents.pop(poison_key, None)
+    # Clean up dpop_token state and rendezvous pin (one-time use)
+    exchange._pending_dpop_tokens.pop(dpop_token_key, None)
+    exchange._pinned_relays.pop(dpop_token_key, None)
+    exchange._ephemeral_agents.pop(dpop_token_key, None)
 
     # One summary DM to patron
     if matched_payload is not None:
@@ -256,10 +256,10 @@ async def receive_npub_proof_tool(
 
         cache = await rt.proven_npub_cache()
 
-        # Compute poison hash — the caller-supplied proof token for future paid
-        # calls. The raw poison is returned to the caller but never stored.
+        # Compute dpop_token hash — the caller-supplied proof token for future paid
+        # calls. The raw dpop_token is returned to the caller but never stored.
         import hashlib as _hashlib
-        poison_hash = _hashlib.sha256(
+        dpop_token_hash = _hashlib.sha256(
             expected_phrase.encode(),
         ).hexdigest()
 
@@ -274,7 +274,7 @@ async def receive_npub_proof_tool(
                 pass  # unparseable → use cache default
 
         from tollbooth.proven_npub import UNSET
-        record = await cache.mark_proven(poison_hash, resolved, ttl_override=ttl_seconds if raw_duration else UNSET)
+        record = await cache.mark_proven(dpop_token_hash, resolved, ttl_override=ttl_seconds if raw_duration else UNSET)
 
         ttl_display = int(record.expires_at - record.verified_at)
         hours = ttl_display / 3600
@@ -307,7 +307,7 @@ async def receive_npub_proof_tool(
         return {
             "success": True,
             "proven_npub": resolved,
-            "proof_token": expected_phrase,
+            "dpop_token": expected_phrase,
             "popped_dms": popped,
             "expires_in_seconds": ttl_display,
             "expires_at": expires_str,
@@ -335,26 +335,26 @@ async def receive_npub_proof_tool(
 async def check_proof_status_tool(
     rt: Any,
     patron_npub: str,
-    proof_token: str,
+    dpop_token: str,
 ) -> dict[str, Any]:
-    """Report whether a cached proof_token is still valid (no side effects)."""
+    """Report whether a cached dpop_token is still valid (no side effects)."""
     err = rt.npub_validation_error(patron_npub, param="patron_npub")
     if err is not None:
         return err
-    err = rt.proof_validation_error(proof_token, param="proof_token")
+    err = rt.proof_validation_error(dpop_token, param="dpop_token")
     if err is not None:
         return err
     resolved = rt.resolve_npub(patron_npub)
 
     import hashlib as _hashlib
-    poison_hash = _hashlib.sha256(proof_token.encode()).hexdigest()
+    dpop_token_hash = _hashlib.sha256(dpop_token.encode()).hexdigest()
     cache = await rt.proven_npub_cache()
-    info = await cache.proof_status(poison_hash, resolved)
+    info = await cache.proof_status(dpop_token_hash, resolved)
 
     status = info["status"]
     if status == "valid":
         message = (
-            "Proof is valid. Pass proof_token as the proof parameter "
+            "Proof is valid. Pass dpop_token as the dpop_token parameter "
             "on paid tool calls."
         )
     elif status == "expired":
@@ -364,7 +364,7 @@ async def check_proof_status_tool(
         )
     else:
         message = (
-            "No proof record found for this (patron_npub, proof_token). "
+            "No proof record found for this (patron_npub, dpop_token). "
             "Call request_npub_proof and receive_npub_proof first."
         )
     return {

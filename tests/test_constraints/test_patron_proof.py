@@ -14,17 +14,17 @@ from tollbooth.constraints.patron_proof import PatronProofConstraint
 _NOW = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
 
 
-def _ctx(proof="", npub="npub1patron", tool_name="expensive_tool"):
+def _ctx(dpop_token="", npub="npub1patron", tool_name="expensive_tool"):
     return ConstraintContext(
         ledger=LedgerSnapshot(),
         patron=PatronIdentity(npub=npub),
         env=EnvironmentSnapshot(utc_now=_NOW, tool_name=tool_name),
-        proof=proof,
+        dpop_token=dpop_token,
     )
 
 
 def test_missing_proof_denied():
-    r = PatronProofConstraint().evaluate(_ctx(proof=""))
+    r = PatronProofConstraint().evaluate(_ctx(dpop_token=""))
     assert r.allowed is False
     assert r.reason == "patron_proof_required"
 
@@ -32,7 +32,7 @@ def test_missing_proof_denied():
 def test_valid_proof_allowed_and_passes_npub_tool_window():
     c = PatronProofConstraint(window_seconds=300)
     with patch("tollbooth.identity_proof.verify_proof", return_value=True) as vp:
-        r = c.evaluate(_ctx(proof="signed", npub="npub1x", tool_name="tool_a"))
+        r = c.evaluate(_ctx(dpop_token="signed", npub="npub1x", tool_name="tool_a"))
     assert r.allowed is True
     assert r.reason == "patron_proof"
     args, kwargs = vp.call_args
@@ -45,7 +45,7 @@ def test_valid_proof_allowed_and_passes_npub_tool_window():
 def test_invalid_proof_denied():
     c = PatronProofConstraint()
     with patch("tollbooth.identity_proof.verify_proof", return_value=False):
-        r = c.evaluate(_ctx(proof="badsig"))
+        r = c.evaluate(_ctx(dpop_token="badsig"))
     assert r.allowed is False
     assert r.reason == "patron_proof_invalid"
 

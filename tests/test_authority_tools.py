@@ -145,7 +145,7 @@ async def test_certify_credits_rejects_nonpositive_amount():
     rt = _fake_runtime()
     with _authority_tools(rt, settings=_settings(), signer=MagicMock(),
                           replay=ReplayTracker(), registry=None) as tools:
-        r = await tools["certify_credits"](npub="npub1op", proof="p", amount_sats=0)
+        r = await tools["certify_credits"](npub="npub1op", dpop_token="p", amount_sats=0)
     assert r == {"success": False, "error": "amount_sats must be positive."}
 
 
@@ -158,7 +158,7 @@ async def test_certify_credits_signs_a_verifiable_certificate():
 
     with _authority_tools(rt, settings=_settings(), signer=signer,
                           replay=replay, registry=None) as tools:
-        r = await tools["certify_credits"](npub=operator_npub, proof="p", amount_sats=1000)
+        r = await tools["certify_credits"](npub=operator_npub, dpop_token="p", amount_sats=1000)
         await asyncio.sleep(0)  # let the fire-and-forget bootstrap task settle
 
     assert r["success"] is True
@@ -179,7 +179,7 @@ async def test_certify_credits_membership_failure_refunds_fee():
     rt = _fake_runtime(fee=20)
     with _authority_tools(rt, settings=_settings(), signer=MagicMock(),
                           replay=ReplayTracker(), registry=registry) as tools:
-        r = await tools["certify_credits"](npub="npub1op", proof="p", amount_sats=1000)
+        r = await tools["certify_credits"](npub="npub1op", dpop_token="p", amount_sats=1000)
 
     assert r["success"] is False
     assert r["error_code"] == "dpyc_membership_required"
@@ -194,7 +194,7 @@ async def test_operator_status_self_inspection_skips_proof():
     signer = SimpleNamespace(npub="npub1authority")
     with _authority_tools(rt, settings=_settings(), signer=signer,
                           replay=ReplayTracker(), registry=None) as tools:
-        r = await tools["operator_status"](npub="", proof="")
+        r = await tools["operator_status"](npub="", dpop_token="")
 
     assert r["npub"] == "npub1self"          # fell back to operator identity
     assert r["balance_sats"] == 500
@@ -257,7 +257,7 @@ def _tools(signer=None):
 async def test_register_operator_blocks_on_bad_proof():
     with _tools() as tools:
         with patch.object(at, "require_proof", AsyncMock(return_value={"success": False, "error": "proof required"})):
-            r = await tools["register_operator"](npub="npub1op", proof="bad")
+            r = await tools["register_operator"](npub="npub1op", dpop_token="bad")
     assert r == {"success": False, "error": "proof required"}
 
 
@@ -266,7 +266,7 @@ async def test_register_operator_blocks_without_authority_consent():
     with _tools() as tools:
         with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_require_authority_consent", AsyncMock(return_value={"success": False, "error": "consent required"})):
-            r = await tools["register_operator"](npub="npub1op", proof="p", authority_proof="")
+            r = await tools["register_operator"](npub="npub1op", dpop_token="p", authority_proof="")
     assert r["error"] == "consent required"
 
 
@@ -286,7 +286,7 @@ async def test_register_operator_happy_provisions_and_registers():
             store_operator_config=AsyncMock(),
             neon_url_for_operator=MagicMock(return_value="postgresql://op_schema:pw@h/db"),
         ):
-            r = await tools["register_operator"](npub="npub1op", proof="p", service_url="https://svc", authority_proof="ap")
+            r = await tools["register_operator"](npub="npub1op", dpop_token="p", service_url="https://svc", authority_proof="ap")
     assert r["success"] is True
     assert r["balance_sats"] == 500
     assert r["neon_database_url"] == "postgresql://op_schema:pw@h/db"
@@ -298,7 +298,7 @@ async def test_update_operator_nothing_to_update():
     with _tools() as tools:
         with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)):
-            r = await tools["update_operator"](npub="npub1op", proof="p", authority_proof="ap")
+            r = await tools["update_operator"](npub="npub1op", dpop_token="p", authority_proof="ap")
     assert "Nothing to update" in r["error"]
 
 
@@ -309,13 +309,13 @@ async def test_update_operator_happy_and_oracle_failure():
              patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at, "_resend_bootstrap_dm", AsyncMock()), \
              patch.object(at, "_update_operator_via_oracle", AsyncMock(return_value="https://c")):
-            ok = await tools["update_operator"](npub="npub1op", proof="p", service_url="https://new", authority_proof="ap")
+            ok = await tools["update_operator"](npub="npub1op", dpop_token="p", service_url="https://new", authority_proof="ap")
         assert ok["success"] is True and ok["commit_url"] == "https://c"
 
         with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at, "_update_operator_via_oracle", AsyncMock(side_effect=RuntimeError("oops"))):
-            bad = await tools["update_operator"](npub="npub1op", proof="p", display_name="X", authority_proof="ap")
+            bad = await tools["update_operator"](npub="npub1op", dpop_token="p", display_name="X", authority_proof="ap")
         assert bad["success"] is False and "Update failed" in bad["error"]
 
 
@@ -325,13 +325,13 @@ async def test_deregister_operator_happy_and_failure():
         with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at, "_deregister_operator_via_oracle", AsyncMock(return_value="https://c")):
-            ok = await tools["deregister_operator"](npub="npub1op", proof="p", authority_proof="ap")
+            ok = await tools["deregister_operator"](npub="npub1op", dpop_token="p", authority_proof="ap")
         assert ok["success"] is True and ok["commit_url"] == "https://c"
 
         with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at, "_deregister_operator_via_oracle", AsyncMock(side_effect=RuntimeError("x"))):
-            bad = await tools["deregister_operator"](npub="npub1op", proof="p", authority_proof="ap")
+            bad = await tools["deregister_operator"](npub="npub1op", dpop_token="p", authority_proof="ap")
         assert bad["success"] is False and "Deregistration failed" in bad["error"]
 
 
@@ -340,14 +340,14 @@ async def test_get_operator_config_no_config_and_filters_password():
     with _tools() as tools:
         with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
              patch("tollbooth.authority.tenant_provisioner.get_all_operator_config", AsyncMock(return_value={})):
-            empty = await tools["get_operator_config"](npub="npub1op", proof="p")
+            empty = await tools["get_operator_config"](npub="npub1op", dpop_token="p")
         assert empty["success"] is False and "No configuration found" in empty["error"]
 
         cfg = {"schema": "op_s", "role_password": "SECRET", "neon_database_url": "url"}
         with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_resend_bootstrap_dm", AsyncMock()), \
              patch("tollbooth.authority.tenant_provisioner.get_all_operator_config", AsyncMock(return_value=cfg)):
-            r = await tools["get_operator_config"](npub="npub1op", proof="p")
+            r = await tools["get_operator_config"](npub="npub1op", dpop_token="p")
         assert r["success"] is True
         assert "role_password" not in r["config"]          # secret filtered out
         assert r["config"]["schema"] == "op_s" and r["config"]["neon_database_url"] == "url"

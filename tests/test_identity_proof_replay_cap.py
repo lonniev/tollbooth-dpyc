@@ -85,9 +85,9 @@ def test_replay_protection_still_works() -> None:
     """A valid proof verifies once; the same proof replays as rejected."""
     pk = PrivateKey()
     npub = pk.public_key.bech32()
-    proof = _make_proof(pk, "my_tool")
+    dpop_token = _make_proof(pk, "my_tool")
 
-    assert verify_proof(proof, npub, "my_tool") is True
+    assert verify_proof(dpop_token, npub, "my_tool") is True
     # Same event id presented again → replay rejected.
-    assert verify_proof(proof, npub, "my_tool") is False
+    assert verify_proof(dpop_token, npub, "my_tool") is False
     assert len(_consumed_proofs) == 1

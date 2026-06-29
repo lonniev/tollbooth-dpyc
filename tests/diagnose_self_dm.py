@@ -123,9 +123,9 @@ async def main():
     logger.info("open_channel result: %s", json.dumps(result, indent=2))
 
     agent_npub = result.get("agent_npub")
-    poison = result["poison"]
+    dpop_token = result["dpop_token"]
     logger.info("Ephemeral agent npub: %s", agent_npub)
-    logger.info("Poison phrase: %s", poison)
+    logger.info("Dpop_token phrase: %s", dpop_token)
 
     # Verify ephemeral agent was stored
     resolved_service = ex._resolve_service("schwab-operator")
@@ -152,7 +152,7 @@ async def main():
     credential_payload = {
         "app_key": "test-app-key-123",
         "secret": "test-secret-456",
-        "poison": poison,
+        "dpop_token": dpop_token,
     }
     reply_event = _make_nip04_event(
         operator_key,            # sender = operator
@@ -185,7 +185,7 @@ async def main():
         logger.info("--- DEBUG: buffer state ---")
         logger.info("received_events count: %d", len(ex._received_events))
         logger.info("consumed_ids: %s", ex._consumed_ids)
-        logger.info("pending_poisons: %s", ex._pending_poisons)
+        logger.info("pending_dpop_tokens: %s", ex._pending_dpop_tokens)
         logger.info("ephemeral_agents: %s",
             {str(k): v.public_key.bech32()[:20] for k, v in ex._ephemeral_agents.items()})
 

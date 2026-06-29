@@ -60,7 +60,7 @@ async def test_restore_runs_credential_vault_ensure_schema():
 
     with patch("tollbooth.pricing_store.PricingModelStore", pricing_cls), \
          patch("tollbooth.vaults.neon.NeonCredentialVault", cred_cls):
-        r = await tools["restore_neon_schema"](proof="ok")
+        r = await tools["restore_neon_schema"](dpop_token="ok")
 
     assert r["success"] is True
     step_names = {s["step"] for s in r["steps"]}
@@ -85,7 +85,7 @@ async def test_restore_reports_credential_step_failure_inline():
 
     with patch("tollbooth.pricing_store.PricingModelStore", pricing_cls), \
          patch("tollbooth.vaults.neon.NeonCredentialVault", cred_cls):
-        r = await tools["restore_neon_schema"](proof="ok")
+        r = await tools["restore_neon_schema"](dpop_token="ok")
 
     cred_step = next(s for s in r["steps"] if s["step"] == "CredentialVault.ensure_schema")
     assert cred_step["ok"] is False

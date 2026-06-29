@@ -37,7 +37,7 @@ async def ensure_schema(vault: Any) -> None:
         "  operator_npub TEXT PRIMARY KEY,"
         "  service_url TEXT NOT NULL DEFAULT '',"
         "  status TEXT NOT NULL DEFAULT 'pending',"
-        "  poison_hash TEXT NOT NULL DEFAULT '',"
+        "  dpop_token_hash TEXT NOT NULL DEFAULT '',"
         "  note TEXT NOT NULL DEFAULT '',"
         "  requested_at TIMESTAMPTZ DEFAULT now(),"
         "  decided_at TIMESTAMPTZ,"
@@ -52,7 +52,7 @@ async def upsert_pending(
     service_url: str,
     *,
     note: str = "",
-    poison_hash: str = "",
+    dpop_token_hash: str = "",
 ) -> None:
     """Record (or refresh) a pending adoption request.
 
@@ -62,19 +62,19 @@ async def upsert_pending(
     """
     await vault._execute(
         f"INSERT INTO {vault._t(TABLE)} "
-        "(operator_npub, service_url, status, poison_hash, note, "
+        "(operator_npub, service_url, status, dpop_token_hash, note, "
         " requested_at, decided_at, expires_at) "
         f"VALUES ($1, $2, '{PENDING}', $3, $4, now(), NULL, "
         f"        now() + interval '{DEFAULT_TTL_SECONDS} seconds') "
         "ON CONFLICT (operator_npub) DO UPDATE SET "
         "  service_url = EXCLUDED.service_url,"
         f"  status = '{PENDING}',"
-        "  poison_hash = EXCLUDED.poison_hash,"
+        "  dpop_token_hash = EXCLUDED.dpop_token_hash,"
         "  note = EXCLUDED.note,"
         "  requested_at = now(),"
         "  decided_at = NULL,"
         f"  expires_at = now() + interval '{DEFAULT_TTL_SECONDS} seconds'",
-        [operator_npub, service_url, poison_hash, note],
+        [operator_npub, service_url, dpop_token_hash, note],
     )
 
 

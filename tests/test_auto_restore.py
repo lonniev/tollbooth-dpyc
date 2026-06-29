@@ -151,7 +151,7 @@ def _make_courier_service(
         "encryption": "vault",
     }
     exchange.receive = AsyncMock(return_value=_vault_result)
-    # Cold-start restore reads straight from the vault (no poison, no relay)
+    # Cold-start restore reads straight from the vault (no dpop_token, no relay)
     exchange.receive_from_vault = AsyncMock(return_value=dict(_vault_result))
     exchange.forget = AsyncMock(return_value={"success": True, "deleted": True})
     svc._exchange = exchange
@@ -163,7 +163,7 @@ class TestRestoreSession:
 
     @pytest.mark.asyncio
     async def test_restore_calls_receive(self):
-        """restore_session() reads from the vault (no poison) with the stored npub."""
+        """restore_session() reads from the vault (no dpop_token) with the stored npub."""
         vault = MagicMock(spec=SessionBindingBackend)
         vault.fetch_session_binding = AsyncMock(return_value="npub1abc")
         vault.store_session_binding = AsyncMock()
@@ -174,7 +174,7 @@ class TestRestoreSession:
         result = await svc.restore_session("user_01", service="thebrain")
         assert result == "npub1abc"
 
-        # Cold-start restore uses the vault-only read, NOT the poison-scoped drain
+        # Cold-start restore uses the vault-only read, NOT the dpop_token-scoped drain
         exchange.receive_from_vault.assert_called_once_with(
             "npub1abc", service="thebrain",
         )

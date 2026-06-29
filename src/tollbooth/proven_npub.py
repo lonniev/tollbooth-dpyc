@@ -1,18 +1,18 @@
-"""Proven npub cache — poison-keyed npub ownership proof.
+"""Proven npub cache — dpop_token-keyed npub ownership proof.
 
-The proof is bound to the poison phrase that the calling application
+The proof is bound to the dpop_token phrase that the calling application
 received during the ``request_npub_proof`` / ``receive_npub_proof``
-exchange. The application remembers the raw poison; the MCP stores
-only ``sha256(poison):npub`` — never the raw poison itself.
+exchange. The application remembers the raw dpop_token; the MCP stores
+only ``sha256(dpop_token):npub`` — never the raw dpop_token itself.
 
-Cache key: ``"{poison_hash}:{npub}"``.
+Cache key: ``"{dpop_token_hash}:{npub}"``.
 
 On ``mark_proven``, the record is written to both the in-memory
 cache and the Neon vault (encrypted by the operator's nsec).
 On ``is_proven`` cache miss, the vault is checked before rejecting —
 surviving serverless cold starts that wipe in-memory state.
 
-Security: a vault compromise yields only hashed poisons — useless
+Security: a vault compromise yields only hashed dpop_tokens — useless
 without the raw values held exclusively by the calling application.
 """
 
@@ -101,19 +101,19 @@ def parse_duration(text: str) -> int | None:
 _VAULT_KEY_PREFIX = "proven_npub:"
 
 
-def _cache_key(poison_hash: str, npub: str) -> str:
-    return f"{poison_hash}:{npub}"
+def _cache_key(dpop_token_hash: str, npub: str) -> str:
+    return f"{dpop_token_hash}:{npub}"
 
 
-def _vault_key(poison_hash: str, npub: str) -> str:
-    return f"{_VAULT_KEY_PREFIX}{poison_hash}:{npub}"
+def _vault_key(dpop_token_hash: str, npub: str) -> str:
+    return f"{_VAULT_KEY_PREFIX}{dpop_token_hash}:{npub}"
 
 
 @dataclass(frozen=True)
 class ProvenNpub:
-    """Record that an npub owner proved ownership via a poison phrase."""
+    """Record that an npub owner proved ownership via a dpop_token phrase."""
 
-    poison_hash: str
+    dpop_token_hash: str
     npub: str
     verified_at: float
     expires_at: float
@@ -127,15 +127,15 @@ class ProvenNpub:
 
 
 class ProvenNpubCache:
-    """Poison-keyed npub ownership cache with vault persistence.
+    """Dpop_token-keyed npub ownership cache with vault persistence.
 
     In-memory ``SessionCache`` for hot lookups.  On cache miss,
     falls back to the Neon vault (encrypted at rest) so proofs
     survive serverless cold starts.
 
-    Keyed by ``(poison_hash, npub)`` — the calling application holds
-    the raw poison phrase and supplies it on each paid tool call.
-    The MCP never stores the raw poison.
+    Keyed by ``(dpop_token_hash, npub)`` — the calling application holds
+    the raw dpop_token phrase and supplies it on each paid tool call.
+    The MCP never stores the raw dpop_token.
 
     Args:
         ttl_seconds: How long a proven npub stays valid (default 2h).
@@ -153,17 +153,17 @@ class ProvenNpubCache:
         self._cache: SessionCache[ProvenNpub] = SessionCache(ttl_seconds=MAX_PROVEN_TTL)
         self._vault = vault
 
-    async def is_proven(self, poison_hash: str, npub: str) -> bool:
-        """Check if an npub is proven via the given poison hash."""
-        key = _cache_key(poison_hash, npub)
+    async def is_proven(self, dpop_token_hash: str, npub: str) -> bool:
+        """Check if an npub is proven via the given dpop_token hash."""
+        key = _cache_key(dpop_token_hash, npub)
         record = self._cache.get(key)
 
         if record is not None:
             if time.time() > record.expires_at:
                 logger.warning(
-                    "Proof cache EXPIRED for poison_hash=%s npub=%s — "
+                    "Proof cache EXPIRED for dpop_token_hash=%s npub=%s — "
                     "verified_at=%.0f expires_at=%.0f now=%.0f (%.0fs overdue)",
-                    poison_hash[:16], npub[:20],
+                    dpop_token_hash[:16], npub[:20],
                     record.verified_at, record.expires_at,
                     time.time(), time.time() - record.expires_at,
                 )
@@ -171,50 +171,50 @@ class ProvenNpubCache:
                 return False
             remaining = record.expires_at - time.time()
             logger.debug(
-                "Proof cache HIT for poison_hash=%s npub=%s (%.0fs remaining)",
-                poison_hash[:16], npub[:20], remaining,
+                "Proof cache HIT for dpop_token_hash=%s npub=%s (%.0fs remaining)",
+                dpop_token_hash[:16], npub[:20], remaining,
             )
             return True
 
         # In-memory miss — try vault restore
         if self._vault:
-            record = await self._vault_fetch(poison_hash, npub)
+            record = await self._vault_fetch(dpop_token_hash, npub)
             if record is not None and time.time() < record.expires_at:
                 self._cache.set(key, record)
                 remaining = record.expires_at - time.time()
                 logger.info(
-                    "Proof cache RESTORED from vault for poison_hash=%s npub=%s (%.0fs remaining)",
-                    poison_hash[:16], npub[:20], remaining,
+                    "Proof cache RESTORED from vault for dpop_token_hash=%s npub=%s (%.0fs remaining)",
+                    dpop_token_hash[:16], npub[:20], remaining,
                 )
                 return True
             if record is not None:
                 logger.info(
-                    "Vault proof expired for poison_hash=%s npub=%s — cleaning up",
-                    poison_hash[:16], npub[:20],
+                    "Vault proof expired for dpop_token_hash=%s npub=%s — cleaning up",
+                    dpop_token_hash[:16], npub[:20],
                 )
-                await self._vault_delete(poison_hash, npub)
+                await self._vault_delete(dpop_token_hash, npub)
 
         cached_keys = list(self._cache._entries.keys())
         logger.warning(
-            "Proof cache MISS for poison_hash=%s npub=%s — "
+            "Proof cache MISS for dpop_token_hash=%s npub=%s — "
             "key=%s not found. %d entries in cache: %s",
-            poison_hash[:16], npub[:20], key[:40],
+            dpop_token_hash[:16], npub[:20], key[:40],
             len(cached_keys),
             [k[:40] for k in cached_keys],
         )
         return False
 
     async def mark_proven(
-        self, poison_hash: str, npub: str, ttl_override: Any = UNSET,
+        self, dpop_token_hash: str, npub: str, ttl_override: Any = UNSET,
     ) -> ProvenNpub:
-        """Cache an npub as ownership-proven via a poison phrase.
+        """Cache an npub as ownership-proven via a dpop_token phrase.
 
         Writes to both in-memory cache and vault (if configured).
         The TTL is capped at ``MAX_PROVEN_TTL`` (30 days) regardless
         of what the patron requests.
 
         Args:
-            poison_hash: SHA-256 hex digest of the raw poison phrase.
+            dpop_token_hash: SHA-256 hex digest of the raw dpop_token phrase.
             npub: The patron's npub (bech32).
             ttl_override: Seconds until expiry. ``None`` or values
                 exceeding the cap are clamped to ``MAX_PROVEN_TTL``.
@@ -229,16 +229,16 @@ class ProvenNpubCache:
         now = time.time()
         expires_at = now + ttl
         record = ProvenNpub(
-            poison_hash=poison_hash,
+            dpop_token_hash=dpop_token_hash,
             npub=npub,
             verified_at=now,
             expires_at=expires_at,
         )
-        self._cache.set(_cache_key(poison_hash, npub), record)
+        self._cache.set(_cache_key(dpop_token_hash, npub), record)
         label = f"{ttl}s" if ttl is not None else "unlimited"
         logger.info(
-            "Cached proven npub %s with poison_hash %s (expires in %s)",
-            npub[:20], poison_hash[:12], label,
+            "Cached proven npub %s with dpop_token_hash %s (expires in %s)",
+            npub[:20], dpop_token_hash[:12], label,
         )
 
         if self._vault:
@@ -246,28 +246,28 @@ class ProvenNpubCache:
 
         return record
 
-    def invalidate(self, poison_hash: str, npub: str) -> None:
+    def invalidate(self, dpop_token_hash: str, npub: str) -> None:
         """Remove a proven npub from the cache."""
-        self._cache.clear(_cache_key(poison_hash, npub))
+        self._cache.clear(_cache_key(dpop_token_hash, npub))
 
-    async def proof_status(self, poison_hash: str, npub: str) -> dict[str, Any]:
+    async def proof_status(self, dpop_token_hash: str, npub: str) -> dict[str, Any]:
         """Read-only lookup of a proof's current state.
 
         Mirrors :meth:`is_proven` but does NOT mutate cache state.
         Used by the ``check_proof_status`` standard tool so calling
-        agents can ask "is this proof_token still going to work?"
+        agents can ask "is this dpop_token still going to work?"
         without burning credits on a guaranteed failure.
 
         Returns a dict with ``status`` (``"valid"`` | ``"expired"`` |
         ``"unknown"``) and ``expires_in_seconds`` (the remaining TTL,
         runtime-derived from the stored ``ProvenNpub.expires_at``).
         """
-        key = _cache_key(poison_hash, npub)
+        key = _cache_key(dpop_token_hash, npub)
         record = self._cache.get(key)
 
         if record is None and self._vault is not None:
             # Try vault — but do NOT delete on expiry (read-only path)
-            record = await self._vault_fetch(poison_hash, npub)
+            record = await self._vault_fetch(dpop_token_hash, npub)
 
         if record is None:
             return {"status": "unknown", "expires_in_seconds": 0}
@@ -285,20 +285,20 @@ class ProvenNpubCache:
         try:
             encrypted = self._vault._encrypt(record.to_json())
             await self._vault.set_config(
-                _vault_key(record.poison_hash, record.npub), encrypted,
+                _vault_key(record.dpop_token_hash, record.npub), encrypted,
             )
             logger.debug(
-                "Proof persisted to vault for poison_hash=%s npub=%s",
-                record.poison_hash[:12], record.npub[:20],
+                "Proof persisted to vault for dpop_token_hash=%s npub=%s",
+                record.dpop_token_hash[:12], record.npub[:20],
             )
         except Exception as exc:
             logger.warning("Vault store for proven npub failed (non-fatal): %s", exc)
 
-    async def _vault_fetch(self, poison_hash: str, npub: str) -> ProvenNpub | None:
+    async def _vault_fetch(self, dpop_token_hash: str, npub: str) -> ProvenNpub | None:
         if self._vault is None:
             return None
         try:
-            raw = await self._vault.get_config(_vault_key(poison_hash, npub))
+            raw = await self._vault.get_config(_vault_key(dpop_token_hash, npub))
             if raw is None:
                 return None
             decrypted = self._vault._decrypt(raw)
@@ -307,11 +307,11 @@ class ProvenNpubCache:
             logger.warning("Vault fetch for proven npub failed (non-fatal): %s", exc)
             return None
 
-    async def _vault_delete(self, poison_hash: str, npub: str) -> None:
+    async def _vault_delete(self, dpop_token_hash: str, npub: str) -> None:
         if self._vault is None:
             return
         try:
-            await self._vault.set_config(_vault_key(poison_hash, npub), "")
+            await self._vault.set_config(_vault_key(dpop_token_hash, npub), "")
         except Exception:
             logger.debug(
                 "best-effort proven-npub vault delete failed", exc_info=True,

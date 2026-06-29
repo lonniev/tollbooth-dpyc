@@ -36,7 +36,7 @@ PYTHON_TYPES: dict[str, type] = {
 # A published tool name becomes a wire identifier: ``{slug}_{name}``.
 VALID_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
-# runner(params, npub, proof) -> awaitable[dict]
+# runner(params, npub, dpop_token) -> awaitable[dict]
 Runner = Callable[[dict[str, Any], str, str], Awaitable[dict[str, Any]]]
 
 
@@ -112,17 +112,17 @@ def build_dynamic_handler(
     """Build a typed async MCP handler that delegates to ``runner``.
 
     The handler exposes one flat keyword param per ``param_schema`` entry
-    (typed via :data:`PYTHON_TYPES`) plus ``npub`` and ``proof``. Its body
+    (typed via :data:`PYTHON_TYPES`) plus ``npub`` and ``dpop_token``. Its body
     collects the supplied declared params into a dict — omitted optional
     params are dropped, never passed as ``None`` — and awaits
-    ``runner(params, npub, proof)``.
+    ``runner(params, npub, dpop_token)``.
     """
     schema = param_schema or {}
 
     async def handler(**kwargs: Any) -> dict[str, Any]:
         params = {k: v for k, v in kwargs.items() if k in schema and v is not None}
         return await runner(
-            params, kwargs.get("npub") or "", kwargs.get("proof") or ""
+            params, kwargs.get("npub") or "", kwargs.get("dpop_token") or ""
         )
 
     sig_params: list[inspect.Parameter] = []
@@ -141,7 +141,7 @@ def build_dynamic_handler(
             )
         )
         annotations[pname] = ann
-    for extra in ("npub", "proof"):
+    for extra in ("npub", "dpop_token"):
         sig_params.append(
             inspect.Parameter(
                 extra, inspect.Parameter.KEYWORD_ONLY, annotation=str, default=""

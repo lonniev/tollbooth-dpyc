@@ -69,7 +69,7 @@ class ConstraintContext:
     ledger: LedgerSnapshot
     patron: PatronIdentity
     env: EnvironmentSnapshot
-    proof: str = ""  # Signed Nostr kind-27235 event proving npub ownership
+    dpop_token: str = ""  # Signed Nostr kind-27235 event proving npub ownership
 
     # Pre-loaded patron-side state the chain may want to read.
     # Populated by the runtime (via ``CouponsVault.fetch_redemptions_for_chain``)

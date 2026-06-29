@@ -96,7 +96,7 @@ async def test_receive_drain_does_not_block_event_loop() -> None:
     sender = PrivateKey()
     sender_bech32 = sender.public_key.bech32()
     # Seed a resolvable pinned channel so receive() reaches the relay drain.
-    ex._pending_poisons[(sender_bech32, "x")] = ("bold-hawk-42", time.time() + 600)
+    ex._pending_dpop_tokens[(sender_bech32, "x")] = ("bold-hawk-42", time.time() + 600)
     ex._pinned_relays[(sender_bech32, "x")] = "wss://relay.test.com"
 
     progressed: list[float] = []
@@ -104,7 +104,7 @@ async def test_receive_drain_does_not_block_event_loop() -> None:
     with patch("tollbooth.nostr_credentials.create_connection", side_effect=_slow_connect):
         start = time.monotonic()
         result, _ = await asyncio.gather(
-            ex.receive(sender_bech32, service="x", poison="bold-hawk-42"),
+            ex.receive(sender_bech32, service="x", dpop_token="bold-hawk-42"),
             _ticker(progressed),
         )
 

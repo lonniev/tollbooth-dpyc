@@ -26,12 +26,12 @@ _CREDS_NOT_DELIVERED = (
 )
 
 
-async def begin_oauth_tool(rt: Any, npub: str, proof: str) -> dict[str, Any]:
+async def begin_oauth_tool(rt: Any, npub: str, dpop_token: str) -> dict[str, Any]:
     """Start the OAuth2 authorization flow; return an authorize URL."""
     opc = rt._oauth_provider
     oauth_service = opc.service_name
 
-    if err := await rt.require_caller_proof(npub, proof, "begin_oauth"):
+    if err := await rt.require_caller_proof(npub, dpop_token, "begin_oauth"):
         return err
     resolved = rt.resolve_npub(npub)
 
@@ -118,12 +118,12 @@ async def begin_oauth_tool(rt: Any, npub: str, proof: str) -> dict[str, Any]:
     return result
 
 
-async def check_oauth_status_tool(rt: Any, npub: str, proof: str) -> dict[str, Any]:
+async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[str, Any]:
     """Poll the collector for the auth code, exchange it, persist tokens."""
     opc = rt._oauth_provider
     oauth_service = opc.service_name
 
-    if err := await rt.require_caller_proof(npub, proof, "check_oauth_status"):
+    if err := await rt.require_caller_proof(npub, dpop_token, "check_oauth_status"):
         return err
     resolved = rt.resolve_npub(npub)
 

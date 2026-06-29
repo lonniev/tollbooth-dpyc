@@ -63,57 +63,57 @@ class TestVerifyOperatorProof:
     def test_valid_proof(self, operator_keypair):
         """A correctly signed proof for the right operator and tool passes."""
         private_key, npub = operator_keypair
-        proof = _make_proof(private_key, tool_name="set_pricing_model")
-        assert verify_operator_proof(proof, npub, "set_pricing_model") is True
+        dpop_token = _make_proof(private_key, tool_name="set_pricing_model")
+        assert verify_operator_proof(dpop_token, npub, "set_pricing_model") is True
 
     def test_wrong_operator_npub(self, operator_keypair, other_keypair):
         """Proof signed by a different key is rejected."""
         private_key, _ = operator_keypair
         _, other_npub = other_keypair
-        proof = _make_proof(private_key, tool_name="set_pricing_model")
-        assert verify_operator_proof(proof, other_npub, "set_pricing_model") is False
+        dpop_token = _make_proof(private_key, tool_name="set_pricing_model")
+        assert verify_operator_proof(dpop_token, other_npub, "set_pricing_model") is False
 
     def test_wrong_tool_name(self, operator_keypair):
         """Proof for a different tool is rejected."""
         private_key, npub = operator_keypair
-        proof = _make_proof(private_key, tool_name="set_pricing_model")
-        assert verify_operator_proof(proof, npub, "certify_credits") is False
+        dpop_token = _make_proof(private_key, tool_name="set_pricing_model")
+        assert verify_operator_proof(dpop_token, npub, "certify_credits") is False
 
     def test_expired_proof(self, operator_keypair):
         """Proof older than 60 seconds is rejected."""
         private_key, npub = operator_keypair
-        proof = _make_proof(
+        dpop_token = _make_proof(
             private_key,
             tool_name="set_pricing_model",
             created_at=int(time.time()) - 120,
         )
-        assert verify_operator_proof(proof, npub, "set_pricing_model") is False
+        assert verify_operator_proof(dpop_token, npub, "set_pricing_model") is False
 
     def test_future_proof_within_window(self, operator_keypair):
         """Proof slightly in the future (clock skew) is accepted."""
         private_key, npub = operator_keypair
-        proof = _make_proof(
+        dpop_token = _make_proof(
             private_key,
             tool_name="set_pricing_model",
             created_at=int(time.time()) + 30,
         )
-        assert verify_operator_proof(proof, npub, "set_pricing_model") is True
+        assert verify_operator_proof(dpop_token, npub, "set_pricing_model") is True
 
     def test_future_proof_outside_window(self, operator_keypair):
         """Proof far in the future is rejected."""
         private_key, npub = operator_keypair
-        proof = _make_proof(
+        dpop_token = _make_proof(
             private_key,
             tool_name="set_pricing_model",
             created_at=int(time.time()) + 120,
         )
-        assert verify_operator_proof(proof, npub, "set_pricing_model") is False
+        assert verify_operator_proof(dpop_token, npub, "set_pricing_model") is False
 
     def test_wrong_kind(self, operator_keypair):
         """Event with a non-27235 kind is rejected."""
         private_key, npub = operator_keypair
-        proof = _make_proof(private_key, tool_name="set_pricing_model", kind=1)
-        assert verify_operator_proof(proof, npub, "set_pricing_model") is False
+        dpop_token = _make_proof(private_key, tool_name="set_pricing_model", kind=1)
+        assert verify_operator_proof(dpop_token, npub, "set_pricing_model") is False
 
     def test_invalid_json(self, operator_keypair):
         """Non-JSON input returns False."""
@@ -147,36 +147,36 @@ class TestVerifyIdentityProof:
     def test_valid_proof(self, other_keypair):
         """A correctly signed proof for an arbitrary npub passes."""
         private_key, npub = other_keypair
-        proof = _make_proof(private_key, tool_name="search")
-        assert verify_identity_proof(proof, npub, "search") is True
+        dpop_token = _make_proof(private_key, tool_name="search")
+        assert verify_identity_proof(dpop_token, npub, "search") is True
 
     def test_wrong_npub(self, operator_keypair, other_keypair):
         """Proof signed by one key is rejected when verified against another."""
         private_key, _ = operator_keypair
         _, other_npub = other_keypair
-        proof = _make_proof(private_key, tool_name="search")
-        assert verify_identity_proof(proof, other_npub, "search") is False
+        dpop_token = _make_proof(private_key, tool_name="search")
+        assert verify_identity_proof(dpop_token, other_npub, "search") is False
 
     def test_wrong_tool(self, other_keypair):
         """Proof for a different tool is rejected."""
         private_key, npub = other_keypair
-        proof = _make_proof(private_key, tool_name="search")
-        assert verify_identity_proof(proof, npub, "other_tool") is False
+        dpop_token = _make_proof(private_key, tool_name="search")
+        assert verify_identity_proof(dpop_token, npub, "other_tool") is False
 
     def test_expired(self, other_keypair):
         """Proof older than the window is rejected."""
         private_key, npub = other_keypair
-        proof = _make_proof(private_key, tool_name="search", created_at=int(time.time()) - 120)
-        assert verify_identity_proof(proof, npub, "search") is False
+        dpop_token = _make_proof(private_key, tool_name="search", created_at=int(time.time()) - 120)
+        assert verify_identity_proof(dpop_token, npub, "search") is False
 
     def test_custom_window(self, other_keypair):
         """A custom window_seconds is respected."""
         private_key, npub = other_keypair
-        proof = _make_proof(private_key, tool_name="search", created_at=int(time.time()) - 90)
+        dpop_token = _make_proof(private_key, tool_name="search", created_at=int(time.time()) - 90)
         # Default 60s window rejects
-        assert verify_identity_proof(proof, npub, "search", window_seconds=60) is False
+        assert verify_identity_proof(dpop_token, npub, "search", window_seconds=60) is False
         # 120s window accepts
-        assert verify_identity_proof(proof, npub, "search", window_seconds=120) is True
+        assert verify_identity_proof(dpop_token, npub, "search", window_seconds=120) is True
 
     def test_invalid_json(self):
         """Non-JSON input returns False."""

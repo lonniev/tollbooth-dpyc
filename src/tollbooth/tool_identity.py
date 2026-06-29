@@ -236,7 +236,7 @@ _STANDARD_LIST: list[ToolIdentity] = [
     ToolIdentity(tool_id=RECEIVE_NPUB_PROOF_UUID, capability="receive_npub_proof", category="free",
                  intent="Receive and cache npub ownership proof."),
     ToolIdentity(tool_id=CHECK_PROOF_STATUS_UUID, capability="check_proof_status", category="free",
-                 intent="Read-only check of a proof_token's remaining validity."),
+                 intent="Read-only check of a dpop_token's remaining validity."),
 
     # -- Oracle delegation --
     # Wire-exposed under the operator's `_oracle_` namespace (e.g.
