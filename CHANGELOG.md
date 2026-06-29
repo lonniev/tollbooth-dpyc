@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.55.3 — 2026-06-29
+
+### Changed — long-runner secrets are normal operator secrets (no separate credential service)
+
+- **Removed the wheel-injected `dpyc-longrunner` Secure Courier service.** It was a third credential-management path — invisible to `onboarding_status`/Pricing Studio and misrouted by the Studio's single-service courier card — to save a one-line per-server template edit, and it pushed Prefect infra secrets onto operators that never run long jobs. `prefect_api_key` is operator infrastructure exactly like `btcpay_api_key`; there was no principled reason to separate it.
+- **The three fields are now exported as `tollbooth.credential_templates.LONGRUNNER_CREDENTIAL_FIELDS`** (optional `FieldSpec`s — the wheel still owns the canonical names, which are coupled to the executor wiring and the `dpyc-closure-key-<key_id>` block). Operators that register a long-running job spec spread them into their **own** `operator_credential_template`: `fields={**mine, **LONGRUNNER_CREDENTIAL_FIELDS}`. They are then ordinary optional operator secrets — same service, same `onboarding_status`/Studio surface, same Secure Courier path, delivered from the Studio's courier card without special routing.
+- `_closure_key_hex` and the auto-wiring probe now load these from the **default operator credential service** (dropped the `service="dpyc-longrunner"` override and the `_LONGRUNNER_SERVICE` constant). No behavior change to dispatch/poll/refund.
+- **Migration:** operators that delivered these under the old `dpyc-longrunner` service must re-courier them under their operator service (clean cutover, no compat shim).
+
 ## 0.55.2 — 2026-06-29
 
 ### Fixed — detached dispatch actually reaches the standalone Prefect account

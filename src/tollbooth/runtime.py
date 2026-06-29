@@ -180,8 +180,8 @@ class OperatorRuntime:
         self._job_specs: dict[str, dict[str, Callable[..., Any]]] = {}
         from tollbooth.async_executor import InProcessExecutor
         # Default executor preserves today's in-process behavior. Operators get
-        # detached execution automatically when the wheel-owned
-        # ``dpyc-longrunner`` credentials are in their vault (auto-resolved on
+        # detached execution automatically when the long-runner operator secrets
+        # (LONGRUNNER_CREDENTIAL_FIELDS) are in their vault (auto-resolved on
         # first start_async_job); set_async_executor() forces a specific one.
         self._async_executor: Any = InProcessExecutor(self)
         self._async_executor_explicit: bool = False  # True once set explicitly
@@ -525,33 +525,6 @@ class OperatorRuntime:
                 ),
             },
             description="Npub ownership — the signed DM itself proves you own this npub",
-        )
-
-        # Built-in template for the durable long-runner capability. Any operator
-        # that registers a job spec (register_job_spec) can offload it to the
-        # shared detached Prefect flow once these reach its vault via Secure
-        # Courier — no per-server template wiring. The Anthropic/upstream secret
-        # is NOT here: it stays in the operator's own credential template and is
-        # sealed into the closure locally. ``closure_seal_key`` must match the
-        # ``dpyc-closure-key-<key_id>`` Prefect Secret block (see durable_key_id).
-        templates[self._LONGRUNNER_SERVICE] = CredentialTemplate(
-            service=self._LONGRUNNER_SERVICE,
-            version=1,
-            fields={
-                "prefect_api_url": FieldSpec(
-                    required=True, sensitive=False,
-                    description="Standalone Prefect Cloud workspace API URL",
-                ),
-                "prefect_api_key": FieldSpec(
-                    required=True, sensitive=True,
-                    description="Prefect Cloud API key for the standalone account",
-                ),
-                "closure_seal_key": FieldSpec(
-                    required=True, sensitive=True,
-                    description="64-hex AES-256 key; mirror in the dpyc-closure-key-<key_id> Secret block",
-                ),
-            },
-            description="Durable long-runner — offload long jobs to detached Prefect compute",
         )
 
         self._courier = SecureCourierService(
@@ -1989,9 +1962,6 @@ class OperatorRuntime:
     # Binds a sealed closure to its context so a vault entry can never be
     # replayed as a closure (and vice-versa). See _seal_closure.
     _CLOSURE_AAD = "dpyc-closure/v1"
-    # Wheel-owned Secure Courier service carrying the durable long-runner creds
-    # (Prefect API URL/key + closure_seal_key). Auto-injected for every operator.
-    _LONGRUNNER_SERVICE = "dpyc-longrunner"
     # The single shared detached flow that serves all operators. Per-operator
     # key isolation is by closure key (dpyc-closure-key-<key_id>), not by deployment.
     _DURABLE_DEPLOYMENT = "dpyc-job-flow/dpyc-jobs"
@@ -2014,7 +1984,7 @@ class OperatorRuntime:
         Defaults to ``InProcessExecutor``. Operators wanting durable, detached
         execution install a ``PrefectClosureExecutor`` (or any ``JobExecutor``)
         at startup. See ``tollbooth/async_executor.py``. Setting it explicitly
-        disables the automatic ``dpyc-longrunner`` resolution.
+        disables the automatic long-runner-creds resolution.
         """
         self._async_executor = executor
         self._async_executor_explicit = True
@@ -2036,7 +2006,8 @@ class OperatorRuntime:
         """Auto-install a detached executor when long-runner creds are vaulted.
 
         Runs once (cached). If the operator never set one explicitly and the
-        wheel-owned ``dpyc-longrunner`` credentials are present, build a
+        long-runner operator secrets (LONGRUNNER_CREDENTIAL_FIELDS, in the
+        operator's own credential template) are present, build a
         ``PrefectClosureExecutor`` bound to this operator's key_id. Otherwise
         leave the in-process default — durable execution is purely opt-in by
         credential delivery, with no per-server bootstrap code.
@@ -2045,9 +2016,10 @@ class OperatorRuntime:
             return
         self._async_executor_resolved = True
         try:
+            # Long-runner creds are normal operator secrets in the operator's own
+            # credential template (LONGRUNNER_CREDENTIAL_FIELDS) — default service.
             creds = await self.load_credentials(
                 ["prefect_api_url", "prefect_api_key"],
-                service=self._LONGRUNNER_SERVICE,
             )
         except Exception as exc:
             logger.debug("long-runner creds not loadable: %s", exc)
@@ -2105,9 +2077,7 @@ class OperatorRuntime:
         detached flow (held there as a Prefect Secret block); it never appears
         in a run parameter.
         """
-        creds = await self.load_credentials(
-            ["closure_seal_key"], service=self._LONGRUNNER_SERVICE
-        )
+        creds = await self.load_credentials(["closure_seal_key"])
         key_hex = (creds.get("closure_seal_key") or "").strip()
         if len(key_hex) != 64:
             raise RuntimeError("closure_seal_key missing or not 32-byte hex")

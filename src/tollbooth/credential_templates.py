@@ -36,6 +36,31 @@ class CredentialTemplate:
     description: str = ""
 
 
+# Canonical field specs for the durable long-runner capability. The wheel owns
+# these definitions (the field NAMES are read by OperatorRuntime — closure_seal_key
+# by the sealer, prefect_api_url/key by the executor wiring — and closure_seal_key
+# is coupled to the dpyc-closure-key-<key_id> Prefect Secret block). Operators that
+# register a long-running job spec spread these into their OWN
+# operator_credential_template, e.g. ``fields={**mine, **LONGRUNNER_CREDENTIAL_FIELDS}``.
+# They are NORMAL operator secrets — same service, same onboarding/Studio surface,
+# same Secure Courier path. They are optional (required=False): without them the
+# job falls back to in-process execution.
+LONGRUNNER_CREDENTIAL_FIELDS: dict[str, FieldSpec] = {
+    "prefect_api_url": FieldSpec(
+        required=False, sensitive=False,
+        description="Durable long-runner: standalone Prefect Cloud workspace API URL",
+    ),
+    "prefect_api_key": FieldSpec(
+        required=False, sensitive=True,
+        description="Durable long-runner: Prefect Cloud API key for the standalone account",
+    ),
+    "closure_seal_key": FieldSpec(
+        required=False, sensitive=True,
+        description="Durable long-runner: 64-hex AES-256 key; mirror in the dpyc-closure-key-<key_id> Prefect Secret block",
+    ),
+}
+
+
 class TemplateValidationError(ValueError):
     """Raised when a credential payload fails template validation."""
 

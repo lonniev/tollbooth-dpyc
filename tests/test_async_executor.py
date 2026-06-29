@@ -431,7 +431,7 @@ async def test_prefect_submit_targets_standalone_account(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Generic DRY layer: per-operator key_id + automatic dpyc-longrunner wiring
+# Generic DRY layer: per-operator key_id + automatic long-runner-creds wiring
 # ---------------------------------------------------------------------------
 
 def test_durable_key_id_is_deterministic_public_selector():
@@ -453,13 +453,13 @@ async def test_auto_resolve_enables_prefect_when_longrunner_creds_present():
     rt.operator_npub = lambda: NPUB
 
     async def creds(field_names, *, service=None):
-        if service == rt._LONGRUNNER_SERVICE:
-            return {
-                "prefect_api_url": "https://api.prefect.cloud/x",
-                "prefect_api_key": "pk",
-                "closure_seal_key": KEY_HEX,
-            }
-        return {}
+        # long-runner creds are normal operator secrets — loaded from the
+        # default operator service (service=None), not a separate one.
+        return {
+            "prefect_api_url": "https://api.prefect.cloud/x",
+            "prefect_api_key": "pk",
+            "closure_seal_key": KEY_HEX,
+        }
 
     rt.load_credentials = creds
     _register_http_spec(rt)

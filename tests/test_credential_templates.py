@@ -3,6 +3,7 @@
 import pytest
 
 from tollbooth.credential_templates import (
+    LONGRUNNER_CREDENTIAL_FIELDS,
     CredentialTemplate,
     FieldSpec,
     TemplateValidationError,
@@ -10,6 +11,40 @@ from tollbooth.credential_templates import (
     render_template_instructions,
     validate_payload,
 )
+
+
+def test_longrunner_fields_are_optional_operator_secrets():
+    """The durable long-runner fields are normal optional operator secrets that
+    an operator spreads into its OWN credential template (no separate service)."""
+    assert set(LONGRUNNER_CREDENTIAL_FIELDS) == {
+        "prefect_api_url", "prefect_api_key", "closure_seal_key"
+    }
+    # all optional — without them the job falls back to in-process execution
+    assert all(not f.required for f in LONGRUNNER_CREDENTIAL_FIELDS.values())
+    # the two keys are sensitive; the URL is not
+    assert LONGRUNNER_CREDENTIAL_FIELDS["prefect_api_key"].sensitive
+    assert LONGRUNNER_CREDENTIAL_FIELDS["closure_seal_key"].sensitive
+    assert not LONGRUNNER_CREDENTIAL_FIELDS["prefect_api_url"].sensitive
+
+
+def test_longrunner_fields_merge_into_an_operator_template():
+    """Spreading them into a template yields one service with all fields, and
+    they validate + render like any other operator secret (single mgmt path)."""
+    tmpl = CredentialTemplate(
+        service="excalibur-operator",
+        version=1,
+        fields={"anthropic_api_key": FieldSpec(required=True), **LONGRUNNER_CREDENTIAL_FIELDS},
+    )
+    # partial delivery of just the long-runner fields validates (merge-on-receive)
+    cleaned = validate_payload(
+        {"closure_seal_key": "ab" * 32, "prefect_api_url": "u", "prefect_api_key": "k"},
+        tmpl,
+        partial=True,
+    )
+    assert set(cleaned) == {"closure_seal_key", "prefect_api_url", "prefect_api_key"}
+    # they render in the welcome DM alongside the operator's own secrets
+    text = render_delimited_instructions(tmpl)
+    assert "closure_seal_key = @@@" in text and "anthropic_api_key = @@@" in text
 
 
 def _x_api_template() -> CredentialTemplate:
