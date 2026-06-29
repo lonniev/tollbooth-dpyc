@@ -175,6 +175,13 @@ class OperatorRuntime:
         self._last_debit_cost: int = 0
         # Claim-check async jobs (see tollbooth/async_jobs.py)
         self._job_runners: dict[str, Callable[..., Any]] = {}
+        # Spec-driven (closure) path: kind -> {"build", "shape"} — see
+        # register_job_spec and tollbooth/async_executor.py.
+        self._job_specs: dict[str, dict[str, Callable[..., Any]]] = {}
+        from tollbooth.async_executor import InProcessExecutor
+        # Default executor preserves today's in-process behavior; operators opt
+        # into detached execution via set_async_executor().
+        self._async_executor: Any = InProcessExecutor(self)
         self._async_jobs_purge_last: float = 0.0  # monotonic, rate-limits purges
         # Shutdown state
         self._shutdown_triggered: bool = False
@@ -1948,6 +1955,9 @@ class OperatorRuntime:
 
     _ASYNC_JOB_MAX_ATTEMPTS = 3
     _ASYNC_JOBS_PURGE_INTERVAL_SECONDS = 300
+    # Binds a sealed closure to its context so a vault entry can never be
+    # replayed as a closure (and vice-versa). See _seal_closure.
+    _CLOSURE_AAD = "dpyc-closure/v1"
 
     def register_job_runner(self, kind: str, runner: Callable[..., Any]) -> None:
         """Map a job kind to the async callable that performs the work.
@@ -1960,6 +1970,65 @@ class OperatorRuntime:
         resume a job orphaned by a serverless recycle.
         """
         self._job_runners[kind] = runner
+
+    def set_async_executor(self, executor: Any) -> None:
+        """Install the executor that dispatches async jobs.
+
+        Defaults to ``InProcessExecutor``. Operators wanting durable, detached
+        execution install a ``PrefectClosureExecutor`` (or any ``JobExecutor``)
+        at startup. See ``tollbooth/async_executor.py``.
+        """
+        self._async_executor = executor
+
+    def register_job_spec(
+        self,
+        kind: str,
+        build_closure: Callable[..., Any],
+        shape_result: Callable[[Any], Any],
+    ) -> None:
+        """Register the spec-driven (closure) path for a job kind.
+
+        ``build_closure(**params)`` runs in-process in the MCP with full vault
+        access — it loads any operator secrets locally and bakes them into a
+        self-describing job spec (e.g. a fully-formed HTTP request). The spec is
+        sealed (AES-256-GCM) before it leaves the process, so secrets reach the
+        detached executor only as ciphertext. ``shape_result(raw)`` turns the
+        flow's raw return into the dict stored on the Neon job row. Either may be
+        sync or async.
+
+        A kind may register both a runner (in-process fallback) and a spec; the
+        spec is used only while a non-in-process executor is installed.
+        """
+        self._job_specs[kind] = {"build": build_closure, "shape": shape_result}
+
+    def _uses_closure_path(self, kind: str) -> bool:
+        """Closure path iff a spec is registered AND a detached executor is set."""
+        from tollbooth.async_executor import InProcessExecutor
+        return kind in self._job_specs and not isinstance(
+            self._async_executor, InProcessExecutor
+        )
+
+    async def _closure_key_hex(self) -> str:
+        """Load the 32-byte (64-hex) closure seal key from the operator vault.
+
+        Never from env. This symmetric key is shared only with the generic
+        detached flow (held there as a Prefect Secret block); it never appears
+        in a run parameter.
+        """
+        creds = await self.load_credentials(["closure_seal_key"])
+        key_hex = (creds.get("closure_seal_key") or "").strip()
+        if len(key_hex) != 64:
+            raise RuntimeError("closure_seal_key missing or not 32-byte hex")
+        return key_hex
+
+    async def _seal_closure(self, spec: dict[str, Any]) -> str:
+        """AES-256-GCM seal a job spec for transit as a detached run parameter."""
+        import json
+
+        from tollbooth.vault_encryption import VaultCipher
+
+        cipher = VaultCipher(await self._closure_key_hex())
+        return cipher.encrypt(json.dumps(spec), aad=self._CLOSURE_AAD)
 
     async def async_job_store(self) -> Any:
         """Build an AsyncJobStore over the operator's vault."""
@@ -1986,8 +2055,8 @@ class OperatorRuntime:
         staleness threshold for watchdog recovery), ``result_ttl_seconds``
         is how long a finished result is kept before it expires.
         """
-        if kind not in self._job_runners:
-            raise RuntimeError(f"No job runner registered for kind {kind!r}")
+        if kind not in self._job_runners and kind not in self._job_specs:
+            raise RuntimeError(f"No job runner or spec registered for kind {kind!r}")
         npub = resolve_npub(npub)
         store = await self.async_job_store()
         claim = await store.create(
@@ -1998,8 +2067,36 @@ class OperatorRuntime:
             max_runtime_seconds=max_runtime_seconds,
             result_ttl_seconds=result_ttl_seconds,
         )
-        import asyncio
-        asyncio.create_task(self._run_job(claim))
+        try:
+            closure_b64: str | None = None
+            if self._uses_closure_path(kind):
+                import inspect
+
+                built = self._job_specs[kind]["build"](**params)
+                spec = await built if inspect.isawaitable(built) else built
+                closure_b64 = await self._seal_closure(spec)
+            handle = await self._async_executor.submit(claim, closure_b64)
+            if handle:
+                await store.set_run_handle(claim, handle)
+        except Exception as exc:
+            # Dispatch failed after the row was persisted (e.g. Prefect
+            # unreachable). Never strand a fee-charged job: fall back to an
+            # in-process runner if one exists, else refund and report.
+            logger.warning("async job %s dispatch failed: %s", claim, exc, exc_info=True)
+            if kind in self._job_runners:
+                import asyncio
+
+                asyncio.create_task(self._run_job(claim))
+            else:
+                await store.fail(claim, "Job dispatch failed. Check operator logs.")
+                await self.rollback_debit(tool_id, npub, tool_kwargs=params)
+                return {
+                    "success": True,
+                    "status": "error",
+                    "error": "Job dispatch failed.",
+                    "refunded": True,
+                    "next_steps": "Start a new request to retry.",
+                }
         return {
             "success": True,
             "claim_check": claim,
@@ -2071,13 +2168,14 @@ class OperatorRuntime:
     async def fetch_async_job(self, claim: str, npub: str) -> dict[str, Any]:
         """Redeem a claim check — the body of an operator's companion tool.
 
-        Every lifecycle state returns guidance, not an error. Doubles as
-        the watchdog: a pending or stalled job found here is re-kicked on
-        this (alive) container, recovering work orphaned by a serverless
-        recycle. No cron required — the patron's own polling drives
-        recovery.
+        Every lifecycle state returns guidance, not an error. For the closure
+        (detached) path this poll also *settles* the job: it asks the executor
+        whether the detached run finished and, if so, writes the result (or
+        refunds on failure) into the Neon row. For the in-process path the Neon
+        row is the source of truth, and a pending/stalled row is re-kicked here
+        (the atomic ``claim_for_run`` makes a redundant spawn harmless) — the
+        only recovery available to a host with no detached executor.
         """
-        import asyncio
         npub = resolve_npub(npub)
         store = await self.async_job_store()
         self._fire_and_forget_purge_expired_jobs(store)
@@ -2101,12 +2199,38 @@ class OperatorRuntime:
                 "refunded": True,
                 "next_steps": "The fee was refunded. Start a new request to retry.",
             }
-        # pending, or running — re-kick when no live container owns it
-        # (pending: creator died before claiming, or released for retry;
-        # stalled: running past its own max_runtime). claim_for_run's
-        # atomicity makes a redundant spawn harmless.
+        # Still open. Closure path: poll the detached executor and settle here.
+        kind = job["kind"]
+        handle = job["run_handle"]
+        if self._uses_closure_path(kind) and handle:
+            outcome = await self._async_executor.poll(handle)
+            if outcome is None:
+                return {"success": True, "status": "running", "poll_after_seconds": 3}
+            if outcome.get("status") == "completed":
+                import inspect
+
+                shaped = self._job_specs[kind]["shape"](outcome.get("result"))
+                shaped = await shaped if inspect.isawaitable(shaped) else shaped
+                await store.complete(claim, shaped)
+                return {"success": True, "status": "done", "result": shaped}
+            # failed / crashed — refund, generic message (never the upstream body)
+            await store.fail(claim, outcome.get("error") or "Detached job failed.")
+            await self.rollback_debit(
+                job["tool_id"], job["npub"], tool_kwargs=job["params"],
+            )
+            return {
+                "success": True,
+                "status": "error",
+                "error": "Job execution failed.",
+                "refunded": True,
+                "next_steps": "The fee was refunded. Start a new request to retry.",
+            }
+        # In-process path: re-kick an orphaned pending/stalled job (atomic) —
+        # the only recovery for a host with no detached executor.
         recovered = False
         if job["status"] == "pending" or job["stalled"]:
+            import asyncio
+
             asyncio.create_task(self._run_job(claim))
             recovered = job["stalled"]
         response: dict[str, Any] = {

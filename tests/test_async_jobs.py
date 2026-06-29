@@ -288,7 +288,7 @@ class TestRuntimeAsyncJobs:
 
     async def test_start_requires_registered_runner(self, vault):
         rt = _make_runtime(vault)
-        with pytest.raises(RuntimeError, match="No job runner registered"):
+        with pytest.raises(RuntimeError, match="No job runner or spec registered"):
             await rt.start_async_job(
                 "unregistered", NPUB, {},
                 tool_id=TOOL_ID, max_runtime_seconds=60, result_ttl_seconds=300,

@@ -10,8 +10,12 @@ module is library code consumed via ``OperatorRuntime.start_async_job`` /
 ``fetch_async_job``.
 
 The tool itself codes how long it may take (``max_runtime_seconds``, also the
-staleness threshold for the watchdog re-kick after a serverless container
+staleness threshold for re-claiming a job orphaned by a serverless container
 recycle) and how long a finished result is kept (``result_ttl_seconds``).
+
+The work runs either in-process (an asyncio task) or on a detached executor
+(see ``tollbooth/async_executor.py``); in the detached case ``run_handle`` holds
+the executor's handle so a later fetch can poll it for the result.
 
 The result is an opaque JSON blob: either the output content itself (e.g. the
 LLM response) or state the Operator can use to find the output elsewhere
@@ -33,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 _ROW_FIELDS = (
     "claim, npub, kind, tool_id, params, status, attempts, "
-    "max_runtime_seconds, result_ttl_seconds, result, error, "
+    "max_runtime_seconds, result_ttl_seconds, result, error, run_handle, "
     "(status = 'running' AND started_at IS NOT NULL AND "
     " started_at < now() - make_interval(secs => max_runtime_seconds)) AS stalled, "
     "(expires_at IS NOT NULL AND expires_at < now()) AS expired"
@@ -73,6 +77,7 @@ def _row_to_job(row: dict[str, Any]) -> dict[str, Any]:
         "result_ttl_seconds": int(row.get("result_ttl_seconds") or 0),
         "result": _as_dict(row.get("result")),
         "error": str(row.get("error") or ""),
+        "run_handle": str(row.get("run_handle") or ""),
         "stalled": _as_bool(row.get("stalled")),
         "expired": _as_bool(row.get("expired")),
     }
@@ -176,6 +181,16 @@ class AsyncJobStore:
             f"UPDATE {self._t('async_jobs')} "
             "SET status = 'pending' WHERE claim = $1 AND status = 'running'",
             [claim],
+        )
+
+    async def set_run_handle(self, claim: str, handle: str) -> None:
+        """Record a detached executor's handle (e.g. a Prefect flow-run id) so
+        a later fetch can poll it for the result."""
+        if not valid_claim(claim):
+            return
+        await self._vault._execute(
+            f"UPDATE {self._t('async_jobs')} SET run_handle = $2 WHERE claim = $1",
+            [claim, handle],
         )
 
     async def get(self, claim: str, npub: str) -> dict[str, Any] | None:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tollbooth-dpyc"
-version = "0.53.2"
+version = "0.54.0"
 description = "Don't Pester Your Customer™ — Bitcoin Lightning micropayments for MCP servers"
 readme = "README.md"
 license = "Apache-2.0"
@@ -47,6 +47,12 @@ x402 = [
     "eth-account>=0.13.0",
 ]
 constraints = []  # No external deps — stdlib only (datetime, zoneinfo, re)
+# Durable, detached async-job execution via PrefectClosureExecutor
+# (tollbooth/async_executor.py). Only operators who opt into detached
+# execution install this — prefect is imported lazily, never at module load.
+prefect = [
+    "prefect>=3.0",
+]
 dev = [
     "pytest>=9.0",
     "pytest-asyncio>=0.24",

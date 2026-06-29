@@ -463,8 +463,15 @@ class NeonVault:
             "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
             "    started_at TIMESTAMPTZ,"
             "    completed_at TIMESTAMPTZ,"
-            "    expires_at TIMESTAMPTZ"
+            "    expires_at TIMESTAMPTZ,"
+            "    run_handle TEXT"
             ")"
+        )
+        # Retrofit run_handle onto operators provisioned before the detached
+        # executor landed — CREATE TABLE IF NOT EXISTS never adds columns.
+        await self._execute(
+            f"ALTER TABLE {self._t('async_jobs')} "
+            "ADD COLUMN IF NOT EXISTS run_handle TEXT"
         )
         await self._execute(
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_async_jobs_npub "

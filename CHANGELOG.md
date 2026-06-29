@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.54.0 — 2026-06-28
+
+### Added — pluggable async-job executor (detached, durable execution off the recycling front)
+
+- New module `tollbooth.async_executor` with a `JobExecutor` Protocol and two implementations. `InProcessExecutor` (the default) preserves today's behavior — the registered runner runs as a concurrent `asyncio` task in the operator's process. `PrefectClosureExecutor` dispatches the work to detached Prefect-managed compute via `run_deployment(..., timeout=0)` (fire-and-return), so a long job (an LLM round-trip, a web-augmented generation) survives a serverless front that freezes/recycles mid-run. The `service_status` Docket diagnostic added in 0.53.2 is what proved Horizon offers no durable in-process backend, motivating this.
+- **Spec-driven "closure" path.** `OperatorRuntime.register_job_spec(kind, build_closure, shape_result)` registers a job kind that, under a detached executor, is dispatched as a self-describing **job spec** rather than an in-process call. `build_closure(**params)` runs in the MCP with full vault access (it loads operator secrets locally and bakes them into the spec, e.g. a fully-formed HTTP request); the spec is **AES-256-GCM sealed** (reusing `vault_encryption.VaultCipher`, AAD-bound) before it becomes a run parameter, so secrets reach Prefect only as ciphertext. `shape_result(raw)` turns the flow's raw return into the stored result dict. **No executable code travels to the flow** — only declarative data; op primitives live in the flow's own git-versioned repo.
+- `OperatorRuntime.set_async_executor(executor)` installs the executor (default `InProcessExecutor`). The public `start_async_job` / `fetch_async_job` / `register_job_runner` API is unchanged; existing operators are unaffected. Selection is automatic: a kind uses the closure path only when it has a registered spec **and** a non-in-process executor is installed, else it falls back to the in-process runner.
+- `start_async_job` now seals+submits the closure and persists the executor handle; if dispatch fails after the row is persisted (e.g. Prefect unreachable) it falls back to an in-process runner when one exists, else refunds — a fee-charged job is never stranded.
+- `fetch_async_job` **settles** the closure path: it polls the executor for the detached run's terminal state and writes the result (or refunds on failure) into the Neon row. The old unconditional watchdog re-kick is gone for the closure path (the executor owns durability); the in-process path keeps its atomic re-kick as the only recovery for hosts without a detached executor.
+- The detached flow returns its result via a **Prefect Artifact** (auto-associated with the flow run, read back with the MCP's existing Prefect API key), not via Prefect result storage — whose default is the worker's local disk and therefore unreadable from the MCP host. `PrefectClosureExecutor.poll` reads the artifact by flow-run id. The generic flow (`flows/dpyc_job_flow.py`, op primitive `http_request`) ships in this repo for Prefect Managed to clone; it touches no Neon and receives only declarative data.
+- New nullable `async_jobs.run_handle TEXT` column (added to the CREATE and retrofitted via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`; `restore_neon_schema` carries it). New `AsyncJobStore.set_run_handle`.
+- New optional `[prefect]` extra (`prefect>=3.0`), imported lazily inside `PrefectClosureExecutor` — operators who never opt in do not need it installed.
+
 ## 0.53.2 — 2026-06-28
 
 ### Added — `service_status` reports the Docket (async-job) backend
