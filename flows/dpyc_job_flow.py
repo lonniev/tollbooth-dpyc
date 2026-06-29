@@ -28,8 +28,10 @@ Deploy (from the public wheel repo, so Managed can clone the code)::
         entrypoint="flows/dpyc_job_flow.py:dpyc_job_flow",
     ).deploy(name="dpyc-jobs", work_pool_name="<managed-pool>")
 
-A Prefect Secret block named ``dpyc-closure-key`` must hold the 64-hex symmetric
-key the MCP seals with (``closure_seal_key`` in the operator vault).
+One Prefect Secret block per operator, named ``dpyc-closure-key-<key_id>``, must
+hold the 64-hex symmetric key that operator seals with (its ``closure_seal_key``
+vault entry). ``key_id`` is ``OperatorRuntime.durable_key_id()`` — a non-secret
+hash of the operator npub — and travels in the cleartext run parameters.
 """
 
 from __future__ import annotations
@@ -45,13 +47,19 @@ from prefect.blocks.system import Secret
 from tollbooth.vault_encryption import VaultCipher
 
 _CLOSURE_AAD = "dpyc-closure/v1"
-_CLOSURE_KEY_BLOCK = "dpyc-closure-key"
+_CLOSURE_KEY_PREFIX = "dpyc-closure-key"
 _DEFAULT_TIMEOUT = 210.0
 
 
-def _open_closure(closure_b64: str) -> dict[str, Any]:
-    """Decrypt the sealed closure into a job spec. Raises on tamper/wrong key."""
-    key_hex = Secret.load(_CLOSURE_KEY_BLOCK).get()
+def _open_closure(closure_b64: str, key_id: str) -> dict[str, Any]:
+    """Decrypt the sealed closure into a job spec. Raises on tamper/wrong key.
+
+    ``key_id`` selects this operator's Secret block ``dpyc-closure-key-<key_id>``
+    — each operator holds its own closure key, so the single shared flow serves
+    them all without any operator's key being able to open another's closure.
+    """
+    block = f"{_CLOSURE_KEY_PREFIX}-{key_id}"
+    key_hex = Secret.load(block).get()
     spec = json.loads(VaultCipher(key_hex).decrypt(closure_b64, aad=_CLOSURE_AAD))
     if not isinstance(spec, dict):
         raise ValueError("closure did not decrypt to a job spec")
@@ -79,8 +87,12 @@ def _do_http_request(req: dict[str, Any]) -> dict[str, Any]:
 
 
 @flow(name="dpyc-job-flow", retries=0, log_prints=False)
-def dpyc_job_flow(closure_b64: str) -> dict[str, Any]:
+def dpyc_job_flow(closure_b64: str, key_id: str) -> dict[str, Any]:
     """Open a sealed closure, dispatch its op, publish the result as an artifact.
+
+    ``key_id`` is the non-secret per-operator selector for the closure key
+    (names the ``dpyc-closure-key-<key_id>`` Secret block); the closure body
+    stays sealed until the matching key opens it.
 
     The result travels back to the triggering MCP via a **Prefect Artifact**
     (stored in Prefect Cloud, auto-associated with this flow run, retrievable
@@ -93,7 +105,7 @@ def dpyc_job_flow(closure_b64: str) -> dict[str, Any]:
     semantics (a fresh ``start_async_job`` is the retry), and ``http_request``
     against a non-idempotent POST must not be auto-replayed.
     """
-    spec = _open_closure(closure_b64)
+    spec = _open_closure(closure_b64, key_id)
     op = spec.get("op")
     if op == "http_request":
         result = _do_http_request(spec["request"])

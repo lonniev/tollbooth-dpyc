@@ -144,7 +144,7 @@ def _register_http_spec(rt):
 def test_executors_satisfy_protocol():
     assert isinstance(InProcessExecutor(object()), JobExecutor)
     assert isinstance(
-        PrefectClosureExecutor(deployment="d/x", api_url="u", api_key="k"),
+        PrefectClosureExecutor(deployment="d/x", api_url="u", api_key="k", key_id="id"),
         JobExecutor,
     )
 
@@ -338,7 +338,9 @@ async def test_prefect_submit_passes_only_ciphertext(monkeypatch):
     monkeypatch.setitem(sys.modules, "prefect", fake_pkg)
     monkeypatch.setitem(sys.modules, "prefect.deployments", fake_dep)
 
-    exe = PrefectClosureExecutor(deployment="dpyc-job-flow/dpyc-jobs", api_url="u", api_key="k")
+    exe = PrefectClosureExecutor(
+        deployment="dpyc-job-flow/dpyc-jobs", api_url="u", api_key="k", key_id="op16hex"
+    )
     sealed = VaultCipher(KEY_HEX).encrypt(
         json.dumps({"op": "http_request", "secret": ANTHROPIC_SECRET}),
         aad="dpyc-closure/v1",
@@ -348,9 +350,83 @@ async def test_prefect_submit_passes_only_ciphertext(monkeypatch):
     assert handle  # a flow-run id string
     assert captured["name"] == "dpyc-job-flow/dpyc-jobs"
     assert captured["timeout"] == 0
-    assert captured["parameters"] == {"closure_b64": sealed}
+    # only ciphertext + the non-secret key_id selector cross
+    assert captured["parameters"] == {"closure_b64": sealed, "key_id": "op16hex"}
     # the secret never appears in cleartext anywhere in the parameters
     assert ANTHROPIC_SECRET not in json.dumps(captured["parameters"])
+
+
+# ---------------------------------------------------------------------------
+# Generic DRY layer: per-operator key_id + automatic dpyc-longrunner wiring
+# ---------------------------------------------------------------------------
+
+def test_durable_key_id_is_deterministic_public_selector():
+    rt = _make_runtime(FakeVault())
+    rt.operator_npub = lambda: NPUB
+    kid = rt.durable_key_id()
+    assert kid == rt.durable_key_id()  # deterministic
+    assert len(kid) == 16 and all(c in "0123456789abcdef" for c in kid)
+    # the npub is public; the selector leaks nothing beyond it
+    assert NPUB not in kid
+    # a different operator names a different Secret block
+    other = _make_runtime(FakeVault())
+    other.operator_npub = lambda: _PK().public_key.bech32()
+    assert other.durable_key_id() != kid
+
+
+async def test_auto_resolve_enables_prefect_when_longrunner_creds_present():
+    rt = _make_runtime(FakeVault())
+    rt.operator_npub = lambda: NPUB
+
+    async def creds(field_names, *, service=None):
+        if service == rt._LONGRUNNER_SERVICE:
+            return {
+                "prefect_api_url": "https://api.prefect.cloud/x",
+                "prefect_api_key": "pk",
+                "closure_seal_key": KEY_HEX,
+            }
+        return {}
+
+    rt.load_credentials = creds
+    _register_http_spec(rt)
+
+    await rt._ensure_async_executor()
+    assert isinstance(rt._async_executor, PrefectClosureExecutor)
+    assert rt._async_executor._key_id == rt.durable_key_id()
+    assert rt._async_executor._deployment == rt._DURABLE_DEPLOYMENT
+    assert rt._uses_closure_path("resolve") is True
+    # the probe is one-shot
+    assert rt._async_executor_resolved is True
+
+
+async def test_auto_resolve_stays_in_process_without_creds():
+    rt = _make_runtime(FakeVault())
+    rt.operator_npub = lambda: NPUB
+
+    async def creds(field_names, *, service=None):
+        return {}
+
+    rt.load_credentials = creds
+    await rt._ensure_async_executor()
+    assert isinstance(rt._async_executor, InProcessExecutor)
+
+
+async def test_explicit_executor_disables_auto_resolve():
+    rt = _make_runtime(FakeVault())
+    rt.operator_npub = lambda: NPUB
+    sentinel = RecordingExecutor()
+    rt.set_async_executor(sentinel)
+
+    async def creds(field_names, *, service=None):
+        return {
+            "prefect_api_url": "u",
+            "prefect_api_key": "k",
+            "closure_seal_key": KEY_HEX,
+        }
+
+    rt.load_credentials = creds
+    await rt._ensure_async_executor()
+    assert rt._async_executor is sentinel  # an explicit choice always wins
 
 
 @pytest.fixture

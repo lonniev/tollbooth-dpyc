@@ -179,9 +179,13 @@ class OperatorRuntime:
         # register_job_spec and tollbooth/async_executor.py.
         self._job_specs: dict[str, dict[str, Callable[..., Any]]] = {}
         from tollbooth.async_executor import InProcessExecutor
-        # Default executor preserves today's in-process behavior; operators opt
-        # into detached execution via set_async_executor().
+        # Default executor preserves today's in-process behavior. Operators get
+        # detached execution automatically when the wheel-owned
+        # ``dpyc-longrunner`` credentials are in their vault (auto-resolved on
+        # first start_async_job); set_async_executor() forces a specific one.
         self._async_executor: Any = InProcessExecutor(self)
+        self._async_executor_explicit: bool = False  # True once set explicitly
+        self._async_executor_resolved: bool = False  # True after one auto-probe
         self._async_jobs_purge_last: float = 0.0  # monotonic, rate-limits purges
         # Shutdown state
         self._shutdown_triggered: bool = False
@@ -521,6 +525,33 @@ class OperatorRuntime:
                 ),
             },
             description="Npub ownership — the signed DM itself proves you own this npub",
+        )
+
+        # Built-in template for the durable long-runner capability. Any operator
+        # that registers a job spec (register_job_spec) can offload it to the
+        # shared detached Prefect flow once these reach its vault via Secure
+        # Courier — no per-server template wiring. The Anthropic/upstream secret
+        # is NOT here: it stays in the operator's own credential template and is
+        # sealed into the closure locally. ``closure_seal_key`` must match the
+        # ``dpyc-closure-key-<key_id>`` Prefect Secret block (see durable_key_id).
+        templates[self._LONGRUNNER_SERVICE] = CredentialTemplate(
+            service=self._LONGRUNNER_SERVICE,
+            version=1,
+            fields={
+                "prefect_api_url": FieldSpec(
+                    required=True, sensitive=False,
+                    description="Standalone Prefect Cloud workspace API URL",
+                ),
+                "prefect_api_key": FieldSpec(
+                    required=True, sensitive=True,
+                    description="Prefect Cloud API key for the standalone account",
+                ),
+                "closure_seal_key": FieldSpec(
+                    required=True, sensitive=True,
+                    description="64-hex AES-256 key; mirror in the dpyc-closure-key-<key_id> Secret block",
+                ),
+            },
+            description="Durable long-runner — offload long jobs to detached Prefect compute",
         )
 
         self._courier = SecureCourierService(
@@ -1958,6 +1989,12 @@ class OperatorRuntime:
     # Binds a sealed closure to its context so a vault entry can never be
     # replayed as a closure (and vice-versa). See _seal_closure.
     _CLOSURE_AAD = "dpyc-closure/v1"
+    # Wheel-owned Secure Courier service carrying the durable long-runner creds
+    # (Prefect API URL/key + closure_seal_key). Auto-injected for every operator.
+    _LONGRUNNER_SERVICE = "dpyc-longrunner"
+    # The single shared detached flow that serves all operators. Per-operator
+    # key isolation is by closure key (dpyc-closure-key-<key_id>), not by deployment.
+    _DURABLE_DEPLOYMENT = "dpyc-job-flow/dpyc-jobs"
 
     def register_job_runner(self, kind: str, runner: Callable[..., Any]) -> None:
         """Map a job kind to the async callable that performs the work.
@@ -1976,9 +2013,62 @@ class OperatorRuntime:
 
         Defaults to ``InProcessExecutor``. Operators wanting durable, detached
         execution install a ``PrefectClosureExecutor`` (or any ``JobExecutor``)
-        at startup. See ``tollbooth/async_executor.py``.
+        at startup. See ``tollbooth/async_executor.py``. Setting it explicitly
+        disables the automatic ``dpyc-longrunner`` resolution.
         """
         self._async_executor = executor
+        self._async_executor_explicit = True
+        self._async_executor_resolved = True
+
+    def durable_key_id(self) -> str:
+        """Stable, non-secret per-operator selector for the closure key.
+
+        Names the operator's Prefect Secret block ``dpyc-closure-key-<key_id>``
+        and rides in the *cleartext* envelope so the shared flow can pick the
+        right key before decrypting. Derived from the operator npub (public), so
+        two operators never collide and the value leaks nothing.
+        """
+        import hashlib
+
+        return hashlib.sha256(self.operator_npub().encode()).hexdigest()[:16]
+
+    async def _ensure_async_executor(self) -> None:
+        """Auto-install a detached executor when long-runner creds are vaulted.
+
+        Runs once (cached). If the operator never set one explicitly and the
+        wheel-owned ``dpyc-longrunner`` credentials are present, build a
+        ``PrefectClosureExecutor`` bound to this operator's key_id. Otherwise
+        leave the in-process default — durable execution is purely opt-in by
+        credential delivery, with no per-server bootstrap code.
+        """
+        if self._async_executor_resolved or self._async_executor_explicit:
+            return
+        self._async_executor_resolved = True
+        try:
+            creds = await self.load_credentials(
+                ["prefect_api_url", "prefect_api_key"],
+                service=self._LONGRUNNER_SERVICE,
+            )
+        except Exception as exc:
+            logger.debug("long-runner creds not loadable: %s", exc)
+            return
+        api_url = (creds.get("prefect_api_url") or "").strip()
+        api_key = (creds.get("prefect_api_key") or "").strip()
+        if not (api_url and api_key):
+            return
+        from tollbooth.async_executor import PrefectClosureExecutor
+
+        self._async_executor = PrefectClosureExecutor(
+            deployment=self._DURABLE_DEPLOYMENT,
+            api_url=api_url,
+            api_key=api_key,
+            key_id=self.durable_key_id(),
+        )
+        logger.info(
+            "Durable async executor enabled (deployment=%s, key_id=%s)",
+            self._DURABLE_DEPLOYMENT,
+            self.durable_key_id(),
+        )
 
     def register_job_spec(
         self,
@@ -2015,7 +2105,9 @@ class OperatorRuntime:
         detached flow (held there as a Prefect Secret block); it never appears
         in a run parameter.
         """
-        creds = await self.load_credentials(["closure_seal_key"])
+        creds = await self.load_credentials(
+            ["closure_seal_key"], service=self._LONGRUNNER_SERVICE
+        )
         key_hex = (creds.get("closure_seal_key") or "").strip()
         if len(key_hex) != 64:
             raise RuntimeError("closure_seal_key missing or not 32-byte hex")
@@ -2057,6 +2149,9 @@ class OperatorRuntime:
         """
         if kind not in self._job_runners and kind not in self._job_specs:
             raise RuntimeError(f"No job runner or spec registered for kind {kind!r}")
+        # Opportunistically enable detached execution if the operator has
+        # couriered the long-runner creds (one-time probe; no-op thereafter).
+        await self._ensure_async_executor()
         npub = resolve_npub(npub)
         store = await self.async_job_store()
         claim = await store.create(
@@ -2996,7 +3091,7 @@ def register_standard_tools(
             op_npub = None
 
         from tollbooth.tools.status import build_service_status
-        return build_service_status(
+        status = build_service_status(
             service=service_name or slug,
             slug=slug,
             version=service_version,
@@ -3007,6 +3102,22 @@ def register_standard_tools(
             process_id=os.getpid(),
             env=os.environ,
         )
+        # Durable long-runner diagnostics: the non-secret key_id names the
+        # operator's Prefect Secret block (dpyc-closure-key-<key_id>), and
+        # whether a detached executor is currently installed. Helps an operator
+        # provision the matching block without guessing.
+        if op_npub:
+            from tollbooth.async_executor import InProcessExecutor
+
+            status["durable_jobs"] = {
+                "key_id": rt.durable_key_id(),
+                "closure_key_block": f"dpyc-closure-key-{rt.durable_key_id()}",
+                "deployment": rt._DURABLE_DEPLOYMENT,
+                "detached_executor_active": not isinstance(
+                    rt._async_executor, InProcessExecutor
+                ),
+            }
+        return status
 
     # -- Onboarding ----------------------------------------------------
 

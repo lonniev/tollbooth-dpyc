@@ -73,12 +73,18 @@ class PrefectClosureExecutor:
     Prefect API URL/key for the standalone account). nsec never reaches Prefect.
     """
 
-    def __init__(self, *, deployment: str, api_url: str, api_key: str) -> None:
+    def __init__(
+        self, *, deployment: str, api_url: str, api_key: str, key_id: str
+    ) -> None:
         # deployment e.g. "dpyc-job-flow/dpyc-jobs". api_url/api_key target the
-        # standalone Prefect Cloud account; held in memory only.
+        # standalone Prefect Cloud account; held in memory only. key_id is the
+        # non-secret selector for this operator's closure key — it names the
+        # ``dpyc-closure-key-<key_id>`` Prefect Secret block and rides in the
+        # cleartext envelope so the shared flow loads the right key.
         self._deployment = deployment
         self._api_url = api_url
         self._api_key = api_key
+        self._key_id = key_id
 
     def _client_ctx(self) -> Any:
         import os
@@ -95,10 +101,11 @@ class PrefectClosureExecutor:
         from prefect.deployments import run_deployment
 
         # timeout=0 ⇒ fire-and-return: create + schedule the run, do NOT wait.
-        # Only the ciphertext closure crosses — no secrets, no params, no code.
+        # Only the ciphertext closure + the non-secret key_id selector cross —
+        # no secrets, no params, no code.
         flow_run = await run_deployment(
             name=self._deployment,
-            parameters={"closure_b64": closure_b64},
+            parameters={"closure_b64": closure_b64, "key_id": self._key_id},
             timeout=0,
         )
         return str(flow_run.id)

@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.55.0 — 2026-06-29
+
+### Changed — durable long-runner is a generic, DRY operator capability (not eXcalibur-specific)
+
+- **Wheel-owned `dpyc-longrunner` credential service.** The runtime now auto-injects a built-in Secure Courier credential template (`prefect_api_url`, `prefect_api_key`, `closure_seal_key`) for *every* operator — the same mechanism as the built-in `npub_ownership` template. Any operator unlocks detached execution by couriering these three secrets; no per-server credential-template wiring. The upstream API secret (e.g. the Anthropic key) is **not** here — it stays in the operator's own template and is sealed into the closure locally.
+- **Automatic executor wiring.** `start_async_job` opportunistically calls a one-shot `_ensure_async_executor()`: if a job spec is registered and the `dpyc-longrunner` creds are present in the vault, it installs a `PrefectClosureExecutor` bound to this operator's `key_id` — with no `set_async_executor` call in the server. An explicit `set_async_executor(...)` still wins and disables the probe.
+- **Per-operator closure keys.** Each operator holds its own `closure_seal_key`; the shared `dpyc-job-flow` selects the right one via a new **non-secret `key_id`** in the cleartext run envelope (names the operator's `dpyc-closure-key-<key_id>` Prefect Secret block). `key_id` = `OperatorRuntime.durable_key_id()`, a public SHA-256 prefix of the operator npub — operators can't open each other's closures. `PrefectClosureExecutor` takes `key_id`; the flow's `dpyc_job_flow(closure_b64, key_id)` loads the keyed block. `_closure_key_hex` now loads from the `dpyc-longrunner` service.
+
 ## 0.54.0 — 2026-06-28
 
 ### Added — pluggable async-job executor (detached, durable execution off the recycling front)
