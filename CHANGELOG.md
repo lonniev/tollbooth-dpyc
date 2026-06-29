@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.55.1 — 2026-06-29
+
+### Fixed — closure-path failure semantics symmetric with in-process
+
+- `fetch_async_job` now wraps `shape_result` on the completed branch: if a detached run finishes but its raw result can't be shaped (an upstream non-2xx surfaced as the result, or the op produced nothing usable), the job is failed and the fare **refunded** — symmetric with the in-process runner, which raises+refunds on the same conditions. Previously a shaping exception escaped unhandled, leaving the job stuck and the fee uncredited. The error detail is never surfaced to the caller.
+- The generic `dpyc-job-flow` `http_request` op now calls `raise_for_status()`: a non-2xx upstream response marks the flow run FAILED (so the MCP refunds) instead of returning as a "completed" job carrying an error status. Matches an in-process runner's `raise_for_status`. (Flow-repo change; re-deploy `dpyc-job-flow/dpyc-jobs` to pick it up.)
+
 ## 0.55.0 — 2026-06-29
 
 ### Changed — durable long-runner is a generic, DRY operator capability (not eXcalibur-specific)

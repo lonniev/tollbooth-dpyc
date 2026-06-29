@@ -78,6 +78,11 @@ def _do_http_request(req: dict[str, Any]) -> dict[str, Any]:
         resp = client.request(
             method, url, headers=req.get("headers"), json=req.get("json")
         )
+    # A non-2xx means the requested call did not succeed: raise so this flow run
+    # is marked FAILED and the triggering MCP refunds the fare (symmetric with an
+    # in-process runner's raise_for_status). The raised text carries the status,
+    # never the request's auth headers.
+    resp.raise_for_status()
     out: dict[str, Any] = {"status": resp.status_code}
     try:
         out["json"] = resp.json()

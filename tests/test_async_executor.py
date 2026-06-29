@@ -255,6 +255,41 @@ async def test_fetch_closure_failed_refunds(vault_and_rt):
     assert refunds == [(TOOL_ID, NPUB, {"prompt": "hi"})]
 
 
+async def test_fetch_closure_completed_but_unshapeable_refunds(vault_and_rt):
+    """A run that finishes but whose result can't be shaped (e.g. an upstream
+    non-2xx surfaced, or empty output) refunds — symmetric with in-process."""
+    vault, rt = vault_and_rt
+
+    async def build_closure(**params):
+        return {"op": "http_request", "request": {"url": "https://x"}}
+
+    def shape_result(raw):
+        raise ValueError("no text returned")
+
+    rt.register_job_spec("resolve", build_closure, shape_result)
+    rt.set_async_executor(RecordingExecutor(
+        outcome={"status": "completed", "result": {"status": 500}, "error": None}
+    ))
+    refunds: list[tuple] = []
+
+    async def fake_rollback(tool_id, npub, *, tool_kwargs=None):
+        refunds.append((tool_id, npub))
+
+    rt.rollback_debit = fake_rollback
+    out = await rt.start_async_job(
+        "resolve", NPUB, {"prompt": "hi"},
+        tool_id=TOOL_ID, max_runtime_seconds=210, result_ttl_seconds=900,
+    )
+    claim = out["claim_check"]
+    fetched = await rt.fetch_async_job(claim, NPUB)
+    assert fetched["status"] == "error"
+    assert fetched["refunded"] is True
+    # the shaping error detail never leaks to the caller
+    assert "no text returned" not in json.dumps(fetched)
+    assert refunds == [(TOOL_ID, NPUB)]
+    assert vault.rows[claim]["status"] == "error"
+
+
 async def test_fetch_closure_still_running(vault_and_rt):
     vault, rt = vault_and_rt
     _register_http_spec(rt)

@@ -2301,15 +2301,29 @@ class OperatorRuntime:
             outcome = await self._async_executor.poll(handle)
             if outcome is None:
                 return {"success": True, "status": "running", "poll_after_seconds": 3}
+            settle_error: str | None = None
             if outcome.get("status") == "completed":
                 import inspect
 
-                shaped = self._job_specs[kind]["shape"](outcome.get("result"))
-                shaped = await shaped if inspect.isawaitable(shaped) else shaped
-                await store.complete(claim, shaped)
-                return {"success": True, "status": "done", "result": shaped}
-            # failed / crashed — refund, generic message (never the upstream body)
-            await store.fail(claim, outcome.get("error") or "Detached job failed.")
+                try:
+                    shaped = self._job_specs[kind]["shape"](outcome.get("result"))
+                    shaped = await shaped if inspect.isawaitable(shaped) else shaped
+                except Exception as exc:
+                    # The detached run finished, but shaping its raw result
+                    # failed (e.g. an upstream non-2xx surfaced as the result, or
+                    # the op produced nothing usable). Treat as a job failure so
+                    # the fee is refunded — symmetric with the in-process runner,
+                    # which raises+refunds on the same conditions.
+                    logger.warning("async job %s result shaping failed: %s", claim, exc)
+                    settle_error = str(exc)
+                else:
+                    await store.complete(claim, shaped)
+                    return {"success": True, "status": "done", "result": shaped}
+            # failed / crashed / unshapeable — refund, generic message (never the
+            # upstream body, which could echo a sealed value).
+            await store.fail(
+                claim, settle_error or outcome.get("error") or "Detached job failed."
+            )
             await self.rollback_debit(
                 job["tool_id"], job["npub"], tool_kwargs=job["params"],
             )
