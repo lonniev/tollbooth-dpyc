@@ -2196,11 +2196,13 @@ class OperatorRuntime:
                     "refunded": True,
                     "next_steps": "Start a new request to retry.",
                 }
+        from tollbooth.async_jobs import poll_backoff_seconds
+
         return {
             "success": True,
             "claim_check": claim,
             "status": "pending",
-            "poll_after_seconds": 3,
+            "poll_after_seconds": poll_backoff_seconds(0, max_runtime_seconds),
         }
 
     async def _run_job(self, claim: str) -> None:
@@ -2289,6 +2291,8 @@ class OperatorRuntime:
         (the atomic ``claim_for_run`` makes a redundant spawn harmless) — the
         only recovery available to a host with no detached executor.
         """
+        from tollbooth.async_jobs import poll_backoff_seconds
+
         npub = resolve_npub(npub)
         store = await self.async_job_store()
         self._fire_and_forget_purge_expired_jobs(store)
@@ -2317,7 +2321,13 @@ class OperatorRuntime:
         if self._uses_closure_path(kind) and handle:
             outcome = await self._async_executor.poll(handle)
             if outcome is None:
-                return {"success": True, "status": "running", "poll_after_seconds": 3}
+                return {
+                    "success": True,
+                    "status": "running",
+                    "poll_after_seconds": poll_backoff_seconds(
+                        job["elapsed_seconds"], job["max_runtime_seconds"]
+                    ),
+                }
             if outcome.get("status") == "completed":
                 import inspect
 
@@ -2375,7 +2385,9 @@ class OperatorRuntime:
         response: dict[str, Any] = {
             "success": True,
             "status": "running",
-            "poll_after_seconds": 3,
+            "poll_after_seconds": poll_backoff_seconds(
+                job["elapsed_seconds"], job["max_runtime_seconds"]
+            ),
         }
         if recovered:
             response["recovered"] = True

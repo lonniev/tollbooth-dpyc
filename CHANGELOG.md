@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.58.0 — 2026-06-30
+
+### Changed — claim-check polling cadence counts down to the deadline instead of up from the start
+
+- **`fetch_async_job` / `start_async_job` now advise an adaptive `poll_after_seconds`** instead of a constant `3`. A fixed 3s tick told an agent to poll a 400s job ~130 times; naive exponential backoff is worse — it advises the *longest* wait right when the result is most imminent, since the longer a job has already run the closer it is to done. The new cadence counts DOWN toward the deadline by which the job is guaranteed resolved (the calling tool's `max_runtime_seconds`): it holds at a steady ceiling through the bulk of the run (bounding how long a finished result waits to be noticed) and TIGHTENS toward a floor in the home stretch. For `resolve_dynamic_block` (`max_runtime=210`) this is a steady ~21s through the middle, then `21 → 16 → 11 → 6 → 5` as the finish nears — flat-then-decreasing, never increasing. (The web frontend has its own client-side backoff and ignores this field; this is the advice an AI agent honors.)
+- **New pure helper `poll_backoff_seconds(elapsed, max_runtime)`** in `tollbooth/async_jobs.py`, plus an `elapsed_seconds` column on the job row. No tool-signature change; every claim-check consumer picks up the better cadence on pin bump.
+
 ## 0.57.0 — 2026-06-29
 
 ### Changed — BREAKING: one name for the possession token — `dpop_token` (retires `proof` / `proof_token` / `poison`)

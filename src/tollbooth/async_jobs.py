@@ -38,10 +38,43 @@ logger = logging.getLogger(__name__)
 _ROW_FIELDS = (
     "claim, npub, kind, tool_id, params, status, attempts, "
     "max_runtime_seconds, result_ttl_seconds, result, error, run_handle, "
+    "EXTRACT(EPOCH FROM (now() - created_at)) AS elapsed_seconds, "
     "(status = 'running' AND started_at IS NOT NULL AND "
     " started_at < now() - make_interval(secs => max_runtime_seconds)) AS stalled, "
     "(expires_at IS NOT NULL AND expires_at < now()) AS expired"
 )
+
+# Polling cadence advised to an agent redeeming a claim check. A constant 3s
+# tick hammers a long job with dozens of idle round-trips; naive exponential
+# backoff (wait 1s, 2s, 4s, …) is worse — it tells you to wait *longest* right
+# when the result is most imminent, since the longer a job has already run the
+# CLOSER it is to done, not farther. So we count DOWN toward the deadline by
+# which the job is guaranteed resolved (its declared max_runtime): the advised
+# interval holds at a steady ceiling through the bulk of the run (bounding how
+# long a finished result waits to be noticed) and TIGHTENS toward a floor in the
+# home stretch. (The web frontend has its own client-side backoff and ignores
+# this field; this is the advice an AI agent honors.)
+_POLL_FLOOR_SECONDS = 5
+_POLL_CEILING_SECONDS = 30
+_POLL_GROWTH = 0.5  # next delay ≈ half the time still expected to remain
+
+
+def poll_backoff_seconds(elapsed_seconds: float, max_runtime_seconds: int) -> int:
+    """Advise the next ``poll_after_seconds`` for a still-running async job.
+
+    Counts down toward the job's guaranteed-resolved deadline rather than up
+    from its start, so the interval SHRINKS as the finish nears (the opposite of
+    exponential backoff). Roughly half the time still expected to remain, held at
+    a steady ceiling early and tightened to a floor near/after the deadline. Pure
+    function of elapsed runtime and the per-attempt ceiling the calling tool
+    declared.
+    """
+    ceiling = 15
+    if max_runtime_seconds > 0:
+        ceiling = max(_POLL_FLOOR_SECONDS, min(max_runtime_seconds // 10, _POLL_CEILING_SECONDS))
+    remaining = max_runtime_seconds - elapsed_seconds
+    suggested = remaining * _POLL_GROWTH
+    return int(max(_POLL_FLOOR_SECONDS, min(suggested, ceiling)))
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -78,6 +111,7 @@ def _row_to_job(row: dict[str, Any]) -> dict[str, Any]:
         "result": _as_dict(row.get("result")),
         "error": str(row.get("error") or ""),
         "run_handle": str(row.get("run_handle") or ""),
+        "elapsed_seconds": float(row.get("elapsed_seconds") or 0.0),
         "stalled": _as_bool(row.get("stalled")),
         "expired": _as_bool(row.get("expired")),
     }
