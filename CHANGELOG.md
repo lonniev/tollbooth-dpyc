@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.59.0 — 2026-06-30
+
+### Added — optional author-declared time budget for async jobs (`expected_seconds`)
+
+- **`start_async_job` now accepts an optional `expected_seconds`** — a caller-declared *prediction* of how long the work takes (distinct from `max_runtime_seconds`, which is a safety ceiling). When a consumer passes it (e.g. a dynamic-block author who sized and pays ad valorem for their block), the advised poll cadence trusts it: the **first wait is ~75% of the budget**, then each subsequent poll waits ~75% of what remains (geometric tightening), capped at a 300s single-hop ceiling and floored at 5s near/after the budget. Leave it unset (`0`) and the existing steady-ceiling countdown is unchanged — so other claim-check consumers are unaffected.
+- **Schema:** new `expected_seconds INTEGER NOT NULL DEFAULT 0` column on `async_jobs`, with an idempotent `ADD COLUMN IF NOT EXISTS` retrofit for operators provisioned earlier. Persisted on create, read back on the row, and consumed by `poll_backoff_seconds(elapsed, max_runtime, expected_seconds)`.
+- **Why two regimes:** for a job whose duration is genuinely known, polling through the middle is wasted round-trips; sleeping most of the budget up front and tightening at the end is both cheaper and lower-latency. For a job where the number is only a ceiling (the default), a long first wait would be wrong — so the budget curve is strictly opt-in.
+
 ## 0.58.0 — 2026-06-30
 
 ### Changed — claim-check polling cadence counts down to the deadline instead of up from the start

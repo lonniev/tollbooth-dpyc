@@ -2141,6 +2141,7 @@ class OperatorRuntime:
         tool_id: str,
         max_runtime_seconds: int,
         result_ttl_seconds: int,
+        expected_seconds: int = 0,
     ) -> dict[str, Any]:
         """Persist a job, kick it off concurrently, return its claim check.
 
@@ -2150,6 +2151,12 @@ class OperatorRuntime:
         ``max_runtime_seconds`` is how long one attempt may take (and the
         staleness threshold for watchdog recovery), ``result_ttl_seconds``
         is how long a finished result is kept before it expires.
+
+        ``expected_seconds`` is an optional caller-declared time budget — a
+        real prediction of how long the work takes, not a safety ceiling. When
+        set, the advised poll cadence trusts it (sleep ~75% of it up front,
+        then tighten) instead of polling through the middle. Leave 0 for the
+        steady-ceiling cadence.
         """
         if kind not in self._job_runners and kind not in self._job_specs:
             raise RuntimeError(f"No job runner or spec registered for kind {kind!r}")
@@ -2165,6 +2172,7 @@ class OperatorRuntime:
             params=params,
             max_runtime_seconds=max_runtime_seconds,
             result_ttl_seconds=result_ttl_seconds,
+            expected_seconds=expected_seconds,
         )
         try:
             closure_b64: str | None = None
@@ -2202,7 +2210,7 @@ class OperatorRuntime:
             "success": True,
             "claim_check": claim,
             "status": "pending",
-            "poll_after_seconds": poll_backoff_seconds(0, max_runtime_seconds),
+            "poll_after_seconds": poll_backoff_seconds(0, max_runtime_seconds, expected_seconds),
         }
 
     async def _run_job(self, claim: str) -> None:
@@ -2325,7 +2333,7 @@ class OperatorRuntime:
                     "success": True,
                     "status": "running",
                     "poll_after_seconds": poll_backoff_seconds(
-                        job["elapsed_seconds"], job["max_runtime_seconds"]
+                        job["elapsed_seconds"], job["max_runtime_seconds"], job["expected_seconds"]
                     ),
                 }
             if outcome.get("status") == "completed":
@@ -2386,7 +2394,7 @@ class OperatorRuntime:
             "success": True,
             "status": "running",
             "poll_after_seconds": poll_backoff_seconds(
-                job["elapsed_seconds"], job["max_runtime_seconds"]
+                job["elapsed_seconds"], job["max_runtime_seconds"], job["expected_seconds"]
             ),
         }
         if recovered:
