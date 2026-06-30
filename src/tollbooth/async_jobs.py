@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 _ROW_FIELDS = (
     "claim, npub, kind, tool_id, params, status, attempts, "
-    "max_runtime_seconds, result_ttl_seconds, result, error, run_handle, "
+    "max_runtime_seconds, expected_seconds, result_ttl_seconds, result, error, run_handle, "
     "EXTRACT(EPOCH FROM (now() - created_at)) AS elapsed_seconds, "
     "(status = 'running' AND started_at IS NOT NULL AND "
     " started_at < now() - make_interval(secs => max_runtime_seconds)) AS stalled, "
@@ -58,17 +58,42 @@ _POLL_FLOOR_SECONDS = 5
 _POLL_CEILING_SECONDS = 30
 _POLL_GROWTH = 0.5  # next delay ≈ half the time still expected to remain
 
+# When a caller declares a real time budget (expected_seconds > 0 — e.g. an
+# author who sized and is paying ad valorem for a dynamic block), trust it:
+# sleep most of it up front rather than polling through the middle. The first
+# wait is ~75% of the budget, then each subsequent wait is ~75% of what's left,
+# so it converges geometrically as the finish nears. One single hop is never
+# advised longer than this absolute cap (the floor still applies near/after the
+# budget). This is distinct from the no-estimate path, where max_runtime is a
+# safety ceiling, not a prediction, so a long first wait would be wrong.
+_POLL_BUDGET_GROWTH = 0.75
+_POLL_BUDGET_CEILING_SECONDS = 300
 
-def poll_backoff_seconds(elapsed_seconds: float, max_runtime_seconds: int) -> int:
+
+def poll_backoff_seconds(
+    elapsed_seconds: float,
+    max_runtime_seconds: int,
+    expected_seconds: int = 0,
+) -> int:
     """Advise the next ``poll_after_seconds`` for a still-running async job.
 
-    Counts down toward the job's guaranteed-resolved deadline rather than up
-    from its start, so the interval SHRINKS as the finish nears (the opposite of
-    exponential backoff). Roughly half the time still expected to remain, held at
-    a steady ceiling early and tightened to a floor near/after the deadline. Pure
-    function of elapsed runtime and the per-attempt ceiling the calling tool
-    declared.
+    Counts down toward the finish rather than up from the start, so the interval
+    SHRINKS as the job nears done (the opposite of exponential backoff). Two
+    regimes, selected by whether the caller declared a time budget:
+
+    * ``expected_seconds > 0`` — a real author-declared budget: first wait ≈75%
+      of it, then ≈75% of the remaining each poll (geometric tightening).
+    * otherwise — ``max_runtime_seconds`` is only a safety ceiling: hold at a
+      steady ceiling (~max/10) through the bulk and tighten to a floor near the
+      deadline.
+
+    Pure function; both regimes are floored so a finished result is never left
+    waiting longer than necessary.
     """
+    if expected_seconds > 0:
+        remaining = expected_seconds - elapsed_seconds
+        suggested = remaining * _POLL_BUDGET_GROWTH
+        return int(max(_POLL_FLOOR_SECONDS, min(suggested, _POLL_BUDGET_CEILING_SECONDS)))
     ceiling = 15
     if max_runtime_seconds > 0:
         ceiling = max(_POLL_FLOOR_SECONDS, min(max_runtime_seconds // 10, _POLL_CEILING_SECONDS))
@@ -107,6 +132,7 @@ def _row_to_job(row: dict[str, Any]) -> dict[str, Any]:
         "status": str(row.get("status", "")),
         "attempts": int(row.get("attempts") or 0),
         "max_runtime_seconds": int(row.get("max_runtime_seconds") or 0),
+        "expected_seconds": int(row.get("expected_seconds") or 0),
         "result_ttl_seconds": int(row.get("result_ttl_seconds") or 0),
         "result": _as_dict(row.get("result")),
         "error": str(row.get("error") or ""),
@@ -148,12 +174,13 @@ class AsyncJobStore:
         params: dict[str, Any],
         max_runtime_seconds: int,
         result_ttl_seconds: int,
+        expected_seconds: int = 0,
     ) -> str:
         """Persist a new pending job; return its claim check."""
         result = await self._vault._execute(
             f"INSERT INTO {self._t('async_jobs')} "
-            "(npub, kind, tool_id, params, max_runtime_seconds, result_ttl_seconds) "
-            "VALUES ($1, $2, $3, $4::jsonb, $5, $6) RETURNING claim",
+            "(npub, kind, tool_id, params, max_runtime_seconds, result_ttl_seconds, expected_seconds) "
+            "VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7) RETURNING claim",
             [
                 npub,
                 kind,
@@ -161,6 +188,7 @@ class AsyncJobStore:
                 json.dumps(params),
                 int(max_runtime_seconds),
                 int(result_ttl_seconds),
+                int(expected_seconds),
             ],
         )
         return str(result["rows"][0]["claim"])

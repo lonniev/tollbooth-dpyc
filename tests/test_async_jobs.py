@@ -61,6 +61,7 @@ class FakeVault:
                 "attempts": 0,
                 "max_runtime_seconds": params[4],
                 "result_ttl_seconds": params[5],
+                "expected_seconds": params[6] if len(params) > 6 else 0,
                 "result": None,
                 "error": "",
                 "created_at": self.now,
@@ -446,6 +447,31 @@ class TestRuntimeAsyncJobs:
         later = await rt.fetch_async_job(claim, NPUB)
         assert later["poll_after_seconds"] < early["poll_after_seconds"]
 
+    async def test_declared_budget_drives_long_first_wait(self, vault):
+        """A job with an author time budget sleeps most of it before polling.
+
+        Exercises the full flow: expected_seconds persists on create, is read
+        back on the row, and selects the budget poll curve in fetch.
+        """
+        rt = _make_runtime(vault)
+        store = AsyncJobStore(vault)
+        claim = await _create(store, max_runtime_seconds=200, expected_seconds=200)
+        await store.claim_for_run(claim)
+
+        async def runner(**params):
+            return {}
+
+        rt.register_job_runner("slow_thing", runner)
+
+        # Fresh: ~75% of the declared budget up front (not max//10 == 20).
+        early = await rt.fetch_async_job(claim, NPUB)
+        assert early["poll_after_seconds"] == 150
+
+        # 150s in: keeps using the budget curve, tightening (0.75 * remaining).
+        vault.now += 150
+        mid = await rt.fetch_async_job(claim, NPUB)
+        assert mid["poll_after_seconds"] == 37
+
 
 # ---------------------------------------------------------------------------
 # poll_backoff_seconds
@@ -480,3 +506,28 @@ class TestPollBackoff:
     def test_unknown_max_runtime_floors(self):
         # No declared deadline → nothing to count down to; stay tight.
         assert poll_backoff_seconds(200, 0) == 5
+
+    # --- author-declared time budget (expected_seconds) ---
+
+    def test_budget_first_wait_is_75pct(self):
+        # A 200s budget: trust it, sleep ~75% up front (150s) rather than
+        # polling through the middle.
+        assert poll_backoff_seconds(0, 200, expected_seconds=200) == 150
+
+    def test_budget_tightens_geometrically(self):
+        # Each poll waits ~75% of what's left, so it converges as the finish nears.
+        assert poll_backoff_seconds(150, 200, expected_seconds=200) == 37  # 0.75*50
+        assert poll_backoff_seconds(190, 200, expected_seconds=200) == 7   # 0.75*10
+
+    def test_budget_floors_at_and_past_deadline(self):
+        assert poll_backoff_seconds(200, 200, expected_seconds=200) == 5
+        assert poll_backoff_seconds(260, 200, expected_seconds=200) == 5
+
+    def test_budget_single_hop_capped(self):
+        # Even a long budget never advises a single wait beyond the absolute cap.
+        assert poll_backoff_seconds(0, 900, expected_seconds=900) == 300
+
+    def test_budget_overrides_ceiling_regime(self):
+        # With a budget, the steady max//10 ceiling does NOT apply — the whole
+        # point is to wait long up front, not poll every ~max/10 seconds.
+        assert poll_backoff_seconds(0, 200, expected_seconds=200) > 200 // 10

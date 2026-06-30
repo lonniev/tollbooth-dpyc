@@ -457,6 +457,7 @@ class NeonVault:
             "    status TEXT NOT NULL DEFAULT 'pending',"
             "    attempts INTEGER NOT NULL DEFAULT 0,"
             "    max_runtime_seconds INTEGER NOT NULL,"
+            "    expected_seconds INTEGER NOT NULL DEFAULT 0,"
             "    result_ttl_seconds INTEGER NOT NULL,"
             "    result JSONB,"
             "    error TEXT,"
@@ -472,6 +473,12 @@ class NeonVault:
         await self._execute(
             f"ALTER TABLE {self._t('async_jobs')} "
             "ADD COLUMN IF NOT EXISTS run_handle TEXT"
+        )
+        # Retrofit expected_seconds (author-declared time budget; drives the
+        # 75%-then-tighten poll cadence) onto operators provisioned earlier.
+        await self._execute(
+            f"ALTER TABLE {self._t('async_jobs')} "
+            "ADD COLUMN IF NOT EXISTS expected_seconds INTEGER NOT NULL DEFAULT 0"
         )
         await self._execute(
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_async_jobs_npub "
