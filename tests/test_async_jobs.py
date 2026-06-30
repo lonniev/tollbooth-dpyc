@@ -7,7 +7,7 @@ import uuid
 import pytest
 from pynostr.key import PrivateKey as _PK
 
-from tollbooth.async_jobs import AsyncJobStore, valid_claim
+from tollbooth.async_jobs import AsyncJobStore, poll_backoff_seconds, valid_claim
 from tollbooth.runtime import OperatorRuntime
 
 _TEST_KEY = _PK()
@@ -36,6 +36,7 @@ class FakeVault:
 
     def _computed(self, r: dict) -> dict:
         out = dict(r)
+        out["elapsed_seconds"] = self.now - r["created_at"]
         out["stalled"] = (
             r["status"] == "running"
             and r["started_at"] is not None
@@ -423,3 +424,59 @@ class TestRuntimeAsyncJobs:
         assert job["status"] == "error"
         assert "register" in job["error"]
         assert refunds == [TOOL_ID]
+
+    async def test_running_poll_cadence_tightens_toward_deadline(self, vault):
+        """Polling advice should tighten, not lengthen, as the job nears done."""
+        rt = _make_runtime(vault)
+        store = AsyncJobStore(vault)
+        claim = await _create(store, max_runtime_seconds=300)
+        await store.claim_for_run(claim)
+
+        async def runner(**params):
+            return {}
+
+        rt.register_job_runner("slow_thing", runner)
+
+        # Mid-run: advised at the steady ceiling, not a 3s hammer.
+        early = await rt.fetch_async_job(claim, NPUB)
+        assert early["poll_after_seconds"] == 30
+
+        # 290s in (home stretch): poll MORE often, since done is imminent.
+        vault.now += 290
+        later = await rt.fetch_async_job(claim, NPUB)
+        assert later["poll_after_seconds"] < early["poll_after_seconds"]
+
+
+# ---------------------------------------------------------------------------
+# poll_backoff_seconds
+# ---------------------------------------------------------------------------
+
+class TestPollBackoff:
+
+    def test_steady_ceiling_through_the_bulk(self):
+        # Early and mid-run both sit at the ceiling (max_runtime // 10, cap 30),
+        # bounding how long a finished result waits to be noticed.
+        assert poll_backoff_seconds(0, 300) == 30
+        assert poll_backoff_seconds(120, 300) == 30
+
+    def test_tightens_toward_the_deadline(self):
+        # As the guaranteed-resolved deadline nears, intervals shrink — the
+        # opposite of exponential backoff.
+        assert poll_backoff_seconds(270, 300) == 15
+        assert poll_backoff_seconds(290, 300) == 5
+
+    def test_never_increases_as_job_ages(self):
+        seq = [poll_backoff_seconds(e, 300) for e in range(0, 320, 10)]
+        assert seq == sorted(seq, reverse=True)
+
+    def test_floors_at_and_past_the_deadline(self):
+        assert poll_backoff_seconds(300, 300) == 5
+        assert poll_backoff_seconds(400, 300) == 5  # overrunning → stay tight
+
+    def test_ceiling_scales_with_short_runtimes(self):
+        # A 100s ceiling holds the bulk rate at max_runtime // 10 = 10s.
+        assert poll_backoff_seconds(0, 100) == 10
+
+    def test_unknown_max_runtime_floors(self):
+        # No declared deadline → nothing to count down to; stay tight.
+        assert poll_backoff_seconds(200, 0) == 5
