@@ -85,7 +85,7 @@ class AuthorityCertifier:
                         # mcp_name (`<slug>_<func>`, e.g. "authority_certify_credits")
                         # since wheel 0.24.0. Sign for whatever wire name the
                         # caller is invoking — that's what the verifier sees.
-                        "proof": self._make_proof(self._certify_tool_name),
+                        "dpop_token": self._make_proof(self._certify_tool_name),
                     },
                 )
         except AuthorityCertifyError:
@@ -160,7 +160,7 @@ class AuthorityCertifier:
                     "authority_check_balance",
                     {
                         "npub": self._operator_npub,
-                        "proof": self._make_proof("check_balance"),
+                        "dpop_token": self._make_proof("check_balance"),
                     },
                 )
         except Exception as e:

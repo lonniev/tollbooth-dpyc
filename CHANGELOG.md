@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.59.1 — 2026-07-03
+
+### Fixed — restore operator→Authority M2M calls broken by the 0.57.0 `dpop_token` rename
+
+- **`authority_client` and `request_adoption` now send the identity token under `dpop_token`, not the pre-0.57.0 `proof` kwarg.** The 0.57.0 rename (`proof` / `poison` / `proof_token` → one `dpop_token`) renamed every tool *parameter* but missed three outbound *calls*: `certify_credits` and `check_balance` (`authority_client.py`) and `receive_adoption_request` (`runtime.py`). Each still passed `proof=`, which the Authority's pydantic-typed tools reject with `unexpected keyword argument: proof` — silently breaking **every patron credit purchase** (which drives `certify_credits` at the operator's upstream Authority) and cross-Authority adoption. Latent since 0.57.0 because these fire only on real M2M certification / adoption, not on ordinary tool calls. The signed-token *value* is unchanged; only the kwarg name was wrong.
+- **Regression guard:** `test_authority_client` now asserts the certify call sends `dpop_token` and never the old `proof` key.
+
 ## 0.59.0 — 2026-06-30
 
 ### Added — optional author-declared time budget for async jobs (`expected_seconds`)

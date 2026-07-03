@@ -4020,7 +4020,7 @@ def register_standard_tools(
                 "receive_adoption_request",
                 {
                     "operator_npub": rt.operator_npub(),
-                    "proof": adoption_proof,
+                    "dpop_token": adoption_proof,
                     "service_url": service_url,
                 },
             )
