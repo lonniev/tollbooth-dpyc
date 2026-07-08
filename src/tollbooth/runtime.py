@@ -97,7 +97,6 @@ class OperatorRuntime:
         operator_credential_greeting: str = "",
         patron_credential_greeting: str = "",
         service_name: str = "",
-        relays: list[str] | None = None,
         constraint_gate: Any | None = None,
         ots_enabled: bool = True,
         ots_calendars: list[str] | None = None,
@@ -136,7 +135,6 @@ class OperatorRuntime:
         self._operator_credential_greeting = operator_credential_greeting
         self._patron_credential_greeting = patron_credential_greeting
         self._service_name = service_name
-        self._relays = relays
         self._constraint_gate = constraint_gate
         self._ots_enabled = ots_enabled
         self._ots_calendars = ots_calendars
@@ -371,7 +369,7 @@ class OperatorRuntime:
 
         # Certified operators: bootstrap from Authority relay DM.
         from tollbooth.bootstrap import ensure_bootstrapped
-        result = await ensure_bootstrapped(relays=self._relays)
+        result = await ensure_bootstrapped()
         if not result.success or not result.neon_database_url:
             raise ValueError(
                 f"Bootstrap failed: {result.error or 'no Neon URL'}. "
@@ -486,7 +484,7 @@ class OperatorRuntime:
         except ImportError:
             return None
 
-        relays = resolve_relays(self._relays)
+        relays = resolve_relays()
 
         # Build credential vault from bootstrapped Neon
         credential_vault = None

@@ -22,15 +22,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
-# Broad public relay set for profile discovery/publish. Patron profiles live on
-# public relays, not necessarily the operator's, so default wide.
-PROFILE_RELAYS = [
-    "wss://relay.primal.net",
-    "wss://nos.lol",
-    "wss://relay.damus.io",
-    "wss://relay.nostr.band",
-]
-
 _KIND_METADATA = 0
 # Per-relay socket timeout. Relays are queried in PARALLEL (one thread each),
 # so total wall-clock is bounded by the single slowest relay (~_TIMEOUT), not
@@ -96,7 +87,8 @@ def fetch_profile(npub: str, relays: list[str] | None = None) -> dict[str, str] 
     recognized profile fields as a dict, or None if no profile is found / npub
     is malformed / relays unreachable.
     """
-    relay_urls = relays or PROFILE_RELAYS
+    from tollbooth.relay_registry import get_relays
+    relay_urls = relays or get_relays()
     try:
         hex_pk = _npub_to_hex(npub)
     except Exception:
@@ -161,7 +153,8 @@ def publish_profile_event(
         return {"success": False, "error": f"Could not verify event: {exc}"}
 
     message = json.dumps(["EVENT", signed_event])
-    relay_urls = relays or PROFILE_RELAYS
+    from tollbooth.relay_registry import get_relays
+    relay_urls = relays or get_relays()
 
     ok = 0
     errors: list[str] = []

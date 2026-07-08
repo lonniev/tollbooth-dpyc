@@ -301,7 +301,7 @@ def _get_nostr_exchange() -> Any:
     from tollbooth.nostr_credentials import NostrCredentialExchange
 
     s = _get_settings()
-    relays = _resolve_relays(s.tollbooth_nostr_relays or None)
+    relays = _resolve_relays()
     return NostrCredentialExchange(
         nsec=s.tollbooth_nostr_operator_nsec,
         relays=relays,

@@ -13,16 +13,17 @@ Send side (Authority):
         authority_nsec="nsec1...",
         operator_npub="npub1...",
         config={"neon_database_url": "postgres://..."},
-        relays=["wss://nostr.wine", ...],
     )
 
 Receive side (Operator):
     config = receive_bootstrap_config(
         operator_nsec="nsec1...",
         authority_pubkey_hex="abc123...",
-        relays=["wss://nostr.wine", ...],
     )
     neon_url = config.get("neon_database_url")
+
+When ``relays`` is omitted, both sides draw the relay set from the DPYC
+community registry (``relay_registry.get_relays``).
 """
 
 from __future__ import annotations
@@ -34,14 +35,6 @@ import time
 logger = logging.getLogger(__name__)
 
 BOOTSTRAP_CONFIG_TAG = "dpyc-bootstrap-config"
-
-# Default relays for bootstrap config delivery
-BOOTSTRAP_RELAYS = [
-    "wss://relay.primal.net",
-    "wss://nos.lol",
-    "wss://relay.damus.io",
-    "wss://relay.nostr.band",
-]
 
 
 def _config_d_tag(op_pubkey_hex: str) -> str:
@@ -76,7 +69,8 @@ def send_bootstrap_config(
     from pynostr.event import Event  # type: ignore[import-untyped]
     from tollbooth.nip04 import encrypt as nip04_encrypt
 
-    relay_urls = relays or BOOTSTRAP_RELAYS
+    from tollbooth.relay_registry import get_relays
+    relay_urls = relays or get_relays()
 
     # Derive authority keys
     if authority_nsec.startswith("nsec1"):
@@ -174,7 +168,8 @@ def receive_bootstrap_config(
     from pynostr.key import PrivateKey  # type: ignore[import-untyped]
     from tollbooth.nip04 import decrypt as nip04_decrypt
 
-    relay_urls = relays or BOOTSTRAP_RELAYS
+    from tollbooth.relay_registry import get_relays
+    relay_urls = relays or get_relays()
 
     # Derive operator keys
     if operator_nsec.startswith("nsec1"):

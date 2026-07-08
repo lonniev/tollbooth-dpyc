@@ -209,77 +209,41 @@ def probe_relay_liveness(
 
 # ── Relay resolution ──────────────────────────────────────────────────
 
-DEFAULT_RELAY = "wss://relay.primal.net"
-FALLBACK_RELAY_POOL = [
-    "wss://relay.damus.io",
-    "wss://nos.lol",
-    "wss://nostr.wine",
-    "wss://relay.nostr.band",
-]
 
+def resolve_relays(*, timeout: int = 5) -> list[str]:
+    """Resolve a live, ordered set of Nostr relay URLs.
 
-def resolve_relays(
-    configured: str | list[str] | None = None,
-    *,
-    timeout: int = 5,
-) -> list[str]:
-    """Resolve a working set of Nostr relay URLs.
-
-    Accepts an optional *configured* value — either a comma-separated
-    string (as typically read from an environment variable) or an
-    explicit list of URLs.  The function:
-
-    1. Parses and probes the configured relays for liveness.
-    2. If any are live, returns them (sorted fastest-first).
-    3. If all configured relays are dead, probes ``FALLBACK_RELAY_POOL``.
-    4. If fallback relays are live, returns those.
-    5. As a last resort, returns the configured list plus the fallback
-       pool unprobed, hoping for eventual recovery.
+    The relay set is governed solely by the DPYC community registry
+    (``dpyc-community/relays.json``, via ``relay_registry.get_relays``). This
+    function sources that curated, primary-first set, probes each relay for
+    liveness, and returns the live relays **in registry order** (so the
+    ``primary`` relay stays first for the courier's rendezvous). If none
+    respond, it returns the full registry set unprobed, hoping for recovery.
 
     Args:
-        configured: Relay URL(s) — a comma-separated string, a list
-            of URLs, or ``None`` (defaults to ``DEFAULT_RELAY``).
         timeout: Per-relay probe timeout in seconds (default 5).
 
     Returns:
         A non-empty list of relay WebSocket URLs.
+
+    Raises:
+        RelayRegistryError: on a cold cache with an unreachable registry.
     """
-    # Normalise input to a list.
-    # When unconfigured, use DEFAULT_RELAY + FALLBACK_RELAY_POOL so
-    # operators reach patrons on whichever relays their client uses.
-    if configured is None:
-        relays = [DEFAULT_RELAY] + FALLBACK_RELAY_POOL
-    elif isinstance(configured, str):
-        relays = [r.strip() for r in configured.split(",") if r.strip()]
-        if not relays:
-            relays = [DEFAULT_RELAY] + FALLBACK_RELAY_POOL
-    else:
-        relays = [r.strip() for r in configured if r.strip()]
-        if not relays:
-            relays = [DEFAULT_RELAY] + FALLBACK_RELAY_POOL
+    from tollbooth.relay_registry import get_relays
+
+    relays = get_relays()
 
     results = probe_relay_liveness(relays, timeout=timeout)
-    live = [r["relay"] for r in results if r["connected"]]
+    live_set = {r["relay"] for r in results if r["connected"]}
+    # Preserve registry (primary-first) order among the live relays.
+    live = [url for url in relays if url in live_set]
 
     if live:
-        logger.info("Relay probe: %d/%d configured relays live", len(live), len(relays))
+        logger.info("Relay probe: %d/%d registry relays live", len(live), len(relays))
         return live
 
-    # All configured relays down — probe fallback pool
-    logger.warning(
-        "All configured relays down (%s), probing fallback pool...",
-        ", ".join(relays),
-    )
-    fallback_results = probe_relay_liveness(FALLBACK_RELAY_POOL, timeout=timeout)
-    fallback_live = [r["relay"] for r in fallback_results if r["connected"]]
-
-    if fallback_live:
-        logger.info("Fallback relays live: %s", ", ".join(fallback_live))
-        return fallback_live
-
-    # Nothing alive — return configured + fallback and hope for recovery
-    logger.warning("No relays responded — using full list, hoping for recovery")
-    return relays + FALLBACK_RELAY_POOL
+    logger.warning("No registry relays responded — using full set, hoping for recovery")
+    return relays
 
 
 def _test_subscription_filter(

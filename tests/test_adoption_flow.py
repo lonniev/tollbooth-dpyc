@@ -28,7 +28,6 @@ def _settings():
         neon_database_url="postgresql://x",
         dpyc_registry_cache_ttl_seconds=60,
         tollbooth_nostr_operator_nsec="nsec1x",
-        tollbooth_nostr_relays=None,
     )
 
 

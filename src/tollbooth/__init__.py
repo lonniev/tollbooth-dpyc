@@ -148,16 +148,23 @@ try:
         courier_ping,
         probe_relay_liveness,
         resolve_relays,
-        DEFAULT_RELAY,
-        FALLBACK_RELAY_POOL,
     )
 except ImportError:
     courier_health = None  # type: ignore[assignment,misc]
     courier_ping = None  # type: ignore[assignment,misc]
     probe_relay_liveness = None  # type: ignore[assignment,misc]
     resolve_relays = None  # type: ignore[assignment,misc]
-    DEFAULT_RELAY = None  # type: ignore[assignment,misc]
-    FALLBACK_RELAY_POOL = None  # type: ignore[assignment,misc]
+
+try:
+    from tollbooth.relay_registry import (
+        RelayRegistry,
+        RelayRegistryError,
+        get_relays,
+    )
+except ImportError:
+    RelayRegistry = None  # type: ignore[assignment,misc]
+    RelayRegistryError = None  # type: ignore[assignment,misc]
+    get_relays = None  # type: ignore[assignment,misc]
 
 try:
     from tollbooth.nostr_notifications import NotificationManager, NotificationPreferences
@@ -328,8 +335,9 @@ __all__ = [
     "courier_ping",
     "probe_relay_liveness",
     "resolve_relays",
-    "DEFAULT_RELAY",
-    "FALLBACK_RELAY_POOL",
+    "RelayRegistry",
+    "RelayRegistryError",
+    "get_relays",
     "NotificationManager",
     "NotificationPreferences",
     # Constraint Engine

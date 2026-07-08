@@ -24,10 +24,10 @@ class AuthoritySettings(BaseSettings):
     # NeonVault (replaces TheBrainVault for ledger persistence)
     neon_database_url: str = ""
 
-    # Nostr audit (optional — enabled when all 3 are set)
+    # Nostr audit (optional — enabled when both are set). Relays are governed
+    # by the DPYC community registry (relay_registry), not a per-Authority env.
     tollbooth_nostr_audit_enabled: str = ""
     tollbooth_nostr_operator_nsec: str = ""
-    tollbooth_nostr_relays: str = ""
 
     # DPYC Registry enforcement (URL comes from tollbooth-dpyc DEFAULT_REGISTRY_URL)
     dpyc_registry_cache_ttl_seconds: int = 300
