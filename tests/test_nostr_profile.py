@@ -8,6 +8,7 @@ relay I/O itself (fetch_profile, the publish fan-out) is integration-only.
 import json
 from unittest.mock import patch
 
+import pytest
 from pynostr.event import Event
 from pynostr.key import PrivateKey
 
@@ -16,6 +17,21 @@ from tollbooth.nostr_profile import fetch_profile, publish_profile_event
 
 # A real npub so _npub_to_hex succeeds; the per-relay I/O is mocked.
 _NPUB = PrivateKey().public_key.bech32()
+
+# The relay set the fan-out iterates. Stubbed so these unit tests never touch
+# the network (the real relay set comes from the DPYC community registry).
+_TEST_RELAYS = [
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+    "wss://relay.damus.io",
+    "wss://relay.nostr.band",
+]
+
+
+@pytest.fixture(autouse=True)
+def _stub_relay_registry():
+    with patch("tollbooth.relay_registry.get_relays", return_value=list(_TEST_RELAYS)):
+        yield
 
 
 def _signed_kind(sk: PrivateKey, kind: int, content: dict) -> dict:

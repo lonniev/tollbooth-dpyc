@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.60.0 — 2026-07-08
+
+### Changed — BREAKING: Nostr relays come from one source of truth (`dpyc-community/relays.json`)
+
+- **The wheel no longer carries any hardcoded relay list.** Four drifting sets — `nostr_diagnostics.DEFAULT_RELAY` / `FALLBACK_RELAY_POOL`, `bootstrap_relay.BOOTSTRAP_RELAYS`, `nostr_profile.PROFILE_RELAYS` (and the Pricing Studio app's own list) — are replaced by a single curated set fetched over GitHub raw HTTPS from `https://raw.githubusercontent.com/lonniev/dpyc-community/main/relays.json`. Edit that file and the whole federation follows on its next cache refresh; no code release needed to tune the relay set.
+- **New `relay_registry.RelayRegistry` / `get_relays()`** — synchronous `httpx.Client` fetch, 3-day in-process TTL cache, primary-first ordering. **Fail-closed** on a cold cache with an unreachable registry (`RelayRegistryError`); **stale-if-error** otherwise (serves the last-known-good set with a short backoff so an outage can't cause a fetch on every call). Sync by design because every relay consumer in the wheel (courier, bootstrap, profile, audit) is synchronous.
+- **`resolve_relays()` no longer takes a `configured` argument.** The set is governed solely by the registry; it probes liveness and returns the live relays in registry (primary-first) order, or the full set unprobed if none respond.
+- **Removed the `relays=` constructor parameter from `OperatorRuntime`** and the Authority-only **`TOLLBOOTH_NOSTR_RELAYS`** env override. Relay choice is no longer per-server configuration. (No consumer passed either — verified across all repos.)
+- **Curated set:** `relay.primal.net` (primary), `relay.damus.io`, `nos.lol`, `relay.nostr.band` — chosen for being both reliable **and** open for writes (paywalled/metadata-only relays like `nostr.wine` are excluded because they would reject arbitrary patron courier DMs). See `dpyc-community/RELAYS.md` for the curation criteria and usage protocol.
+- **Spin/WASI note:** Spin operators (e.g. tollbooth-fermyon) fetch `relays.json` through the `wasi:http` seam — verify `raw.githubusercontent.com` is in `allowed_outbound_hosts` when bumping the pin.
+
 ## 0.59.1 — 2026-07-03
 
 ### Fixed — restore operator→Authority M2M calls broken by the 0.57.0 `dpop_token` rename

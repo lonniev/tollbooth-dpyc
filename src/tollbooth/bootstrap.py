@@ -50,8 +50,8 @@ async def ensure_bootstrapped(
 
     Args:
         relays: Optional relay URLs to search for the Authority's
-            bootstrap config DM. Falls back to ``BOOTSTRAP_RELAYS``
-            if not provided.
+            bootstrap config DM. Falls back to the DPYC community relay
+            registry (``relay_registry.get_relays``) if not provided.
 
     Reads ``TOLLBOOTH_NOSTR_OPERATOR_NSEC`` from the environment.
     """
