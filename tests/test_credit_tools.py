@@ -131,7 +131,10 @@ def _mock_btcpay(invoice_response: dict | None = None, error: Exception | None =
 def _mock_cache(ledger: UserLedger | None = None):
     """Create a mock LedgerCache."""
     cache = AsyncMock(spec=LedgerCache)
-    cache.get = AsyncMock(return_value=ledger or UserLedger())
+    led = ledger or UserLedger()
+    cache.get = AsyncMock(return_value=led)
+    # Credit paths now read fresh before mutate+flush (write-through).
+    cache.get_fresh = AsyncMock(return_value=led)
     cache.mark_dirty = MagicMock()  # sync method, not async
     return cache
 

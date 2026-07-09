@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 
 from tollbooth.identity_proof import require_proof
 from tollbooth.tool_identity import capability_uuid
+from tollbooth.vault_backend import LedgerUnavailableError, LedgerWriteError
 
 logger = logging.getLogger(__name__)
 
@@ -988,60 +989,82 @@ class OperatorRuntime:
         # and add the credit to the patron's balance directly.
         if effective_cost < 0:
             cache = await self.ledger_cache()
-            ledger = await cache.get(npub)
             credit_sats = abs(effective_cost)
-            ledger.credit_deposit(credit_sats, f"chain_credit:{name}")
-            cache.mark_dirty(npub)
+            await cache.credit(npub, credit_sats, f"chain_credit:{name}")
             await _burn_consumed_coupons()
             return effective_cost  # signed — caller can detect credit case
 
-        # ── Billing ───────────────────────────────────────────
+        # ── Billing (atomic, write-through) ────────────────────
         cache = await self.ledger_cache()
-        ledger = await cache.get(npub)
-
-        # Apply tranche lifetime retroactively to any unstamped tranches
         ttl = await self.resolve_tranche_lifetime()
-        ledger.apply_tranche_lifetime(ttl)
 
-        if npub not in self._reconciled_npubs and ledger.pending_invoices:
+        # Cold-start reconciliation of any settled-but-uncredited invoices —
+        # best-effort, once per npub per process. Runs before the debit so the
+        # balance gate sees any recovered credits.
+        if npub not in self._reconciled_npubs:
             self._reconciled_npubs.add(npub)
             try:
-                cashier = await self.ensure_cashier()
-                from tollbooth.tools.credits import reconcile_pending_invoices
-                recon = await reconcile_pending_invoices(
-                    cashier, cache, npub,
-                    tranche_lifetime_seconds=ttl,
-                )
-                if recon.get("reconciled", 0) > 0:
-                    logger.info(
-                        "Auto-reconciled %d invoice(s) for %s on cold start",
-                        recon["reconciled"], npub[:20],
+                probe = await cache.get(npub)
+                if probe.pending_invoices:
+                    cashier = await self.ensure_cashier()
+                    from tollbooth.tools.credits import reconcile_pending_invoices
+                    recon = await reconcile_pending_invoices(
+                        cashier, cache, npub,
+                        tranche_lifetime_seconds=ttl,
                     )
-                    ledger = await cache.get(npub)
+                    if recon.get("reconciled", 0) > 0:
+                        logger.info(
+                            "Auto-reconciled %d invoice(s) for %s on cold start",
+                            recon["reconciled"], npub[:20],
+                        )
             except Exception as exc:
                 logger.debug("Auto-reconciliation skipped for %s: %s", npub[:20], exc)
-        elif npub not in self._reconciled_npubs:
-            self._reconciled_npubs.add(npub)
 
-        if ledger.balance_api_sats < effective_cost:
+        # Read-modify-write-through against the definitive store: the balance
+        # gate and the debit apply to the SAME fresh ledger, and a losing CAS
+        # race re-fetches and re-checks rather than double-spending.
+        _short: dict[str, int] = {}
+
+        def _do_debit(ledger: Any) -> bool:
+            ledger.apply_tranche_lifetime(ttl)
+            if ledger.balance_api_sats < effective_cost:
+                _short["balance"] = ledger.balance_api_sats
+                return False
+            ledger.debit(name, effective_cost)
+            return True
+
+        try:
+            debited = await cache.mutate(npub, _do_debit)
+        except (LedgerUnavailableError, LedgerWriteError) as exc:
+            # Definitive store unreadable / write kept losing races — never
+            # tell a funded patron "insufficient balance". No fare charged.
+            logger.warning("Ledger unavailable during debit for %s: %s", npub[:20], exc)
+            return {
+                "success": False,
+                "error_code": "vault_unavailable",
+                "error": (
+                    "The service is warming up and couldn't confirm your balance. "
+                    "No fare was charged — please try again in a few seconds."
+                ),
+                "next_steps": ["Retry in 10–15 seconds."],
+            }
+        if debited is False:
+            bal = _short.get("balance", 0)
             return {
                 "success": False,
                 "error_code": ErrorCode.INSUFFICIENT_BALANCE,
                 "error": (
-                    f"Insufficient balance: {ledger.balance_api_sats} sats "
+                    f"Insufficient balance: {bal} sats "
                     f"available, {effective_cost} required for {name}."
                 ),
-                "balance_sats": ledger.balance_api_sats,
+                "balance_sats": bal,
                 "cost_sats": effective_cost,
                 "next_steps": [
-                    f"purchase_credits(amount_sats=<at least {effective_cost - ledger.balance_api_sats}>, npub=<patron_npub>)",
+                    f"purchase_credits(amount_sats=<at least {effective_cost - bal}>, npub=<patron_npub>)",
                     "Pay the returned Lightning invoice",
                     "check_payment(invoice_id=<from purchase_credits>) to confirm settlement",
                 ],
             }
-
-        ledger.debit(name, effective_cost)
-        cache.mark_dirty(npub)
         await _burn_consumed_coupons()
         return effective_cost
 
@@ -1060,9 +1083,7 @@ class OperatorRuntime:
             pricing = await resolver.get_tool_pricing(tool_id)
             cost = pricing.compute(**(tool_kwargs or {}))
             if cost > 0:
-                ledger = await cache.get(npub)
-                ledger.credit_deposit(cost, f"rollback:{self.mcp_name_for(tool_id)}")
-                cache.mark_dirty(npub)
+                await cache.credit(npub, cost, f"rollback:{self.mcp_name_for(tool_id)}")
         except Exception:
             # Money path: a failed rollback means the patron may have been
             # charged for a tool call that did not deliver. Loud, not silent —

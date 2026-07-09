@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.62.0 — 2026-07-09
+
+### Fixed — balance ledger is now write-through and conflict-safe across replicas
+
+- **`NeonVault.store_ledger` no longer clobbers on a version conflict.** The `balances` table's optimistic-concurrency guard used to *detect* a conflict (guarded UPDATE returns 0 rows) and then **fall through to an unconditional UPSERT that overwrote the newer row** — silently losing a balance mutation whenever a horizontally-scaled fleet wrote the same ledger (e.g. a +1000 top-up on one replica vanishing when another replica flushed a stale copy). It now raises `LedgerVersionConflict`; the caller re-fetches and re-applies. The no-cached-version path inserts with `ON CONFLICT DO NOTHING` and likewise refuses to blind-overwrite.
+- **Ledger mutations are write-through with read-modify-write retry.** New `LedgerCache.mutate(user_id, fn)` fetches the CURRENT ledger from the definitive store, applies `fn`, and CAS-writes it; on `LedgerVersionConflict` it re-fetches and re-applies (bounded retries) so concurrent replicas can't clobber or double-spend. `debit()` and the new `credit()` route through it; the runtime billing / chain-credit / rollback paths and the credit tools (`check_payment`, `restore_credits`, `reconcile_pending_invoices`, `purchase`) now read fresh before writing. No balance change is deferred to a lossy write-behind flush.
+- **Never zero a balance on a cold read.** `mutate` raises `LedgerUnavailableError` instead of applying a mutation to an empty fallback ledger when the store is unreadable; a debit then surfaces "service warming up — retry, no fare charged" rather than a false "insufficient balance".
+- **`check_balance` / `account_statement` read fresh**, so the displayed balance is authoritative (fixes the chip-vs-paid-path disagreement).
+- New exceptions in `tollbooth.vault_backend`: `LedgerVersionConflict`, `LedgerUnavailableError`, `LedgerWriteError`.
+
+Tradeoff: ~1 extra Neon round-trip per paid call — the deliberate cost of making Neon the definitive store so the MCP business logic can scale horizontally.
+
 ## 0.61.0 — 2026-07-09
 
 ### Fixed — `max_runtime_seconds` is now a hard cap on a claim-check attempt

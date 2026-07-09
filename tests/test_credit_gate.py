@@ -93,6 +93,21 @@ class FakeLedgerCache:
             self._ledgers[npub] = led
         return self._ledgers[npub]
 
+    async def get_fresh(self, npub):
+        return await self.get(npub)
+
+    async def mutate(self, npub, fn, *, retries=6):
+        led = await self.get(npub)
+        return fn(led)
+
+    async def debit(self, npub, tool_name, cost):
+        led = await self.get(npub)
+        return led.debit(tool_name, cost)
+
+    async def credit(self, npub, api_sats, invoice_id, *, ttl_seconds=None):
+        led = await self.get(npub)
+        led.credit_deposit(api_sats, invoice_id, ttl_seconds=ttl_seconds)
+
     def mark_dirty(self, npub):
         pass
 

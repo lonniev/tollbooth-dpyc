@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
+from tollbooth.vault_backend import LedgerVersionConflict
 from tollbooth.vaults.neon import NeonVault, NeonQueryError
 
 
@@ -189,7 +190,10 @@ class TestStoreLedger:
         assert body["params"][2] == 3
 
     @pytest.mark.asyncio
-    async def test_version_conflict_falls_through_to_upsert(self) -> None:
+    async def test_version_conflict_raises_never_clobbers(self) -> None:
+        # A CAS conflict must RAISE (so the caller re-fetches) — never fall
+        # through to an unconditional upsert that clobbers a newer replica's
+        # balance write.
         vault = _vault()
         vault._version_cache["npub1abc"] = 5
 
@@ -198,28 +202,23 @@ class TestStoreLedger:
         async def mock_post(url: str, **kwargs: dict) -> httpx.Response:
             nonlocal call_count
             call_count += 1
-            if call_count == 1:
-                # Version conflict: UPDATE returns 0 rows
-                return _response(200, _sql_result(rows=[], command="UPDATE"))
-            else:
-                # Upsert succeeds
-                return _response(200, _sql_result(
-                    rows=[{"version": 6}], command="INSERT",
-                ))
+            return _response(200, _sql_result(rows=[], command="UPDATE"))
 
         vault._client.post = AsyncMock(side_effect=mock_post)
-        result = await vault.store_ledger("npub1abc", '{"v": 4}')
-        assert result == "6"
-        assert vault._version_cache["npub1abc"] == 6
-        assert call_count == 2
+        with pytest.raises(LedgerVersionConflict):
+            await vault.store_ledger("npub1abc", '{"v": 4}')
+        assert call_count == 1  # only the guarded UPDATE — no clobbering fallthrough
+        assert vault._version_cache["npub1abc"] == 5  # unchanged
 
     @pytest.mark.asyncio
-    async def test_raises_when_upsert_returns_no_rows(self) -> None:
+    async def test_first_write_conflict_raises(self) -> None:
+        # No cached version → INSERT ... DO NOTHING. If a row already exists
+        # (another replica created it), refuse rather than blind-overwrite.
         vault = _vault()
         vault._client.post = AsyncMock(
             return_value=_response(200, _sql_result(rows=[], command="INSERT"))
         )
-        with pytest.raises(NeonQueryError, match="UPSERT returned no rows"):
+        with pytest.raises(LedgerVersionConflict):
             await vault.store_ledger("npub1abc", '{"v": 4}')
 
 

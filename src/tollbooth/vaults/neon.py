@@ -24,6 +24,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from tollbooth.vault_backend import LedgerVersionConflict
+
 logger = logging.getLogger(__name__)
 
 
@@ -187,11 +189,14 @@ class NeonVault:
     # -- VaultBackend protocol -----------------------------------------------
 
     async def store_ledger(self, user_id: str, ledger_json: str) -> str:
-        """UPSERT ledger JSON into ``balances`` table with version increment.
+        """CAS-store ledger JSON into ``balances`` with an optimistic version guard.
 
-        Uses optimistic concurrency: if a version is cached from a prior
-        ``fetch_ledger``, issues an UPDATE with a version guard. On version
-        conflict (0 rows affected), falls through to a full UPSERT.
+        The definitive store NEVER blind-overwrites: a write only lands if it
+        matches the version the writer last read. On conflict it raises
+        ``LedgerVersionConflict`` so the caller re-fetches and re-applies — this
+        is what makes the ledger safe under a horizontally-scaled fleet, where
+        the old fall-through-to-unconditional-UPSERT silently clobbered a
+        newer replica's balance write.
 
         Returns the new version as a string.
         """
@@ -211,21 +216,23 @@ class NeonVault:
                 new_version = rows[0]["version"]
                 self._version_cache[user_id] = new_version
                 return str(new_version)
-
+            # Someone else advanced the row past our version — do NOT clobber.
             logger.info(
-                "Version conflict for %s (cached v%d), falling through to upsert.",
-                user_id,
-                cached_version,
+                "Ledger CAS conflict for %s (had v%d) — caller must re-fetch.",
+                user_id[:20], cached_version,
+            )
+            raise LedgerVersionConflict(
+                f"ledger version conflict for {user_id[:20]} (had v{cached_version})"
             )
 
-        # Full UPSERT — handles both first-time inserts and conflict recovery
+        # No cached version → first write for this user_id in this process.
+        # Insert; if a row already exists (another replica created it), DO
+        # NOTHING and treat it as a conflict so the caller re-fetches rather
+        # than overwriting a row it never read.
         result = await self._execute(
             f"INSERT INTO {self._t('balances')}(npub, ledger_json, version, last_flush, created_at) "
             "VALUES ($1, $2, 1, now(), now()) "
-            "ON CONFLICT (npub) DO UPDATE "
-            f"SET ledger_json = EXCLUDED.ledger_json, "
-            f"    version = {self._t('balances')}.version + 1, "
-            "    last_flush = now() "
+            "ON CONFLICT (npub) DO NOTHING "
             "RETURNING version",
             [user_id, ledger_json],
         )
@@ -234,8 +241,9 @@ class NeonVault:
             new_version = rows[0]["version"]
             self._version_cache[user_id] = new_version
             return str(new_version)
-
-        raise NeonQueryError("UPSERT returned no rows")
+        raise LedgerVersionConflict(
+            f"ledger exists for {user_id[:20]} but no version was read — refetch required"
+        )
 
     async def fetch_ledger(self, user_id: str) -> str | None:
         """Fetch the current ledger JSON for a user.
@@ -249,6 +257,10 @@ class NeonVault:
         )
         rows = result.get("rows", [])
         if not rows:
+            # No row: drop any stale cached version so a subsequent store_ledger
+            # takes the clean INSERT path instead of a doomed CAS against a
+            # version that no longer exists.
+            self._version_cache.pop(user_id, None)
             return None
 
         ledger_json = rows[0]["ledger_json"]

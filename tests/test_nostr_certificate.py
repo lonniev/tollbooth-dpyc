@@ -114,7 +114,9 @@ def _mock_btcpay(invoice_response: dict | None = None):
 
 def _mock_cache(ledger: UserLedger | None = None):
     cache = AsyncMock(spec=LedgerCache)
-    cache.get = AsyncMock(return_value=ledger or UserLedger())
+    led = ledger or UserLedger()
+    cache.get = AsyncMock(return_value=led)
+    cache.get_fresh = AsyncMock(return_value=led)
     cache.mark_dirty = MagicMock()
     return cache
 

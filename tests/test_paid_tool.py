@@ -120,6 +120,23 @@ class FakeLedgerCache:
             self._ledgers[npub] = ledger
         return self._ledgers[npub]
 
+    async def get_fresh(self, npub: str):
+        return await self.get(npub)
+
+    async def mutate(self, npub: str, fn, *, retries: int = 6):
+        # In-memory single-writer: no CAS races. Apply fn in place; a False
+        # return signals a no-op (e.g. insufficient balance).
+        ledger = await self.get(npub)
+        return fn(ledger)
+
+    async def debit(self, npub: str, tool_name: str, cost: int) -> bool:
+        ledger = await self.get(npub)
+        return ledger.debit(tool_name, cost)
+
+    async def credit(self, npub: str, api_sats: int, invoice_id: str, *, ttl_seconds=None) -> None:
+        ledger = await self.get(npub)
+        ledger.credit_deposit(api_sats, invoice_id, ttl_seconds=ttl_seconds)
+
     def mark_dirty(self, npub: str) -> None:
         pass
 

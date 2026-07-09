@@ -83,7 +83,7 @@ async def _create_purchase_invoice(
     # ledger — recovery requires restore_credits, which the patron may not know
     # to call. Log loudly so this shows up in traces even when the API call
     # itself succeeds.
-    ledger = await cache.get(user_id)
+    ledger = await cache.get_fresh(user_id)
     ledger.pending_invoices.append(invoice_id)
     ledger.record_invoice_created(
         invoice_id=invoice_id,
@@ -275,7 +275,7 @@ async def check_payment_tool(
 
     status = invoice.get("status", "Unknown")
     additional = invoice.get("additionalStatus", "")
-    ledger = await cache.get(user_id)
+    ledger = await cache.get_fresh(user_id)
 
     result: dict[str, Any] = {
         "success": True,
@@ -373,7 +373,7 @@ async def check_balance_tool(
     user_id: str,
 ) -> dict[str, Any]:
     """Return the user's current credit balance and usage summary."""
-    ledger = await cache.get(user_id)
+    ledger = await cache.get_fresh(user_id)
     today = date.today().isoformat()
 
     vault_unavailable = getattr(ledger, "_vault_unavailable", False)
@@ -465,7 +465,7 @@ async def restore_credits_tool(
 ) -> dict[str, Any]:
     """Restore credits from a paid invoice that was lost due to cache or vault issues."""
     # Check idempotency first
-    ledger = await cache.get(user_id)
+    ledger = await cache.get_fresh(user_id)
     if invoice_id in ledger.credited_invoices:
         return {
             "success": True,
@@ -585,7 +585,7 @@ async def reconcile_pending_invoices(
     tranche_lifetime_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Reconcile pending invoices on startup: credit settled, remove terminal."""
-    ledger = await cache.get(user_id)
+    ledger = await cache.get_fresh(user_id)
     pending_copy = list(ledger.pending_invoices)
     if not pending_copy:
         return {"reconciled": 0, "actions": []}
@@ -700,7 +700,7 @@ async def account_statement_tool(
         user_id: The user's identity key.
         days: Number of days of daily usage to include (default 30).
     """
-    ledger = await cache.get(user_id)
+    ledger = await cache.get_fresh(user_id)
     now = datetime.now(timezone.utc)
     today = date.today()
 

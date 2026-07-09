@@ -576,54 +576,107 @@ class TestFlushDue:
 class TestDebitMethod:
     @pytest.mark.asyncio
     async def test_debit_succeeds_with_balance(self) -> None:
-        """debit() returns True and ledger is debited."""
+        """debit() returns True, debits, and persists write-through."""
         vault = _funded_vault(500)
         cache = LedgerCache(vault, maxsize=5)
         result = await cache.debit("user1", "search_thoughts", 10)
         assert result is True
+        vault.store_ledger.assert_called_once()  # write-through, not deferred
+        assert cache._entries["user1"].dirty is False  # persisted → clean
         ledger = await cache.get("user1")
         assert ledger.balance_api_sats == 490
-        assert cache._entries["user1"].dirty is True
 
     @pytest.mark.asyncio
     async def test_debit_fails_insufficient_balance(self) -> None:
-        """debit() returns False when balance is insufficient, no state change."""
+        """debit() returns False when insufficient — no write, no debit."""
         vault = _mock_vault()  # empty ledger, 0 balance
         cache = LedgerCache(vault, maxsize=5)
         result = await cache.debit("user1", "search_thoughts", 10)
         assert result is False
-        # Entry should not be dirty (debit didn't happen)
-        assert not cache._entries["user1"].dirty
+        vault.store_ledger.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_debit_triggers_flush_at_threshold(self) -> None:
-        """After N debits via debit(), vault.store_ledger is called on next get()."""
+    async def test_debit_writes_through_every_call(self) -> None:
+        """Each debit persists immediately — no write-behind batching."""
         vault = _funded_vault(500)
-        cache = LedgerCache(vault, maxsize=5, flush_batch_size=3)
+        cache = LedgerCache(vault, maxsize=5)
         await cache.debit("user1", "tool_a", 1)
         await cache.debit("user1", "tool_b", 1)
-        await cache.debit("user1", "tool_c", 1)  # dirty_count = 3
-        vault.store_ledger.assert_not_called()
-        # Next get() triggers the fire-and-forget flush
-        await cache.get("user1")
-        await asyncio.sleep(0)  # let background task run
-        vault.store_ledger.assert_called_once()
+        await cache.debit("user1", "tool_c", 1)
+        assert vault.store_ledger.call_count == 3
 
     @pytest.mark.asyncio
-    async def test_debit_no_flush_below_threshold(self) -> None:
-        """Below N debits, no vault write happens."""
-        vault = _funded_vault(500)
-        cache = LedgerCache(vault, maxsize=5, flush_batch_size=10)
-        await cache.debit("user1", "tool_a", 1)
-        await cache.debit("user1", "tool_b", 1)
-        # Access entry again — should NOT flush (2 < 10)
-        await cache.get("user1")
-        vault.store_ledger.assert_not_called()
+    async def test_debit_retries_on_version_conflict(self) -> None:
+        """A losing CAS race re-fetches fresh state and re-applies (no clobber)."""
+        from tollbooth.vault_backend import LedgerVersionConflict
+
+        seed = UserLedger()
+        seed.credit_deposit(500, "seed")
+        vault = _mock_vault(ledger_json=seed.to_json())
+        calls = {"n": 0}
+
+        async def flaky_store(user_id: str, ledger_json: str) -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise LedgerVersionConflict("lost race")
+            return "v2"
+
+        vault.store_ledger = AsyncMock(side_effect=flaky_store)
+        cache = LedgerCache(vault, maxsize=5)
+        result = await cache.debit("user1", "tool_a", 10)
+        assert result is True
+        assert calls["n"] == 2  # conflicted once, retried, then persisted
 
 
 # ---------------------------------------------------------------------------
 # Write-through credit
 # ---------------------------------------------------------------------------
+
+
+class TestMutate:
+    @pytest.mark.asyncio
+    async def test_credit_writes_through(self) -> None:
+        seed = UserLedger()
+        seed.credit_deposit(100, "seed")
+        vault = _mock_vault(ledger_json=seed.to_json())
+        cache = LedgerCache(vault, maxsize=5)
+        await cache.credit("user1", 1000, "invoice-x")
+        vault.store_ledger.assert_called_once()  # durable immediately
+        assert (await cache.get("user1")).balance_api_sats == 1100
+
+    @pytest.mark.asyncio
+    async def test_no_write_when_fn_returns_false(self) -> None:
+        vault = _funded_vault(500)
+        cache = LedgerCache(vault, maxsize=5)
+        out = await cache.mutate("user1", lambda _l: False)
+        assert out is False
+        vault.store_ledger.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_raises_and_never_writes_on_unreadable_store(self) -> None:
+        # A cold/unreachable store must NOT let a mutation apply to an empty
+        # fallback and zero a real balance — it must raise.
+        from tollbooth.vault_backend import LedgerUnavailableError
+
+        vault = AsyncMock()
+        vault.fetch_ledger = AsyncMock(side_effect=Exception("neon cold"))
+        vault.store_ledger = AsyncMock(return_value="v1")
+        cache = LedgerCache(vault, maxsize=5)
+        with pytest.raises(LedgerUnavailableError):
+            await cache.credit("user1", 1000, "invoice-x")
+        vault.store_ledger.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_raises_after_exhausting_conflict_retries(self) -> None:
+        from tollbooth.vault_backend import LedgerVersionConflict, LedgerWriteError
+
+        seed = UserLedger()
+        seed.credit_deposit(500, "seed")
+        vault = _mock_vault(ledger_json=seed.to_json())
+        vault.store_ledger = AsyncMock(side_effect=LedgerVersionConflict("always loses"))
+        cache = LedgerCache(vault, maxsize=5)
+        with pytest.raises(LedgerWriteError):
+            await cache.debit("user1", "tool_a", 10)
 
 
 class TestWriteThroughCredit:

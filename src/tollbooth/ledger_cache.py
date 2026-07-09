@@ -14,11 +14,25 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from tollbooth.ledger import UserLedger
+from tollbooth.vault_backend import (
+    LedgerUnavailableError,
+    LedgerVersionConflict,
+    LedgerWriteError,
+)
 
 if TYPE_CHECKING:
+    from typing import Callable, TypeVar
+
     from tollbooth.vault_backend import VaultBackend
 
+    _T = TypeVar("_T")
+
 logger = logging.getLogger(__name__)
+
+# How many times a mutation re-fetches + re-applies after losing a CAS race
+# before giving up. Conflicts only happen when multiple replicas write the
+# same ledger in the same instant, so a handful of retries is ample.
+_MAX_WRITE_RETRIES = 6
 
 
 @dataclass
@@ -169,17 +183,95 @@ class LedgerCache:
             return True  # Nothing to flush
         return await self._flush_entry(user_id, entry)
 
-    async def debit(self, user_id: str, tool_name: str, cost: int) -> bool:
-        """Debit a tool cost from a user's ledger.
+    async def mutate(
+        self,
+        user_id: str,
+        fn: Callable[[UserLedger], _T],
+        *,
+        retries: int = _MAX_WRITE_RETRIES,
+    ) -> _T:
+        """Atomically read-modify-**write-through** a ledger against the vault.
 
-        Handles hydration (load from vault on miss), flush-due check,
-        and dirty tracking. Returns False if insufficient balance.
+        The definitive store is the source of truth. This fetches the CURRENT
+        ledger from the vault (never a stale in-memory copy), applies
+        ``fn(ledger)``, and CAS-writes it back. If another replica wrote first
+        (``LedgerVersionConflict``) it re-fetches and re-applies ``fn`` on the
+        fresh state, up to ``retries`` — so concurrent replicas can't clobber
+        each other's balance changes.
+
+        ``fn`` returning ``False`` signals a no-op (e.g. debit found
+        insufficient balance): nothing is written and ``False`` is returned.
+        Any other return value is written through and returned.
+
+        Raises ``LedgerUnavailableError`` if the vault can't be read (so a cold
+        store never makes a mutation apply to an empty fallback ledger and zero
+        a real balance), or ``LedgerWriteError`` if retries are exhausted.
         """
-        ledger = await self.get(user_id)  # hydrate + flush-due check
-        if not ledger.debit(tool_name, cost):
-            return False
-        self.mark_dirty(user_id)
-        return True
+        lock = self._get_lock(user_id)
+        async with lock:
+            for _ in range(retries):
+                ledger, from_vault = await self._load_from_vault(user_id)
+                if not from_vault:
+                    raise LedgerUnavailableError(
+                        f"definitive ledger store unreadable for {user_id[:20]}"
+                    )
+                result = fn(ledger)
+                if result is False:
+                    return result  # explicit no-op — nothing to persist
+                try:
+                    await self._vault.store_ledger(user_id, ledger.to_json())
+                except LedgerVersionConflict:
+                    continue  # lost the race — re-fetch fresh state and re-apply
+                # Persisted. Cache the authoritative post-write ledger (clean)
+                # so same-process reads see it without another round-trip.
+                self._entries[user_id] = _CacheEntry(ledger=ledger)
+                self._entries.move_to_end(user_id)
+                return result
+        raise LedgerWriteError(
+            f"ledger write for {user_id[:20]} lost {retries} consecutive CAS races"
+        )
+
+    async def debit(self, user_id: str, tool_name: str, cost: int) -> bool:
+        """Atomic write-through debit. Returns False on insufficient balance.
+
+        Read-modify-write against the definitive store with conflict retry, so
+        two replicas can't both spend the same sats.
+        """
+        return await self.mutate(user_id, lambda ledger: ledger.debit(tool_name, cost))
+
+    async def credit(
+        self,
+        user_id: str,
+        api_sats: int,
+        invoice_id: str,
+        *,
+        ttl_seconds: int | None = None,
+    ) -> None:
+        """Atomic write-through credit — adds a tranche against fresh state."""
+        await self.mutate(
+            user_id,
+            lambda ledger: ledger.credit_deposit(api_sats, invoice_id, ttl_seconds=ttl_seconds),
+        )
+
+    async def get_fresh(self, user_id: str) -> UserLedger:
+        """Force-reload the ledger from the definitive store, refreshing the cache.
+
+        Use immediately before a mutate-then-``flush_user`` sequence so the
+        subsequent CAS write matches the CURRENT version — not a stale cached
+        one that would conflict forever. On a vault-read failure the returned
+        ledger is flagged ``_vault_unavailable`` (and NOT cached), so callers
+        can refuse to credit a phantom balance during a cold start.
+        """
+        lock = self._get_lock(user_id)
+        async with lock:
+            ledger, from_vault = await self._load_from_vault(user_id)
+            if not from_vault:
+                ledger._vault_unavailable = True  # type: ignore[attr-defined]
+                return ledger
+            entry = _CacheEntry(ledger=ledger)
+            self._entries[user_id] = entry
+            self._entries.move_to_end(user_id)
+            return ledger
 
     async def write_through_credit(self, user_id: str) -> bool:
         """Mark dirty and immediately flush. Use for credit settlements."""
