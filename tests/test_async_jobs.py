@@ -324,6 +324,44 @@ class TestRuntimeAsyncJobs:
         assert "hunter2" not in json.dumps(fetched)
         assert refunds == [(TOOL_ID, NPUB, {"x": "1"})]
 
+    async def test_runner_exceeding_budget_is_cancelled_and_refunds(self, vault):
+        rt = _make_runtime(vault)
+        refunds: list[tuple] = []
+
+        async def fake_rollback(tool_id, npub, *, tool_kwargs=None):
+            refunds.append((tool_id, npub, tool_kwargs))
+
+        rt.rollback_debit = fake_rollback
+
+        cancelled = {"hit": False}
+
+        async def runner(**params):
+            try:
+                await asyncio.sleep(30)  # far longer than the 1s budget
+            except asyncio.CancelledError:
+                cancelled["hit"] = True
+                raise
+            return {"never": "reached"}
+
+        rt.register_job_runner("slow_thing", runner)
+        out = await rt.start_async_job(
+            "slow_thing", NPUB, {"x": "1"},
+            tool_id=TOOL_ID, max_runtime_seconds=1, result_ttl_seconds=300,
+        )
+        claim = out["claim_check"]
+        await _drain(lambda: vault.rows[claim]["status"] == "error", timeout=5.0)
+
+        # the runner was actually cancelled at its await point, not left running
+        assert cancelled["hit"] is True
+
+        fetched = await rt.fetch_async_job(claim, NPUB)
+        assert fetched["status"] == "error"
+        assert fetched["refunded"] is True
+        # a budget timeout is a terminal, refundable, transient situation
+        assert fetched["error_code"] == "job_timed_out"
+        assert fetched["transient"] is True
+        assert refunds == [(TOOL_ID, NPUB, {"x": "1"})]
+
     async def test_failure_then_retry_succeeds(self, vault):
         rt = _make_runtime(vault)
         calls = {"n": 0}

@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.61.0 — 2026-07-09
+
+### Fixed — `max_runtime_seconds` is now a hard cap on a claim-check attempt
+
+- **`OperatorRuntime._run_job` wraps the runner in `asyncio.wait_for(..., timeout=max_runtime_seconds)`.** Previously the runner was `await`ed unbounded, so `max_runtime_seconds` was only the stale-reclaim threshold — a runner whose own I/O timeout was missing or too generous (e.g. an LLM SDK's 10-minute default) left the job row `running` well past its declared budget, and a polling frontend's ceiling expired before any terminal state was written. Now an attempt that outruns its budget is cancelled at its next `await` point.
+- **A budget timeout is terminal and refundable, not retried.** On timeout the job is failed with a curated `AsyncJobSituation` (`error_code="job_timed_out"`, transient, "This request took too long… No fare was charged.") and the debit is rolled back — retrying would just burn a second full budget the frontend has already stopped waiting for. Writing a terminal `error` also forecloses the stale-reclaim race (the row never lingers `running` for a watchdog to re-kick).
+- **Cancellation is cooperative** — a runner parked on I/O (every DPYC runner: an LLM/HTTP round-trip on `await`) is interrupted cleanly; a runner stuck in non-awaiting CPU work would not be. Operators should still bound their own upstream calls (a shorter per-call timeout yields a faster, more specific situation); this cap is the backstop that guarantees no runner outlives its declared budget.
+
 ## 0.60.0 — 2026-07-08
 
 ### Changed — BREAKING: Nostr relays come from one source of truth (`dpyc-community/relays.json`)

@@ -2241,8 +2241,23 @@ class OperatorRuntime:
                         job["tool_id"], job["npub"], tool_kwargs=job["params"],
                     )
                     return
+                # Hard-cap the attempt at the job's declared max_runtime_seconds.
+                # Without this the await is unbounded — a runner whose own I/O
+                # timeout is missing or too generous (e.g. an LLM SDK's 10-minute
+                # default) leaves the row 'running' well past its budget, and the
+                # frontend's poll ceiling expires before any terminal state is
+                # written. wait_for cancels the runner at its next await point and
+                # raises TimeoutError. Cancellation is cooperative, so a runner
+                # stuck in non-awaiting CPU work won't be interrupted — but every
+                # DPYC runner is I/O-bound (an LLM/HTTP round-trip parked on await).
+                budget = job["max_runtime_seconds"]
                 try:
-                    result = await runner(**job["params"])
+                    if budget and budget > 0:
+                        result = await asyncio.wait_for(
+                            runner(**job["params"]), timeout=budget,
+                        )
+                    else:
+                        result = await runner(**job["params"])
                 except AsyncJobSituation as sit:
                     # The runner classified a failure into a curated, frontend-
                     # facing situation (machine code + safe message + transient).
@@ -2251,6 +2266,29 @@ class OperatorRuntime:
                     # infra blip), no raw text to the patron.
                     logger.info("async job %s situation: %s", claim, sit.error_code)
                     await store.fail(claim, sit.to_row())
+                    await self.rollback_debit(
+                        job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                    )
+                    return
+                except (asyncio.TimeoutError, TimeoutError):
+                    # The attempt outran its budget and was cancelled. Treat as a
+                    # terminal, refundable situation rather than retrying: another
+                    # attempt would burn a second full budget the frontend has
+                    # already stopped waiting for. Writing a terminal 'error' here
+                    # also forecloses the stale-reclaim race (the row never lingers
+                    # 'running' past max_runtime for a watchdog to re-kick).
+                    logger.warning(
+                        "Async job %s (%s) exceeded max_runtime %ss; cancelled",
+                        claim, kind, budget,
+                    )
+                    situation = AsyncJobSituation(
+                        error_code="job_timed_out",
+                        message="This request took too long to complete and was "
+                                "stopped. No fare was charged.",
+                        next_steps="Please try again.",
+                        transient=True,
+                    )
+                    await store.fail(claim, situation.to_row())
                     await self.rollback_debit(
                         job["tool_id"], job["npub"], tool_kwargs=job["params"],
                     )
