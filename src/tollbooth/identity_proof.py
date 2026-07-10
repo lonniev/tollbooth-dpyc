@@ -54,6 +54,13 @@ PROOF_EVENT_KIND = 27235
 DEFAULT_WINDOW_SECONDS = 60
 """Maximum age (in seconds) of a valid proof event."""
 
+MAX_PROOF_JSON_BYTES = 64 * 1024
+"""Reject proof payloads larger than this before parsing.
+
+A signed kind-27235 event is well under 2 KB; anything approaching this cap is
+an adversarial oversized payload (tool arguments are untrusted AI input). Bound
+the input before ``json.loads`` so a 10 MB string can't be fully parsed."""
+
 OWNERSHIP_SENTINEL = "npub_ownership"
 """Sentinel tool name for npub ownership proofs (not tied to a specific tool)."""
 
@@ -185,6 +192,13 @@ def verify_proof(
         from pynostr.event import Event  # type: ignore[import-untyped]
     except ImportError:
         logger.warning("pynostr not installed — cannot verify identity proof")
+        return False
+
+    if not isinstance(proof_json, str) or len(proof_json) > MAX_PROOF_JSON_BYTES:
+        logger.debug(
+            "identity_proof: rejecting oversized/invalid payload (%s bytes)",
+            len(proof_json) if isinstance(proof_json, str) else "non-str",
+        )
         return False
 
     try:

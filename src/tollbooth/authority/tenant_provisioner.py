@@ -135,6 +135,8 @@ async def transfer_schema_ownership(vault: Any, schema: str) -> None:
     schema grows. Idempotent: a table already owned by the operator role (or
     not owned by the connecting role) is skipped.
     """
+    if not _SAFE_IDENTIFIER.match(schema):
+        raise ValueError(f"Unsafe schema name: {schema!r}")
     await vault._execute(f'ALTER SCHEMA "{schema}" OWNER TO "{schema}"')
     try:
         result = await vault._execute(

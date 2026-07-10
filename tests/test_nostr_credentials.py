@@ -869,7 +869,7 @@ class TestCredentialVault:
 
     @pytest.mark.asyncio
     async def test_vault_blob_is_encrypted(self):
-        """Vault blob is not plaintext JSON — it's NIP-04 encrypted."""
+        """Vault blob is not plaintext JSON — it's AES-256-GCM encrypted."""
         operator = PrivateKey()
         sender = PrivateKey()
         vault = MockCredentialVault()
@@ -891,11 +891,37 @@ class TestCredentialVault:
 
         blob = await vault.fetch_credentials("x", sender.public_key.bech32())
         assert blob is not None
-        # Blob should be NIP-04 format, not plaintext
-        assert "?iv=" in blob
+        # Blob is AES-256-GCM (VaultCipher), not legacy NIP-04 CBC ("?iv=").
+        assert "?iv=" not in blob
         # Blob should NOT contain plaintext credentials
         assert "sk-secret" not in blob
         assert "top-secret" not in blob
+        # ...but round-trips back through the operator's GCM cipher.
+        assert "sk-secret" in ex._vault_decrypt(blob)
+
+    def test_vault_decrypt_reads_legacy_nip04_and_new_gcm(self):
+        """Migration: legacy NIP-04 CBC blobs still decrypt; new writes are GCM.
+
+        Pre-0.62.1 credential blobs were unauthenticated NIP-04 AES-256-CBC.
+        _vault_decrypt must still read them (so nothing bricks) while
+        _vault_encrypt writes authenticated AES-256-GCM going forward.
+        """
+        from tollbooth.nip04 import encrypt as nip04_encrypt
+
+        operator = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec, credential_vault=MockCredentialVault())
+
+        # Legacy blob written the old way still round-trips via the fallback.
+        legacy = nip04_encrypt(
+            '{"api_key": "legacy"}', ex._privkey_hex, ex._pubkey_hex,
+        )
+        assert "?iv=" in legacy  # NIP-04 CBC framing
+        assert ex._vault_decrypt(legacy) == '{"api_key": "legacy"}'
+
+        # New writes are GCM (no "?iv=") and round-trip through the same reader.
+        gcm = ex._vault_encrypt('{"api_key": "new"}')
+        assert "?iv=" not in gcm
+        assert ex._vault_decrypt(gcm) == '{"api_key": "new"}'
 
     @pytest.mark.asyncio
     async def test_forget_clears_vault(self):

@@ -10,7 +10,7 @@ could not express. These tests pin the split behavior.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -114,12 +114,21 @@ async def test_effective_mode_auto_failsafe_direct_and_not_cached():
 @pytest.mark.asyncio
 async def test_vault_env_source_reads_neon_env(monkeypatch):
     monkeypatch.setenv("NEON_DATABASE_URL", "postgres://from-env")
+    # Self-provisioning actors now encrypt at rest with their own nsec, so the
+    # runtime must have a signing key available.
+    monkeypatch.setenv(
+        "TOLLBOOTH_NOSTR_OPERATOR_NSEC",
+        "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5",
+    )
     rt = OperatorRuntime(tool_registry={}, purchase_mode="certified", vault_source="env")
     with patch("tollbooth.vaults.NeonVault") as NV:
         NV.return_value.ensure_schema = AsyncMock()
         await rt.vault()
-    # certified + env (the NewEngland combo) still self-provisions from env.
-    NV.assert_called_once_with(database_url="postgres://from-env")
+    # certified + env (the NewEngland combo) self-provisions from env AND
+    # encrypts with the actor's own nsec (no more plaintext ledger column).
+    NV.assert_called_once_with(
+        database_url="postgres://from-env", encryption_nsec_hex=ANY
+    )
 
 
 @pytest.mark.asyncio

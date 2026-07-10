@@ -152,8 +152,13 @@ class TestPublishLedgerUpdate:
 
     @patch("tollbooth.nostr_audit._HAS_PYNOSTR", True)
     @patch("tollbooth.nostr_audit._HAS_WEBSOCKET", True)
-    def test_constructs_plaintext_event_for_non_npub(self) -> None:
-        """Non-npub user IDs produce plaintext content (legacy path)."""
+    def test_skips_publishing_for_non_npub_target(self) -> None:
+        """Non-npub (non-encryptable) targets must NOT be published at all.
+
+        Audit content carries balances/financial figures. If the target can't
+        be NIP-44 encrypted, the publisher refuses to broadcast plaintext — it
+        skips the event entirely rather than leak cleartext to public relays.
+        """
         mock_pk = _mock_private_key()
 
         mock_event = MagicMock()
@@ -162,7 +167,7 @@ class TestPublishLedgerUpdate:
         with (
             patch("tollbooth.nostr_audit.PrivateKey", create=True) as MockPK,
             patch("tollbooth.nostr_audit.Event", create=True) as MockEvent,
-            patch("tollbooth.nostr_audit.threading") as mock_threading,
+            patch("tollbooth.nostr_audit.threading"),
         ):
             MockPK.from_nsec.return_value = mock_pk
             MockEvent.return_value = mock_event
@@ -174,43 +179,9 @@ class TestPublishLedgerUpdate:
                 "user_01KGZY", SAMPLE_LEDGER_JSON, "flush",
             )
 
-            # Event was constructed with kind 30078
-            MockEvent.assert_called_once()
-            call_kwargs = MockEvent.call_args
-            assert call_kwargs.kwargs["kind"] == 30078
-
-            # Content is valid JSON with expected fields (plaintext)
-            content = json.loads(call_kwargs.kwargs["content"])
-            assert content["user_id"] == "user_01KGZY"
-            assert content["balance"] == 5220
-            assert content["deposited"] == 8000
-            assert content["consumed"] == 2780
-            assert content["event_type"] == "flush"
-            assert "timestamp" in content
-
-            # Tags include d-tag, p-tag, t-tag, L-tag — NO encrypted tag
-            tags = call_kwargs.kwargs["tags"]
-            tag_names = [t[0] for t in tags]
-            assert "d" in tag_names
-            assert "p" in tag_names
-            assert "t" in tag_names
-            assert "L" in tag_names
-            assert "encrypted" not in tag_names
-
-            # d-tag starts with tollbooth-audit-
-            d_tag = [t for t in tags if t[0] == "d"][0]
-            assert d_tag[1].startswith("tollbooth-audit-")
-
-            # t-tag is tollbooth-audit
-            t_tag = [t for t in tags if t[0] == "t"][0]
-            assert t_tag[1] == "tollbooth-audit"
-
-            # Event was signed
-            mock_event.sign.assert_called_once()
-
-            # Thread was started for relay publishing
-            mock_threading.Thread.assert_called_once()
-            mock_threading.Thread.return_value.start.assert_called_once()
+            # No event constructed or signed — plaintext broadcast refused.
+            MockEvent.assert_not_called()
+            mock_event.sign.assert_not_called()
 
     @patch("tollbooth.nostr_audit._HAS_PYNOSTR", True)
     @patch("tollbooth.nostr_audit._HAS_WEBSOCKET", True)
@@ -420,12 +391,25 @@ class TestAuditedVaultDelegation:
 
 class TestEventContent:
     def test_snapshot_event_type(self) -> None:
-        """Snapshot events should have event_type='snapshot'."""
+        """Snapshot events should have event_type='snapshot'.
+
+        Uses a real npub target (financial audit content is only ever published
+        NIP-44-encrypted); ``_nip44_encrypt`` is patched to an identity so the
+        content stays inspectable as plaintext JSON.
+        """
+        from pynostr.key import PrivateKey as RealPrivateKey
+
         mock_pk = _mock_private_key()
+        patron_npub = RealPrivateKey().public_key.bech32()
 
         with (
             patch("tollbooth.nostr_audit._HAS_PYNOSTR", True),
             patch("tollbooth.nostr_audit._HAS_WEBSOCKET", True),
+            patch("tollbooth.nostr_audit._HAS_NIP44", True),
+            patch(
+                "tollbooth.nostr_audit._nip44_encrypt",
+                lambda plaintext, sk_hex, pk_hex: plaintext,
+            ),
             patch("tollbooth.nostr_audit.PrivateKey", create=True) as MockPK,
             patch("tollbooth.nostr_audit.Event", create=True) as MockEvent,
             patch("tollbooth.nostr_audit.threading"),
@@ -436,7 +420,7 @@ class TestEventContent:
             MockEvent.return_value = mock_event
 
             pub = NostrAuditPublisher(FAKE_NSEC, FAKE_RELAYS, enabled=True)
-            pub.publish_ledger_update("user1", SAMPLE_LEDGER_JSON, "snapshot")
+            pub.publish_ledger_update(patron_npub, SAMPLE_LEDGER_JSON, "snapshot")
 
             content = json.loads(MockEvent.call_args.kwargs["content"])
             assert content["event_type"] == "snapshot"

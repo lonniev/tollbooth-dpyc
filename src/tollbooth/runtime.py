@@ -362,10 +362,18 @@ class OperatorRuntime:
                     "NEON_DATABASE_URL is required for self-provisioning actors "
                     "(vault_source='env')."
                 )
-            self._vault = NeonVault(database_url=neon_url)
+            # Encrypt at rest with the actor's own nsec — self-provisioning
+            # actors (Authorities) hold financial ledgers; storing them in a
+            # plaintext column let Neon/DB admins read balances. Existing
+            # plaintext rows migrate to ciphertext on their next write via the
+            # vault's plaintext-read bridge.
+            self._vault = NeonVault(
+                database_url=neon_url,
+                encryption_nsec_hex=self._get_nsec_hex(),
+            )
             await self._vault.ensure_schema()
             self._vault_ready_at = _time.monotonic()
-            logger.info("Vault initialized from NEON_DATABASE_URL (vault_source=env)")
+            logger.info("Vault initialized from NEON_DATABASE_URL (vault_source=env, encrypted)")
             return self._vault
 
         # Certified operators: bootstrap from Authority relay DM.

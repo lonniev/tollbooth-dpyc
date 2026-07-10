@@ -69,6 +69,15 @@ async def receive_credentials_tool(
             "success": False,
             "error": "sender_npub is required.",
         }
+    # Bound untrusted string args before any parsing. A dpop_token is a short
+    # phrase and an ncred card is a small JSON blob; anything larger is an
+    # adversarial oversized payload from AI tool input.
+    _MAX_ARG_BYTES = 256 * 1024
+    if len(dpop_token or "") > 1024 or len(credential_card or "") > _MAX_ARG_BYTES:
+        return {
+            "success": False,
+            "error": "Argument too large.",
+        }
     if not service:
         return {
             "success": False,

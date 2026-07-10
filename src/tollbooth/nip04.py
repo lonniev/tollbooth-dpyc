@@ -25,8 +25,9 @@ from cryptography.hazmat.primitives.padding import PKCS7
 def _get_shared_secret(private_key_hex: str, public_key_hex: str) -> bytes:
     """Derive NIP-04 shared secret via secp256k1 ECDH.
 
-    Returns the SHA-256 hash of the x-coordinate of the ECDH shared point,
-    used as the AES-256-CBC key.
+    Returns the raw 32-byte x-coordinate of the ECDH shared point, used
+    directly as the AES-256-CBC key (per the NIP-04 spec — there is no hashing
+    step; the x-coordinate itself is the key).
     """
     sk = _CoinPrivateKey(bytes.fromhex(private_key_hex))
     pk = _CoinPublicKey(b"\x02" + bytes.fromhex(public_key_hex))

@@ -14,7 +14,26 @@ from tollbooth.certificate import CertificateError, verify_certificate_auto
 from tollbooth.config import TollboothConfig
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
+from tollbooth.vault_backend import LedgerUnavailableError, LedgerWriteError
 from tollbooth.constants import LOW_BALANCE_FLOOR_API_SATS, MAX_INVOICE_SATS
+
+
+def _invoice_owner(invoice: dict[str, Any]) -> str | None:
+    """The npub the invoice was created for, per its BTCPay metadata.
+
+    A settled ``invoice_id`` is NOT a bearer token: crediting must confirm the
+    invoice belongs to the account being credited, or a party who merely learns
+    another patron's invoice_id (they surface in tool results, DMs, logs) could
+    claim it. Every DPYC invoice is stamped with ``metadata.user_id`` at
+    creation (see ``_create_purchase_invoice``); ``None`` means the field is
+    absent (anomalous — allowed through so a metadata-less legacy invoice isn't
+    bricked, but the mismatch case below is always refused).
+    """
+    meta = invoice.get("metadata")
+    if isinstance(meta, dict):
+        owner = meta.get("user_id")
+        return owner if isinstance(owner, str) else None
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -292,22 +311,53 @@ async def check_payment_tool(
         result["message"] = "Payment seen, waiting for confirmation."
 
     elif status == "Settled":
-        if invoice_id in ledger.credited_invoices:
-            # Already credited — true idempotency check
-            result["message"] = "Payment already credited."
+        # A settled invoice_id must belong to the caller being credited.
+        # Without this, a proven patron who learns another patron's invoice_id
+        # could claim it — the per-ledger credited_invoices idempotency guards
+        # only the victim's ledger, not the claimer's, so it would mint free
+        # credits (cross-account double-issuance).
+        owner = _invoice_owner(invoice)
+        if owner is not None and owner != user_id:
+            logger.warning(
+                "check_payment: invoice %s belongs to %s, not caller %s — refusing.",
+                invoice_id, owner[:20], user_id[:20],
+            )
+            result["success"] = False
             result["credits_granted"] = 0
-        elif getattr(ledger, "_vault_unavailable", False):
-            # Cold start: cache.get() couldn't reach Neon and returned an
-            # uncached empty ledger. Mutating it would credit a phantom
-            # ledger that gets garbage-collected, while mark_dirty +
-            # flush_user silently no-op (no cache entry to mark or flush).
-            # Refuse to "credit" — the patron's payment is on BTCPay and
-            # the next check_payment call will succeed once the vault is
-            # warm, since check_payment is idempotent via credited_invoices.
+            result["error_code"] = "invoice_owner_mismatch"
+            result["error"] = "This invoice was not created for your account."
+            result["message"] = result["error"]
+            return result
+
+        amount_str = invoice.get("amount", "0")
+        amount_sats = int(float(amount_str))
+        settled_at = datetime.now(timezone.utc).isoformat()
+
+        def _apply_settlement(led: UserLedger) -> int:
+            # Runs against FRESH ledger state inside the CAS write-through, and
+            # is re-applied on each conflict retry — so the idempotency check
+            # sees the definitive credited_invoices set, not a stale cache.
+            if invoice_id in led.credited_invoices:
+                return 0
+            led.credit_deposit(amount_sats, invoice_id, ttl_seconds=tranche_lifetime_seconds)
+            led.record_invoice_settled(
+                invoice_id=invoice_id,
+                api_sats_credited=amount_sats,
+                settled_at=settled_at,
+                btcpay_status=status,
+            )
+            return amount_sats
+
+        try:
+            credited = await cache.mutate(user_id, _apply_settlement)
+        except (LedgerUnavailableError, LedgerWriteError) as exc:
+            # Cold vault or exhausted CAS races — the credit did NOT persist.
+            # The payment is safe at BTCPay; the caller retries once warm.
+            # mutate() refuses to operate on an uncached/empty ledger, so this
+            # replaces the old _vault_unavailable phantom-credit guard.
             logger.error(
-                "Vault unavailable during settle for %s (invoice %s). "
-                "Returning persisted=false so caller retries.",
-                user_id, invoice_id,
+                "Settle for %s (invoice %s) not persisted: %s: %s",
+                user_id, invoice_id, type(exc).__name__, exc,
             )
             result["success"] = False
             result["credits_granted"] = 0
@@ -319,31 +369,18 @@ async def check_payment_tool(
                 "in 10–15 seconds to credit your balance."
             )
             result["message"] = result["error"]
-        else:
-            # Credit the user — flush immediately so credits survive cache loss
-            amount_str = invoice.get("amount", "0")
-            amount_sats = int(float(amount_str))
-            credited = amount_sats
-            ledger.credit_deposit(credited, invoice_id, ttl_seconds=tranche_lifetime_seconds)
-            ledger.record_invoice_settled(
-                invoice_id=invoice_id,
-                api_sats_credited=credited,
-                settled_at=datetime.now(timezone.utc).isoformat(),
-                btcpay_status=status,
-            )
-            cache.mark_dirty(user_id)
-            flush_ok = await cache.flush_user(user_id)
-            if not flush_ok:
-                logger.error(
-                    "CRITICAL: Failed to flush %d credits for %s (invoice %s). "
-                    "Credits are in memory but may be lost on restart.",
-                    credited, user_id, invoice_id,
-                )
-            result["credits_granted"] = credited
-            result["persisted"] = flush_ok
-            result["message"] = f"Payment settled! {credited:,} credits added to your balance."
-            if not flush_ok:
-                result["warning"] = "Credits added but vault flush failed — may not survive restart."
+            return result
+
+        # mutate() wrote through to the vault; refresh the local ledger so the
+        # trailing balance line reflects the new tranche.
+        ledger = await cache.get(user_id)
+        result["credits_granted"] = credited
+        result["persisted"] = True
+        result["message"] = (
+            "Payment already credited."
+            if credited == 0
+            else f"Payment settled! {credited:,} credits added to your balance."
+        )
 
     elif status == "Expired":
         if invoice_id in ledger.pending_invoices:
@@ -533,6 +570,22 @@ async def restore_credits_tool(
         return {
             "success": False,
             "error": f"Invoice status is '{status}', not 'Settled'. Cannot restore.",
+            "invoice_id": invoice_id,
+        }
+
+    # Restore only against the invoice's own patron — never move one patron's
+    # settled invoice onto another account (defense-in-depth; restore is
+    # operator-gated, so this guards operator error, not an external claim).
+    owner = _invoice_owner(invoice)
+    if owner is not None and owner != user_id:
+        logger.warning(
+            "restore_credits: invoice %s belongs to %s, not %s — refusing.",
+            invoice_id, owner[:20], user_id[:20],
+        )
+        return {
+            "success": False,
+            "error": "This invoice was not created for that account.",
+            "error_code": "invoice_owner_mismatch",
             "invoice_id": invoice_id,
         }
 

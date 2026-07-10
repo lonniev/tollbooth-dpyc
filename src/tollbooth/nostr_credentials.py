@@ -338,6 +338,7 @@ class NostrCredentialExchange:
         self._pubkey_hex: str = ""
         self._npub: str = ""
         self._enabled = True
+        self._vault_cipher_obj: Any = None  # lazy AES-256-GCM vault cipher
 
         if not _HAS_PYNOSTR:
             logger.warning(
@@ -1861,22 +1862,42 @@ class NostrCredentialExchange:
             )
             return False
 
-    def _vault_encrypt(self, plaintext: str) -> str:
-        """Encrypt plaintext for vault storage using operator's key.
+    def _vault_cipher(self) -> Any:
+        """Lazily build the AES-256-GCM vault cipher from the operator's key.
 
-        Uses NIP-04 AES-256-CBC with the operator as both sender and
-        recipient (self-encryption).
+        Same primitive the ledger uses (``VaultCipher``) — authenticated
+        encryption with a tamper-evident tag, keyed by HKDF-SHA256 from the
+        operator's nsec.
         """
-        if not _HAS_NIP04:
-            raise RuntimeError("NIP-04 module required for vault encryption")
-        from tollbooth.nip04 import encrypt as _nip04_encrypt
-        return _nip04_encrypt(plaintext, self._privkey_hex, self._pubkey_hex)
+        if self._vault_cipher_obj is None:
+            from tollbooth.vault_encryption import VaultCipher
+            self._vault_cipher_obj = VaultCipher(nsec_hex=self._privkey_hex)
+        return self._vault_cipher_obj
+
+    def _vault_encrypt(self, plaintext: str) -> str:
+        """Encrypt plaintext for vault storage with AES-256-GCM (operator key).
+
+        Replaces the legacy unauthenticated NIP-04 AES-256-CBC self-encryption:
+        credentials, OAuth tokens, and the ephemeral agent nsec were malleable
+        (no MAC) under CBC. GCM is tamper-evident.
+        """
+        return self._vault_cipher().encrypt(plaintext)
 
     def _vault_decrypt(self, blob: str) -> str:
-        """Decrypt a vault blob using operator's key."""
-        if not _HAS_NIP04:
-            raise RuntimeError("NIP-04 module required for vault decryption")
-        return _nip04_decrypt(blob, self._privkey_hex, self._pubkey_hex)
+        """Decrypt a vault blob — GCM for current blobs, NIP-04 for legacy ones.
+
+        Blobs written before the GCM migration are NIP-04 AES-256-CBC and carry
+        a ``?iv=`` segment — a reliable discriminator (base64 decoding is too
+        lenient to distinguish the two formats). Legacy blobs decrypt here and
+        re-encrypt with GCM on the next store, aging the unauthenticated
+        population out. New writes are always GCM.
+        """
+        if "?iv=" in blob:
+            # Legacy NIP-04 AES-256-CBC blob — migrate on next store.
+            if not _HAS_NIP04:
+                raise RuntimeError("NIP-04 module required to read legacy vault blob")
+            return _nip04_decrypt(blob, self._privkey_hex, self._pubkey_hex)
+        return self._vault_cipher().decrypt(blob)
 
     # ── Template matching ───────────────────────────────────────────
 

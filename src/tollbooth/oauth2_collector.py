@@ -21,6 +21,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import time
 import urllib.parse
 
@@ -253,6 +254,30 @@ async def refresh_access_token(
 # ---------------------------------------------------------------------------
 # Collector retrieval + decryption
 # ---------------------------------------------------------------------------
+
+
+def encrypt_collector_code(code: str, state: str) -> str:
+    """Encrypt an authorization code for handoff via the collector.
+
+    The canonical peer of :func:`decrypt_collector_code`: both halves of the
+    contract live here so the collector service and the retrieving MCP server
+    can't drift. AES-256-GCM with key = SHA-256(state), a random 12-byte IV
+    prepended to the ciphertext, URL-safe base64 encoded.
+
+    Args:
+        code: The plaintext OAuth2 authorization code.
+        state: The state token used during authorization (the npub).
+
+    Returns:
+        URL-safe base64 string of (IV + ciphertext + tag).
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    key = hashlib.sha256(state.encode()).digest()
+    iv = os.urandom(12)
+    aes = AESGCM(key)
+    ct = aes.encrypt(iv, code.encode(), None)
+    return base64.urlsafe_b64encode(iv + ct).decode()
 
 
 def decrypt_collector_code(encrypted_b64: str, state: str) -> str:

@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.62.1 — 2026-07-09
+
+### Security — hardening batch (audit-driven)
+
+- **`check_payment` / `restore_credits` now verify invoice ownership before crediting.** A settled `invoice_id` is not a bearer token: crediting confirms the invoice's `metadata.user_id` matches the account being credited (refuses `invoice_owner_mismatch`). Previously any caller who learned another patron's settled invoice_id — they surface in tool results, DMs, and logs — could claim it, and the per-ledger `credited_invoices` idempotency guarded only the victim's ledger, so it minted free credits for the claimer (cross-account double-issuance). The `check_payment` settlement path is also rewritten onto the 0.62.0 CAS `LedgerCache.mutate()` write-through, so the credit is idempotent and conflict-safe against fresh state rather than a `get_fresh`+`flush_user` dance.
+- **Credential vault upgraded from unauthenticated NIP-04 AES-256-CBC to authenticated AES-256-GCM.** API keys, OAuth tokens, and the ephemeral agent nsec (`agent_nsec_hex`) were self-encrypted with NIP-04 CBC — no MAC, so ciphertext was malleable and not tamper-evident. They now use the same `VaultCipher` (GCM) the ledger uses. Legacy blobs (identified by the NIP-04 `?iv=` marker) still decrypt and are re-encrypted with GCM on their next write, aging the unauthenticated population out.
+- **Self-provisioning actors (Authorities) now encrypt their ledger at rest.** The `vault_source="env"` path constructed `NeonVault` with no encryption key, storing financial balances in a plaintext Postgres column readable by Neon/DB admins. It now encrypts with the actor's own nsec. A keyless `NeonVault` also logs a loud warning (previously silent), and a legacy-plaintext read under an encrypting cipher warns so the migration is observable.
+- **Audit publisher never broadcasts cleartext financials.** Ledger-update events to non-npub targets previously fell through to a plaintext publish (balance/deposited/consumed) on public relays; any target that can't be NIP-44-encrypted is now skipped rather than leaked.
+- **Bounded untrusted string arguments before parsing.** `verify_proof` rejects `proof_json` over 64 KiB and the Secure Courier `receive` tool bounds `dpop_token`/`credential_card` — a 10 MB payload can no longer be fully parsed (mild DoS from adversarial AI tool input).
+- **Defense-in-depth SQL identifier guard** on `transfer_schema_ownership` (schema names are already SHA-256-derived and validated on role creation).
+- Removed orphaned `acl_verify` / `acl_store` / `tools.acl` bytecode with no source (import-shadowing hazard); corrected the NIP-04 shared-secret docstring (raw x-coordinate, no hash step).
+
 ## 0.62.0 — 2026-07-09
 
 ### Fixed — balance ledger is now write-through and conflict-safe across replicas

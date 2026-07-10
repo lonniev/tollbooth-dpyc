@@ -111,23 +111,45 @@ class NeonVault:
         self._version_cache: dict[str, int] = {}
 
         # Field encryption — if nsec provided, all stored values are AES-256-GCM encrypted.
-        # Without nsec, vault operates in plaintext mode (backward compatible).
+        # Without nsec, vault operates in plaintext mode. Every production caller
+        # supplies a key (operator via Authority bootstrap, self-provisioning
+        # actor via its own nsec); a keyless vault means financial/PII data would
+        # land in a plaintext column, so make that choice loud rather than silent.
         self._cipher = None
         if encryption_nsec_hex:
             from tollbooth.vault_encryption import VaultCipher
             self._cipher = VaultCipher(nsec_hex=encryption_nsec_hex)
+        else:
+            logger.warning(
+                "NeonVault constructed WITHOUT encryption_nsec_hex — stored "
+                "values (including balances) will be PLAINTEXT. This is only "
+                "acceptable for tests; production callers must pass a key."
+            )
 
     def _encrypt(self, plaintext: str) -> str:
         """Encrypt if cipher is configured, otherwise passthrough."""
         return self._cipher.encrypt(plaintext) if self._cipher else plaintext
 
     def _decrypt(self, value: str) -> str:
-        """Decrypt if cipher is configured. Handles migration from plaintext."""
+        """Decrypt if cipher is configured. Bridges legacy plaintext rows.
+
+        A configured cipher that reads a value which isn't ciphertext means a
+        pre-encryption (plaintext) row — it's returned as-is so the read
+        succeeds and gets re-encrypted on its next write. This bridge is only
+        safe while such rows still exist; the warning makes the shrinking
+        legacy population observable so the fallthrough can be removed once it
+        stops firing. Not a silent downgrade.
+        """
         if not self._cipher:
             return value
         if self._cipher.is_encrypted(value):
             return self._cipher.decrypt(value)
-        return value  # Legacy plaintext — return as-is
+        logger.warning(
+            "NeonVault read a PLAINTEXT value under an encrypting cipher — "
+            "legacy pre-encryption row; it will migrate to ciphertext on next "
+            "write. Investigate if this persists after a full write cycle."
+        )
+        return value  # Legacy plaintext — return as-is (migrates on next write)
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""

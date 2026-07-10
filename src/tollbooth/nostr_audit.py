@@ -218,15 +218,16 @@ class NostrAuditPublisher:
                 )
                 tags.append(["encrypted", "nip44"])
             else:
-                # Fallback: skip publishing entirely if encryption unavailable
-                # for npub patrons (never publish plaintext for npub users)
-                if user_id.startswith("npub1"):
-                    logger.warning(
-                        "NIP-44 encryption unavailable — skipping audit "
-                        "event for npub patron (refusing plaintext fallback)."
-                    )
-                    return
-                content = plaintext
+                # Never broadcast cleartext audit content (it carries balances /
+                # financial figures) to public relays. If the target can't be
+                # NIP-44 encrypted — no npub, no key, or NIP-44 unavailable —
+                # skip publishing entirely rather than leak plaintext.
+                logger.warning(
+                    "Audit target not NIP-44-encryptable (user_id=%s, "
+                    "has_key=%s) — skipping event; refusing plaintext broadcast.",
+                    user_id[:20], self._private_key is not None,
+                )
+                return
 
             event = Event(
                 kind=30078,

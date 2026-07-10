@@ -136,6 +136,15 @@ def _mock_cache(ledger: UserLedger | None = None):
     # Credit paths now read fresh before mutate+flush (write-through).
     cache.get_fresh = AsyncMock(return_value=led)
     cache.mark_dirty = MagicMock()  # sync method, not async
+
+    # Settlement credits go through the CAS write-through: mutate() applies the
+    # caller's fn to the definitive ledger and returns its result. Simulate that
+    # by running the fn against the real UserLedger so tranche/idempotency
+    # assertions still exercise the ledger logic.
+    async def _apply(user_id, fn):
+        return fn(led)
+
+    cache.mutate = AsyncMock(side_effect=_apply)
     return cache
 
 
@@ -349,7 +358,7 @@ class TestCheckPayment:
         assert result["credits_granted"] == 1000
         assert result["balance_api_sats"] == 1000
         assert "inv-1" not in ledger.pending_invoices
-        cache.mark_dirty.assert_called()
+        cache.mutate.assert_called()
 
     @pytest.mark.asyncio
     async def test_settled_creates_tranche(self) -> None:
@@ -399,6 +408,41 @@ class TestCheckPayment:
         assert result["credits_granted"] == 0
         assert result["balance_api_sats"] == 1000
         assert "already credited" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_settled_refuses_foreign_invoice(self) -> None:
+        """A settled invoice created for another npub must NOT credit the caller.
+
+        Guards the invoice-claiming double-issuance: a proven patron who learns
+        someone else's settled invoice_id could otherwise mint free credits,
+        since credited_invoices idempotency is per-ledger.
+        """
+        btcpay = _mock_btcpay({
+            "id": "inv-victim", "status": "Settled", "amount": "1000",
+            "metadata": {"user_id": "victim_npub"},
+        })
+        ledger = UserLedger()
+        cache = _mock_cache(ledger)
+        result = await check_payment_tool(btcpay, cache, "attacker_npub", "inv-victim")
+        assert result["success"] is False
+        assert result["error_code"] == "invoice_owner_mismatch"
+        assert result["credits_granted"] == 0
+        # No tranche minted, mutate never invoked.
+        assert len(ledger.tranches) == 0
+        cache.mutate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_settled_credits_own_invoice(self) -> None:
+        """A settled invoice whose metadata owner matches the caller credits."""
+        btcpay = _mock_btcpay({
+            "id": "inv-1", "status": "Settled", "amount": "1000",
+            "metadata": {"user_id": "user1"},
+        })
+        ledger = UserLedger(pending_invoices=["inv-1"])
+        cache = _mock_cache(ledger)
+        result = await check_payment_tool(btcpay, cache, "user1", "inv-1")
+        assert result["success"] is True
+        assert result["credits_granted"] == 1000
 
     @pytest.mark.asyncio
     async def test_expired_removes_pending(self) -> None:

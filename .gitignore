@@ -14,6 +14,17 @@ venv/
 .venv/
 env/
 
+# Secrets — never commit nsec, keys, tokens, connection strings, or vault creds
+.env
+.env.*
+!.env.example
+*.nsec
+*.pem
+*.key
+*token*.json
+credentials.json
+secrets.json
+
 # IDE
 .idea/
 .vscode/
