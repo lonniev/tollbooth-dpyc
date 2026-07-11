@@ -2107,7 +2107,7 @@ class OperatorRuntime:
         self,
         kind: str,
         build_closure: Callable[..., Any],
-        shape_result: Callable[[Any], Any],
+        shape_result: Callable[..., Any],
     ) -> None:
         """Register the spec-driven (closure) path for a job kind.
 
@@ -2115,12 +2115,18 @@ class OperatorRuntime:
         access — it loads any operator secrets locally and bakes them into a
         self-describing job spec (e.g. a fully-formed HTTP request). The spec is
         sealed (AES-256-GCM) before it leaves the process, so secrets reach the
-        detached executor only as ciphertext. ``shape_result(raw)`` turns the
-        flow's raw return into the dict stored on the Neon job row. Either may be
-        sync or async.
+        detached executor only as ciphertext. ``shape_result(raw, params)`` turns
+        the flow's raw return into the dict stored on the Neon job row; ``params``
+        is the job's persisted params (the same kwargs ``build_closure`` received),
+        so a stateful job can perform its param-dependent side effects (open a
+        journal entry, record an evaluation) here — the detached flow only issues
+        the sealed request, and this runs back in the MCP on the settling fetch,
+        exactly once per job. Either may be sync or async.
 
         A kind may register both a runner (in-process fallback) and a spec; the
-        spec is used only while a non-in-process executor is installed.
+        spec is used only while a non-in-process executor is installed. The
+        in-process runner never calls ``shape_result`` (it returns its own dict),
+        so a stateful job's side effects fire once on whichever path runs it.
         """
         self._job_specs[kind] = {"build": build_closure, "shape": shape_result}
 
@@ -2201,6 +2207,7 @@ class OperatorRuntime:
             result_ttl_seconds=result_ttl_seconds,
             expected_seconds=expected_seconds,
         )
+        from tollbooth.async_situation import AsyncJobSituation
         try:
             closure_b64: str | None = None
             if self._uses_closure_path(kind):
@@ -2212,6 +2219,15 @@ class OperatorRuntime:
             handle = await self._async_executor.submit(claim, closure_b64)
             if handle:
                 await store.set_run_handle(claim, handle)
+        except AsyncJobSituation as sit:
+            # build_closure classified a pre-flight failure (a not-found entry,
+            # an unfunded provider caught by a probe) into a curated, refundable
+            # situation. Terminal — same posture as a runner raising one: persist
+            # it structured, refund, and return it. Never a dispatch-failure retry.
+            logger.info("async job %s build situation: %s", claim, sit.error_code)
+            await store.fail(claim, sit.to_row())
+            await self.rollback_debit(tool_id, npub, tool_kwargs=params)
+            return sit.to_response()
         except Exception as exc:
             # Dispatch failed after the row was persisted (e.g. Prefect
             # unreachable). Never strand a fee-charged job: fall back to an
@@ -2407,7 +2423,9 @@ class OperatorRuntime:
                 from tollbooth.async_situation import AsyncJobSituation
 
                 try:
-                    shaped = self._job_specs[kind]["shape"](outcome.get("result"))
+                    shaped = self._job_specs[kind]["shape"](
+                        outcome.get("result"), job["params"]
+                    )
                     shaped = await shaped if inspect.isawaitable(shaped) else shaped
                 except AsyncJobSituation as sit:
                     # shape_result classified the upstream outcome into a curated,

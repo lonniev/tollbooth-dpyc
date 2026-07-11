@@ -131,8 +131,11 @@ def _register_http_spec(rt):
             },
         }
 
-    def shape_result(raw):
-        return {"x_text": (raw or {}).get("text", "")}
+    def shape_result(raw, params):
+        # params is the job's persisted kwargs — threaded through so a stateful
+        # job can run its param-dependent side effects while shaping.
+        assert isinstance(params, dict)
+        return {"x_text": (raw or {}).get("text", ""), "prompt": params.get("prompt", "")}
 
     rt.register_job_spec("resolve", build_closure, shape_result)
 
@@ -226,7 +229,7 @@ async def test_fetch_closure_completed_shapes_and_completes(vault_and_rt):
     claim = out["claim_check"]
     fetched = await rt.fetch_async_job(claim, NPUB)
     assert fetched["status"] == "done"
-    assert fetched["result"] == {"x_text": "woven answer"}
+    assert fetched["result"] == {"x_text": "woven answer", "prompt": "hi"}
     assert vault.rows[claim]["status"] == "done"
 
 
@@ -263,7 +266,7 @@ async def test_fetch_closure_completed_but_unshapeable_refunds(vault_and_rt):
     async def build_closure(**params):
         return {"op": "http_request", "request": {"url": "https://x"}}
 
-    def shape_result(raw):
+    def shape_result(raw, params):
         raise ValueError("no text returned")
 
     rt.register_job_spec("resolve", build_closure, shape_result)
@@ -301,7 +304,7 @@ async def test_fetch_closure_situation_surfaces_curated_fields(vault_and_rt):
     async def build_closure(**params):
         return {"op": "http_request", "request": {"url": "https://x"}}
 
-    def shape_result(raw):
+    def shape_result(raw, params):
         # the operator classifies the raw upstream response into a situation;
         # the raw body (with a fake request_id) must NOT reach the patron
         assert raw["status"] == 400  # operator sees the raw status
@@ -356,7 +359,7 @@ async def test_fetch_closure_generic_exception_never_leaks_on_repoll(vault_and_r
     async def build_closure(**params):
         return {"op": "http_request", "request": {"url": "https://x"}}
 
-    def shape_result(raw):
+    def shape_result(raw, params):
         raise ValueError("RAW-SECRET-abc in the exception text")
 
     rt.register_job_spec("resolve", build_closure, shape_result)
@@ -378,6 +381,51 @@ async def test_fetch_closure_generic_exception_never_leaks_on_repoll(vault_and_r
     for resp in (first, second):
         assert resp["status"] == "error" and resp["refunded"] is True
         assert "RAW-SECRET-abc" not in json.dumps(resp)
+
+
+async def test_start_closure_build_situation_is_terminal_refund(vault_and_rt):
+    """A build_closure that raises AsyncJobSituation (a pre-flight rejection —
+    not-found entry, unfunded probe) settles terminally: the job row is failed
+    with the curated situation, the fare is refunded, and the caller gets the
+    situation response — NOT a dispatch-failure fallback / retry."""
+    from tollbooth.async_situation import AsyncJobSituation
+
+    vault, rt = vault_and_rt
+
+    async def build_closure(**params):
+        raise AsyncJobSituation(
+            error_code="journal_entry_not_found",
+            message="That scenario is gone. No fare was charged.",
+            next_steps="Deal a fresh one.",
+            transient=False,
+        )
+
+    def shape_result(raw, params):  # never reached
+        return {}
+
+    rt.register_job_spec("resolve", build_closure, shape_result)
+    rt.set_async_executor(RecordingExecutor())
+    refunds: list = []
+
+    async def fake_rollback(tool_id, npub, *, tool_kwargs=None):
+        refunds.append((tool_id, tool_kwargs))
+
+    rt.rollback_debit = fake_rollback
+
+    out = await rt.start_async_job(
+        "resolve", NPUB, {"prompt": "hi"},
+        tool_id=TOOL_ID, max_runtime_seconds=210, result_ttl_seconds=900,
+    )
+    # terminal, curated, refunded — no claim check to poll
+    assert out["status"] == "error"
+    assert out["error_code"] == "journal_entry_not_found"
+    assert out["transient"] is False
+    assert refunds == [(TOOL_ID, {"prompt": "hi"})]
+    # the row was persisted as a structured error, so a later poll agrees
+    claim = next(iter(vault.rows))
+    assert vault.rows[claim]["status"] == "error"
+    again = await rt.fetch_async_job(claim, NPUB)
+    assert again["error_code"] == "journal_entry_not_found"
 
 
 async def test_fetch_closure_still_running(vault_and_rt):

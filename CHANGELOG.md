@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.62.2 — 2026-07-11
+
+### Changed — durable async jobs can now carry per-job state
+
+- **`register_job_spec` shape callback now receives the job's params: `shape_result(raw, params)`.** The detached (closure) path runs only the sealed `http_request` in Prefect, so `shape_result` — which settles the completed run back in the MCP — previously had no access to the job's identifying arguments (npub, entry_id, …). A stateful operator job (open a journal entry, record an evaluation) could not perform its param-dependent side effects on the detached path. `params` is the same kwargs `build_closure` received, threaded through so the settle step is symmetric with the in-process runner. **Breaking:** existing `shape_result(raw)` callbacks must accept a second `params` argument (ignore it if stateless).
+- **A `build_closure` that raises `AsyncJobSituation` now settles terminally.** `start_async_job` treats a curated situation from the build step (a pre-flight rejection — a not-found entry, an unfunded-provider probe) as a terminal, refundable outcome — persist the structured situation, refund the fare, return the situation response — instead of routing it through the generic "dispatch failed" in-process fallback. Symmetric with a runner raising one; lets a closure job reject cheaply before dispatch.
+
 ## 0.62.1 — 2026-07-09
 
 ### Security — hardening batch (audit-driven)
