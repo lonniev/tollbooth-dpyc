@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.62.4 — 2026-07-12
+
+### Fixed — a missing `[prefect]` extra degrades gracefully instead of poisoning the container
+
+- **`_ensure_async_executor` no longer crashes the first drill when the long-runner creds are vaulted but the `prefect` runtime is absent.** Constructing `PrefectClosureExecutor` imports `prefect` (the optional `[prefect]` extra); an operator who couriered `prefect_api_url`/`prefect_api_key` but pinned `tollbooth-dpyc[nostr]` (no `prefect`) hit an `ImportError` raised **after** `_async_executor_resolved` was already set — so the first `start_async_job` on each container errored and every later job short-circuited to in-process, silently. Observed as optionality's `deal_scenario` timing out `job_timed_out` with `recovered:true` while **no** flow run ever reached Prefect. The construction is now wrapped: a missing extra logs a loud, actionable warning (`add the [prefect] extra`), records the reason, and falls back to in-process — never propagates.
+- **`service_status.durable_jobs` now reports `detached_executor_resolved` and `detached_executor_error`.** `detached_executor_active: false` was ambiguous — lazily-unprobed vs. probed-and-failed look identical. The new fields make a misconfigured operator (creds present, extra missing, empty creds) diagnosable without reading container logs.
+
 ## 0.62.3 — 2026-07-11
 
 ### Fixed — a cold-vault hiccup no longer pins a container to in-process execution

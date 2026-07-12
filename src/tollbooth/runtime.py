@@ -185,6 +185,7 @@ class OperatorRuntime:
         self._async_executor: Any = InProcessExecutor(self)
         self._async_executor_explicit: bool = False  # True once set explicitly
         self._async_executor_resolved: bool = False  # True after one auto-probe
+        self._async_executor_error: str | None = None  # why detached is off, if so
         self._async_jobs_purge_last: float = 0.0  # monotonic, rate-limits purges
         # Shutdown state
         self._shutdown_triggered: bool = False
@@ -2096,15 +2097,34 @@ class OperatorRuntime:
         api_url = (creds.get("prefect_api_url") or "").strip()
         api_key = (creds.get("prefect_api_key") or "").strip()
         if not (api_url and api_key):
+            self._async_executor_error = "long-runner creds vaulted but empty"
             return
-        from tollbooth.async_executor import PrefectClosureExecutor
+        # The ``prefect`` runtime is the ``[prefect]`` extra. If an operator
+        # vaults the long-runner creds but forgets the extra, constructing the
+        # executor raises ImportError — degrade to in-process with a loud,
+        # actionable warning instead of crashing this (and every first) drill.
+        try:
+            from tollbooth.async_executor import PrefectClosureExecutor
 
-        self._async_executor = PrefectClosureExecutor(
-            deployment=self._DURABLE_DEPLOYMENT,
-            api_url=api_url,
-            api_key=api_key,
-            key_id=self.durable_key_id(),
-        )
+            self._async_executor = PrefectClosureExecutor(
+                deployment=self._DURABLE_DEPLOYMENT,
+                api_url=api_url,
+                api_key=api_key,
+                key_id=self.durable_key_id(),
+            )
+        except ImportError as exc:
+            self._async_executor_error = (
+                "long-runner creds vaulted but the 'prefect' runtime is missing "
+                "— pin tollbooth-dpyc[...,prefect]; running in-process"
+            )
+            logger.warning(
+                "Detached execution requested but prefect is not installed "
+                "(%s). Add the [prefect] extra to enable durable jobs; "
+                "falling back to in-process.",
+                exc,
+            )
+            return
+        self._async_executor_error = None
         logger.info(
             "Durable async executor enabled (deployment=%s, key_id=%s)",
             self._DURABLE_DEPLOYMENT,
@@ -3275,6 +3295,8 @@ def register_standard_tools(
                 "detached_executor_active": not isinstance(
                     rt._async_executor, InProcessExecutor
                 ),
+                "detached_executor_resolved": rt._async_executor_resolved,
+                "detached_executor_error": rt._async_executor_error,
             }
         return status
 

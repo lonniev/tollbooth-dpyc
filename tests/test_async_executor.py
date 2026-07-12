@@ -659,6 +659,43 @@ async def test_auto_resolve_retries_after_transient_creds_failure():
     assert rt._uses_closure_path("resolve") is True
 
 
+async def test_auto_resolve_degrades_gracefully_without_prefect_extra(monkeypatch):
+    """Creds vaulted but the [prefect] extra absent must NOT crash the drill.
+
+    Constructing the executor raises ImportError (prefect not installed); the
+    runtime must fall back to in-process, cache the (definitive) resolution,
+    and record an actionable error for service_status — never propagate."""
+    import tollbooth.async_executor as ae
+
+    class _NoPrefect:
+        def __init__(self, *a, **k):
+            raise ImportError("No module named 'prefect'")
+
+    monkeypatch.setattr(ae, "PrefectClosureExecutor", _NoPrefect)
+
+    rt = _make_runtime(FakeVault())
+    rt.operator_npub = lambda: NPUB
+
+    async def creds(field_names, *, service=None):
+        return {
+            "prefect_api_url": "https://api.prefect.cloud/x",
+            "prefect_api_key": "pk",
+            "closure_seal_key": KEY_HEX,
+        }
+
+    rt.load_credentials = creds
+    _register_http_spec(rt)
+
+    # Must not raise even though executor construction fails.
+    await rt._ensure_async_executor()
+    assert isinstance(rt._async_executor, InProcessExecutor)
+    assert rt._uses_closure_path("resolve") is False
+    # Definitive (a missing extra won't change without a redeploy) — cache it.
+    assert rt._async_executor_resolved is True
+    assert rt._async_executor_error is not None
+    assert "prefect" in rt._async_executor_error.lower()
+
+
 async def test_explicit_executor_disables_auto_resolve():
     rt = _make_runtime(FakeVault())
     rt.operator_npub = lambda: NPUB
