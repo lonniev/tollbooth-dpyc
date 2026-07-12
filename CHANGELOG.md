@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.62.3 — 2026-07-11
+
+### Fixed — a cold-vault hiccup no longer pins a container to in-process execution
+
+- **`_ensure_async_executor` no longer caches a *transient* creds-load failure.** It set `_async_executor_resolved = True` **before** loading the long-runner creds, so if the vault threw on a container's first job — a cold Neon on warm-up, exactly when the first request lands — the probe bailed and that container was pinned to **in-process execution for its whole life**, even though the creds were present and would load a moment later. Every deal/judge/tip on it then ran in-process and risked the `max_runtime` hard-cap (observed as a live `deal_scenario` timing out `job_timed_out` despite the detached executor being active elsewhere in the fleet). The resolution is now cached only on a **definitive** answer (creds loaded, present or absent); a load exception leaves the probe unresolved so the next job retries. A genuine "no creds" answer is still cached (no wasteful re-probing).
+
 ## 0.62.2 — 2026-07-11
 
 ### Changed — durable async jobs can now carry per-job state

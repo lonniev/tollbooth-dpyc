@@ -621,6 +621,42 @@ async def test_auto_resolve_stays_in_process_without_creds():
     rt.load_credentials = creds
     await rt._ensure_async_executor()
     assert isinstance(rt._async_executor, InProcessExecutor)
+    # a definitive "no creds" answer IS cached — no point re-probing every job
+    assert rt._async_executor_resolved is True
+
+
+async def test_auto_resolve_retries_after_transient_creds_failure():
+    """A cold-vault hiccup on the first job must NOT pin the container to
+    in-process for life. The probe stays unresolved on a load EXCEPTION and
+    installs the detached executor on the next job once the vault is reachable."""
+    rt = _make_runtime(FakeVault())
+    rt.operator_npub = lambda: NPUB
+    calls = {"n": 0}
+
+    async def creds(field_names, *, service=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("neon warming up")  # transient cold-vault throw
+        return {
+            "prefect_api_url": "https://api.prefect.cloud/x",
+            "prefect_api_key": "pk",
+            "closure_seal_key": KEY_HEX,
+        }
+
+    rt.load_credentials = creds
+    _register_http_spec(rt)
+
+    # First job: transient failure — stays in-process AND unresolved (will retry).
+    await rt._ensure_async_executor()
+    assert isinstance(rt._async_executor, InProcessExecutor)
+    assert rt._async_executor_resolved is False
+    assert rt._uses_closure_path("resolve") is False
+
+    # Next job: vault reachable — the detached executor now installs.
+    await rt._ensure_async_executor()
+    assert isinstance(rt._async_executor, PrefectClosureExecutor)
+    assert rt._async_executor_resolved is True
+    assert rt._uses_closure_path("resolve") is True
 
 
 async def test_explicit_executor_disables_auto_resolve():

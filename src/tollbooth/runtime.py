@@ -2066,16 +2066,21 @@ class OperatorRuntime:
     async def _ensure_async_executor(self) -> None:
         """Auto-install a detached executor when long-runner creds are vaulted.
 
-        Runs once (cached). If the operator never set one explicitly and the
-        long-runner operator secrets (LONGRUNNER_CREDENTIAL_FIELDS, in the
-        operator's own credential template) are present, build a
+        Cached once a DEFINITIVE answer is known. If the operator never set one
+        explicitly and the long-runner operator secrets (LONGRUNNER_CREDENTIAL_FIELDS,
+        in the operator's own credential template) are present, build a
         ``PrefectClosureExecutor`` bound to this operator's key_id. Otherwise
         leave the in-process default — durable execution is purely opt-in by
         credential delivery, with no per-server bootstrap code.
+
+        A *transient* creds-load failure (a cold vault on container warm-up — the
+        first job is exactly when Neon is most likely to hiccup) is NOT cached, so
+        the next job retries. Caching a transient miss would pin this container to
+        in-process execution for its whole life despite the creds being present,
+        and every deal/judge/tip would then risk the in-process hard-cap.
         """
         if self._async_executor_resolved or self._async_executor_explicit:
             return
-        self._async_executor_resolved = True
         try:
             # Long-runner creds are normal operator secrets in the operator's own
             # credential template (LONGRUNNER_CREDENTIAL_FIELDS) — default service.
@@ -2083,8 +2088,11 @@ class OperatorRuntime:
                 ["prefect_api_url", "prefect_api_key"],
             )
         except Exception as exc:
-            logger.debug("long-runner creds not loadable: %s", exc)
+            # Transient — leave unresolved so the next job retries the probe.
+            logger.debug("long-runner creds not loadable (will retry next job): %s", exc)
             return
+        # Definitive answer (creds present or absent) — cache the resolution.
+        self._async_executor_resolved = True
         api_url = (creds.get("prefect_api_url") or "").strip()
         api_key = (creds.get("prefect_api_key") or "").strip()
         if not (api_url and api_key):
