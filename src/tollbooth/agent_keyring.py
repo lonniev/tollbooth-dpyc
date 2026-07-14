@@ -29,23 +29,18 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from tollbooth.identity_proof import create_proof
+from tollbooth.patron_signer import PatronSigner
 
 
 def signed_arguments(
     tool_name: str, arguments: dict[str, Any] | None, npub: str, nsec: str
 ) -> dict[str, Any]:
-    """Return *arguments* with the agent's identity + a fresh proof injected.
+    """Convenience free-function form of :meth:`PatronSigner.authenticate`.
 
-    Pure and side-effect-free (the one exception being that ``create_proof`` reads the
-    clock): sets ``npub`` if the caller didn't, and always (re)signs a fresh in-memory
-    kind-27235 ``dpop_token`` bound to ``tool_name`` — a per-call proof of possession,
-    never stored. Kept separate from the middleware so it is testable without FastMCP.
+    The signing logic lives in :class:`~tollbooth.patron_signer.PatronSigner` (the single
+    patron-signing home); this is a thin wrapper for one-shot use and for tests.
     """
-    args = dict(arguments or {})
-    args.setdefault("npub", npub)
-    args["dpop_token"] = create_proof(nsec, tool_name)
-    return args
+    return PatronSigner(npub, nsec).authenticate(tool_name, arguments)
 
 
 def build_keyring(upstream_url: str, npub: str, nsec: str) -> Any:
@@ -56,12 +51,14 @@ def build_keyring(upstream_url: str, npub: str, nsec: str) -> Any:
     from fastmcp.server import create_proxy
     from fastmcp.server.middleware import Middleware
 
+    signer = PatronSigner(npub, nsec)  # one signing hand for this keyring
+
     class _DpopAuthMiddleware(Middleware):
         """Inject (npub, fresh kind-27235 proof) into every tool call before forwarding."""
 
         async def on_call_tool(self, context: Any, call_next: Any) -> Any:
             params = context.message
-            new_args = signed_arguments(params.name, params.arguments, npub, nsec)
+            new_args = signer.authenticate(params.name, params.arguments)
             forwarded = context.copy(message=params.model_copy(update={"arguments": new_args}))
             return await call_next(forwarded)
 

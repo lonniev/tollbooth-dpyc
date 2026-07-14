@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from tollbooth.patron_signer import PatronSigner
+
 try:
     from fastmcp import Client  # type: ignore[import-untyped]
 except ImportError:
@@ -49,16 +51,9 @@ class AuthorityCertifier:
         certify_tool_name: str = "authority_certify_credits",
     ) -> None:
         self._authority_url = authority_url
-        self._operator_npub = operator_npub
-        self._operator_nsec = operator_nsec
         self._certify_tool_name = certify_tool_name
-
-    def _make_proof(self, tool_name: str) -> str:
-        """Create a kind-27235 proof for the given tool."""
-        if not self._operator_nsec:
-            return ""
-        from tollbooth.identity_proof import create_proof
-        return create_proof(self._operator_nsec, tool_name)
+        # The one home for patron-side signing (shared with the agent keyring).
+        self._signer = PatronSigner(operator_npub, operator_nsec)
 
     async def certify_credits(self, amount_sats: int) -> dict[str, Any]:
         """Call the Authority's certify_credits tool and return the certificate dict.
@@ -76,17 +71,14 @@ class AuthorityCertifier:
 
         try:
             async with Client(self._authority_url, auth="oauth") as client:
+                # The Authority's verify_proof gate binds the proof to the runtime
+                # mcp_name (`<slug>_<func>`, e.g. "authority_certify_credits") since
+                # wheel 0.24.0 — so we sign for the exact wire name we invoke.
                 result = await client.call_tool(
                     self._certify_tool_name,
-                    {
-                        "npub": self._operator_npub,
-                        "amount_sats": amount_sats,
-                        # The Authority's verify_proof gate uses the runtime
-                        # mcp_name (`<slug>_<func>`, e.g. "authority_certify_credits")
-                        # since wheel 0.24.0. Sign for whatever wire name the
-                        # caller is invoking — that's what the verifier sees.
-                        "dpop_token": self._make_proof(self._certify_tool_name),
-                    },
+                    self._signer.authenticate(
+                        self._certify_tool_name, {"amount_sats": amount_sats}
+                    ),
                 )
         except AuthorityCertifyError:
             raise
@@ -156,12 +148,12 @@ class AuthorityCertifier:
 
         try:
             async with Client(self._authority_url, auth="oauth") as client:
+                # NOTE: historically signs for "check_balance" (not the wire name
+                # "authority_check_balance"); preserved as-is by this refactor. See the
+                # tool-name-mismatch follow-up.
                 result = await client.call_tool(
                     "authority_check_balance",
-                    {
-                        "npub": self._operator_npub,
-                        "dpop_token": self._make_proof("check_balance"),
-                    },
+                    self._signer.authenticate("check_balance"),
                 )
         except Exception as e:
             raise AuthorityCertifyError(

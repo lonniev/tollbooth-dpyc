@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## 0.63.0 — 2026-07-14
 
+### Added — `PatronSigner`: the single home for patron-side proof signing
+
+- `tollbooth.patron_signer.PatronSigner` holds a patron's `(npub, nsec)` and authenticates
+  its outgoing operator calls — `proof(tool)` mints a fresh, tool-bound kind-27235 proof;
+  `authenticate(tool, args)` returns the ready payload (npub + fresh `dpop_token`). It is
+  now the one place server-side Python signs on a patron's behalf (the peer of iOS's
+  Keychain-backed native signer). Empty `nsec` yields an empty proof (parity with prior behaviour).
+- **`AuthorityCertifier` refactored onto `PatronSigner`** — its hand-rolled `_make_proof`
+  and inline payload assembly are gone; it holds a `PatronSigner` and calls `authenticate()`.
+  Behaviour preserved exactly (including the historical `check_balance` proof-name, flagged
+  for a separate follow-up). The agent keyring uses the same signer.
+
 ### Added — `tollbooth.agent_keyring`: an authenticated passthrough to a DPYC operator
 
 - A reusable **agent keyring** — the peer of `AuthorityClient`. A DPYC agent (a patron
