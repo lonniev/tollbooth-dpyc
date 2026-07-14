@@ -3,6 +3,35 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.63.0 — 2026-07-14
+
+### Added — `PatronSigner`: the single home for patron-side proof signing
+
+- `tollbooth.patron_signer.PatronSigner` holds a patron's `(npub, nsec)` and authenticates
+  its outgoing operator calls — `proof(tool)` mints a fresh, tool-bound kind-27235 proof;
+  `authenticate(tool, args)` returns the ready payload (npub + fresh `dpop_token`). It is
+  now the one place server-side Python signs on a patron's behalf (the peer of iOS's
+  Keychain-backed native signer). Empty `nsec` yields an empty proof (parity with prior behaviour).
+- **`AuthorityCertifier` refactored onto `PatronSigner`** — its hand-rolled `_make_proof`
+  and inline payload assembly are gone; it holds a `PatronSigner` and calls `authenticate()`.
+  Behaviour preserved exactly (including the historical `check_balance` proof-name, flagged
+  for a separate follow-up). The agent keyring uses the same signer.
+
+### Added — `tollbooth.agent_keyring`: an authenticated passthrough to a DPYC operator
+
+- A reusable **agent keyring** — the peer of `AuthorityClient`. A DPYC agent (a patron
+  holding its own nsec) fronts an upstream paid operator through this FastMCP proxy; on
+  every forwarded call it injects the agent's npub and a **freshly-signed, in-memory**
+  kind-27235 proof bound to the tool being called (`create_proof`). Nothing is stored,
+  and nothing new is *granted* per call — the standing grant is possession of the nsec
+  plus a funded balance; the proof is only the mechanical demonstration of possession.
+- Run as a local stdio MCP server (e.g. in a CI agent's `--mcp-config`) so the agent
+  calls the operator's verbs plainly while the nsec stays in the keyring process, out of
+  the agent's own reasoning context:
+  `DPYC_KEYRING_UPSTREAM=... DPYC_KEYRING_NPUB=... DPYC_KEYRING_NSEC=... python -m tollbooth.agent_keyring`.
+- New optional extra `keyring` (pulls FastMCP; imported lazily). `signed_arguments()` is a
+  pure, FastMCP-free helper (the injection logic) and is unit-tested independently.
+
 ## 0.62.4 — 2026-07-12
 
 ### Fixed — a missing `[prefect]` extra degrades gracefully instead of poisoning the container
