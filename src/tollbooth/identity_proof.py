@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -104,7 +105,12 @@ def create_proof(nsec: str, tool_name: str) -> str:
         kind=PROOF_EVENT_KIND,
         content="",
         created_at=int(time.time()),
-        tags=[["u", tool_name]],
+        # A per-call nonce so two proofs for the same tool within the same wall-clock
+        # second are never byte-identical. Without it their event ids collide and the
+        # verifier's replay guard rejects the second as already-seen (rapid same-tool
+        # callers — a seed loop, an agent keyring — would spuriously fail). The nonce is
+        # signed but otherwise inert: verify_proof reads only the ``u`` tag.
+        tags=[["u", tool_name], ["nonce", secrets.token_hex(16)]],
     )
     event.sign(pk.hex())
     return json.dumps(event.to_dict())
