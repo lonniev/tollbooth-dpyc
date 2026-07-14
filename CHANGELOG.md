@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.63.1 — 2026-07-14
+
+### Fixed — `create_proof` mints a unique event per call (no more replay-collision)
+
+- `create_proof` produced whole-second, fixed-body kind-27235 events, so two proofs for
+  the **same tool** minted within the **same wall-clock second** were byte-identical →
+  same event id → the verifier's replay guard rejected the second as already-seen. Rapid
+  same-tool callers (a seed loop, an agent keyring) hit spurious "Invalid identity proof".
+- Each proof now carries a per-call `nonce` tag (`secrets.token_hex(16)`), signed but
+  otherwise inert — `verify_proof` reads only the `u` tag — so distinct mints can never
+  collide by construction. Replay protection is unaffected (re-presenting the same token
+  is still rejected).
+
 ## 0.63.0 — 2026-07-14
 
 ### Added — `PatronSigner`: the single home for patron-side proof signing
