@@ -3,6 +3,23 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.63.0 — 2026-07-14
+
+### Added — `tollbooth.agent_keyring`: an authenticated passthrough to a DPYC operator
+
+- A reusable **agent keyring** — the peer of `AuthorityClient`. A DPYC agent (a patron
+  holding its own nsec) fronts an upstream paid operator through this FastMCP proxy; on
+  every forwarded call it injects the agent's npub and a **freshly-signed, in-memory**
+  kind-27235 proof bound to the tool being called (`create_proof`). Nothing is stored,
+  and nothing new is *granted* per call — the standing grant is possession of the nsec
+  plus a funded balance; the proof is only the mechanical demonstration of possession.
+- Run as a local stdio MCP server (e.g. in a CI agent's `--mcp-config`) so the agent
+  calls the operator's verbs plainly while the nsec stays in the keyring process, out of
+  the agent's own reasoning context:
+  `DPYC_KEYRING_UPSTREAM=... DPYC_KEYRING_NPUB=... DPYC_KEYRING_NSEC=... python -m tollbooth.agent_keyring`.
+- New optional extra `keyring` (pulls FastMCP; imported lazily). `signed_arguments()` is a
+  pure, FastMCP-free helper (the injection logic) and is unit-tested independently.
+
 ## 0.62.4 — 2026-07-12
 
 ### Fixed — a missing `[prefect]` extra degrades gracefully instead of poisoning the container

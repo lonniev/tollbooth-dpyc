@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tollbooth-dpyc"
-version = "0.62.4"
+version = "0.63.0"
 description = "Don't Pester Your Customer™ — Bitcoin Lightning micropayments for MCP servers"
 readme = "README.md"
 license = "Apache-2.0"
@@ -41,6 +41,12 @@ authority = [
     "pydantic-settings>=2.0",
 ]
 qr = ["segno>=1.6.0"]
+# tollbooth.agent_keyring — the reusable agent keyring (a FastMCP proxy that signs a
+# fresh proof per call). Only an agent runtime that runs the keyring installs this;
+# FastMCP is imported lazily, never at module load.
+keyring = [
+    "fastmcp>=3.0",
+]
 ots = []  # Reserved — no extra deps needed (uses stdlib hashlib + existing httpx)
 x402 = [
     "x402>=2.8.0",
