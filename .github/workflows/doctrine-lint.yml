@@ -1,0 +1,13 @@
+# Thin caller — deterministic doctrine/wording lint on changed prose files.
+name: Doctrine Lint
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  doctrine-lint:
+    uses: lonniev/dpyc-community/.github/workflows/doctrine-lint.yml@main
