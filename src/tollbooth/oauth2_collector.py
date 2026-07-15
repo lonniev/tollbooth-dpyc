@@ -352,6 +352,9 @@ async def retrieve_code_from_collector(
             raise OAuthCollectorError(
                 f"Collector returned HTTP {resp.status_code}"
             )
+        # Response may be SSE (text/event-stream) or plain JSON — our Accept
+        # header allows both, so the collector may answer with either. Handle
+        # the SSE framing first, then fall back to a plain-JSON body.
         text = resp.text
         for line in text.strip().split("\n"):
             if line.startswith("data: "):
@@ -360,4 +363,13 @@ async def retrieve_code_from_collector(
                 if not content.get("found"):
                     return None
                 return decrypt_collector_code(content["code"], state_token)
-    return None
+
+        # Plain JSON response (Content-Type: application/json, no SSE framing).
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            return None
+        content = data.get("result", {}).get("structuredContent", {})
+        if not content.get("found"):
+            return None
+        return decrypt_collector_code(content["code"], state_token)

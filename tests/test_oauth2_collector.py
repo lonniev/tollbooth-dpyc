@@ -339,3 +339,74 @@ class TestRetrieveCodeFromCollector:
         assert result == "xyz"
         call_args = mock_http.post.call_args
         assert call_args[0][0] == "https://collector.example.com/mcp/"
+
+    @pytest.mark.asyncio
+    async def test_returns_decrypted_code_on_plain_json(self):
+        # The collector may answer with Content-Type: application/json
+        # (no SSE "data: " framing) — our Accept header allows it. The code
+        # must be detected here too, not treated as "not yet available".
+        state = "npub1json"
+        encrypted = _fake_encrypt("auth-code-json", state)
+
+        json_body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "structuredContent": {"found": True, "code": encrypted}
+                },
+            }
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = json_body
+        mock_response.json.return_value = json.loads(json_body)
+
+        mock_http = AsyncMock()
+        mock_http.post.return_value = mock_response
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "tollbooth.oauth2_collector.httpx.AsyncClient", return_value=mock_http
+        ):
+            result = await retrieve_code_from_collector(
+                "https://collector.example.com", state
+            )
+
+        assert result == "auth-code-json"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_not_found_plain_json(self):
+        json_body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "structuredContent": {
+                        "found": False,
+                        "error": "not found or expired",
+                    }
+                },
+            }
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = json_body
+        mock_response.json.return_value = json.loads(json_body)
+
+        mock_http = AsyncMock()
+        mock_http.post.return_value = mock_response
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "tollbooth.oauth2_collector.httpx.AsyncClient", return_value=mock_http
+        ):
+            result = await retrieve_code_from_collector(
+                "https://collector.example.com", "npub1json"
+            )
+
+        assert result is None
