@@ -290,6 +290,31 @@ async def test_request_sends_challenge_and_returns_token(patron):
 
 
 @pytest.mark.asyncio
+async def test_request_greeting_includes_request_timestamp(patron):
+    # Issue #120: the proof-request preamble (the greeting the courier places
+    # directly above the @@@ fields) must carry the request's date/time so the
+    # patron sees when the challenge was raised. Kept to one terse line.
+    ex = FakeExchange(candidates=[])
+    rt = OperatorRuntime(tool_registry={}, service_name="Test Operator")
+    rt._courier = SimpleNamespace(
+        _exchange=ex,
+        open_channel=AsyncMock(return_value={
+            "success": True, "dpop_token": "bold-hawk-42", "rendezvous_relay": PIN,
+        }),
+    )
+    rt.store_patron_session = AsyncMock()
+    tools = _register(rt)
+
+    await tools["request_npub_proof"](patron_npub=patron)
+
+    greeting = rt._courier.open_channel.await_args.kwargs["greeting"]
+    assert "Requested:" in greeting
+    # A UTC date/time stamp of the shape YYYY-MM-DD HH:MM UTC.
+    import re
+    assert re.search(r"Requested: \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC", greeting)
+
+
+@pytest.mark.asyncio
 async def test_request_propagates_open_channel_failure(patron):
     ex = FakeExchange(candidates=[])
     rt = OperatorRuntime(tool_registry={}, service_name="Test")

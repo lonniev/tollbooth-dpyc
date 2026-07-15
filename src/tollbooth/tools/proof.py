@@ -70,6 +70,12 @@ async def request_npub_proof_tool(
             "you own this npub. Reply with any text to confirm. "
             "Your signed Nostr DM is the proof."
         )
+        # Stamp the request time into the preamble so the patron can see
+        # when the challenge was raised. Kept to a single terse line — proof
+        # DMs are succinct notifications, not documents.
+        from datetime import datetime, timezone
+        requested_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        _greeting = f"{_greeting}\nRequested: {requested_at}"
         result = await courier.open_channel(
             PROOF_SERVICE,
             greeting=_greeting,
