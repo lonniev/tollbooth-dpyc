@@ -3,6 +3,23 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.63.2 — 2026-07-15
+
+### Fixed — OAuth2 collector retrieval no longer drops plain-JSON responses
+
+- `retrieve_code_from_collector` only parsed Server-Sent-Events framing (lines beginning
+  `data: `). When the collector answered with a plain `Content-Type: application/json`
+  body — which the request's own `Accept: application/json, text/event-stream` header
+  permits — no line matched and the function fell through to `return None`.
+  `check_oauth_status` reads that `None` as "code not yet available" and reports `pending`,
+  so a completed OAuth flow appeared stuck forever.
+- The retrieval now accepts **either** framing: it decodes SSE `data:` frames as before and
+  falls back to parsing the whole body as a single JSON object. This removes the dependency
+  on the collector host's transport-framing default, so a future FastMCP/host change that
+  flips SSE↔JSON cannot re-break the path. Reuses the SDK's `decrypt_collector_code`
+  (no new crypto). Closes the OAuth `pending` regression seen by collector consumers
+  (e.g. schwab-mcp) after the 2026-07-09 collector redeploy. (#116, #118)
+
 ## 0.63.1 — 2026-07-14
 
 ### Fixed — `create_proof` mints a unique event per call (no more replay-collision)
