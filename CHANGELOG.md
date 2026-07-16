@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.63.3 — 2026-07-16
+
+### Added — npub-proof challenge DM now stamps the request time
+
+- The npub-ownership proof-request DM omitted *when* the challenge was raised. `request_npub_proof_tool`
+  now prepends a single terse `Requested: <YYYY-MM-DD HH:MM UTC>` line to the greeting the courier
+  places directly above the `@@@` fields, so the timestamp lands in the preamble without touching the
+  shared `open_channel` path used by every other credential exchange. Proof DMs stay succinct
+  notifications, not documents. Closes #120.
+
 ## 0.63.2 — 2026-07-15
 
 ### Fixed — OAuth2 collector retrieval no longer drops plain-JSON responses
