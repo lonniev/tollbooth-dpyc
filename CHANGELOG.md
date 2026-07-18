@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## 0.63.4 — 2026-07-18
 
 ### Fixed — operator display name now reaches the community roster
 
@@ -206,7 +206,7 @@ Tradeoff: ~1 extra Neon round-trip per paid call — the deliberate cost of maki
 
 ### Fixed — detached dispatch actually reaches the standalone Prefect account
 
-- **`PrefectClosureExecutor` never authenticated to the operator's standalone Prefect account**, so on a host platform that sets its own `PREFECT_*` env (e.g. Prefect Horizon / FastMCP Cloud), `run_deployment`/poll targeted the *wrong* account (401 / deployment-not-found). `submit` raised, and `start_async_job`'s dispatch-failure handler silently fell back to the **in-process runner** — so detached execution never actually ran from the MCP front, and the very long jobs it exists to protect still died on serverless recycle. Quick jobs masked it by completing in-process before recycling.
+- **`PrefectClosureExecutor` never authenticated to the operator's standalone Prefect account**, so on a host platform that sets its own `PREFECT_*` env (e.g. Prefect Horizon), `run_deployment`/poll targeted the *wrong* account (401 / deployment-not-found). `submit` raised, and `start_async_job`'s dispatch-failure handler silently fell back to the **in-process runner** — so detached execution never actually ran from the MCP front, and the very long jobs it exists to protect still died on serverless recycle. Quick jobs masked it by completing in-process before recycling.
 - Root cause: `poll` used `os.environ.setdefault(...)`, a **no-op** when the host already set those vars; `submit` set nothing at all. Replaced both with `temporary_settings({PREFECT_API_URL, PREFECT_API_KEY})` — which *re-derives* settings (not defaults them) and is contextvar-scoped so concurrent operators don't clobber each other — forcing the vaulted standalone-account creds for the duration of each `run_deployment` / client call. Verified against a deliberately-wrong ambient env (401 without the override; correct account inside it).
 
 ## 0.55.1 — 2026-06-29
@@ -272,7 +272,7 @@ Tradeoff: ~1 extra Neon round-trip per paid call — the deliberate cost of maki
 
 ### Added — `resolve_service_version()` (one fleet-wide version resolver)
 
-- New `tollbooth.version.resolve_service_version(dist_name, source_hint=None)` (also exported as `tollbooth.resolve_service_version`). Resolves a service's own version from `pyproject [project].version`: installed distribution metadata first, with a from-source `pyproject.toml` fallback (walks up from `source_hint`, typically the caller's `__file__`) for deploys that run a checkout without installing it — e.g. FastMCP Cloud running a flat `py-modules` app, where `importlib.metadata` raises `PackageNotFoundError`. Returns `"0.0.0"` if unresolvable.
+- New `tollbooth.version.resolve_service_version(dist_name, source_hint=None)` (also exported as `tollbooth.resolve_service_version`). Resolves a service's own version from `pyproject [project].version`: installed distribution metadata first, with a from-source `pyproject.toml` fallback (walks up from `source_hint`, typically the caller's `__file__`) for deploys that run a checkout without installing it — e.g. Horizon running a flat `py-modules` app, where `importlib.metadata` raises `PackageNotFoundError`. Returns `"0.0.0"` if unresolvable.
 - Every operator and Authority can now call this instead of carrying its own copy, so version reporting in `service_status` is identical across the fleet and there is no hand-maintained version constant to drift — `/release` bumping pyproject is the only lever.
 - The wheel dogfoods it for its own `__version__` (was a bare `importlib.metadata.version` with no fallback).
 
@@ -2703,7 +2703,7 @@ design), `check_price` (per-npub pricing nuance), `service_status` (system-level
 
 ## [0.1.151] — 2026-03-29
 
-- fix: use correct FastMCP Cloud env vars for build_info
+- fix: use correct Horizon env vars for build_info
 
 ## [0.1.150] — 2026-03-29
 
