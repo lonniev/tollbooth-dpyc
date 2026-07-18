@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.64.1 — 2026-07-18
+
+### Changed — field reports need no per-operator template edit
+
+- The runtime now auto-includes the optional `github_repo` / `github_token` field-report
+  secrets in every operator's courier-facing credential template
+  (`OperatorRuntime._courier_operator_template`). Because the Secure Courier silently drops
+  fields not present in the template, `report_issue` previously required each operator to
+  spread `ISSUE_REPORTING_CREDENTIAL_FIELDS` into its own template before the secrets could be
+  delivered. Now an operator enables field reports fleet-wide by simply couriering the two
+  secrets — no code change. The fields stay optional, so onboarding readiness (which reads the
+  declared template) and operators that never use field reports are unaffected. Provisioning
+  across the fleet is therefore just the Renovate SDK pin bump plus the per-operator Secure
+  Courier delivery.
+
 ## 0.64.0 — 2026-07-18
 
 ### Added — `report_issue`: patron-filed field reports as GitHub issues
