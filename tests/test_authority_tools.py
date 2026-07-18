@@ -293,6 +293,49 @@ async def test_register_operator_happy_provisions_and_registers():
     assert r["commit_url"] == "https://commit"
 
 
+def _provision_mocks(oracle):
+    """Common provisioning mocks for register_operator, with a stubbed oracle call."""
+    return patch.multiple(
+        at,
+        require_proof=AsyncMock(return_value=None),
+        _require_authority_consent=AsyncMock(return_value=None),
+        _resend_bootstrap_dm=AsyncMock(),
+        _register_operator_via_oracle=oracle,
+    ), patch.multiple(
+        "tollbooth.authority.tenant_provisioner",
+        ensure_bootstrap_table=AsyncMock(),
+        provision_operator_schema=AsyncMock(return_value=("op_schema", "pw")),
+        store_operator_config=AsyncMock(),
+        neon_url_for_operator=MagicMock(return_value="postgresql://op_schema:pw@h/db"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_register_operator_forwards_display_name_to_roster():
+    oracle = AsyncMock(return_value="https://commit")
+    outer, inner = _provision_mocks(oracle)
+    with _tools() as tools, outer, inner:
+        await tools["register_operator"](
+            npub="npub1operatorlongkeyvalue", dpop_token="p",
+            service_url="https://svc", display_name="my-service", authority_proof="ap",
+        )
+    # The operator's chosen name reaches the community roster verbatim.
+    assert oracle.await_args.kwargs["display_name"] == "my-service"
+
+
+@pytest.mark.asyncio
+async def test_register_operator_falls_back_to_short_npub_without_name():
+    npub = "npub1operatorlongkeyvalue0000"
+    oracle = AsyncMock(return_value="https://commit")
+    outer, inner = _provision_mocks(oracle)
+    with _tools() as tools, outer, inner:
+        await tools["register_operator"](
+            npub=npub, dpop_token="p", service_url="https://svc", authority_proof="ap",
+        )
+    # No name supplied -> the roster is named by a truncated npub, never the full key.
+    assert oracle.await_args.kwargs["display_name"] == npub[:16] + "..."
+
+
 @pytest.mark.asyncio
 async def test_update_operator_nothing_to_update():
     with _tools() as tools:

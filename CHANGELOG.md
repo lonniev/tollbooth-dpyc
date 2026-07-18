@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed — operator display name now reaches the community roster
+
+- `register_operator` never carried the operator's chosen name: `_provision_operator`
+  hardcoded `display_name=npub[:16] + "..."`, so every Authority-mediated registration
+  landed in `members/operators/*.json` named by a truncated npub (both `display_name` and
+  `services[].name`). The `register_operator` tool now accepts an optional `display_name`
+  and threads it through `_provision_operator` → `_register_operator_via_oracle`, falling
+  back to the truncated npub only when no name is supplied. The deferred `approve_adoption`
+  path forwards `display_name` too (empty until the adoption store captures one).
+
 ## 0.63.3 — 2026-07-16
 
 ### Added — npub-proof challenge DM now stamps the request time
