@@ -3,6 +3,24 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.64.2 — 2026-07-18
+
+### Fixed — delivered operator secrets are now visible in onboarding status
+
+- `onboarding_status` enumerated only the operator's *declared* credential template, so
+  operator secrets delivered into the auto-included optional slots (the field-report
+  `github_repo` / `github_token`, added to the courier template in 0.64.1) vaulted correctly
+  but were invisible everywhere — including Pricing Studio, which reads this surface. It now
+  enumerates the *effective* template (declared + auto-included) via the new pure
+  `classify_operator_secrets`, so a delivered operator secret appears under `configured`.
+  Auto-included fields that were never delivered are omitted entirely (not listed as
+  `optional_missing`), so operators who don't use field reports aren't nagged, and onboarding
+  readiness is unchanged. Resolves the first live Scout field report (tollbooth-sample#64 →
+  tollbooth-dpyc#132): an operator can now confirm which field-report secrets are set and
+  which repo reports route to. (Rotate = re-courier the field; revoke = `forget_credentials`;
+  patron-scope listing already exists as `get_patron_credential_fields`. Per-field delivery
+  timestamps remain a future enhancement.)
+
 ## 0.64.1 — 2026-07-18
 
 ### Changed — field reports need no per-operator template edit

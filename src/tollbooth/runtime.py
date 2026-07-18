@@ -78,6 +78,48 @@ def resolve_npub(npub: str) -> str:
     return npub
 
 
+def classify_operator_secrets(
+    effective_fields: dict[str, Any],
+    declared_names: set[str],
+    vault_names: set[str],
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+    """Sort operator credential fields into (configured, missing, optional_missing).
+
+    Iterates the EFFECTIVE template — the operator's declared secrets plus the optional
+    field-report secrets the runtime auto-includes — so a *delivered* operator secret
+    (e.g. a couriered ``github_repo``/``github_token``) surfaces under ``configured`` and is
+    therefore visible in any client that reads onboarding status, Pricing Studio included.
+
+    Rules:
+      - delivered (in vault)                    → configured
+      - undelivered AND declared, required      → missing
+      - undelivered AND declared, optional      → optional_missing
+      - undelivered AND only auto-included      → omitted entirely
+
+    That last rule is deliberate: auto-included fields are opt-in *by delivery*, so an
+    operator that never uses field reports must not be nagged with a permanent
+    "optional_missing: github_token". They appear only once actually delivered.
+    """
+    configured: list[dict[str, str]] = []
+    missing: list[dict[str, str]] = []
+    optional_missing: list[dict[str, str]] = []
+    for name, spec in effective_fields.items():
+        if name in vault_names:
+            configured.append({
+                "field": name, "category": "secret",
+                "status": "configured", "lifecycle": spec.lifecycle,
+            })
+        elif name in declared_names:
+            entry = {
+                "field": name, "category": "secret", "status": "missing",
+                "lifecycle": spec.lifecycle,
+                "how": spec.description if spec.description else "Deliver via Secure Courier.",
+            }
+            (missing if spec.required else optional_missing).append(entry)
+        # else: an auto-included optional field not yet delivered — omit (no nag).
+    return configured, missing, optional_missing
+
+
 class OperatorRuntime:
     """Core DPYC protocol engine shared by all operators.
 
@@ -1199,29 +1241,24 @@ class OperatorRuntime:
                 "status": "configured",
             })
 
-        # Check operator credential template fields against vault
+        # Check operator credential fields against the vault. We enumerate the EFFECTIVE
+        # template (declared secrets + the auto-included optional field-report secrets) so a
+        # delivered operator secret surfaces under `configured` and is visible in Studio — but
+        # an auto-included field that was never delivered is omitted, not nagged. See
+        # classify_operator_secrets.
         if self._operator_credential_template is not None:
+            effective = self._courier_operator_template()
             vault_creds = await self._load_vault_creds(
                 self._operator_credential_template.service,
             )
-            for name, spec in self._operator_credential_template.fields.items():
-                if name in vault_creds:
-                    configured.append({
-                        "field": name, "category": "secret", "status": "configured",
-                        "lifecycle": spec.lifecycle,
-                    })
-                else:
-                    entry = {
-                        "field": name,
-                        "category": "secret",
-                        "status": "missing",
-                        "lifecycle": spec.lifecycle,
-                        "how": spec.description if spec.description else "Deliver via Secure Courier.",
-                    }
-                    if spec.required:
-                        missing.append(entry)
-                    else:
-                        optional_missing.append(entry)
+            cfg, miss, opt = classify_operator_secrets(
+                effective.fields,
+                set(self._operator_credential_template.fields),
+                set(vault_creds),
+            )
+            configured.extend(cfg)
+            missing.extend(miss)
+            optional_missing.extend(opt)
 
         ready = len(missing) == 0
         if ready:
