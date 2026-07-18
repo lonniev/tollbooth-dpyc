@@ -643,6 +643,7 @@ async def _provision_operator(
     runtime: OperatorRuntime,
     npub: str,
     service_url: str,
+    display_name: str = "",
 ) -> dict[str, Any]:
     """Provision an operator: ledger row + isolated Neon tenant + registry.
 
@@ -695,7 +696,9 @@ async def _provision_operator(
         signer = _get_nostr_signer()
         commit_url = await _register_operator_via_oracle(
             operator_npub=npub,
-            display_name=npub[:16] + "...",
+            # The operator's chosen name (from the adopting app's UI); only fall back to a
+            # truncated npub when no name was supplied, so the roster is never named by npub.
+            display_name=display_name or (npub[:16] + "..."),
             service_url=service_url,
             authority_npub=signer.npub,
         )
@@ -768,6 +771,14 @@ def register_authority_tools(
             str,
             Field(description="Your MCP endpoint URL (e.g. 'https://my-service.fastmcp.app/mcp')."),
         ] = "",
+        display_name: Annotated[
+            str,
+            Field(description=(
+                "Human-readable name for the Operator service, shown in the community "
+                "roster (e.g. 'my-service'). If empty, the roster falls back to a "
+                "truncated npub."
+            )),
+        ] = "",
         authority_proof: Annotated[
             str,
             Field(description=(
@@ -810,7 +821,7 @@ def register_authority_tools(
             return err
 
         # Inline-consent path: provisioning is the shared effect.
-        return await _provision_operator(runtime, npub, service_url)
+        return await _provision_operator(runtime, npub, service_url, display_name)
 
     @tool
     async def update_operator(
@@ -1261,7 +1272,12 @@ def register_authority_tools(
                 "error": f"Operator {operator_npub[:16]}... is already provisioned.",
             }
 
-        result = await _provision_operator(runtime, operator_npub, row.get("service_url", ""))
+        # Deferred path carries the name if the request captured one; today the adoption
+        # store has no display_name column, so this is "" and falls back to a short npub.
+        # The inline register_operator path (the app's "adopt") is where the name flows.
+        result = await _provision_operator(
+            runtime, operator_npub, row.get("service_url", ""), row.get("display_name", ""),
+        )
         await adoption_store.mark(vault, operator_npub, adoption_store.PROVISIONED)
         result["adoption"] = "approved"
         return result
