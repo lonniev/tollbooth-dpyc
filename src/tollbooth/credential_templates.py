@@ -60,6 +60,24 @@ LONGRUNNER_CREDENTIAL_FIELDS: dict[str, FieldSpec] = {
     ),
 }
 
+# Canonical field specs for the standard ``report_issue`` tool. Any operator that
+# wants patrons to file field reports as GitHub issues spreads these into its OWN
+# operator_credential_template, e.g. ``fields={**mine, **ISSUE_REPORTING_CREDENTIAL_FIELDS}``.
+# They are NORMAL operator secrets — same service, same onboarding/Studio surface, same
+# Secure Courier path. Both are optional (required=False): without them the ``report_issue``
+# tool degrades gracefully to an "issue reporting not configured" situation rather than
+# failing. The token needs only ``issues:write`` on ``github_repo`` — never code scope.
+ISSUE_REPORTING_CREDENTIAL_FIELDS: dict[str, FieldSpec] = {
+    "github_repo": FieldSpec(
+        required=False, sensitive=False,
+        description="Field reports: the owner/repo this operator files patron issues to (e.g. lonniev/schwab-mcp)",
+    ),
+    "github_token": FieldSpec(
+        required=False, sensitive=True,
+        description="Field reports: a fine-grained GitHub token with issues:write on github_repo (no code scope)",
+    ),
+}
+
 
 class TemplateValidationError(ValueError):
     """Raised when a credential payload fails template validation."""

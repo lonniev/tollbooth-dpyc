@@ -182,6 +182,9 @@ FORGET_COUPON_UUID                   = "08fc1a2b-5924-5761-9f8d-bc334001776e"
 REQUEST_ADOPTION_UUID                = "26114c4d-eeb4-50dd-9dec-024fc7a76fda"
 ADOPTION_STATUS_UUID                 = "4b966aa3-e1ca-5615-bb2b-33d600ac702d"
 
+# Field reports — patron-filed GitHub issues on the operator's repo (wheel 0.64.0+)
+REPORT_ISSUE_UUID                    = "49ade49c-884b-5085-8a5b-5e20eb12a8f6"
+
 
 _STANDARD_LIST: list[ToolIdentity] = [
     # -- Credit tools --
@@ -321,6 +324,14 @@ _STANDARD_LIST: list[ToolIdentity] = [
                  intent="Operator-only: ask a chosen Authority to adopt this operator."),
     ToolIdentity(tool_id=ADOPTION_STATUS_UUID, capability="adoption_status", category="free",
                  intent="Check this operator's pending adoption request at a chosen Authority."),
+
+    # -- Field reports --
+    # Patron-facing and metered: npub proof gates WHO may file, and a small fee
+    # ("balance is the cap") keeps a free write to the operator's issue tracker from
+    # being abused. Seeds at 1 sat; the operator can raise it in Pricing Studio.
+    ToolIdentity(tool_id=REPORT_ISSUE_UUID, capability="report_issue", category="write",
+                 pricing_hint_type="flat", pricing_hint_value=1, pricing_hint_min=1,
+                 intent="Patron files a field report as a GitHub issue on the operator's repo."),
 ]
 
 # Build the UUID-keyed dict from the list.
