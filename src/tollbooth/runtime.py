@@ -199,6 +199,33 @@ class OperatorRuntime:
             return self._operator_credential_template.service
         return ""
 
+    def _courier_operator_template(self) -> Any:
+        """The operator credential template as the Secure Courier sees it.
+
+        The operator's DECLARED template plus the always-optional field-report
+        secrets (``github_repo`` / ``github_token``). This is what the courier
+        validates delivered payloads against — and it silently drops undeclared
+        fields — so merging these in here lets ANY operator enable the standard
+        ``report_issue`` tool by simply delivering the two secrets via Secure
+        Courier, with no per-operator template edit. The fields are optional, so
+        onboarding readiness (which reads the DECLARED template) is unaffected,
+        as are operators that never use field reports. Returns ``None`` when the
+        operator declared no credential template.
+        """
+        op = self._operator_credential_template
+        if not op:
+            return None
+        from tollbooth.credential_templates import (
+            ISSUE_REPORTING_CREDENTIAL_FIELDS,
+            CredentialTemplate,
+        )
+        return CredentialTemplate(
+            service=op.service,
+            version=op.version,
+            fields={**op.fields, **ISSUE_REPORTING_CREDENTIAL_FIELDS},
+            description=op.description,
+        )
+
     @property
     def patron_credential_service(self) -> str:
         """Return the patron credential service name."""
@@ -509,7 +536,9 @@ class OperatorRuntime:
 
         templates = {}
         if self._operator_credential_template:
-            templates[self._operator_credential_template.service] = self._operator_credential_template
+            # Merge in the always-optional field-report secrets so report_issue is
+            # enablable fleet-wide via Secure Courier with no per-operator edit.
+            templates[self._operator_credential_template.service] = self._courier_operator_template()
         if self._patron_credential_template:
             templates[self._patron_credential_template.service] = self._patron_credential_template
 

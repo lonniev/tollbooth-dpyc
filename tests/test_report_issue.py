@@ -5,8 +5,13 @@ from __future__ import annotations
 import pytest
 
 from tollbooth.constants import ErrorCode
-from tollbooth.credential_templates import ISSUE_REPORTING_CREDENTIAL_FIELDS
+from tollbooth.credential_templates import (
+    ISSUE_REPORTING_CREDENTIAL_FIELDS,
+    CredentialTemplate,
+    FieldSpec,
+)
 from tollbooth.github_issues_client import GitHubError
+from tollbooth.runtime import OperatorRuntime
 from tollbooth.tool_identity import (
     STANDARD_IDENTITIES,
     capability_uuid,
@@ -38,6 +43,34 @@ def test_report_issue_identity_is_priced_write_tool():
     # seeds at a 1-sat floor so a fresh operator's report_issue is metered from birth.
     assert identity.pricing_hint_value == 1
     assert identity.pricing_hint_min == 1
+
+
+def test_courier_template_auto_includes_field_report_secrets():
+    """An operator that declares only its own (e.g. BTCPay) secrets still gets the
+    github_repo/github_token fields merged into the courier-facing template, so the
+    Secure Courier accepts them without any per-operator template edit."""
+    declared = CredentialTemplate(
+        service="my-operator",
+        version=1,
+        fields={"btcpay_host": FieldSpec(required=True, sensitive=False, description="")},
+    )
+    rt = OperatorRuntime(operator_credential_template=declared)
+    effective = rt._courier_operator_template()
+    assert effective.service == "my-operator"
+    # the operator's own field is preserved AND the optional github fields are present
+    assert "btcpay_host" in effective.fields
+    assert "github_repo" in effective.fields
+    assert "github_token" in effective.fields
+    # they arrive optional, so onboarding readiness is unaffected
+    assert not effective.fields["github_repo"].required
+    assert not effective.fields["github_token"].required
+    # the DECLARED template is untouched (readiness reads this one)
+    assert "github_repo" not in declared.fields
+
+
+def test_courier_template_none_when_no_operator_template():
+    rt = OperatorRuntime(operator_credential_template=None)
+    assert rt._courier_operator_template() is None
 
 
 # --------------------------------------------------------------------------

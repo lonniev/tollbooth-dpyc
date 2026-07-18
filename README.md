@@ -80,22 +80,20 @@ runtime = OperatorRuntime(
 )
 ```
 
-**Optional — enable field reports (`report_issue`).** To let proven patrons file field
-reports about your tools as GitHub issues on your repo, spread
-`ISSUE_REPORTING_CREDENTIAL_FIELDS` into your template and deliver the two values via Secure
-Courier like any other operator secret:
+**Optional — enable field reports (`report_issue`).** No code change required. To let proven
+patrons file field reports about your tools as GitHub issues on your repo, just deliver two
+secrets on your operator credential service via Secure Courier:
 
-```python
-from tollbooth.credential_templates import ISSUE_REPORTING_CREDENTIAL_FIELDS
-# fields={**my_fields, **ISSUE_REPORTING_CREDENTIAL_FIELDS}
-#   github_repo   → "owner/repo" you want reports filed to
-#   github_token  → a fine-grained token with issues:write on that repo (no code scope)
+```
+github_repo   → "owner/repo" you want reports filed to
+github_token  → a fine-grained token with issues:write on that repo (no code scope)
 ```
 
-The `<slug>_report_issue` tool is always registered; without these two secrets it simply
-returns an "issue reporting not configured" situation. It is proof-gated and priced (seeds at
-1 sat) so it cannot be spammed, and refunds automatically when nothing is filed. The issue's
-author of record is the caller's npub, stamped into the body.
+The runtime auto-includes these optional fields in your courier template, so no template
+edit is needed. The `<slug>_report_issue` tool is always registered; without the two secrets
+it simply returns an "issue reporting not configured" situation. It is proof-gated and priced
+(seeds at 1 sat) so it cannot be spammed, and refunds automatically when nothing is filed. The
+issue's author of record is the caller's npub, stamped into the body.
 
 ### 4. Register Standard Tools + Domain Tools
 
