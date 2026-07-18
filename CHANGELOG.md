@@ -3,6 +3,27 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.64.0 — 2026-07-18
+
+### Added — `report_issue`: patron-filed field reports as GitHub issues
+
+- Every operator now exposes a standard `<slug>_report_issue(npub, dpop_token, title, body,
+  tool_name)` tool. A proven patron who finds a tool's metadata or response wrong or confusing
+  files a field report as a GitHub issue **on that operator's own repo** — the defect lands where
+  the tool lives. The **author of record is the caller's npub** (for an assistant reporting under
+  a "Scout" identity, that npub is Scout), stamped into the issue body with an authoritative
+  `<!-- dpyc-field-report reporter="npub1..." tool="..." -->` marker that the Service Desk keys on.
+  Any marker token smuggled into the report text is neutralized so provenance cannot be spoofed.
+- **Proof-gated and metered**: no npub / no proof → no issue, and the tool is priced (seeds at a
+  1-sat floor via its `ToolIdentity` pricing hint) so a free write to an issue tracker cannot be
+  abused — "balance is the cap". A not-configured operator, a validation failure, or a GitHub
+  rejection all return a clean situation and **refund** the fee (nothing was filed).
+- Operators opt in by spreading `ISSUE_REPORTING_CREDENTIAL_FIELDS` (`github_repo` +
+  `github_token`, both optional) into their `operator_credential_template` and delivering the two
+  via Secure Courier — same path as every other operator secret. The token needs only
+  `issues:write` on the repo, never code scope. New `github_issues_client.py` (httpx, WASI-safe via
+  the wasmcp seam) and `tools/report_issue.py` carry the implementation.
+
 ## 0.63.4 — 2026-07-18
 
 ### Fixed — operator display name now reaches the community roster

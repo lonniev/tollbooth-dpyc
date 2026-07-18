@@ -3225,6 +3225,54 @@ def register_standard_tools(
             ).isoformat(),
         }
 
+    # -- Field reports -------------------------------------------------
+
+    @tool
+    async def report_issue(
+        npub: str,
+        dpop_token: str,
+        title: str,
+        body: str,
+        tool_name: str = "",
+    ) -> dict[str, Any]:
+        """File a field report about this service as a GitHub issue on the operator's repo.
+
+        Found a tool's metadata or response wrong or confusing? Report it where the tool
+        lives. The **author of record is your npub** — no npub / no proof, no issue — and it
+        is stamped into the issue so the report is attributed to you, not the operator. Costs
+        a small fee (a free write to an issue tracker would be abused). The report is PUBLIC
+        and goes to the maintainers' normal triage; nothing is verified here.
+
+        Returns the filed issue's repo, number, and url. If this operator has not enabled
+        field reports, returns an "issue reporting not configured" situation and you are not
+        charged.
+
+        Args:
+            npub: Your Nostr public key (npub1...); the report's author of record.
+            dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+            title: One-line summary of the problem.
+            body: The details — which tool, what was wrong, what you expected.
+            tool_name: Optional: the specific tool the report is about
+                (e.g. "schwab_get_option_chain").
+        """
+        try:
+            npub = resolve_npub(npub)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        cost = await rt.debit_or_deny(
+            capability_uuid("report_issue"), npub, dpop_token=dpop_token,
+        )
+        if isinstance(cost, dict):
+            return cost
+        creds = await rt.load_credentials(["github_repo", "github_token"])
+        from tollbooth.tools.report_issue import report_issue_tool
+        result = await report_issue_tool(creds, npub, title, body, tool_name)
+        if not result.get("success"):
+            # Nothing was filed — refund the fee so a not-configured / rejected
+            # report never costs the patron.
+            await rt.rollback_debit(capability_uuid("report_issue"), npub)
+        return result
+
     # -- Service status ------------------------------------------------
 
     @tool
