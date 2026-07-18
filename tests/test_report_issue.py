@@ -11,7 +11,7 @@ from tollbooth.credential_templates import (
     FieldSpec,
 )
 from tollbooth.github_issues_client import GitHubError
-from tollbooth.runtime import OperatorRuntime
+from tollbooth.runtime import OperatorRuntime, classify_operator_secrets
 from tollbooth.tool_identity import (
     STANDARD_IDENTITIES,
     capability_uuid,
@@ -71,6 +71,44 @@ def test_courier_template_auto_includes_field_report_secrets():
 def test_courier_template_none_when_no_operator_template():
     rt = OperatorRuntime(operator_credential_template=None)
     assert rt._courier_operator_template() is None
+
+
+# --------------------------------------------------------------------------
+# classify_operator_secrets — delivered secrets become visible (Studio surface)
+# --------------------------------------------------------------------------
+
+def _effective():
+    declared = {
+        "btcpay_host": FieldSpec(required=True, sensitive=False, description="host"),
+        "note": FieldSpec(required=False, sensitive=False, description="optional note"),
+    }
+    effective = {**declared, **ISSUE_REPORTING_CREDENTIAL_FIELDS}
+    return declared, effective
+
+
+def test_delivered_auto_included_secret_is_visible():
+    declared, effective = _effective()
+    # btcpay_host + the auto-included github_token were delivered; github_repo was not
+    cfg, miss, opt = classify_operator_secrets(
+        effective, set(declared), {"btcpay_host", "github_token"},
+    )
+    names = {c["field"] for c in cfg}
+    # the delivered github_token surfaces under configured — visible in Studio
+    assert names == {"btcpay_host", "github_token"}
+    assert miss == []               # required btcpay_host is present
+    # the undelivered OPTIONAL DECLARED field nags; the undelivered AUTO-INCLUDED one does NOT
+    assert {o["field"] for o in opt} == {"note"}
+
+
+def test_undelivered_auto_included_secret_is_silent():
+    declared, effective = _effective()
+    cfg, miss, opt = classify_operator_secrets(effective, set(declared), set())
+    assert cfg == []
+    assert {m["field"] for m in miss} == {"btcpay_host"}      # declared required -> missing
+    # github_repo/github_token are auto-included + undelivered -> omitted entirely (no nag)
+    opt_names = {o["field"] for o in opt}
+    assert "github_repo" not in opt_names and "github_token" not in opt_names
+    assert opt_names == {"note"}
 
 
 # --------------------------------------------------------------------------
