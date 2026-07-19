@@ -36,11 +36,18 @@ class NeonQueryError(Exception):
     (e.g. ``42501`` permission denied, ``42P01`` undefined table), so
     callers can distinguish permanent misconfiguration from transient
     connectivity trouble. ``code`` is ``""`` when Neon gave no SQLSTATE.
+
+    ``status`` carries the HTTP status of the Neon REST gateway response
+    when the failure was an HTTP-level one (``0`` for SQL errors returned
+    in a 200 body). This is how the persistence *provider*'s own signals —
+    notably ``402`` when the project has exhausted its compute/storage
+    quota — reach the classifier, since a billing 402 carries no SQLSTATE.
     """
 
-    def __init__(self, message: str, code: str = "") -> None:
+    def __init__(self, message: str, code: str = "", status: int = 0) -> None:
         super().__init__(message)
         self.code = code
+        self.status = status
 
 
 class NeonVault:
@@ -195,6 +202,7 @@ class NeonVault:
                     f"Neon HTTP {resp.status_code}: {err_body['message']} "
                     f"(query={query[:120]}…)",
                     code=str(err_body.get("code") or ""),
+                    status=resp.status_code,
                 )
             # Body wasn't JSON or didn't have a message — fall through to
             # raise_for_status so callers still see the HTTP error.

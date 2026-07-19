@@ -52,6 +52,15 @@ class ErrorCode:
     # denied, missing relation, auth failure). Unlike WARMING_UP this will
     # NOT resolve by retrying — the operator must repair the database.
     PERSISTENCE_MISCONFIGURED = "persistence_misconfigured"
+    # The persistence PROVIDER (Neon) answered HTTP 402: the operator's
+    # database — the DPYC economy's accounting books — has exhausted its
+    # compute/storage quota, so every query is refused at the gateway before
+    # any SQL runs. NOT a cold start (WARMING_UP) and NOT a SQL/permission
+    # fault (PERSISTENCE_MISCONFIGURED): retrying cannot help. The Authority
+    # that provisions these books must upgrade the plan or wait for the quota
+    # to reset. Distinct from UPSTREAM_SUBSCRIPTION_REQUIRED, which is a
+    # business API's 402 — this is the books themselves going dark.
+    PERSISTENCE_QUOTA_EXCEEDED = "persistence_quota_exceeded"
     OPERATOR_NOT_REGISTERED = "operator_not_registered"
     VAULT_BOOTSTRAPPING = "vault_bootstrapping"
     SECURE_COURIER_UNAVAILABLE = "secure_courier_unavailable"

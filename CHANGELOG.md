@@ -3,6 +3,37 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.64.3 — 2026-07-19
+
+### Added — Neon books health: a 402 is no longer a "warming up" lie, and the Authority learns first
+
+The DPYC economy's accounting books are Neon, and the books are the Authority's charge. When
+an operator's Neon project exhausted its compute quota, Neon answered HTTP 402 and the operator
+went dark — but the runtime misclassified that 402 as `warming_up` and told patrons to *"retry
+shortly"*, so a real outage masqueraded as a cold start and the Authority learned last, from a
+patron complaint. This release fixes the classification and routes the signal to the party
+responsible for the books.
+
+- **Distinct classification (A).** `NeonQueryError` now carries the HTTP `status`; a 402 is
+  classified as the new `PERSISTENCE_QUOTA_EXCEEDED` error code and `quota_exceeded` lifecycle
+  state — separate from `warming_up` (transient cold start) and `persistence_misconfigured`
+  (SQL/permission). The paid-tool gate and `session_status` now return an honest, non-transient
+  message ("retrying will NOT help") instead of inviting a retry, and the pricing resolver
+  stops burning its cold-start retry budget on a condition only a human can clear
+  (`PricingResolver.last_error_quota`).
+- **Operator → Authority alert (B).** On catching a Neon 402, the operator's runtime
+  fire-and-forgets a rate-limited alert to its Authority via the new
+  `authority_receive_neon_402_alert` tool (`AuthorityCertifier.report_neon_quota_exceeded`).
+  It works while the operator's own books are dark because it uses only the operator nsec and
+  the Authority's registry-resolved endpoint — neither touches Neon. The Authority records a
+  durable latest-state row (`neon_alert_store`) and DMs its owner.
+- **Proactive watch (C).** New restricted `network_books_health` Authority tool reports, from
+  most to least proactive: per-Neon-project compute-quota posture (hours used, %, reset date,
+  ok/warning/critical/exhausted) via a new `NeonAdminClient` (needs an org-scoped
+  `NEON_API_KEY`; `configured=false` otherwise); reactive self-detection of the Authority's own
+  books; and the operator-reported alerts. `list_neon_alerts` exposes the reactive queue.
+  Pricing Studio renders these as a Network Books Health panel.
+
 ## 0.64.2 — 2026-07-18
 
 ### Fixed — delivered operator secrets are now visible in onboarding status

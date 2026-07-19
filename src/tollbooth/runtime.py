@@ -205,6 +205,10 @@ class OperatorRuntime:
         self._operator_npub: str | None = None
         self._nsec: str | None = None
         self._reconciled_npubs: set[str] = set()  # dedup auto-reconciliation
+        # Neon-402 alert to the Authority: in-memory rate limit + a strong ref
+        # to in-flight fire-and-forget tasks so they aren't GC'd mid-send.
+        self._last_quota_alert_at: float = 0.0
+        self._quota_alert_tasks: set[Any] = set()
         self._proven_npub_ttl = proven_npub_ttl_seconds
         self._proven_npub_cache: Any | None = None  # lazy ProvenNpubCache
         self._npub_proof_field = npub_proof_field
@@ -525,6 +529,45 @@ class OperatorRuntime:
             auth_info["url"], self.operator_npub(), self._get_nsec(),
         )
         return certifier, auth_info
+
+    async def _alert_authority_quota_exceeded(self, detail: str = "") -> None:
+        """Fire-and-forget: notify this operator's Authority that the books are
+        402-locked (Neon compute/storage quota exhausted).
+
+        The Authority provisions and is responsible for the books, so it must
+        learn the instant they lock — before a patron files a complaint. This
+        never blocks the caller (the patron's own error response) and never
+        raises: it schedules a rate-limited background send and returns at once.
+        Works while Neon is down because it uses only the operator nsec and the
+        Authority's registry-resolved MCP endpoint — neither touches Neon.
+        """
+        import asyncio
+        import time as _t
+
+        now = _t.monotonic()
+        # At most one alert per 10 min per process — a locked project stays
+        # locked for hours; repeating on every denied tool call would be noise.
+        if self._last_quota_alert_at and (now - self._last_quota_alert_at) < 600:
+            return
+        self._last_quota_alert_at = now
+
+        async def _send() -> None:
+            try:
+                certifier, _auth = await self._certifier()
+                await certifier.report_neon_quota_exceeded(detail)
+                logger.info("Notified Authority of Neon-402 (books locked).")
+            except Exception:
+                logger.debug(
+                    "Neon-402 Authority alert failed (best-effort)", exc_info=True
+                )
+
+        try:
+            task = asyncio.create_task(_send())
+        except RuntimeError:
+            # No running event loop (unusual on this async path) — skip.
+            return
+        self._quota_alert_tasks.add(task)
+        task.add_done_callback(self._quota_alert_tasks.discard)
 
     # ------------------------------------------------------------------
     # Secure Courier
@@ -895,6 +938,28 @@ class OperatorRuntime:
         resolver = await self.pricing_resolver()
         await resolver._ensure_fresh()
         if not resolver.neon_available:
+            if resolver.last_error_quota:
+                # The books are locked for billing (Neon HTTP 402): the
+                # operator's database has exhausted its compute/storage quota.
+                # This is NOT a cold start — do NOT tell the patron to retry
+                # (that guidance is what let a real outage masquerade as a
+                # warm-up). The operator's Authority is notified out of band.
+                await self._alert_authority_quota_exceeded(resolver.last_error_summary)
+                return 0, {
+                    "success": False,
+                    "error_code": ErrorCode.PERSISTENCE_QUOTA_EXCEEDED,
+                    "error": (
+                        "This service is temporarily unavailable: the operator's "
+                        "database has reached its provider quota, so paid tools "
+                        "cannot run right now. Retrying will NOT help. The "
+                        "operator's Authority has been notified to restore "
+                        "capacity. Free tools remain available."
+                    ),
+                    "next_steps": [
+                        "Try again later — capacity is restored by the operator's "
+                        "Authority, not by retrying now"
+                    ],
+                }
             if resolver.last_error_permanent:
                 return 0, {
                     "success": False,
@@ -3458,6 +3523,11 @@ def register_standard_tools(
         - misconfigured: Persistence rejected a query with a permanent SQL
           error (permission denied, missing relation). Paid tools will fail
           until the operator repairs the database — retrying does not help.
+        - quota_exceeded: The persistence provider (Neon) answered HTTP 402 —
+          the operator's database has exhausted its compute/storage quota, so
+          the books are locked for billing. Paid tools fail; retrying does NOT
+          help. The operator's Authority must restore capacity (upgrade the
+          plan or wait for the quota reset). Free tools remain available.
         - not_registered: Operator has no Authority relationship yet. Call register_operator first.
         - no_identity: Operator nsec is not configured. Deployment issue.
 
@@ -3546,6 +3616,20 @@ def register_standard_tools(
         resolver = await rt.pricing_resolver()
         await resolver._ensure_fresh()
         if not resolver.neon_available:
+            if resolver.last_error_quota:
+                await rt._alert_authority_quota_exceeded(resolver.last_error_summary)
+                return {
+                    "success": True,
+                    "lifecycle": "quota_exceeded",
+                    "operator_npub": npub,
+                    "message": "The operator's database has reached its provider "
+                               "quota (Neon HTTP 402) — the books are locked for "
+                               "billing, so paid tools cannot run. This is NOT a "
+                               "cold start: retrying does not help. The operator's "
+                               "Authority has been notified to restore capacity "
+                               "(upgrade the plan or wait for the quota reset).",
+                    "detail": resolver.last_error_summary,
+                }
             if resolver.last_error_permanent:
                 return {
                     "success": True,

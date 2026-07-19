@@ -89,6 +89,33 @@ class AuthorityCertifier:
 
         return self._parse_result(result)
 
+    async def report_neon_quota_exceeded(self, detail: str = "") -> dict[str, Any]:
+        """Tell this operator's Authority that the operator's Neon books are
+        402-locked (compute/storage quota exhausted).
+
+        Best-effort telemetry: the Authority provisions and is responsible for
+        the books, so it should learn the instant they lock — from the operator,
+        not from a patron complaint. Signs for the exact wire name the same way
+        ``certify_credits`` does. Returns the Authority's ack dict; raises
+        ``AuthorityCertifyError`` on transport failure so the caller can decide
+        (the caller runs this fire-and-forget, so a raise is only logged)."""
+        if Client is None:
+            raise AuthorityCertifyError("fastmcp package required for Authority alerts.")
+        tool = "authority_receive_neon_402_alert"
+        try:
+            async with Client(self._authority_url, auth="oauth") as client:
+                result = await client.call_tool(
+                    tool, self._signer.authenticate(tool, {"detail": detail[:500]})
+                )
+        except Exception as e:
+            raise AuthorityCertifyError(
+                f"Failed to reach Authority at {self._authority_url}: {e}"
+            ) from e
+        # Best-effort — unwrap to a dict if we can, else return a bare ack.
+        if hasattr(result, "data") and isinstance(getattr(result, "data"), dict):
+            return result.data  # type: ignore[no-any-return]
+        return {"success": True}
+
     def _parse_result(self, result: Any) -> dict[str, Any]:
         """Extract the certificate dict from the MCP tool result."""
         # Unwrap CallToolResult (fastmcp dataclass) — duck typing to avoid import

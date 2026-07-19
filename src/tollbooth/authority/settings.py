@@ -24,6 +24,13 @@ class AuthoritySettings(BaseSettings):
     # NeonVault (replaces TheBrainVault for ledger persistence)
     neon_database_url: str = ""
 
+    # Neon control-plane API key (org-scoped) for the PROACTIVE compute-quota
+    # watch (network_books_health). Optional: absent it, the watch falls back
+    # to reactive self-detection + operator-reported alerts. ``neon_org_id``
+    # scopes the project listing to one Neon organization.
+    neon_api_key: str = ""
+    neon_org_id: str = ""
+
     # Nostr audit (optional — enabled when both are set). Relays are governed
     # by the DPYC community registry (relay_registry), not a per-Authority env.
     tollbooth_nostr_audit_enabled: str = ""
