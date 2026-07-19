@@ -33,6 +33,13 @@ def _is_permanent_sql_error(exc: Exception) -> bool:
     return bool(code) and code[:2] in _PERMANENT_SQLSTATE_CLASSES
 
 
+def _is_quota_error(exc: Exception) -> bool:
+    """True when *exc* is the persistence provider (Neon) refusing with HTTP
+    402 — the database has exhausted its compute/storage quota. Non-transient
+    and distinct from a SQL fault: the books are locked for billing, not code."""
+    return getattr(exc, "status", 0) == 402
+
+
 class PricingResolver:
     """Runtime resolver for tool costs and constraint engines.
 
@@ -87,6 +94,16 @@ class PricingResolver:
         return self._last_error is not None and _is_permanent_sql_error(self._last_error)
 
     @property
+    def last_error_quota(self) -> bool:
+        """True when the most recent load failure was Neon HTTP 402 — the
+        database's compute/storage quota is exhausted (the books are locked
+        for billing). Non-transient; the Authority that provisions this
+        database must upgrade the plan or wait for the quota to reset.
+        Meaningful only while ``neon_available`` is False.
+        """
+        return self._last_error is not None and _is_quota_error(self._last_error)
+
+    @property
     def last_error_summary(self) -> str:
         """One-line summary of the most recent load failure, '' if none.
 
@@ -136,9 +153,11 @@ class PricingResolver:
                 return
             except Exception as exc:
                 last_exc = exc
-                if _is_permanent_sql_error(exc):
-                    # Permission denied / missing relation — retrying with
-                    # backoff cannot help; record and report immediately.
+                if _is_permanent_sql_error(exc) or _is_quota_error(exc):
+                    # Permission denied / missing relation, or a provider 402
+                    # (quota exhausted) — retrying with backoff cannot help;
+                    # record and report immediately rather than burning the
+                    # cold-start budget on a condition only a human can clear.
                     break
                 if attempt < self._HYDRATION_RETRIES - 1:
                     logger.debug(

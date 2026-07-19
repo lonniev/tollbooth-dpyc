@@ -291,6 +291,23 @@ class _PermanentFailStore:
         )
 
 
+class _QuotaFailStore:
+    """Raises a NeonQueryError carrying HTTP 402 — provider quota exhausted."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def fetch_active_model(self, operator: str):
+        self.call_count += 1
+        from tollbooth.vaults.neon import NeonQueryError
+        raise NeonQueryError(
+            "Neon HTTP 402: Your account or project has exceeded the compute "
+            "time quota. (query=SELECT …)",
+            code="",
+            status=402,
+        )
+
+
 class TestErrorClassification:
     @pytest.mark.asyncio
     async def test_permanent_sql_error_is_flagged(self) -> None:
@@ -305,6 +322,25 @@ class TestErrorClassification:
     async def test_permanent_sql_error_skips_retries(self) -> None:
         """42501 cannot heal in 2 seconds — no backoff retries."""
         store = _PermanentFailStore(code="42501")
+        resolver = PricingResolver(store=store, operator="npub1op")
+        await resolver._ensure_fresh()
+        assert store.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_quota_402_is_flagged_and_not_permanent(self) -> None:
+        """A provider 402 is its own category — quota, not a permanent SQL fault."""
+        store = _QuotaFailStore()
+        resolver = PricingResolver(store=store, operator="npub1op")
+        await resolver._ensure_fresh()
+        assert resolver.neon_available is False
+        assert resolver.last_error_quota is True
+        assert resolver.last_error_permanent is False
+        assert "402" in resolver.last_error_summary
+
+    @pytest.mark.asyncio
+    async def test_quota_402_skips_retries(self) -> None:
+        """A locked project won't unlock in 2 seconds — don't burn the retry budget."""
+        store = _QuotaFailStore()
         resolver = PricingResolver(store=store, operator="npub1op")
         await resolver._ensure_fresh()
         assert store.call_count == 1

@@ -28,11 +28,12 @@ _PASS_PROOF = patch("tollbooth.runtime.require_proof", AsyncMock(return_value=No
 
 
 class FakeResolver:
-    def __init__(self, *, cost=10, chain=(), neon=True, permanent=False, priced=True, has=True):
+    def __init__(self, *, cost=10, chain=(), neon=True, permanent=False, quota=False, priced=True, has=True):
         self._cost = cost
         self._chain = list(chain)
         self._neon = neon
         self.last_error_permanent = permanent
+        self.last_error_quota = quota
         self.last_error_summary = "neon rejected the query"
         self._priced = priced
         self._has = has
@@ -189,6 +190,25 @@ async def test_pricing_misconfigured_when_permanent_error():
     with _PASS_PROOF:
         r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
     assert r["error_code"] == ErrorCode.PERSISTENCE_MISCONFIGURED
+
+
+@pytest.mark.asyncio
+async def test_pricing_quota_exceeded_is_not_warming_up():
+    """A Neon 402 must classify as quota_exceeded — NOT warming_up — so the
+    patron is never told to 'retry' through a provider outage, and the
+    Authority is alerted."""
+    registry, tid = _registry()
+    rt = _runtime(registry, resolver=FakeResolver(neon=False, quota=True))
+    alert = AsyncMock(return_value=None)
+    with _PASS_PROOF, patch.object(rt, "_alert_authority_quota_exceeded", alert):
+        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+    assert r["error_code"] == ErrorCode.PERSISTENCE_QUOTA_EXCEEDED
+    # The honest message states non-transience — it must NOT tell the patron to
+    # simply retry (the old warming_up copy did exactly that through an outage).
+    assert "will not help" in r["error"].lower()
+    assert "warming up" not in r["error"].lower()
+    # The Authority was notified out of band.
+    alert.assert_awaited_once()
 
 
 @pytest.mark.asyncio

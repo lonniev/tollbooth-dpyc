@@ -59,7 +59,7 @@ from tollbooth.tool_identity import (
     capability_uuid,
 )
 
-from tollbooth.authority import adoption_store
+from tollbooth.authority import adoption_store, neon_alert_store
 from tollbooth.authority.nostr_signing import AuthorityNostrSigner
 from tollbooth.authority.onboarding import ONBOARDING_TEMPLATES, OnboardingState
 from tollbooth.authority.replay import ReplayTracker
@@ -118,6 +118,10 @@ REJECT_ADOPTION_UUID          = "7dbcfa85-f776-5306-a6dc-9032f1dcb9b3"
 GET_ADOPTION_STATUS_UUID      = "45c1b7b4-93ac-52e3-ad5a-8fac1b05fad1"
 # Tenant-schema ownership repair (owner consent)
 REPAIR_OPERATOR_SCHEMA_UUID   = "b626ee48-dcd7-5ef2-93dd-0be12364acbb"
+# Neon books health — 402 alerts (inbound from operators) + proactive watch
+RECEIVE_NEON_402_ALERT_UUID   = "bdb94fb1-454a-5804-8885-42ba93f1446d"
+LIST_NEON_ALERTS_UUID         = "b8079cbd-bc1e-579c-86fa-897a0a0641bd"
+NETWORK_BOOKS_HEALTH_UUID     = "07706702-fac9-50d0-b69d-d706a71b9101"
 
 
 AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
@@ -221,6 +225,25 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         capability="repair_operator_schema",
         category="restricted",
         intent="Owner repair: reassign all table ownership in an operator's tenant schema to its own role.",
+    ),
+    # -- Neon books health --
+    ToolIdentity(
+        tool_id=RECEIVE_NEON_402_ALERT_UUID,
+        capability="receive_neon_402_alert",
+        category="free",
+        intent="Inbound: an operator reports its Neon books are 402-locked (operator-proof gated).",
+    ),
+    ToolIdentity(
+        tool_id=LIST_NEON_ALERTS_UUID,
+        capability="list_neon_alerts",
+        category="restricted",
+        intent="Owner queue: list operators that reported a Neon-402 (books locked).",
+    ),
+    ToolIdentity(
+        tool_id=NETWORK_BOOKS_HEALTH_UUID,
+        capability="network_books_health",
+        category="restricted",
+        intent="Owner view: proactive per-project Neon compute-quota posture + reactive alerts.",
     ),
 ]
 
@@ -1230,6 +1253,218 @@ def register_authority_tools(
         except Exception as exc:
             return {"success": False, "error": f"Could not list requests: {exc}"}
         return {"success": True, "count": len(pending), "requests": pending}
+
+    # ------------------------------------------------------------------
+    # Neon books health — the accounting books are the Authority's charge
+    # ------------------------------------------------------------------
+
+    async def _notify_owner_of_neon_402(operator_npub: str, detail: str) -> None:
+        """Best-effort heads-up DM to the Authority owner that an operator's
+        books are 402-locked. Never raises; the durable row is the record."""
+        try:
+            exchange = _get_nostr_exchange()
+            await exchange.open_channel(
+                "neon_books_alert",
+                greeting=(
+                    f"⚠ Operator {operator_npub[:16]}... reports its Neon books are "
+                    "402-locked (compute/storage quota exhausted) — paid tools are "
+                    "down for its patrons. Review with network_books_health / "
+                    "list_neon_alerts and restore capacity (upgrade the plan or wait "
+                    "for the quota reset)."
+                ),
+                recipient_npub=runtime.operator_npub(),
+            )
+        except Exception as exc:
+            logger.info("Neon-402 owner DM skipped for %s: %s", operator_npub[:16], exc)
+
+    @tool
+    async def receive_neon_402_alert(
+        npub: Annotated[
+            str,
+            Field(description="The reporting operator's Nostr npub (the one whose books are locked)."),
+        ] = "",
+        dpop_token: Annotated[
+            str,
+            Field(description=(
+                "Inline kind-27235 proof signed by the operator's nsec, bound to "
+                "this tool's wire name. The operator's runtime mints and sends this "
+                "automatically when it catches a Neon 402."
+            )),
+        ] = "",
+        detail: Annotated[
+            str,
+            Field(description="Short, credential-free error summary (the Neon 402 message)."),
+        ] = "",
+    ) -> dict[str, Any]:
+        """Inbound: an operator reports its Neon books are 402-locked.
+
+        Called MCP-to-MCP by the operator's runtime the instant it catches a
+        Neon HTTP 402 on its own database. Verifies the operator controls
+        ``npub`` (inline Schnorr bound to this tool's wire name), records a
+        durable latest-state row, and fires a best-effort owner-notification
+        DM. This is how the Authority learns the books are dark BEFORE a patron
+        files a complaint.
+        """
+        if not npub:
+            return {"success": False, "error": "npub is required."}
+        if not verify_proof(dpop_token, npub, runtime.runtime_name("receive_neon_402_alert")):
+            return {
+                "success": False,
+                "error_code": ErrorCode.PROOF_INVALID,
+                "error": (
+                    "Invalid operator proof. The alert must carry a fresh "
+                    "kind-27235 proof signed by npub, bound to this tool."
+                ),
+            }
+        try:
+            vault = await runtime.vault()
+            await neon_alert_store.ensure_schema(vault)
+            await neon_alert_store.record(vault, npub, detail)
+        except Exception as exc:
+            # The Authority's OWN books may be down too (shared project). Still
+            # try to reach the human, and report honestly rather than 500.
+            await _notify_owner_of_neon_402(npub, detail)
+            return {"success": False, "error": f"Could not record alert: {exc}"}
+
+        await _notify_owner_of_neon_402(npub, detail)
+        return {
+            "success": True,
+            "operator_npub": npub,
+            "message": (
+                "Neon-402 alert recorded. The Authority owner has been notified "
+                "to restore capacity."
+            ),
+        }
+
+    @tool
+    async def list_neon_alerts(
+        authority_proof: Annotated[
+            str,
+            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
+        ] = "",
+    ) -> dict[str, Any]:
+        """Owner queue: operators that reported a Neon-402 (books locked).
+
+        Restricted to the Authority owner. A companion to network_books_health:
+        this is the reactive list (operators that already went dark); the health
+        tool adds the proactive per-project compute posture.
+        """
+        err = await _require_authority_consent(
+            runtime, authority_proof, runtime.runtime_name("list_neon_alerts"),
+        )
+        if err:
+            return err
+        try:
+            vault = await runtime.vault()
+            await neon_alert_store.ensure_schema(vault)
+            alerts = await neon_alert_store.list_all(vault)
+        except Exception as exc:
+            return {"success": False, "error": f"Could not list alerts: {exc}"}
+        return {"success": True, "count": len(alerts), "alerts": alerts}
+
+    @tool
+    async def network_books_health(
+        authority_proof: Annotated[
+            str,
+            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
+        ] = "",
+    ) -> dict[str, Any]:
+        """Owner view: the health of the DPYC economy's accounting books (Neon).
+
+        Restricted to the Authority owner. Three layers, from most to least
+        proactive:
+
+        1. ``projects`` — if a Neon API key is configured (NEON_API_KEY), the
+           per-project compute-quota posture across the org: hours used, %,
+           reset date, and a status ladder (ok/warning/critical/exhausted) so a
+           project can be topped up BEFORE it 402s. ``configured=false`` when no
+           key is present (deliver one to enable the proactive watch).
+        2. ``own_books`` — reactive self-detection: whether the Authority's OWN
+           database answers, or is itself 402-locked. Always available.
+        3. ``operator_alerts`` — operators that reported a 402 (from
+           receive_neon_402_alert). Reactive, but immediate.
+        """
+        err = await _require_authority_consent(
+            runtime, authority_proof, runtime.runtime_name("network_books_health"),
+        )
+        if err:
+            return err
+
+        from tollbooth.vaults.neon import NeonQueryError
+
+        # (2) Reactive self-probe of the Authority's own books.
+        own_books: dict[str, Any]
+        try:
+            vault = await runtime.vault()
+            await vault._execute("SELECT 1 AS one")
+            own_books = {"status": "ok", "detail": ""}
+        except NeonQueryError as exc:
+            status = "quota_exceeded" if getattr(exc, "status", 0) == 402 else "error"
+            own_books = {"status": status, "detail": str(exc)[:300]}
+            vault = None
+        except Exception as exc:
+            own_books = {"status": "unreachable", "detail": str(exc)[:300]}
+            vault = None
+
+        # (3) Operator-reported alerts (best-effort — needs a live vault).
+        operator_alerts: list[dict[str, Any]] = []
+        if vault is not None:
+            try:
+                await neon_alert_store.ensure_schema(vault)
+                operator_alerts = await neon_alert_store.list_all(vault)
+            except Exception as exc:
+                logger.info("Could not read operator Neon alerts: %s", exc)
+
+        # (1) Proactive per-project compute posture (needs a Neon API key).
+        s = _get_settings()
+        if not s.neon_api_key:
+            neon_api: dict[str, Any] = {
+                "configured": False,
+                "hint": (
+                    "Set NEON_API_KEY (org-scoped) to enable proactive per-project "
+                    "compute-quota monitoring, so a project can be topped up before "
+                    "it 402s. Without it, only reactive detection is available."
+                ),
+                "projects": [],
+            }
+        else:
+            from tollbooth.authority.neon_admin import NeonAdminClient
+            try:
+                client = NeonAdminClient(s.neon_api_key, org_id=s.neon_org_id)
+                usage = await client.project_usage()
+                neon_api = {
+                    "configured": True,
+                    "projects": [u.to_dict() for u in usage],
+                }
+            except Exception as exc:
+                neon_api = {
+                    "configured": True,
+                    "error": f"Neon API read failed: {str(exc)[:200]}",
+                    "projects": [],
+                }
+
+        # Roll up a single worst-case posture for an at-a-glance dot.
+        project_statuses = [p.get("status") for p in neon_api.get("projects", [])]
+        ladder = ["exhausted", "critical", "warning", "ok"]
+        overall = "ok"
+        if own_books["status"] == "quota_exceeded" or operator_alerts:
+            overall = "exhausted"
+        else:
+            for rung in ladder:
+                if rung in project_statuses:
+                    overall = rung
+                    break
+            if own_books["status"] in ("error", "unreachable"):
+                overall = "critical" if overall == "ok" else overall
+
+        return {
+            "success": True,
+            "overall_status": overall,
+            "own_books": own_books,
+            "operator_alerts": operator_alerts,
+            "operator_alert_count": len(operator_alerts),
+            "neon_api": neon_api,
+        }
 
     @tool
     async def approve_adoption(
