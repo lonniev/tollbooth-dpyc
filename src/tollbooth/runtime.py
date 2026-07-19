@@ -3077,7 +3077,11 @@ def register_standard_tools(
 
         Args:
             npub: The Nostr public key (npub1...) whose balance to check.
-            dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
+                `u` tag must hold THIS tool's exact name (from tools/list), not
+                the endpoint URL; content:"", created_at within 60s of now, and a
+                random `nonce` tag recommended. Or a cached dpop_token phrase.
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "check_balance"):
             return err
@@ -3101,7 +3105,11 @@ def register_standard_tools(
 
         Args:
             npub: The Nostr public key (npub1...) the credits will fund.
-            dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
+                `u` tag must hold THIS tool's exact name (from tools/list), not
+                the endpoint URL; content:"", created_at within 60s of now, and a
+                random `nonce` tag recommended. Or a cached dpop_token phrase.
             amount_sats: Satoshis to purchase (default 1000).
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "purchase_credits"):
@@ -3202,7 +3210,11 @@ def register_standard_tools(
         Args:
             invoice_id: The invoice ID returned by purchase_credits.
             npub: The Nostr public key (npub1...) that purchased the invoice.
-            dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
+                `u` tag must hold THIS tool's exact name (from tools/list), not
+                the endpoint URL; content:"", created_at within 60s of now, and a
+                random `nonce` tag recommended. Or a cached dpop_token phrase.
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "check_payment"):
             return err
@@ -3305,7 +3317,11 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
+                `u` tag must hold THIS tool's exact name (from tools/list), not
+                the endpoint URL; content:"", created_at within 60s of now, and a
+                random `nonce` tag recommended. Or a cached dpop_token phrase.
             days: Number of days of daily usage history to include (default 30).
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "account_statement"):
@@ -3329,7 +3345,11 @@ def register_standard_tools(
 
         Args:
             npub: The Nostr public key (npub1...) whose statement to render.
-            dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
+                `u` tag must hold THIS tool's exact name (from tools/list), not
+                the endpoint URL; content:"", created_at within 60s of now, and a
+                random `nonce` tag recommended. Or a cached dpop_token phrase.
             days: Number of days of daily usage history to include (default 30).
         """
         try:
@@ -3380,7 +3400,11 @@ def register_standard_tools(
 
         Args:
             npub: Your Nostr public key (npub1...); the report's author of record.
-            dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
+                `u` tag must hold THIS tool's exact name (from tools/list), not
+                the endpoint URL; content:"", created_at within 60s of now, and a
+                random `nonce` tag recommended. Or a cached dpop_token phrase.
             title: One-line summary of the problem.
             body: The details — which tool, what was wrong, what you expected.
             tool_name: Optional: the specific tool the report is about
@@ -3775,7 +3799,11 @@ def register_standard_tools(
         Args:
             service: The credential service to forget.
             npub: The Nostr public key (npub1...) whose credentials to forget.
-            dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
+                `u` tag must hold THIS tool's exact name (from tools/list), not
+                the endpoint URL; content:"", created_at within 60s of now, and a
+                random `nonce` tag recommended. Or a cached dpop_token phrase.
         Free.
         """
         from tollbooth.tools.courier import forget_credentials_tool
@@ -3838,7 +3866,11 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
+                `u` tag must hold THIS tool's exact name (from tools/list), not
+                the endpoint URL; content:"", created_at within 60s of now, and a
+                random `nonce` tag recommended. Or a cached dpop_token phrase.
             field: The credential field name to set.
             value: The value to store.
         """
@@ -3871,7 +3903,11 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
+                `u` tag must hold THIS tool's exact name (from tools/list), not
+                the endpoint URL; content:"", created_at within 60s of now, and a
+                random `nonce` tag recommended. Or a cached dpop_token phrase.
             field: The credential field name to remove.
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "delete_patron_credential"):
@@ -3903,7 +3939,11 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
+                `u` tag must hold THIS tool's exact name (from tools/list), not
+                the endpoint URL; content:"", created_at within 60s of now, and a
+                random `nonce` tag recommended. Or a cached dpop_token phrase.
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "get_patron_credential_fields"):
             return err
@@ -3940,7 +3980,12 @@ def register_standard_tools(
 
             Args:
                 npub: Your DPYC patron npub (npub1...).
-                dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+                dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                    not base64, not NIP-98 'Authorization: Nostr <b64>' framing.
+                    Its `u` tag must hold THIS tool's exact name (from
+                    tools/list), not the endpoint URL; content:"", created_at
+                    within 60s of now, and a random `nonce` tag recommended. Or a
+                    cached dpop_token phrase.
             """
             from tollbooth.tools.oauth import begin_oauth_tool
             return await begin_oauth_tool(rt, npub, dpop_token)
@@ -3962,7 +4007,12 @@ def register_standard_tools(
 
             Args:
                 npub: The same Nostr public key (npub1...) used in begin_oauth.
-                dpop_token: A kind-27235 Nostr event signed by npub for this tool.
+                dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
+                    not base64, not NIP-98 'Authorization: Nostr <b64>' framing.
+                    Its `u` tag must hold THIS tool's exact name (from
+                    tools/list), not the endpoint URL; content:"", created_at
+                    within 60s of now, and a random `nonce` tag recommended. Or a
+                    cached dpop_token phrase.
             """
             from tollbooth.tools.oauth import check_oauth_status_tool
             return await check_oauth_status_tool(rt, npub, dpop_token)
