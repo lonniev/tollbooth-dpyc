@@ -3,6 +3,43 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added — a proof-request DM now proves who is asking, not just who is answering
+
+The npub-proof handshake authenticated the patron to the Operator but never the Operator to the
+patron. In the self-addressed case (an Operator proving its own npub) relays drop
+self-addressed DMs, so the request is *delivered* from a throwaway ephemeral key — and the human
+was shown that unfamiliar key as the "Operator", with no way to tell a legitimate front-end
+worker from an impostor who guessed their npub and timed a request well. The only safe move was
+to let it expire, so the honest flow failed closed while a well-timed attack would have
+succeeded.
+
+The seal cannot carry the fix — relays require the distinct delivery key — so provenance now
+rides *inside* the encrypted DM body, attested by the Operator rather than asserted by the
+requester.
+
+- **Operator provenance attestation.** `identity_proof.create_provenance_attestation` signs a
+  kind-27235 event with the Operator's **registered** identity key (the asset an impostor does
+  not hold) binding the **delivery key**, the **subject** npub, the **service**, and the
+  one-time **challenge** (`dpop_token`). `open_channel` embeds it in every request DM.
+  `verify_provenance_attestation` checks the signature and that each bound fact matches the DM
+  the recipient actually saw — so an attestation cannot be lifted onto a DM sent by a different
+  key, nor replayed against another exchange. It performs no registry I/O: it surfaces the
+  recovered signer pubkey for the recipient to resolve, keeping the fail-closed trust decision
+  (registered+certified → green; registered but novel → amber; unresolvable → red) at the edge.
+- **Honest attribution in the DM body.** The `Operator:` line now always shows the Operator's
+  **registered** npub, never the ephemeral delivery key; the delivery key is shown on its own
+  labeled line that says, in plain words, that its authority comes from the attestation and not
+  from the key itself.
+- **Additive and backward compatible.** If signing is unavailable the DM omits the attestation
+  block and renders amber (never green) at the client — envelope-absent is never trusted. No
+  change to the NIP-59 gift-wrap, the reply path, or any consumer; `thebrain-mcp`'s live DM flow
+  is unaffected.
+
+Client-side three-state rendering (Pricing Studio) and steering agent-held identities to inline
+self-attestation instead of the DM round-trip are tracked as follow-ups.
+
 ## 0.64.3 — 2026-07-19
 
 ### Added — Neon books health: a 402 is no longer a "warming up" lie, and the Authority learns first

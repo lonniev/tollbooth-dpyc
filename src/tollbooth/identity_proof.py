@@ -128,6 +128,185 @@ def create_ownership_proof(nsec: str) -> str:
     return create_proof(nsec, OWNERSHIP_SENTINEL)
 
 
+PROVENANCE_ATTESTATION_TOOL = "npub_proof_request"
+"""``u``-tag sentinel marking a kind-27235 event as a proof-request provenance
+attestation (not a per-tool caller proof). Distinct from ``OWNERSHIP_SENTINEL``
+so a provenance attestation can never be mistaken for a caller's ownership
+proof, or vice versa."""
+
+
+def create_provenance_attestation(
+    operator_nsec: str,
+    *,
+    sender_pubkey_hex: str,
+    subject_npub: str,
+    service: str,
+    challenge: str,
+) -> str:
+    """Sign an Operator provenance attestation for a Secure-Courier request DM.
+
+    A Secure-Courier DM must be *delivered* from a key other than the
+    Operator's own npub in the self-addressed case — Nostr relays silently
+    drop self-addressed DMs, so ``open_channel`` sends self-DMs from a
+    throwaway ephemeral key (commit #93). That leaves the human staring at an
+    unfamiliar sender npub with no verifiable tie to the Operator they believe
+    they are dealing with.
+
+    This attestation restores the tie *inside* the (NIP-44 encrypted) DM body:
+    the Operator signs — with its **registered** identity key, the asset an
+    impostor does not hold — a kind-27235 event that binds:
+
+    - ``sender``: the pubkey the recipient actually sees on the DM (the
+      ephemeral delivery key, or the Operator's own key on a patron DM). An
+      attestation cannot be lifted onto a DM delivered by a different key.
+    - ``subject``: the npub whose ownership/credentials the DM concerns.
+    - ``service``: the credential-template / proof service the DM rides on.
+    - ``challenge``: the one-time ``dpop_token`` for this exchange, so the
+      attestation is bound to this DM and cannot be replayed against another.
+
+    The recipient verifies the signature (``verify_provenance_attestation``)
+    and resolves the recovered signer pubkey against the DPYC registry to
+    render the trust state. Provenance is thus **Operator-attested**, never
+    **requester-asserted** — the design principle this closes.
+
+    Args:
+        operator_nsec: The Operator's registered private key (bech32 or hex).
+        sender_pubkey_hex: Hex pubkey the DM is delivered from (ephemeral key
+            for self-DMs, else the Operator's own pubkey).
+        subject_npub: The npub the request concerns (bech32).
+        service: The service name the DM rides on.
+        challenge: The one-time ``dpop_token`` slug for this exchange.
+
+    Returns:
+        JSON string of the signed kind-27235 attestation event.
+    """
+    from pynostr.key import PrivateKey  # type: ignore[import-untyped]
+    from pynostr.event import Event  # type: ignore[import-untyped]
+
+    if operator_nsec.startswith("nsec1"):
+        pk = PrivateKey.from_nsec(operator_nsec)
+    else:
+        pk = PrivateKey(bytes.fromhex(operator_nsec))
+
+    event = Event(
+        pubkey=pk.public_key.hex(),
+        kind=PROOF_EVENT_KIND,
+        content="",
+        created_at=int(time.time()),
+        tags=[
+            ["u", PROVENANCE_ATTESTATION_TOOL],
+            ["sender", sender_pubkey_hex],
+            ["subject", subject_npub],
+            ["service", service],
+            ["challenge", challenge],
+            ["nonce", secrets.token_hex(16)],
+        ],
+    )
+    event.sign(pk.hex())
+    return json.dumps(event.to_dict())
+
+
+def verify_provenance_attestation(
+    attestation_json: str,
+    *,
+    expected_sender_pubkey_hex: str,
+    expected_subject_npub: str,
+    expected_challenge: str,
+) -> dict[str, Any]:
+    """Verify an Operator provenance attestation against what the recipient saw.
+
+    Confirms the attestation is a well-formed, correctly-signed kind-27235
+    provenance event whose bound facts (sender, subject, challenge) match the
+    DM the recipient actually received — closing the lift-and-replay window.
+
+    This function performs **cryptographic** verification only. It deliberately
+    does *not* consult the DPYC registry: the caller resolves the recovered
+    ``operator_pubkey_hex`` against the registry to decide the trust state
+    (registered + certified → green; registered but novel → amber; unresolvable
+    → red). Keeping registry I/O out of this leaf makes it pure and testable,
+    and lets the caller apply its own fail-closed policy.
+
+    Unlike ``verify_proof`` there is **no freshness window and no replay
+    consumption**: the attestation is an inbound, idempotently-readable fact a
+    human may verify minutes or hours after the DM arrived (the same reason the
+    proof-reply path dropped its wall-clock gate), and re-reading it is not a
+    replay.
+
+    Returns a dict with:
+        ``valid``: bool — signature valid and all bound fields match.
+        ``operator_pubkey_hex``: str | None — recovered signer, for registry
+            resolution (present whenever the signature verified, even if a
+            bound field mismatched).
+        ``reason``: str — machine-readable failure cause when ``valid`` is
+            False (``"pynostr_missing"``, ``"malformed"``, ``"bad_signature"``,
+            ``"wrong_kind"``, ``"not_attestation"``, ``"sender_mismatch"``,
+            ``"subject_mismatch"``, ``"challenge_mismatch"``), else ``"ok"``.
+    """
+    result: dict[str, Any] = {
+        "valid": False,
+        "operator_pubkey_hex": None,
+        "reason": "ok",
+    }
+
+    try:
+        from pynostr.event import Event  # type: ignore[import-untyped]
+    except ImportError:
+        logger.warning("pynostr not installed — cannot verify provenance attestation")
+        result["reason"] = "pynostr_missing"
+        return result
+
+    if (
+        not isinstance(attestation_json, str)
+        or len(attestation_json) > MAX_PROOF_JSON_BYTES
+    ):
+        result["reason"] = "malformed"
+        return result
+
+    try:
+        event = Event.from_dict(json.loads(attestation_json))
+    except Exception:
+        result["reason"] = "malformed"
+        return result
+
+    try:
+        if not event.verify():
+            result["reason"] = "bad_signature"
+            return result
+    except Exception:
+        result["reason"] = "bad_signature"
+        return result
+
+    # Signature is valid — the signer pubkey is now trustworthy for the caller
+    # to resolve against the registry, regardless of any bound-field mismatch.
+    result["operator_pubkey_hex"] = event.pubkey
+
+    if event.kind != PROOF_EVENT_KIND:
+        result["reason"] = "wrong_kind"
+        return result
+
+    def _tag(name: str) -> str | None:
+        for tag in event.tags:
+            if len(tag) >= 2 and tag[0] == name:
+                return tag[1]
+        return None
+
+    if _tag("u") != PROVENANCE_ATTESTATION_TOOL:
+        result["reason"] = "not_attestation"
+        return result
+    if _tag("sender") != expected_sender_pubkey_hex:
+        result["reason"] = "sender_mismatch"
+        return result
+    if _tag("subject") != expected_subject_npub:
+        result["reason"] = "subject_mismatch"
+        return result
+    if _tag("challenge") != expected_challenge:
+        result["reason"] = "challenge_mismatch"
+        return result
+
+    result["valid"] = True
+    return result
+
+
 # Replay protection: track consumed proof event IDs within the window
 _consumed_proofs: dict[str, float] = {}  # event_id → expiry time
 _CONSUMED_CLEANUP_INTERVAL = 120  # seconds between cleanups
