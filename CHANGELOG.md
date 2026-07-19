@@ -3,6 +3,23 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.65.1 — 2026-07-19
+
+### Fixed — a rejected inline npub proof now says *why*, and the dpop_token shape is documented
+
+A self-minted `kind:27235` proof that was refused returned one opaque `proof_invalid`
+"Invalid identity proof." — the real reason was computed and discarded at DEBUG, forcing
+key-holding agents into guess-and-check. `require_proof` now surfaces a machine-readable
+`reason` on the denial (`malformed_json` for a base64/NIP-98-wrapped token, `tool_mismatch`
+— with `expected_u` naming the tool — when the `u` tag held the endpoint URL instead of the
+tool name, plus `signature_invalid` / `npub_mismatch` / `wrong_kind` / `expired` / `replayed`).
+The accept/reject logic is **byte-for-byte unchanged** — `verify_proof(...) -> bool` is now a
+thin wrapper over the reason-returning `_verify_proof_reason`; only the explanation is added,
+never what is accepted. Every `dpop_token` docstring now states the exact shape: raw JSON (not
+base64, not NIP-98), a `u` tag holding this tool's exact name from `tools/list` (not the
+endpoint URL), `content:""`, `created_at` within the freshness window, and a recommended
+`nonce`. Closes tollbooth-dpyc#137 (reported by Scout).
+
 ## 0.65.0 — 2026-07-19
 
 ### Added — a proof-request DM now proves who is asking, not just who is answering
