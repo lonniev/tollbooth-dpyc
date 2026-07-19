@@ -960,9 +960,52 @@ class NostrCredentialExchange:
                 recipient_npub[:20], service,
             )
 
-        operator_line_value = (
-            agent_key.public_key.bech32() if agent_key is not None else self._npub
+        # Provenance: the request is ALWAYS attributed to the Operator's
+        # registered identity (self._npub) — never the throwaway delivery key.
+        # In the self-DM case the DM is *delivered* from an ephemeral key
+        # (relays drop self-addressed DMs, commit #93), which the body labels
+        # as a delivery-only key whose authority is proven by the signed
+        # attestation below, not by the key itself.
+        sender_pubkey_hex = (
+            agent_key.public_key.hex() if agent_key is not None else self._pubkey_hex
         )
+        delivery_key_line = ""
+        if agent_key is not None:
+            delivery_key_line = (
+                f"Delivery key: {agent_key.public_key.bech32()}\n"
+                f"  (Relays drop self-addressed DMs, so this request is "
+                f"delivered from a one-time key. Its authority comes from the "
+                f"Operator Attestation below — never from this key.)\n"
+            )
+
+        # Operator-signed provenance attestation, bound to the exact delivery
+        # key, subject and one-time challenge. Best-effort: if signing is
+        # unavailable the DM omits the block and renders amber client-side,
+        # never green (envelope-absent is never trusted). See
+        # identity_proof.create_provenance_attestation.
+        attestation_block = ""
+        if recipient_npub is not None and self._privkey_hex:
+            try:
+                from tollbooth.identity_proof import create_provenance_attestation
+                _attestation = create_provenance_attestation(
+                    self._privkey_hex,
+                    sender_pubkey_hex=sender_pubkey_hex,
+                    subject_npub=recipient_npub,
+                    service=service,
+                    challenge=dpop_token,
+                )
+                attestation_block = (
+                    "--- Operator Attestation ---\n"
+                    "Signed by the Operator's registered npub; binds the "
+                    "delivery key and this exact request. Verify it resolves "
+                    "to a known Operator in the DPYC registry before trusting "
+                    "this message.\n"
+                    f"attestation = @@@{_attestation}@@@\n\n"
+                )
+            except Exception:
+                logger.debug(
+                    "best-effort provenance attestation build failed", exc_info=True,
+                )
 
         def build_welcome(rendezvous_relay: str) -> str:
             """Build the welcome DM with the rendezvous relay embedded.
@@ -981,9 +1024,11 @@ class NostrCredentialExchange:
                 f"IMPORTANT: include the anti-replay token exactly as shown.\n"
                 f"IMPORTANT: reply via the rendezvous_relay above — the "
                 f"courier listens there.\n\n"
+                f"{attestation_block}"
                 f"--- Message Provenance ---\n"
                 f"Service: {template.description or template.service}\n"
-                f"Operator: {operator_line_value}\n"
+                f"Operator: {self._npub}\n"
+                f"{delivery_key_line}"
                 f"Sent: {timestamp}\n"
                 f"Protocol: DPYC Secure Courier v{_tb_version}\n\n"
                 f"Your reply is end-to-end encrypted — "
