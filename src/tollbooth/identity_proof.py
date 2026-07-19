@@ -354,6 +354,159 @@ def _record_consumed(event_id: str, expiry: float) -> None:
     _consumed_proofs[event_id] = expiry
 
 
+# Machine-readable rejection reasons for an inline Schnorr (Tactic-2) proof.
+# Coarse by design — one value per distinct rejection branch in
+# ``_verify_proof_reason`` — so a caller can tell *why* a proof was refused
+# without leaking key material, the full event, or registry-membership facts.
+PROOF_REASON_MALFORMED_JSON = "malformed_json"
+"""Payload was not raw JSON within bounds (e.g. base64-wrapped, NIP-98 framed)."""
+PROOF_REASON_BAD_EVENT = "bad_event"
+"""JSON parsed, but not a well-formed Nostr event."""
+PROOF_REASON_WRONG_KIND = "wrong_kind"
+"""Event kind was not 27235."""
+PROOF_REASON_SIGNATURE_INVALID = "signature_invalid"
+"""Schnorr signature did not verify over the event id."""
+PROOF_REASON_NPUB_MISMATCH = "npub_mismatch"
+"""Signer pubkey ≠ the npub the caller claimed. NOT a registry statement."""
+PROOF_REASON_TOOL_MISMATCH = "tool_mismatch"
+"""No ``u`` tag held this tool's name."""
+PROOF_REASON_EXPIRED = "expired"
+"""``created_at`` was outside the freshness window (too old or too far future)."""
+PROOF_REASON_REPLAYED = "replayed"
+"""This event id was already consumed within the window."""
+PROOF_REASON_PYNOSTR_MISSING = "pynostr_missing"
+"""pynostr is not installed — proof cannot be verified (environment fault)."""
+
+# Human-readable one-liners for each rejection reason, safe to hand to the
+# caller. Each says *what* was wrong without revealing key material, the event,
+# or registry facts (``npub_mismatch`` = "signer ≠ the npub you claimed", never
+# "that npub is/isn't registered").
+_PROOF_REASON_MESSAGES = {
+    PROOF_REASON_MALFORMED_JSON: (
+        "Invalid identity proof: the dpop_token must be the raw JSON of a "
+        "signed kind-27235 event — not base64, not NIP-98 "
+        "'Authorization: Nostr <b64>' framing."
+    ),
+    PROOF_REASON_BAD_EVENT: (
+        "Invalid identity proof: the payload parsed as JSON but is not a "
+        "well-formed Nostr event."
+    ),
+    PROOF_REASON_WRONG_KIND: (
+        "Invalid identity proof: the event kind must be 27235."
+    ),
+    PROOF_REASON_SIGNATURE_INVALID: (
+        "Invalid identity proof: the Schnorr signature did not verify."
+    ),
+    PROOF_REASON_NPUB_MISMATCH: (
+        "Invalid identity proof: the event was signed by a different key than "
+        "the npub you claimed."
+    ),
+    PROOF_REASON_TOOL_MISMATCH: (
+        "Invalid identity proof: the u tag did not contain this tool's name."
+    ),
+    PROOF_REASON_EXPIRED: (
+        "Invalid identity proof: created_at is outside the "
+        f"{DEFAULT_WINDOW_SECONDS}-second freshness window (too old or too far "
+        "in the future)."
+    ),
+    PROOF_REASON_REPLAYED: (
+        "Invalid identity proof: this event id was already used. Mint a fresh "
+        "event (add a random nonce tag to avoid same-second id collisions)."
+    ),
+    PROOF_REASON_PYNOSTR_MISSING: (
+        "Cannot verify identity proof: proof verification is unavailable on "
+        "this server."
+    ),
+}
+
+
+def _verify_proof_reason(
+    proof_json: str,
+    expected_npub: str,
+    tool_name: str,
+    window_seconds: int = DEFAULT_WINDOW_SECONDS,
+) -> str | None:
+    """Verify an inline kind-27235 proof, returning the rejection *reason*.
+
+    The single source of truth for Tactic-2 accept/reject — ``verify_proof``
+    (bool) and ``require_proof`` (structured denial) both delegate here. The
+    accept/reject logic is byte-for-byte identical to the historical
+    ``verify_proof``; this only *surfaces* the reason instead of discarding it
+    at DEBUG. Do not loosen any check here.
+
+    Returns ``None`` when the proof is valid, otherwise one of the
+    ``PROOF_REASON_*`` constants.
+    """
+    try:
+        from pynostr.event import Event  # type: ignore[import-untyped]
+    except ImportError:
+        logger.warning("pynostr not installed — cannot verify identity proof")
+        return PROOF_REASON_PYNOSTR_MISSING
+
+    if not isinstance(proof_json, str) or len(proof_json) > MAX_PROOF_JSON_BYTES:
+        logger.debug(
+            "identity_proof: rejecting oversized/invalid payload (%s bytes)",
+            len(proof_json) if isinstance(proof_json, str) else "non-str",
+        )
+        return PROOF_REASON_MALFORMED_JSON
+
+    try:
+        event_dict = json.loads(proof_json)
+    except (json.JSONDecodeError, TypeError):
+        logger.debug("identity_proof: invalid JSON")
+        return PROOF_REASON_MALFORMED_JSON
+
+    try:
+        event = Event.from_dict(event_dict)
+    except Exception:
+        logger.debug("identity_proof: invalid Nostr event structure")
+        return PROOF_REASON_BAD_EVENT
+
+    try:
+        if not event.verify():
+            logger.debug("identity_proof: signature verification failed")
+            return PROOF_REASON_SIGNATURE_INVALID
+    except Exception:
+        logger.debug("identity_proof: signature verification error")
+        return PROOF_REASON_SIGNATURE_INVALID
+
+    if event.kind != PROOF_EVENT_KIND:
+        logger.debug("identity_proof: wrong kind %d (expected %d)", event.kind, PROOF_EVENT_KIND)
+        return PROOF_REASON_WRONG_KIND
+
+    try:
+        expected_hex = _npub_to_hex(expected_npub)
+    except Exception:
+        logger.debug("identity_proof: invalid expected npub")
+        return PROOF_REASON_NPUB_MISMATCH
+
+    if event.pubkey != expected_hex:
+        logger.debug("identity_proof: pubkey mismatch")
+        return PROOF_REASON_NPUB_MISMATCH
+
+    u_values = [tag[1] for tag in event.tags if len(tag) >= 2 and tag[0] == "u"]
+    if tool_name not in u_values:
+        logger.debug("identity_proof: tool_name %r not in u tags %r", tool_name, u_values)
+        return PROOF_REASON_TOOL_MISMATCH
+
+    now = time.time()
+    age = abs(now - event.created_at)
+    if age > window_seconds:
+        logger.debug("identity_proof: expired (age=%.1fs, window=%ds)", age, window_seconds)
+        return PROOF_REASON_EXPIRED
+
+    # Replay protection: reject reused proof event IDs
+    _cleanup_consumed()
+    event_id = getattr(event, "id", None) or event_dict.get("id", "")
+    if event_id and event_id in _consumed_proofs:
+        logger.debug("identity_proof: replay rejected (event_id=%s)", event_id[:16])
+        return PROOF_REASON_REPLAYED
+    if event_id:
+        _record_consumed(event_id, now + window_seconds)
+
+    return None
+
+
 def verify_proof(
     proof_json: str,
     expected_npub: str,
@@ -372,75 +525,11 @@ def verify_proof(
 
     Returns:
         ``True`` if the proof is valid, ``False`` otherwise.
+
+    Back-compat thin wrapper over ``_verify_proof_reason`` — a valid proof is
+    exactly one with no rejection reason.
     """
-    try:
-        from pynostr.event import Event  # type: ignore[import-untyped]
-    except ImportError:
-        logger.warning("pynostr not installed — cannot verify identity proof")
-        return False
-
-    if not isinstance(proof_json, str) or len(proof_json) > MAX_PROOF_JSON_BYTES:
-        logger.debug(
-            "identity_proof: rejecting oversized/invalid payload (%s bytes)",
-            len(proof_json) if isinstance(proof_json, str) else "non-str",
-        )
-        return False
-
-    try:
-        event_dict = json.loads(proof_json)
-    except (json.JSONDecodeError, TypeError):
-        logger.debug("identity_proof: invalid JSON")
-        return False
-
-    try:
-        event = Event.from_dict(event_dict)
-    except Exception:
-        logger.debug("identity_proof: invalid Nostr event structure")
-        return False
-
-    try:
-        if not event.verify():
-            logger.debug("identity_proof: signature verification failed")
-            return False
-    except Exception:
-        logger.debug("identity_proof: signature verification error")
-        return False
-
-    if event.kind != PROOF_EVENT_KIND:
-        logger.debug("identity_proof: wrong kind %d (expected %d)", event.kind, PROOF_EVENT_KIND)
-        return False
-
-    try:
-        expected_hex = _npub_to_hex(expected_npub)
-    except Exception:
-        logger.debug("identity_proof: invalid expected npub")
-        return False
-
-    if event.pubkey != expected_hex:
-        logger.debug("identity_proof: pubkey mismatch")
-        return False
-
-    u_values = [tag[1] for tag in event.tags if len(tag) >= 2 and tag[0] == "u"]
-    if tool_name not in u_values:
-        logger.debug("identity_proof: tool_name %r not in u tags %r", tool_name, u_values)
-        return False
-
-    now = time.time()
-    age = abs(now - event.created_at)
-    if age > window_seconds:
-        logger.debug("identity_proof: expired (age=%.1fs, window=%ds)", age, window_seconds)
-        return False
-
-    # Replay protection: reject reused proof event IDs
-    _cleanup_consumed()
-    event_id = getattr(event, "id", None) or event_dict.get("id", "")
-    if event_id and event_id in _consumed_proofs:
-        logger.debug("identity_proof: replay rejected (event_id=%s)", event_id[:16])
-        return False
-    if event_id:
-        _record_consumed(event_id, now + window_seconds)
-
-    return True
+    return _verify_proof_reason(proof_json, expected_npub, tool_name, window_seconds) is None
 
 
 async def require_proof(
@@ -500,7 +589,12 @@ async def require_proof(
             "error": "dpop_token is required.",
             "next_steps": [
                 "Either: sign a kind-27235 Nostr event with your nsec and pass "
-                "it as `dpop_token` (one-shot, no relay round-trip).",
+                "it as `dpop_token` (one-shot, no relay round-trip). Shape: "
+                "RAW JSON (not base64, not NIP-98 'Authorization: Nostr <b64>'), "
+                "kind:27235, content:\"\", a `u` tag holding THIS tool's exact "
+                "name from tools/list (not the endpoint URL), created_at within "
+                f"{DEFAULT_WINDOW_SECONDS}s of now, and a random `nonce` tag "
+                "recommended to avoid same-second event-id collisions.",
                 "Or: call request_npub_proof, reply to the DM challenge from "
                 "your Nostr client, then call receive_npub_proof — pass the "
                 "returned dpop_token as `dpop_token` on every subsequent call.",
@@ -560,10 +654,21 @@ async def require_proof(
         }
 
     # Tactic 2: inline Schnorr-signed kind-27235 event
-    if not verify_proof(dpop_token, npub, tool_name, window_seconds=window_seconds):
-        return {
+    reason = _verify_proof_reason(
+        dpop_token, npub, tool_name, window_seconds=window_seconds
+    )
+    if reason is not None:
+        denial: dict[str, Any] = {
             "success": False,
             "error_code": ErrorCode.PROOF_INVALID,
-            "error": "Invalid identity proof.",
+            "reason": reason,
+            "error": _PROOF_REASON_MESSAGES.get(reason, "Invalid identity proof."),
         }
+        # ``expected_u`` names the tool the caller is already invoking, so it
+        # leaks nothing — and it's the single most common Tactic-2 mistake
+        # (endpoint URL in ``u`` instead of the tool name). Only for
+        # ``tool_mismatch``; every other reason keeps the surface minimal.
+        if reason == PROOF_REASON_TOOL_MISMATCH:
+            denial["expected_u"] = tool_name
+        return denial
     return None
