@@ -892,6 +892,7 @@ class NostrCredentialExchange:
         *,
         greeting: str,
         recipient_npub: str | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Open a credential delivery channel for a service.
 
@@ -993,6 +994,7 @@ class NostrCredentialExchange:
                     subject_npub=recipient_npub,
                     service=service,
                     challenge=dpop_token,
+                    reason=reason,
                 )
                 attestation_block = (
                     "--- Operator Attestation ---\n"
@@ -1027,7 +1029,8 @@ class NostrCredentialExchange:
                 f"{attestation_block}"
                 f"--- Message Provenance ---\n"
                 f"Service: {template.description or template.service}\n"
-                f"Operator: {self._npub}\n"
+                + (f"Reason: {reason}\n" if reason else "")
+                + f"Operator: {self._npub}\n"
                 f"{delivery_key_line}"
                 f"Sent: {timestamp}\n"
                 f"Protocol: DPYC Secure Courier v{_tb_version}\n\n"

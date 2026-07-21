@@ -29,8 +29,17 @@ async def request_npub_proof_tool(
     patron_npub: str,
     *,
     service_name: str,
+    reason: str | None = None,
 ) -> dict[str, Any]:
-    """Send an npub-ownership challenge DM via the Secure Courier."""
+    """Send an npub-ownership challenge DM via the Secure Courier.
+
+    ``reason`` is an optional human-readable purpose the Operator states for
+    the request ("I'm working on your request XYZ and need the Operator to do
+    ABC"). It is signed into the provenance attestation (tamper-evident) and
+    shown in the DM body, so the recipient sees *why* they are being asked —
+    especially valuable for an unknown-signer request, where the stated
+    purpose is what lets a human judge a stranger's ask.
+    """
     err = rt.npub_validation_error(patron_npub, param="patron_npub")
     if err is not None:
         return err
@@ -70,6 +79,8 @@ async def request_npub_proof_tool(
             "you own this npub. Reply with any text to confirm. "
             "Your signed Nostr DM is the proof."
         )
+        if reason:
+            _greeting = f"{_greeting}\n\n{reason}"
         # Stamp the request time into the preamble so the patron can see
         # when the challenge was raised. Kept to a single terse line — proof
         # DMs are succinct notifications, not documents.
@@ -80,6 +91,7 @@ async def request_npub_proof_tool(
             PROOF_SERVICE,
             greeting=_greeting,
             recipient_npub=patron_npub,
+            reason=reason,
         )
         if not result.get("success"):
             return result

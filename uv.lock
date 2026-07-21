@@ -2975,7 +2975,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/bb/89/6df40b0c5fd9a1c30
 
 [[package]]
 name = "tollbooth-dpyc"
-version = "0.63.4"
+version = "0.66.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.66.0 — 2026-07-21
+
+### Added — proof / credential requests can carry a signed, human-readable purpose
+
+`request_npub_proof` (and the underlying `SecureCourier.open_channel` →
+`create_provenance_attestation`) gain an optional `reason`: a plain-language purpose the
+Operator states for the request — *"I'm working on your request XYZ and need the Operator
+to do ABC for you."* It is signed into the `kind:27235` provenance attestation as a `reason`
+tag (tamper-evident, bound to the signer) **and** shown in the DM body's Message Provenance
+block. This gives a recipient the one fact that makes a stranger's ask judgeable — especially
+in the unknown-signer case, where a claimed identity alone is not enough to decide. Omitting
+`reason` leaves the attestation and DM exactly as before (no tag, no line).
+
 ## 0.65.1 — 2026-07-19
 
 ### Fixed — a rejected inline npub proof now says *why*, and the dpop_token shape is documented
