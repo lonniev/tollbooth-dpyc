@@ -156,7 +156,7 @@ def test_harvest_origin_and_coarsen_ip():
 
 
 def test_first_public_ip_discards_loopback_and_private():
-    """A loopback / private address is the internal proxy (FastMCP Cloud shows
+    """A loopback / private address is the internal proxy (Horizon shows
     the app localhost), not the client — so it is discarded, never shown."""
     from tollbooth.tools.proof import _first_public_ip
     assert _first_public_ip({"x-forwarded-for": "127.0.0.1"}, None) == ""
@@ -172,7 +172,7 @@ def test_assemble_origin_drops_when_only_self_reported():
     """A self-reported User-Agent alone yields no origin — we omit rather than
     assert a 'trust me' hint the operator never observed."""
     from tollbooth.tools.proof import _assemble_origin
-    # Only a UA, no observable IP/geo → None (the FastMCP-Cloud/localhost case).
+    # Only a UA, no observable IP/geo → None (the Horizon/localhost case).
     assert _assemble_origin({"user-agent": "curl/8.19.0"}, None) is None
     # Loopback IP + UA → still None (loopback is the proxy, not the client).
     assert _assemble_origin(

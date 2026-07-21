@@ -53,7 +53,7 @@ def _first_public_ip(headers: dict[str, str], req: object) -> str:
     """The first globally-routable client IP the transport reveals, or "".
 
     A private / loopback / link-local address (127.*, 10.*, 192.168.*, etc.) is
-    the *internal proxy*, NOT the client — on FastMCP Cloud the app sees
+    the *internal proxy*, NOT the client — on Horizon the app sees
     localhost — so it is deliberately discarded: a bogus "could be anywhere"
     address is worse than none.
     """
@@ -84,7 +84,7 @@ def _assemble_origin(headers: dict[str, str], req: object) -> str | None:
     """Compose an origin string from what the transport reveals — but ONLY when
     an *observed* signal survives (a public client IP or an edge geo). A
     self-reported ``User-Agent`` alone is NOT enough: on a platform that hides
-    the client IP (FastMCP Cloud → the app sees localhost) that is all that
+    the client IP (Horizon → the app sees localhost) that is all that
     remains, and asserting a "trust me" origin from a self-reported string is
     exactly what we must not do. Returns ``None`` in that case so the attestation
     omits the tag rather than showing a weak, misleading hint.

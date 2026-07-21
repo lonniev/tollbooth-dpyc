@@ -8,7 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed — request `origin` is emitted only when something is actually observed
 
 0.67.0 could stamp a misleading origin: on a platform that hides the client IP
-(FastMCP Cloud hands the app localhost), the harvest fell back to `127.0.0.1` and
+(Horizon hands the app localhost), the harvest fell back to `127.0.0.1` and
 emitted `127.0.0.0/24 · <user-agent>` — a loopback address that "could be
 anywhere", plus a self-reported UA. Now: private/loopback/link-local addresses
 are discarded (they are the internal proxy, not the client); the real-client-IP
