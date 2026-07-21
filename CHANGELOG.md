@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.67.1 — 2026-07-21
+
+### Fixed — request `origin` is emitted only when something is actually observed
+
+0.67.0 could stamp a misleading origin: on a platform that hides the client IP
+(Horizon hands the app localhost), the harvest fell back to `127.0.0.1` and
+emitted `127.0.0.0/24 · <user-agent>` — a loopback address that "could be
+anywhere", plus a self-reported UA. Now: private/loopback/link-local addresses
+are discarded (they are the internal proxy, not the client); the real-client-IP
+header set is broadened (`true-client-ip`, `fly-client-ip`, `fastly-client-ip`,
+… + more geo headers); and the `origin` tag is emitted ONLY when an *observed*
+signal survives (a public IP or an edge geo). A self-reported User-Agent alone
+yields no tag — we omit rather than assert a "trust me" origin the operator
+never observed.
+
 ## 0.67.0 — 2026-07-21
 
 ### Added — proof requests carry an operator-observed `origin` so the human can judge an unsolicited ask
