@@ -79,6 +79,43 @@ def test_roundtrip_valid(operator):
     assert res["operator_pubkey_hex"] == op_hex
 
 
+def test_reason_tag_signed_in_when_given(operator):
+    """An optional human-readable purpose rides as a signed ``reason`` tag —
+    tamper-evident, so a recipient can render the stated 'why' bound to the
+    signer (the unknown-signer case needs exactly this to judge a stranger)."""
+    op_pk, _, _ = operator
+    subject = PrivateKey().public_key.bech32()
+    ephemeral = PrivateKey().public_key.hex()
+    reason = "I'm working on your credit top-up and need the Operator to certify it."
+
+    att = create_provenance_attestation(
+        op_pk.nsec,
+        sender_pubkey_hex=ephemeral,
+        subject_npub=subject,
+        service="x",
+        challenge="bold-hawk-42",
+        reason=reason,
+    )
+    tags = {t[0]: t[1] for t in json.loads(att)["tags"] if len(t) >= 2}
+    assert tags.get("reason") == reason
+    # The extra tag does not break signature verification.
+    res = verify_provenance_attestation(
+        att,
+        expected_sender_pubkey_hex=ephemeral,
+        expected_subject_npub=subject,
+        expected_challenge="bold-hawk-42",
+    )
+    assert res["valid"] is True
+
+
+def test_reason_tag_absent_when_omitted(operator):
+    op_pk, _, _ = operator
+    subject = PrivateKey().public_key.bech32()
+    ephemeral = PrivateKey().public_key.hex()
+    att = _attest(op_pk, sender_hex=ephemeral, subject_npub=subject)
+    assert "reason" not in [t[0] for t in json.loads(att)["tags"]]
+
+
 def test_sender_mismatch_rejected(operator):
     """An attestation lifted onto a DM delivered by a different key fails."""
     op_pk, op_hex, _ = operator

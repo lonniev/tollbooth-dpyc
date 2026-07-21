@@ -142,6 +142,7 @@ def create_provenance_attestation(
     subject_npub: str,
     service: str,
     challenge: str,
+    reason: str | None = None,
 ) -> str:
     """Sign an Operator provenance attestation for a Secure-Courier request DM.
 
@@ -176,6 +177,11 @@ def create_provenance_attestation(
         subject_npub: The npub the request concerns (bech32).
         service: The service name the DM rides on.
         challenge: The one-time ``dpop_token`` slug for this exchange.
+        reason: Optional human-readable purpose the Operator states for this
+            request ("I'm working on your request XYZ and need the Operator to
+            do ABC"). Signed into the attestation as a ``reason`` tag so the
+            recipient can render it *verifiably bound to the signer* — a relay
+            cannot forge or alter the stated purpose. Omitted when not given.
 
     Returns:
         JSON string of the signed kind-27235 attestation event.
@@ -188,19 +194,23 @@ def create_provenance_attestation(
     else:
         pk = PrivateKey(bytes.fromhex(operator_nsec))
 
+    tags = [
+        ["u", PROVENANCE_ATTESTATION_TOOL],
+        ["sender", sender_pubkey_hex],
+        ["subject", subject_npub],
+        ["service", service],
+        ["challenge", challenge],
+        ["nonce", secrets.token_hex(16)],
+    ]
+    if reason:
+        tags.append(["reason", reason])
+
     event = Event(
         pubkey=pk.public_key.hex(),
         kind=PROOF_EVENT_KIND,
         content="",
         created_at=int(time.time()),
-        tags=[
-            ["u", PROVENANCE_ATTESTATION_TOOL],
-            ["sender", sender_pubkey_hex],
-            ["subject", subject_npub],
-            ["service", service],
-            ["challenge", challenge],
-            ["nonce", secrets.token_hex(16)],
-        ],
+        tags=tags,
     )
     event.sign(pk.hex())
     return json.dumps(event.to_dict())

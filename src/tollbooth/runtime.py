@@ -4031,6 +4031,7 @@ def register_standard_tools(
     @tool
     async def request_npub_proof(
         patron_npub: str = "",
+        reason: str = "",
     ) -> dict[str, Any]:
         """Request npub ownership proof from a patron via Nostr DM.
 
@@ -4062,10 +4063,16 @@ def register_standard_tools(
 
         Args:
             patron_npub: Required. The patron's npub to request proof from.
+            reason: Optional. A human-readable purpose for the request
+                ("I'm working on your request XYZ and need the Operator to do
+                ABC for you"). Signed into the provenance attestation and shown
+                in the DM, so the recipient sees *why* they are being asked —
+                especially useful when the signer is unknown to them.
         """
         from tollbooth.tools.proof import request_npub_proof_tool
         return await request_npub_proof_tool(
             rt, patron_npub, service_name=service_name,
+            reason=reason or None,
         )
 
     @tool
