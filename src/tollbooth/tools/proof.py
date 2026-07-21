@@ -140,6 +140,7 @@ async def request_npub_proof_tool(
     *,
     service_name: str,
     reason: str | None = None,
+    verify_at: str | None = None,
 ) -> dict[str, Any]:
     """Send an npub-ownership challenge DM via the Secure Courier.
 
@@ -209,6 +210,7 @@ async def request_npub_proof_tool(
             recipient_npub=patron_npub,
             reason=reason,
             origin=origin,
+            verify_at=verify_at,
         )
         if not result.get("success"):
             return result

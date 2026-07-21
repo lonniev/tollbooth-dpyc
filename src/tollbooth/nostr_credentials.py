@@ -894,6 +894,7 @@ class NostrCredentialExchange:
         recipient_npub: str | None = None,
         reason: str | None = None,
         origin: str | None = None,
+        verify_at: str | None = None,
     ) -> dict[str, Any]:
         """Open a credential delivery channel for a service.
 
@@ -997,6 +998,7 @@ class NostrCredentialExchange:
                     challenge=dpop_token,
                     reason=reason,
                     origin=origin,
+                    verify_at=verify_at,
                 )
                 attestation_block = (
                     "--- Operator Attestation ---\n"
@@ -1027,7 +1029,14 @@ class NostrCredentialExchange:
                 f"  rendezvous_relay = @@@{rendezvous_relay}@@@\n\n"
                 f"IMPORTANT: include the anti-replay token exactly as shown.\n"
                 f"IMPORTANT: reply via the rendezvous_relay above — the "
-                f"courier listens there.\n\n"
+                f"courier listens there.\n"
+                + (
+                    f"IMPORTANT: this code was shown to you at: {verify_at}\n"
+                    f"  Approve ONLY if the code above matches what you see there. "
+                    f"If you can't find it, do not approve.\n"
+                    if verify_at else ""
+                )
+                + "\n"
                 f"{attestation_block}"
                 f"--- Message Provenance ---\n"
                 f"Service: {template.description or template.service}\n"

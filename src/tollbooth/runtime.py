@@ -4032,6 +4032,7 @@ def register_standard_tools(
     async def request_npub_proof(
         patron_npub: str = "",
         reason: str = "",
+        verify_at: str = "",
     ) -> dict[str, Any]:
         """Request npub ownership proof from a patron via Nostr DM.
 
@@ -4068,11 +4069,19 @@ def register_standard_tools(
                 ABC for you"). Signed into the provenance attestation and shown
                 in the DM, so the recipient sees *why* they are being asked —
                 especially useful when the signer is unknown to them.
+            verify_at: Optional. A free-form statement of WHERE you (the
+                initiating agent) already showed this proof's one-time code to
+                the user — a URL, or "your Claude.ai conversation", "the Grok
+                session". The OAuth 2.0 Device Grant ``verification_uri``,
+                generalized: the user approves only if the code in the DM matches
+                the one you displayed there, so an unsolicited request they've
+                never seen is refused. Signed into the attestation.
         """
         from tollbooth.tools.proof import request_npub_proof_tool
         return await request_npub_proof_tool(
             rt, patron_npub, service_name=service_name,
             reason=reason or None,
+            verify_at=verify_at or None,
         )
 
     @tool
