@@ -3,6 +3,25 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.67.0 — 2026-07-21
+
+### Added — proof requests carry an operator-observed `origin` so the human can judge an unsolicited ask
+
+`request_npub_proof` is free and unauthenticated — anyone can trigger the operator
+to send a genuinely operator-signed proof-request DM to any npub. The attestation
+proves *who signed it*, but said nothing about *who triggered it, from where*.
+
+The operator now best-effort harvests the triggering client's provenance
+server-side — geo + a coarsened source IP (last octet dropped) + the claimed
+client agent — from the transport headers (`CF-IPCountry`, `CF-Connecting-IP` /
+`X-Forwarded-For`, `User-Agent`), and signs it into the attestation as an
+`origin` tag (tamper-evident; observed, never client self-report). It is also
+shown as a `Requested from:` line in the DM. Best-effort: when the transport
+exposes nothing (no HTTP context / no edge geo), the tag is simply omitted.
+
+This is display-only by design — it gives a human the missing datum to *decide*
+whether to accept a request, not a gate that blocks it.
+
 ## 0.66.1 — 2026-07-21
 
 ### Changed — the proof-request `reason` is carried once (signed tag only), keeping the payload lean

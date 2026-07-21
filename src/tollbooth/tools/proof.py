@@ -24,6 +24,67 @@ logger = logging.getLogger(__name__)
 PROOF_SERVICE = "npub_ownership"
 
 
+def _coarsen_ip(ip: str) -> str:
+    """Blunt an IP for provenance display — the recipient judges *region*, not a
+    pinpoint address. IPv4 → drop the last octet; IPv6 → keep the /48 prefix."""
+    ip = ip.strip()
+    if ":" in ip:  # IPv6
+        return ":".join(ip.split(":")[:3]) + "::/48"
+    parts = ip.split(".")
+    if len(parts) == 4:
+        return ".".join(parts[:3]) + ".0/24"
+    return ip
+
+
+def harvest_request_origin() -> str | None:
+    """Best-effort, operator-OBSERVED provenance of the client that triggered
+    this tool call: a compact ``geo · coarse-ip · client`` string pulled from the
+    transport headers server-side (never client self-report).
+
+    Everything here is best-effort — the request may not be inside an HTTP
+    context, and an edge/CDN may inject geo headers or not. Returns ``None`` when
+    nothing can be observed, so the attestation simply omits the ``origin`` tag.
+    """
+    parts: list[str] = []
+    headers: dict[str, str] = {}
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+        headers = {k.lower(): v for k, v in (get_http_headers() or {}).items()}
+    except Exception:
+        headers = {}
+
+    # Geo — present only if the edge injects it (e.g. Cloudflare CF-IP* headers).
+    country = (headers.get("cf-ipcountry") or "").strip()
+    city = (headers.get("cf-ipcity") or "").strip()
+    loc = ", ".join(x for x in (city, country) if x and x.upper() != "XX")
+    if loc:
+        parts.append(loc)
+
+    # Coarse source IP — observed at the edge; last octet dropped for privacy.
+    ip = (
+        headers.get("cf-connecting-ip")
+        or headers.get("x-forwarded-for", "").split(",")[0]
+        or headers.get("x-real-ip", "")
+    ).strip()
+    if not ip:
+        try:
+            from fastmcp.server.dependencies import get_http_request
+            req = get_http_request()
+            ip = req.client.host if req and req.client else ""
+        except Exception:
+            ip = ""
+    if ip:
+        parts.append(_coarsen_ip(ip))
+
+    # Client agent — the caller presents this at the header, so it is CLAIMED
+    # (weaker than the observed IP/geo), but still a useful signal. Truncated.
+    ua = (headers.get("user-agent") or "").strip()
+    if ua:
+        parts.append(ua[:48])
+
+    return " · ".join(parts) if parts else None
+
+
 async def request_npub_proof_tool(
     rt: Any,
     patron_npub: str,
@@ -90,11 +151,15 @@ async def request_npub_proof_tool(
         from datetime import datetime, timezone
         requested_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         _greeting = f"{_greeting}\nRequested: {requested_at}"
+        # Best-effort operator-observed provenance of the triggering client —
+        # signed into the attestation so the human can judge an unsolicited ask.
+        origin = harvest_request_origin()
         result = await courier.open_channel(
             PROOF_SERVICE,
             greeting=_greeting,
             recipient_npub=patron_npub,
             reason=reason,
+            origin=origin,
         )
         if not result.get("success"):
             return result

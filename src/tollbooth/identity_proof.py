@@ -143,6 +143,7 @@ def create_provenance_attestation(
     service: str,
     challenge: str,
     reason: str | None = None,
+    origin: str | None = None,
 ) -> str:
     """Sign an Operator provenance attestation for a Secure-Courier request DM.
 
@@ -182,6 +183,12 @@ def create_provenance_attestation(
             do ABC"). Signed into the attestation as a ``reason`` tag so the
             recipient can render it *verifiably bound to the signer* — a relay
             cannot forge or alter the stated purpose. Omitted when not given.
+        origin: Optional, operator-OBSERVED provenance of the client that
+            triggered the request (a compact "geo · coarse-ip · client" string
+            harvested server-side from the transport — never client self-report).
+            Signed into an ``origin`` tag so the recipient sees *where the
+            request came from* to judge an unsolicited ask. Best-effort: omitted
+            when the transport exposes nothing. Omitted when not given.
 
     Returns:
         JSON string of the signed kind-27235 attestation event.
@@ -204,6 +211,8 @@ def create_provenance_attestation(
     ]
     if reason:
         tags.append(["reason", reason])
+    if origin:
+        tags.append(["origin", origin])
 
     event = Event(
         pubkey=pk.public_key.hex(),

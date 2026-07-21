@@ -174,7 +174,7 @@ class TestOpenChannel:
             result = await service.open_channel("x", greeting="Test greeting")
 
         mock_open.assert_called_once_with(
-            "x", greeting="Test greeting", recipient_npub=None, reason=None,
+            "x", greeting="Test greeting", recipient_npub=None, reason=None, origin=None,
         )
         assert result == expected
 
@@ -199,7 +199,7 @@ class TestOpenChannel:
             )
 
         mock_open.assert_called_once_with(
-            "x", greeting="Test greeting", recipient_npub=npub, reason=None,
+            "x", greeting="Test greeting", recipient_npub=npub, reason=None, origin=None,
         )
 
 

@@ -116,6 +116,45 @@ def test_reason_tag_absent_when_omitted(operator):
     assert "reason" not in [t[0] for t in json.loads(att)["tags"]]
 
 
+def test_origin_tag_signed_in_when_given(operator):
+    """Operator-observed client provenance rides as a signed ``origin`` tag —
+    tamper-evident, so the recipient can judge an unsolicited request by *where
+    it came from* rather than only *who signed it*."""
+    op_pk, _, _ = operator
+    subject = PrivateKey().public_key.bech32()
+    ephemeral = PrivateKey().public_key.hex()
+    origin = "US · 203.0.113.0/24 · claude-ai/1.0"
+    att = create_provenance_attestation(
+        op_pk.nsec, sender_pubkey_hex=ephemeral, subject_npub=subject,
+        service="x", challenge="bold-hawk-42", origin=origin,
+    )
+    tags = {t[0]: t[1] for t in json.loads(att)["tags"] if len(t) >= 2}
+    assert tags.get("origin") == origin
+    res = verify_provenance_attestation(
+        att, expected_sender_pubkey_hex=ephemeral,
+        expected_subject_npub=subject, expected_challenge="bold-hawk-42",
+    )
+    assert res["valid"] is True
+
+
+def test_origin_tag_absent_when_omitted(operator):
+    op_pk, _, _ = operator
+    subject = PrivateKey().public_key.bech32()
+    ephemeral = PrivateKey().public_key.hex()
+    att = _attest(op_pk, sender_hex=ephemeral, subject_npub=subject)
+    assert "origin" not in [t[0] for t in json.loads(att)["tags"]]
+
+
+def test_harvest_origin_and_coarsen_ip():
+    """The IP coarsener drops the last octet (v4) / keeps the /48 (v6), and
+    harvest returns None outside an HTTP request context (best-effort)."""
+    from tollbooth.tools.proof import _coarsen_ip, harvest_request_origin
+    assert _coarsen_ip("203.0.113.47") == "203.0.113.0/24"
+    assert _coarsen_ip("2001:db8:abcd:1::5") == "2001:db8:abcd::/48"
+    # No FastMCP HTTP context in a plain test → best-effort None, never raises.
+    assert harvest_request_origin() is None
+
+
 def test_sender_mismatch_rejected(operator):
     """An attestation lifted onto a DM delivered by a different key fails."""
     op_pk, op_hex, _ = operator
