@@ -24,10 +24,23 @@ logger = logging.getLogger(__name__)
 PROOF_SERVICE = "npub_ownership"
 
 
+# Real-client-IP headers, most-trustworthy first. Different fronts use different
+# names; we take the first that yields a *globally routable* address.
+_IP_HEADERS = (
+    "true-client-ip", "cf-connecting-ip", "fly-client-ip", "fastly-client-ip",
+    "x-real-ip", "x-client-ip", "x-forwarded-for", "x-envoy-external-address",
+)
+_GEO_COUNTRY_HEADERS = (
+    "cf-ipcountry", "x-vercel-ip-country", "x-country-code",
+    "fastly-geo-country-code", "x-geo-country",
+)
+_GEO_CITY_HEADERS = ("cf-ipcity", "x-vercel-ip-city", "x-geo-city")
+
+
 def _coarsen_ip(ip: str) -> str:
     """Blunt an IP for provenance display — the recipient judges *region*, not a
     pinpoint address. IPv4 → drop the last octet; IPv6 → keep the /48 prefix."""
-    ip = ip.strip()
+    ip = ip.strip().strip("[]")
     if ":" in ip:  # IPv6
         return ":".join(ip.split(":")[:3]) + "::/48"
     parts = ip.split(".")
@@ -36,53 +49,89 @@ def _coarsen_ip(ip: str) -> str:
     return ip
 
 
-def harvest_request_origin() -> str | None:
-    """Best-effort, operator-OBSERVED provenance of the client that triggered
-    this tool call: a compact ``geo · coarse-ip · client`` string pulled from the
-    transport headers server-side (never client self-report).
+def _first_public_ip(headers: dict[str, str], req: object) -> str:
+    """The first globally-routable client IP the transport reveals, or "".
 
-    Everything here is best-effort — the request may not be inside an HTTP
-    context, and an edge/CDN may inject geo headers or not. Returns ``None`` when
-    nothing can be observed, so the attestation simply omits the ``origin`` tag.
+    A private / loopback / link-local address (127.*, 10.*, 192.168.*, etc.) is
+    the *internal proxy*, NOT the client — on FastMCP Cloud the app sees
+    localhost — so it is deliberately discarded: a bogus "could be anywhere"
+    address is worse than none.
     """
-    parts: list[str] = []
-    headers: dict[str, str] = {}
-    try:
-        from fastmcp.server.dependencies import get_http_headers
-        headers = {k.lower(): v for k, v in (get_http_headers() or {}).items()}
-    except Exception:
-        headers = {}
+    import ipaddress
 
-    # Geo — present only if the edge injects it (e.g. Cloudflare CF-IP* headers).
-    country = (headers.get("cf-ipcountry") or "").strip()
-    city = (headers.get("cf-ipcity") or "").strip()
+    def _global(cand: str) -> str:
+        cand = cand.split(",")[0].strip().strip("[]")
+        # strip a :port on IPv4
+        if cand.count(":") == 1 and "." in cand:
+            cand = cand.split(":")[0]
+        try:
+            return cand if ipaddress.ip_address(cand).is_global else ""
+        except ValueError:
+            return ""
+
+    for h in _IP_HEADERS:
+        got = _global(headers.get(h, ""))
+        if got:
+            return got
+    try:
+        host = getattr(getattr(req, "client", None), "host", "") or ""
+        return _global(host)
+    except Exception:
+        return ""
+
+
+def _assemble_origin(headers: dict[str, str], req: object) -> str | None:
+    """Compose an origin string from what the transport reveals — but ONLY when
+    an *observed* signal survives (a public client IP or an edge geo). A
+    self-reported ``User-Agent`` alone is NOT enough: on a platform that hides
+    the client IP (FastMCP Cloud → the app sees localhost) that is all that
+    remains, and asserting a "trust me" origin from a self-reported string is
+    exactly what we must not do. Returns ``None`` in that case so the attestation
+    omits the tag rather than showing a weak, misleading hint.
+    """
+    observed: list[str] = []
+
+    # Geo — present only if a front injects it.
+    country = next((headers[h].strip() for h in _GEO_COUNTRY_HEADERS
+                    if headers.get(h, "").strip()), "")
+    city = next((headers[h].strip() for h in _GEO_CITY_HEADERS
+                 if headers.get(h, "").strip()), "")
     loc = ", ".join(x for x in (city, country) if x and x.upper() != "XX")
     if loc:
-        parts.append(loc)
+        observed.append(loc)
 
-    # Coarse source IP — observed at the edge; last octet dropped for privacy.
-    ip = (
-        headers.get("cf-connecting-ip")
-        or headers.get("x-forwarded-for", "").split(",")[0]
-        or headers.get("x-real-ip", "")
-    ).strip()
-    if not ip:
-        try:
-            from fastmcp.server.dependencies import get_http_request
-            req = get_http_request()
-            ip = req.client.host if req and req.client else ""
-        except Exception:
-            ip = ""
+    # A *public* client IP, coarsened. A loopback/private address is discarded.
+    ip = _first_public_ip(headers, req)
     if ip:
-        parts.append(_coarsen_ip(ip))
+        observed.append(_coarsen_ip(ip))
 
-    # Client agent — the caller presents this at the header, so it is CLAIMED
-    # (weaker than the observed IP/geo), but still a useful signal. Truncated.
+    # Nothing the operator actually OBSERVED → omit. The self-reported client
+    # agent is only added as context ALONGSIDE an observed signal, never alone.
+    if not observed:
+        return None
     ua = (headers.get("user-agent") or "").strip()
     if ua:
-        parts.append(ua[:48])
+        observed.append(ua[:48])
+    return " · ".join(observed)
 
-    return " · ".join(parts) if parts else None
+
+def harvest_request_origin() -> str | None:
+    """Best-effort, operator-OBSERVED provenance of the client that triggered
+    this tool call. Pulls the transport headers server-side and delegates to
+    :func:`_assemble_origin`, which returns ``None`` unless an observed signal
+    (public IP / geo) survives — so a platform that hides the client IP simply
+    yields no ``origin`` tag rather than a self-reported one.
+    """
+    try:
+        from fastmcp.server.dependencies import get_http_headers, get_http_request
+        headers = {k.lower(): v for k, v in (get_http_headers() or {}).items()}
+        try:
+            req: object = get_http_request()
+        except Exception:
+            req = None
+    except Exception:
+        return None
+    return _assemble_origin(headers, req)
 
 
 async def request_npub_proof_tool(

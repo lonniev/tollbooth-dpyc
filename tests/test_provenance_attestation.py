@@ -155,6 +155,36 @@ def test_harvest_origin_and_coarsen_ip():
     assert harvest_request_origin() is None
 
 
+def test_first_public_ip_discards_loopback_and_private():
+    """A loopback / private address is the internal proxy (FastMCP Cloud shows
+    the app localhost), not the client — so it is discarded, never shown."""
+    from tollbooth.tools.proof import _first_public_ip
+    assert _first_public_ip({"x-forwarded-for": "127.0.0.1"}, None) == ""
+    assert _first_public_ip({"x-forwarded-for": "10.0.0.5"}, None) == ""
+    assert _first_public_ip({"x-forwarded-for": "192.168.1.9"}, None) == ""
+    # First *global* hop wins, private hops skipped.
+    assert _first_public_ip({"x-forwarded-for": "8.8.8.8, 10.0.0.1"}, None) == "8.8.8.8"
+    # Non-standard header names are covered too.
+    assert _first_public_ip({"true-client-ip": "1.1.1.1"}, None) == "1.1.1.1"
+
+
+def test_assemble_origin_drops_when_only_self_reported():
+    """A self-reported User-Agent alone yields no origin — we omit rather than
+    assert a 'trust me' hint the operator never observed."""
+    from tollbooth.tools.proof import _assemble_origin
+    # Only a UA, no observable IP/geo → None (the FastMCP-Cloud/localhost case).
+    assert _assemble_origin({"user-agent": "curl/8.19.0"}, None) is None
+    # Loopback IP + UA → still None (loopback is the proxy, not the client).
+    assert _assemble_origin(
+        {"x-forwarded-for": "127.0.0.1", "user-agent": "curl/8.19.0"}, None) is None
+    # An observed public IP survives, and the UA rides along as context.
+    got = _assemble_origin(
+        {"true-client-ip": "8.8.8.8", "user-agent": "claude-ai/1.0"}, None)
+    assert got == "8.8.8.0/24 · claude-ai/1.0"
+    # An observed geo survives on its own.
+    assert _assemble_origin({"cf-ipcountry": "US"}, None) == "US"
+
+
 def test_sender_mismatch_rejected(operator):
     """An attestation lifted onto a DM delivered by a different key fails."""
     op_pk, op_hex, _ = operator
