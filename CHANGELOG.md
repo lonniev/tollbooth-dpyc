@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.66.1 — 2026-07-21
+
+### Changed — the proof-request `reason` is carried once (signed tag only), keeping the payload lean
+
+0.66.0 spliced the `reason` into three places — the greeting, the signed
+attestation tag, and a `Reason:` provenance line. That bloats the DM and
+duplicates free-text into the parse-sensitive body. The reason now rides in
+exactly one place: the tamper-evident `reason` tag on the attestation (where a
+recipient reads it trustworthily). The greeting and provenance block are back to
+their lean, fixed form. No behaviour change for a recipient that reads the tag;
+the wire payload is smaller and single-sourced.
+
 ## 0.66.0 — 2026-07-21
 
 ### Added — proof / credential requests can carry a signed, human-readable purpose
