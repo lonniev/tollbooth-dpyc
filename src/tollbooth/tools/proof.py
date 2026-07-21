@@ -79,8 +79,11 @@ async def request_npub_proof_tool(
             "you own this npub. Reply with any text to confirm. "
             "Your signed Nostr DM is the proof."
         )
-        if reason:
-            _greeting = f"{_greeting}\n\n{reason}"
+        # NOTE: `reason` is carried ONCE, in the signed attestation tag (below,
+        # via open_channel → create_provenance_attestation). It is deliberately
+        # NOT also spliced into the greeting or a provenance line — the payload
+        # stays lean and single-sourced, and the recipient reads the reason from
+        # the tamper-evident tag, not a duplicated free-text copy.
         # Stamp the request time into the preamble so the patron can see
         # when the challenge was raised. Kept to a single terse line — proof
         # DMs are succinct notifications, not documents.

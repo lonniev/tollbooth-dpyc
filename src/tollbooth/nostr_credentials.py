@@ -1029,8 +1029,7 @@ class NostrCredentialExchange:
                 f"{attestation_block}"
                 f"--- Message Provenance ---\n"
                 f"Service: {template.description or template.service}\n"
-                + (f"Reason: {reason}\n" if reason else "")
-                + f"Operator: {self._npub}\n"
+                f"Operator: {self._npub}\n"
                 f"{delivery_key_line}"
                 f"Sent: {timestamp}\n"
                 f"Protocol: DPYC Secure Courier v{_tb_version}\n\n"
