@@ -144,6 +144,7 @@ def create_provenance_attestation(
     challenge: str,
     reason: str | None = None,
     origin: str | None = None,
+    verify_at: str | None = None,
 ) -> str:
     """Sign an Operator provenance attestation for a Secure-Courier request DM.
 
@@ -189,6 +190,14 @@ def create_provenance_attestation(
             Signed into an ``origin`` tag so the recipient sees *where the
             request came from* to judge an unsolicited ask. Best-effort: omitted
             when the transport exposes nothing. Omitted when not given.
+        verify_at: Optional, free-form statement of *where the initiating agent
+            already showed the recipient this exact ``challenge`` (dpop_token)* —
+            a URL, or a description like "your Claude.ai conversation". This is
+            the OAuth 2.0 Device Grant ``verification_uri`` generalized: the
+            recipient approves only if the code here matches the one displayed
+            there, so an unsolicited request (whose code the recipient has never
+            seen anywhere) is refused. Signed in so a relay cannot rewrite the
+            stated venue. Omitted when not given.
 
     Returns:
         JSON string of the signed kind-27235 attestation event.
@@ -213,6 +222,8 @@ def create_provenance_attestation(
         tags.append(["reason", reason])
     if origin:
         tags.append(["origin", origin])
+    if verify_at:
+        tags.append(["verify_at", verify_at])
 
     event = Event(
         pubkey=pk.public_key.hex(),

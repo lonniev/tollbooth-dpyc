@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.68.0 — 2026-07-21
+
+### Added — proof requests carry a Device-Grant `verify_at` (where the code was shown)
+
+`request_npub_proof` gains an optional `verify_at`: a free-form statement of
+*where the initiating agent already showed the recipient this one-time code* —
+a URL, or "your Claude.ai conversation", "the Grok session". It is OAuth 2.0
+Device Authorization Grant (RFC 8628) applied to the Nostr proof flow: the
+`dpop_token` is the `user_code`; `verify_at` is the (generalized)
+`verification_uri`. The recipient approves only if the code in the DM matches
+the one displayed there — so an unsolicited request, whose code they've never
+seen anywhere, is refused (no anchor → no trust). Signed into the attestation
+as a `verify_at` tag (tamper-evident) and written as an IMPORTANT line in the DM
+next to the code. Omitted when not given.
+
 ## 0.67.1 — 2026-07-21
 
 ### Fixed — request `origin` is emitted only when something is actually observed

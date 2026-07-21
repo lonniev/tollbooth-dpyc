@@ -145,6 +145,35 @@ def test_origin_tag_absent_when_omitted(operator):
     assert "origin" not in [t[0] for t in json.loads(att)["tags"]]
 
 
+def test_verify_at_tag_signed_in_when_given(operator):
+    """The Device-Grant verification venue rides as a signed ``verify_at`` tag —
+    tamper-evident, so a relay can't rewrite where the user is told to confirm
+    the one-time code."""
+    op_pk, _, _ = operator
+    subject = PrivateKey().public_key.bech32()
+    ephemeral = PrivateKey().public_key.hex()
+    verify_at = "your Claude.ai conversation"
+    att = create_provenance_attestation(
+        op_pk.nsec, sender_pubkey_hex=ephemeral, subject_npub=subject,
+        service="x", challenge="bold-hawk-42", verify_at=verify_at,
+    )
+    tags = {t[0]: t[1] for t in json.loads(att)["tags"] if len(t) >= 2}
+    assert tags.get("verify_at") == verify_at
+    res = verify_provenance_attestation(
+        att, expected_sender_pubkey_hex=ephemeral,
+        expected_subject_npub=subject, expected_challenge="bold-hawk-42",
+    )
+    assert res["valid"] is True
+
+
+def test_verify_at_tag_absent_when_omitted(operator):
+    op_pk, _, _ = operator
+    subject = PrivateKey().public_key.bech32()
+    ephemeral = PrivateKey().public_key.hex()
+    att = _attest(op_pk, sender_hex=ephemeral, subject_npub=subject)
+    assert "verify_at" not in [t[0] for t in json.loads(att)["tags"]]
+
+
 def test_harvest_origin_and_coarsen_ip():
     """The IP coarsener drops the last octet (v4) / keeps the /48 (v6), and
     harvest returns None outside an HTTP request context (best-effort)."""

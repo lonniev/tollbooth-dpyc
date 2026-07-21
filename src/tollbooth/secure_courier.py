@@ -183,6 +183,7 @@ class SecureCourierService:
         recipient_npub: str | None = None,
         reason: str | None = None,
         origin: str | None = None,
+        verify_at: str | None = None,
     ) -> dict[str, Any]:
         """Open a Secure Courier channel.  Sends welcome DM if *recipient_npub* provided.
 
@@ -201,7 +202,7 @@ class SecureCourierService:
         """
         return await self._exchange.open_channel(
             service, greeting=greeting, recipient_npub=recipient_npub,
-            reason=reason, origin=origin,
+            reason=reason, origin=origin, verify_at=verify_at,
         )
 
     async def receive(
