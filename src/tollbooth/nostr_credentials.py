@@ -182,8 +182,15 @@ class NostrProfile:
         meta.update(self.extra)
         return meta
 
-# Default freshness window (seconds)
-_DEFAULT_FRESHNESS = 900  # 15 minutes
+# Default freshness window (seconds) — how long the operator remembers a pending
+# courier channel (npub-proof challenge or credential handoff) after sending the
+# DM. These are human-in-the-loop replies: a person has to notice the DM, match a
+# code, and sign a reply — often not at a keyboard the instant it arrives. 15
+# minutes forced a scramble (and, against a background worker's ~30-min tick,
+# structurally missed the window). One hour lets the parties wait for ordinary
+# human responsiveness without hurrying. The reply itself is never timestamp-gated
+# (see tools/proof.py); this only bounds how long the challenge stays claimable.
+_DEFAULT_FRESHNESS = 3600  # 1 hour
 _DEFAULT_SUBSCRIBE_TIMEOUT = 10
 
 # NACK copy sent to the sender of a popped courier DM whose anti-replay
