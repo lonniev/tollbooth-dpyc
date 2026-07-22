@@ -3,6 +3,22 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.69.0 — 2026-07-22
+
+### Changed — courier freshness window 15 min → 1 hour (human-paced replies)
+
+The Secure Courier's default freshness window (`_DEFAULT_FRESHNESS`) — how long
+the operator remembers a pending channel after sending the DM — goes from 15
+minutes to 1 hour. It governs both npub-proof challenges and credential handoffs,
+which are human-in-the-loop: a person has to notice the DM, match a code, and
+sign a reply, often not at a keyboard the instant it arrives. 15 minutes forced
+a scramble, and against a background worker on a ~30-minute tick it structurally
+missed the window (the tick landed after the challenge had already lapsed),
+leaving the proof perpetually pending. One hour lets the parties wait for
+ordinary human responsiveness. The reply itself remains un-timestamp-gated
+(`tools/proof.py`) — this only bounds how long a challenge stays claimable.
+Consumers that pass an explicit `freshness_window` are unaffected.
+
 ## 0.68.0 — 2026-07-21
 
 ### Added — proof requests carry a Device-Grant `verify_at` (where the code was shown)
