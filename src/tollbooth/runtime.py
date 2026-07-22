@@ -849,6 +849,21 @@ class OperatorRuntime:
                     "error": str(e),
                 }
 
+            # Restricted tools require the caller to BE the operator — check that
+            # BEFORE proof. It's an npub comparison (the operator npub is public,
+            # so this leaks nothing), and doing it first means a non-operator
+            # gets a clear "restricted" error instead of a misleading proof
+            # failure against the operator's npub. The old order returned
+            # `proof_refresh_needed` ("your proof cache is invalid, re-sign-in")
+            # to a caller whose proof was perfectly valid — and on a
+            # non-best-effort call that reads as an auth bounce and logs them out.
+            if category == "restricted" and resolved != self.operator_npub():
+                return {
+                    "success": False,
+                    "error_code": ErrorCode.RESTRICTED,
+                    "error": "This tool is restricted to the operator.",
+                }
+
             proof_npub = self.operator_npub() if category == "restricted" else resolved
             if err := await require_proof(
                 proof_npub,
@@ -859,7 +874,8 @@ class OperatorRuntime:
                 return err
 
         # ── Access: operator-restricted ───────────────────────
-        # Proof already verified above. Just check the npub is the operator.
+        # Proof already verified above. A non-operator caller was already
+        # rejected before the proof check; this re-check covers the no-npub path.
         if category == "restricted":
             try:
                 caller = resolve_npub(npub)

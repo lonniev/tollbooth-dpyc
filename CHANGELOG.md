@@ -3,6 +3,20 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.69.1 — 2026-07-22
+
+### Fixed — restricted tools deny non-operators with `restricted`, not a misleading proof error
+
+`debit_or_deny` now checks `caller == operator` **before** verifying the proof
+for `restricted` (operator-only) tools. Previously the proof was verified first,
+against the *operator's* npub — so a non-operator caller (whose own proof was
+perfectly valid) failed that check and got `proof_refresh_needed` ("your
+npub-proof cache is no longer valid, re-sign-in"). That was misleading, and on a
+non-best-effort call it read as an auth bounce that logged the caller out. The
+access check is an npub comparison and the operator npub is public, so ordering
+it first leaks nothing; a non-operator now gets a clear `restricted` ("This tool
+is restricted to the operator.") and the operator path is unchanged.
+
 ## 0.69.0 — 2026-07-22
 
 ### Changed — courier freshness window 15 min → 1 hour (human-paced replies)
