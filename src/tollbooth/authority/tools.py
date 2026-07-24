@@ -89,6 +89,20 @@ OPERATOR_CREDENTIAL_TEMPLATE = CredentialTemplate(
             required=True, sensitive=True,
             description="Your BTCPay Store ID (visible in Store Settings).",
         ),
+        # Optional, courier-delivered (never env): the org-scoped Neon control-plane key +
+        # its org id, enabling the PROACTIVE per-project compute-quota watch surfaced in
+        # Persistence Status. Absent them, the watch degrades to reactive self-detection.
+        "neon_api_key": FieldSpec(
+            required=False, sensitive=True,
+            description="Neon control-plane API key (org-scoped) for proactive per-project "
+                        "compute-quota monitoring. Optional — absent it, only reactive "
+                        "402 detection is available.",
+        ),
+        "neon_org_id": FieldSpec(
+            required=False, sensitive=False,
+            description="Neon organization id that scopes the project listing for the "
+                        "proactive compute-quota watch. Pairs with neon_api_key.",
+        ),
     },
 )
 
@@ -1415,14 +1429,22 @@ def register_authority_tools(
             except Exception as exc:
                 logger.info("Could not read operator Neon alerts: %s", exc)
 
-        # (1) Proactive per-project compute posture (needs a Neon API key).
-        s = _get_settings()
-        if not s.neon_api_key:
+        # (1) Proactive per-project compute posture. neon_api_key/neon_org_id are OPTIONAL
+        # Authority secrets, courier-delivered and read from the vault — never env. Absent the
+        # key, the watch degrades to the reactive self-probe + operator alerts above.
+        neon_creds: dict[str, str] = {}
+        try:
+            neon_creds = await runtime._load_vault_creds(OPERATOR_CREDENTIAL_TEMPLATE.service)
+        except Exception as exc:
+            logger.info("Could not load Neon watch secrets from vault: %s", exc)
+        neon_api_key = (neon_creds.get("neon_api_key") or "").strip()
+        neon_org_id = (neon_creds.get("neon_org_id") or "").strip()
+        if not neon_api_key:
             neon_api: dict[str, Any] = {
                 "configured": False,
                 "hint": (
-                    "Set NEON_API_KEY (org-scoped) to enable proactive per-project "
-                    "compute-quota monitoring, so a project can be topped up before "
+                    "Deliver NEON_API_KEY (org-scoped) via Secure Courier to enable proactive "
+                    "per-project compute-quota monitoring, so a project can be topped up before "
                     "it 402s. Without it, only reactive detection is available."
                 ),
                 "projects": [],
@@ -1430,7 +1452,7 @@ def register_authority_tools(
         else:
             from tollbooth.authority.neon_admin import NeonAdminClient
             try:
-                client = NeonAdminClient(s.neon_api_key, org_id=s.neon_org_id)
+                client = NeonAdminClient(neon_api_key, org_id=neon_org_id)
                 usage = await client.project_usage()
                 neon_api = {
                     "configured": True,
