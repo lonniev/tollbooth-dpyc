@@ -3,6 +3,23 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.70.0 — 2026-07-24
+
+### Added — `NEON_API_KEY` is a Secure-Courier–delivered Authority secret, not env
+
+The Neon control-plane key is not needed to bootstrap an Authority, so it is no
+longer an environment secret. `neon_api_key` (sensitive) and `neon_org_id` are
+now optional fields on the Authority's operator credential template — delivered
+via Secure Courier and read from the vault by the proactive compute-quota watch
+(`network_books_health`). They surface in onboarding `optionalMissing`, so the
+courier DM requests them and `receive_credentials` vaults them; the FE hint now
+reads "Deliver … via Secure Courier."
+
+### Removed
+
+`neon_api_key` / `neon_org_id` env settings on the Authority — deliver them via
+Secure Courier instead (Pricing Studio → Authority → Persistence Status → Deliver).
+
 ## 0.69.1 — 2026-07-22
 
 ### Fixed — restricted tools deny non-operators with `restricted`, not a misleading proof error
