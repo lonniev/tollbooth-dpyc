@@ -13,13 +13,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tollbooth.authority_client import AuthorityCertifier, AuthorityCertifyError
 from tollbooth.authority import neon_alert_store
 from tollbooth.authority.neon_admin import (
     DEFAULT_ALLOWANCE_SECONDS,
     NeonAdminClient,
     ProjectUsage,
 )
+from tollbooth.authority_client import AuthorityCertifier, AuthorityCertifyError
 
 
 def _text_block(data: dict) -> MagicMock:
@@ -108,19 +108,31 @@ def test_project_usage_to_dict_shape():
 async def test_neon_admin_client_parses_projects():
     """project_usage maps the Neon projects list into ProjectUsage rows,
     tolerating a project with no consumption field (status unknown)."""
-    payload = {
+    # /projects LIST carries ids/names/quota reset — NOT compute (Neon omits it there).
+    projects_payload = {
         "projects": [
-            {"id": "p1", "name": "ancient-water", "compute_time_seconds": 700000,
-             "quota_reset_at": "2026-08-01T00:00:00Z"},
-            {"id": "p2", "name": "quiet-forest"},  # no consumption reported
+            {"id": "p1", "name": "ancient-water", "quota_reset_at": "2026-08-01T00:00:00Z"},
+            {"id": "p2", "name": "quiet-forest"},  # absent from consumption below
         ]
     }
-    resp = MagicMock()
-    resp.raise_for_status = MagicMock()
-    resp.json = MagicMock(return_value=payload)
+    # Per-project compute comes from the consumption_history endpoint.
+    consumption_payload = {
+        "projects": [
+            {"project_id": "p1", "periods": [{"consumption": [{"compute_time_seconds": 700000}]}]},
+        ]
+    }
+
+    def _resp(payload):
+        r = MagicMock()
+        r.is_error = False
+        r.json = MagicMock(return_value=payload)
+        return r
+
+    def _get(url, **kwargs):
+        return _resp(consumption_payload) if "consumption_history" in url else _resp(projects_payload)
 
     http = AsyncMock()
-    http.get = AsyncMock(return_value=resp)
+    http.get = AsyncMock(side_effect=_get)
     http.__aenter__ = AsyncMock(return_value=http)
     http.__aexit__ = AsyncMock(return_value=False)
 
@@ -129,12 +141,12 @@ async def test_neon_admin_client_parses_projects():
         usage = await client.project_usage()
 
     assert [u.project_id for u in usage] == ["p1", "p2"]
-    assert usage[0].compute_seconds_used == 700000
-    assert usage[1].status == "unknown"
-    # org_id and bearer auth were passed.
-    _, kwargs = http.get.await_args
-    assert kwargs["params"]["org_id"] == "org-1"
-    assert kwargs["headers"]["Authorization"] == "Bearer neon_api_key_xxx"
+    assert usage[0].compute_seconds_used == 700000  # from consumption_history
+    assert usage[1].status == "unknown"             # absent from consumption
+    # org_id and bearer auth were passed on the /projects call.
+    first = http.get.await_args_list[0]
+    assert first.kwargs["params"]["org_id"] == "org-1"
+    assert first.kwargs["headers"]["Authorization"] == "Bearer neon_api_key_xxx"
 
 
 # --------------------------------------------------------------------------

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -145,21 +146,93 @@ class NeonAdminClient:
                 )
             data = resp.json()
 
-        projects = data.get("projects") if isinstance(data, dict) else None
+            projects = data.get("projects") if isinstance(data, dict) else None
+            projects = projects or []
+            # The /projects LIST does not carry per-project compute consumption —
+            # that lives in Neon's consumption_history endpoint. Fetch it here so
+            # used_pct/status are real instead of "unknown". Best-effort: a failure
+            # leaves usage None ("unknown") rather than breaking the probe.
+            used_by_id = await self._compute_seconds_by_project(client, headers)
+
         out: list[ProjectUsage] = []
-        for p in projects or []:
+        for p in projects:
             if not isinstance(p, dict):
                 continue
-            used = p.get("compute_time_seconds")
+            pid = str(p.get("id") or "")
             out.append(
                 ProjectUsage(
-                    project_id=str(p.get("id") or ""),
-                    name=str(p.get("name") or p.get("id") or "unnamed"),
-                    compute_seconds_used=int(used) if isinstance(used, (int, float)) else None,
+                    project_id=pid,
+                    name=str(p.get("name") or pid or "unnamed"),
+                    compute_seconds_used=used_by_id.get(pid),
                     allowance_seconds=self._allowance_seconds,
                     quota_reset_at=(
                         str(p["quota_reset_at"]) if p.get("quota_reset_at") else None
                     ),
                 )
             )
+        return out
+
+    async def _compute_seconds_by_project(
+        self, client: Any, headers: dict[str, str]
+    ) -> dict[str, int]:
+        """Sum each project's ``compute_time_seconds`` for the current billing
+        period via Neon's ``consumption_history`` endpoint (the /projects list
+        omits it, so used_pct would otherwise always be 'unknown').
+
+        Best-effort and tolerant: any failure or unexpected shape returns an empty
+        map, so usage degrades to None rather than turning a health probe into an
+        outage.
+        """
+        from datetime import datetime
+
+        try:
+            now = datetime.now(UTC)
+            # Current period ≈ the calendar month — Neon Free resets on the 1st,
+            # which is what quota_reset_at reflects. One monthly bucket covers it.
+            start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            params: dict[str, str] = {
+                "from": start.isoformat().replace("+00:00", "Z"),
+                "to": now.isoformat().replace("+00:00", "Z"),
+                "granularity": "monthly",
+                "limit": "100",
+            }
+            if self._org_id:
+                params["org_id"] = self._org_id
+            resp = await client.get(
+                f"{self._base_url}/consumption_history/projects",
+                params=params,
+                headers=headers,
+            )
+            if resp.is_error:
+                logger.info(
+                    "Neon consumption_history %s: %s",
+                    resp.status_code,
+                    resp.text[:200].strip(),
+                )
+                return {}
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001 — best-effort probe; must never raise
+            logger.info("Neon consumption_history read failed: %s", exc)
+            return {}
+
+        out: dict[str, int] = {}
+        rows = (data.get("projects") if isinstance(data, dict) else None) or []
+        for proj in rows:
+            if not isinstance(proj, dict):
+                continue
+            pid = str(proj.get("project_id") or "")
+            if not pid:
+                continue
+            total = 0.0
+            seen = False
+            for period in proj.get("periods") or []:
+                if not isinstance(period, dict):
+                    continue
+                for c in period.get("consumption") or []:
+                    v = c.get("compute_time_seconds") if isinstance(c, dict) else None
+                    if isinstance(v, (int, float)):
+                        total += v
+                        seen = True
+            if seen:
+                out[pid] = int(total)
         return out
