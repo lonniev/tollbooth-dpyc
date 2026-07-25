@@ -130,7 +130,19 @@ class NeonAdminClient:
             resp = await client.get(
                 f"{self._base_url}/projects", params=params, headers=headers
             )
-            resp.raise_for_status()
+            if resp.is_error:
+                # Surface Neon's OWN message, not just the bare status line. The most
+                # common 400 on an org-scoped key is a missing org_id — /projects needs
+                # it for organization keys — so front-load that actionable hint.
+                hint = (
+                    " (an org-scoped Neon key needs neon_org_id — deliver it via Secure "
+                    "Courier alongside neon_api_key)"
+                    if resp.status_code == 400 and not self._org_id
+                    else ""
+                )
+                raise RuntimeError(
+                    f"Neon /projects {resp.status_code}{hint}: {resp.text[:200].strip()}"
+                )
             data = resp.json()
 
         projects = data.get("projects") if isinstance(data, dict) else None
