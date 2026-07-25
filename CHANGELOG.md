@@ -3,6 +3,27 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.71.1 — 2026-07-25
+
+### Fixed — renamed-with-frozen-UUID tools resolve their real wire name in proofs
+
+`network_persistence_health` (0.71.0 rename of `network_books_health`) kept its
+original frozen `tool_id` so pricing and proofs stay stable — but `runtime_name`
+re-hashed the *new* capability string via `capability_uuid()`, producing a UUID
+that no longer matched the frozen id. `mcp_name_for` missed and returned the raw
+UUID as the "wire name", so the owner-consent gate expected a `u` tag of
+`df1368fa-…` instead of `authority_network_persistence_health`. Every Authority
+proof mismatched — masked by `_require_authority_consent` as a blanket
+`authority_consent_required`, so the Pricing Studio Persistence Status pane could
+never satisfy consent.
+
+`runtime_name` now resolves a capability through its **registered identity**
+(the authoritative `tool_id`), falling back to the name hash only for a
+brand-new, unregistered capability. This fixes the rename and any future one —
+and also repairs `runtime_name` for dynamic tools (whose ids are seeded from a
+`dyn:`-prefixed string, which the old hash path likewise missed). `capability_uuid`
+stays a seed-only helper, as its docstring already promised. Regression test added.
+
 ## 0.71.0 — 2026-07-25
 
 ### Changed — "Books" is now "Persistence" throughout the SDK surface

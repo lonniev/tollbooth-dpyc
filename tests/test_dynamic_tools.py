@@ -202,6 +202,50 @@ class TestRegisterDynamicTool:
         assert "cypher_q" in fake.removed
         assert "cypher_q" in fake.registered
 
+
+class TestRuntimeNameFrozenUuidRename:
+    """A tool renamed after launch keeps its ORIGINAL (frozen) UUID so pricing
+    and identity proofs stay stable. ``runtime_name`` must resolve such a tool
+    through its registered identity, NOT by re-hashing the current capability
+    string — otherwise the expected proof ``u`` tag becomes the raw UUID and
+    every owner-consent proof fails (masked as authority_consent_required).
+    Regression for the 0.71.0 network_books_health → network_persistence_health
+    rename.
+    """
+
+    def test_renamed_capability_resolves_via_frozen_id(self) -> None:
+        from tollbooth.tool_identity import ToolIdentity
+
+        rt, _ = _wired_runtime(slug="authority")
+        # tool_id frozen to the OLD name's hash; capability is the NEW string.
+        frozen = capability_uuid("network_books_health")
+        rt._tool_registry[frozen] = ToolIdentity(
+            tool_id=frozen,
+            capability="network_persistence_health",
+            category="restricted",
+            intent="Owner persistence health.",
+        )
+
+        # Resolves to the real wire name (registered identity), not the raw
+        # hash of the renamed string.
+        assert (
+            rt.runtime_name("network_persistence_health")
+            == "authority_network_persistence_health"
+        )
+        # And critically NOT the recomputed-hash miss (the pre-fix bug).
+        assert rt.runtime_name("network_persistence_health") != capability_uuid(
+            "network_persistence_health"
+        )
+
+    def test_unrenamed_capability_still_resolves(self) -> None:
+        """The common case — capability string == the UUID's seed — is unchanged."""
+        rt, _ = _wired_runtime()
+        rt.register_dynamic_tool(
+            name="find_airline_flights", param_schema=SCHEMA, runner=_runner,
+            intent="Find flights.",
+        )
+        assert rt.runtime_name("find_airline_flights") == "cypher_find_airline_flights"
+
     def test_rejects_bad_name(self) -> None:
         rt, _ = _wired_runtime()
         with pytest.raises(ValueError, match="must match"):

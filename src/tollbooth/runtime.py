@@ -667,7 +667,20 @@ class OperatorRuntime:
         The runtime name is what crosses every server boundary — the wire,
         the pricing model, identity proofs, audit logs. The capability is
         the Python function identifier and stays internal to this process.
+
+        Resolve through the REGISTERED identity for this capability: its
+        ``tool_id`` is authoritative and may be frozen to a historical hash —
+        e.g. a tool renamed after launch keeps its original UUID so pricing
+        and proofs stay stable. Recomputing ``capability_uuid(capability)``
+        from the *current* string would miss such a tool (the hash no longer
+        matches the frozen id) and leak the raw UUID as the wire name, which
+        then fails every identity-proof ``u``-tag check. Prefer the registry;
+        fall back to the hash only for a brand-new capability not yet
+        registered (its UUID is, by construction, the hash of its name).
         """
+        for tool_id, identity in self._tool_registry.items():
+            if identity.capability == capability:
+                return self.mcp_name_for(tool_id)
         return self.mcp_name_for(capability_uuid(capability))
 
     async def require_caller_proof(
