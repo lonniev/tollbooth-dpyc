@@ -1,9 +1,10 @@
 """Tests for vault_encryption — nsec-derived AES-256-GCM encryption."""
 
 import json
-import pytest
-from tollbooth.vault_encryption import VaultCipher
 
+import pytest
+
+from tollbooth.vault_encryption import VaultCipher
 
 # A test nsec (hex) — NOT a real key
 TEST_NSEC_HEX = "a" * 64  # 32 bytes of 0xaa
@@ -30,7 +31,7 @@ def test_wrong_key_fails_decrypt():
     cipher1 = VaultCipher(nsec_hex="a" * 64)
     cipher2 = VaultCipher(nsec_hex="b" * 64)
     encrypted = cipher1.encrypt("secret")
-    with pytest.raises(Exception):  # InvalidTag from AES-GCM
+    with pytest.raises(Exception):  # InvalidTag from AES-GCM  # noqa: B017
         cipher2.decrypt(encrypted)
 
 
@@ -93,7 +94,7 @@ def test_tampered_ciphertext_fails():
     raw = bytearray(base64.b64decode(encrypted))
     raw[-1] ^= 0xFF  # Flip last byte (in the GCM tag)
     tampered = base64.b64encode(bytes(raw)).decode()
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         cipher.decrypt(tampered)
 
 
@@ -138,7 +139,7 @@ class TestAADEnforcement:
         with DB access could swap rows between slots."""
         cipher = VaultCipher(nsec_hex=TEST_NSEC_HEX)
         ct = cipher.encrypt("refresh-token-data", aad="oauth/refresh_token")
-        with pytest.raises(Exception):  # InvalidTag from AES-GCM
+        with pytest.raises(Exception):  # InvalidTag from AES-GCM  # noqa: B017
             cipher.decrypt(ct, aad="oauth/access_token")
 
     def test_aad_required_on_decrypt_when_encrypt_used_aad(self):
@@ -147,7 +148,7 @@ class TestAADEnforcement:
         the fallback is gone."""
         cipher = VaultCipher(nsec_hex=TEST_NSEC_HEX)
         ct = cipher.encrypt("sensitive", aad="some-context")
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             cipher.decrypt(ct, aad="")
 
     def test_aad_required_on_encrypt_when_decrypt_uses_aad(self):
@@ -156,7 +157,7 @@ class TestAADEnforcement:
         test exists to keep that fallback removed."""
         cipher = VaultCipher(nsec_hex=TEST_NSEC_HEX)
         ct = cipher.encrypt("sensitive")  # no aad
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             cipher.decrypt(ct, aad="some-context")
 
     def test_empty_aad_unchanged_behavior(self):

@@ -2,13 +2,12 @@
 
 import asyncio
 import time
+from unittest.mock import AsyncMock
 
 import pytest
-from unittest.mock import AsyncMock
 
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -280,7 +279,7 @@ class TestLedgerCacheSnapshotAll:
             nonlocal call_count
             call_count += 1
             if user_id == "user1":
-                raise Exception("vault error")
+                raise Exception("vault error")  # noqa: TRY002
             return "snap-id"
 
         vault.snapshot_ledger = AsyncMock(side_effect=snapshot_side_effect)
@@ -398,7 +397,7 @@ class TestLedgerCacheFlushRetry:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise Exception("transient error")
+                raise Exception("transient error")  # noqa: TRY002
             return "ok"
 
         vault.store_ledger = AsyncMock(side_effect=store_side_effect)

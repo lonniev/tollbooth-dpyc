@@ -106,7 +106,7 @@ class NeonVault:
                     logger.info("Neon: schema prefix = %s", self._schema_prefix)
         except ValueError:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug("Schema prefix parsing skipped (non-fatal): %s", exc)
         self._client = httpx.AsyncClient(
             headers={
@@ -195,7 +195,7 @@ class NeonVault:
         if resp.status_code >= 400:
             try:
                 err_body = resp.json()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 err_body = None
             if isinstance(err_body, dict) and err_body.get("message"):
                 raise NeonQueryError(
@@ -547,7 +547,7 @@ class NeonVault:
             )
             rows = result.get("rows", [])
             return int(rows[0]["count"]) if rows else 0
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.debug("get_demand failed for %s/%s", tool_name, window_key)
             return 0
 
@@ -565,7 +565,7 @@ class NeonVault:
                 f"DO UPDATE SET count = {self._t('tool_demand')}.count + 1",
                 [tool_name, window_key],
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.debug(
                 "increment_demand failed for %s/%s", tool_name, window_key,
             )
@@ -687,7 +687,7 @@ class NeonVault:
             )
             rows = result.get("rows", [])
             return rows[0]["value"] if rows else None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     async def set_config(self, key: str, value: str) -> None:

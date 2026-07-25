@@ -2,7 +2,7 @@
 
 import ast
 import inspect
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -35,7 +35,7 @@ def _ctx(
         ),
         patron=PatronIdentity(npub=npub, membership_tier=membership_tier),
         env=EnvironmentSnapshot(
-            utc_now=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
+            utc_now=datetime(2026, 3, 1, 12, 0, tzinfo=UTC),
             tool_name=tool_name,
             invocation_count=invocation_count,
         ),

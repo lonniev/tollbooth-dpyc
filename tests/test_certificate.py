@@ -13,8 +13,7 @@ from tollbooth.certificate import (
     reset_jti_store,
     verify_certificate_auto,
 )
-from tollbooth.nostr_certificate import NOSTR_CERT_KIND, NOSTR_CERT_TAG, NOSTR_CERT_LABEL
-
+from tollbooth.nostr_certificate import NOSTR_CERT_KIND, NOSTR_CERT_LABEL, NOSTR_CERT_TAG
 
 # ---------------------------------------------------------------------------
 # Fixtures

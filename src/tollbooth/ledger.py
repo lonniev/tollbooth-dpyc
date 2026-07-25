@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,7 @@ class Tranche:
         if self.expires_at is None:
             return False
         try:
-            exp = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
+            exp = datetime.fromisoformat(self.expires_at)
             return now >= exp
         except (ValueError, TypeError):
             return False  # Malformed → treat as never-expiring
@@ -185,7 +185,7 @@ class UserLedger:
     @property
     def balance_api_sats(self) -> int:
         """Sum of remaining_sats in non-expired tranches (read-only, no mutation)."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return sum(
             t.remaining_sats for t in self.tranches
             if t.remaining_sats > 0 and not t.is_expired_at(now)
@@ -255,12 +255,12 @@ class UserLedger:
         """
         if tranche_lifetime_seconds is None:
             return
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         for t in self.tranches:
             if t.expires_at is not None or t.remaining_sats <= 0 or not t.granted_at:
                 continue
             try:
-                granted = datetime.fromisoformat(t.granted_at.replace("Z", "+00:00"))
+                granted = datetime.fromisoformat(t.granted_at)
                 t.expires_at = (granted + timedelta(seconds=tranche_lifetime_seconds)).isoformat()
             except (ValueError, TypeError):
                 # Malformed granted_at — expire immediately. An unverifiable
@@ -279,7 +279,7 @@ class UserLedger:
         Returns the number of sats newly collected.
         """
         if now is None:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
         collected = 0
         for t in self.tranches:
             if t.remaining_sats > 0 and t.is_expired_at(now):
@@ -296,7 +296,7 @@ class UserLedger:
         if api_sats < 0:
             return False
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self._collect_expired(now)
 
         # Compute available from non-expired tranches
@@ -320,7 +320,7 @@ class UserLedger:
 
         self.total_consumed_api_sats += api_sats
 
-        today = date.today().isoformat()
+        today = date.today().isoformat()  # noqa: DTZ011
         day_log = self.daily_log.setdefault(today, {})
         usage = day_log.setdefault(tool_name, ToolUsage())
         usage.calls += 1
@@ -336,7 +336,7 @@ class UserLedger:
         self, api_sats: int, invoice_id: str, ttl_seconds: int | None = None,
     ) -> None:
         """Add credits as a new tranche. ttl_seconds=None means no expiration."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = (now + timedelta(seconds=ttl_seconds)).isoformat() if ttl_seconds else None
         self.tranches.append(Tranche(
             granted_at=now.isoformat(),
@@ -346,7 +346,7 @@ class UserLedger:
             expires_at=expires_at,
         ))
         self.total_deposited_api_sats += api_sats
-        self.last_deposit_at = date.today().isoformat()
+        self.last_deposit_at = date.today().isoformat()  # noqa: DTZ011
         if invoice_id in self.pending_invoices:
             self.pending_invoices.remove(invoice_id)
         if invoice_id not in self.credited_invoices:
@@ -356,7 +356,7 @@ class UserLedger:
         """Undo a previous debit by adding sats back to the soonest-expiring tranche."""
         if api_sats <= 0:
             return
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Find the active tranche expiring soonest; fall back to any active tranche
         active = [t for t in self.tranches if t.remaining_sats > 0 and not t.is_expired_at(now)]
         target = None
@@ -377,7 +377,7 @@ class UserLedger:
             ))
         self.total_consumed_api_sats -= api_sats
 
-        today = date.today().isoformat()
+        today = date.today().isoformat()  # noqa: DTZ011
         day_log = self.daily_log.get(today, {})
         usage = day_log.get(tool_name)
         if usage:
@@ -391,7 +391,7 @@ class UserLedger:
 
     def rotate_daily_log(self, retention_days: int = 30) -> None:
         """Fold daily entries older than ``retention_days`` into ``history``."""
-        cutoff = (date.today() - timedelta(days=retention_days)).isoformat()
+        cutoff = (date.today() - timedelta(days=retention_days)).isoformat()  # noqa: DTZ011
         expired_keys = [d for d in self.daily_log if d < cutoff]
         for day_key in expired_keys:
             del self.daily_log[day_key]
@@ -400,7 +400,7 @@ class UserLedger:
 
     def expiring_within(self, seconds: int) -> int:
         """Sum of remaining_sats in tranches expiring within the given window."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cutoff = now + timedelta(seconds=seconds)
         total = 0
         for t in self.tranches:
@@ -408,7 +408,7 @@ class UserLedger:
                 continue
             if t.expires_at is not None:
                 try:
-                    exp = datetime.fromisoformat(t.expires_at.replace("Z", "+00:00"))
+                    exp = datetime.fromisoformat(t.expires_at)
                     if exp <= cutoff:
                         total += t.remaining_sats
                 except (ValueError, TypeError):
@@ -417,14 +417,14 @@ class UserLedger:
 
     def next_expiration(self) -> str | None:
         """ISO datetime of the earliest tranche expiration, or None."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         earliest: datetime | None = None
         for t in self.tranches:
             if t.remaining_sats <= 0 or t.is_expired_at(now):
                 continue
             if t.expires_at is not None:
                 try:
-                    exp = datetime.fromisoformat(t.expires_at.replace("Z", "+00:00"))
+                    exp = datetime.fromisoformat(t.expires_at)
                     if earliest is None or exp < earliest:
                         earliest = exp
                 except (ValueError, TypeError):

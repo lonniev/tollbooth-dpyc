@@ -29,7 +29,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import IntEnum
 from typing import Any
 
@@ -142,8 +142,8 @@ def _render_critical_message(
 ) -> str:
     """Render a critical low-balance DM."""
     parts = [
-        f"Heads up -- your {service_name} balance is critically low "
-        f"(below {threshold_pct}%).",
+        (f"Heads up -- your {service_name} balance is critically low "
+        f"(below {threshold_pct}%)."),
         "",
         f"Current balance: {balance:,} api-sats",
     ]
@@ -165,8 +165,8 @@ def _render_expiration_message(
     """Render a tranche expiration approaching DM."""
     hours_int = max(1, int(hours_until))
     parts = [
-        f"Friendly notice -- some of your {service_name} credits are "
-        f"expiring soon.",
+        (f"Friendly notice -- some of your {service_name} credits are "
+        f"expiring soon."),
         "",
         f"Credits expiring: {expiring_sats:,} api-sats",
         f"Time remaining: ~{hours_int} hour{'s' if hours_int != 1 else ''}",
@@ -270,7 +270,7 @@ class NotificationManager:
             pk = PrivateKey.from_nsec(operator_nsec)
             self._privkey_hex = pk.hex()
             self._pubkey_hex = pk.public_key.hex()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Invalid operator nsec -- notifications disabled: %s", exc)
             self._enabled = False
 
@@ -338,7 +338,7 @@ class NotificationManager:
 
         try:
             self._do_check_and_notify(patron_npub, balance, last_deposit, tranches)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "Notification check failed (non-fatal): %s", exc,
             )
@@ -438,7 +438,7 @@ class NotificationManager:
         tranches: list[Tranche],
     ) -> None:
         """Check for tranches expiring within the notification window."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cutoff = now + timedelta(seconds=self._expiration_window_secs)
 
         expiring_sats = 0
@@ -450,7 +450,7 @@ class NotificationManager:
             if t.expires_at is None:
                 continue
             try:
-                exp = datetime.fromisoformat(t.expires_at.replace("Z", "+00:00"))
+                exp = datetime.fromisoformat(t.expires_at)
                 if exp <= cutoff:
                     expiring_sats += t.remaining_sats
                     if earliest_expiry is None or exp < earliest_expiry:
@@ -492,7 +492,7 @@ class NotificationManager:
 
         try:
             recipient_hex = PublicKey.from_npub(recipient_npub).hex()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug("Invalid recipient npub %s: %s", recipient_npub[:20], exc)
             return
 
@@ -525,7 +525,7 @@ class NotificationManager:
                 "Sent NIP-44 notification DM to %s via %d relays",
                 recipient_npub[:20], len(self._relays),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "Failed to send notification DM to %s (non-fatal): %s",
                 recipient_npub[:20], exc,
@@ -544,7 +544,7 @@ class NotificationManager:
                     ws.recv()
                 finally:
                     ws.close()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "Relay publish %s failed (non-fatal): %s", relay_url, exc,
                 )

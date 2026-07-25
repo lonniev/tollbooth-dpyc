@@ -14,7 +14,6 @@ from tollbooth.nostr_audit import (
     _npub_to_hex,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -228,7 +227,7 @@ class TestPublishLedgerUpdate:
             tags = call_kwargs.kwargs["tags"]
             tag_names = [t[0] for t in tags]
             assert "encrypted" in tag_names
-            enc_tag = [t for t in tags if t[0] == "encrypted"][0]
+            enc_tag = next(t for t in tags if t[0] == "encrypted")
             assert enc_tag[1] == "nip44"
 
     @patch("tollbooth.nostr_audit._HAS_PYNOSTR", True)
@@ -442,6 +441,7 @@ class TestNIP44EncryptionIntegration:
     def test_real_encrypted_event_decryptable_by_patron(self) -> None:
         """Publish an encrypted event, verify patron can decrypt the content."""
         from pynostr.key import PrivateKey as RealPrivateKey
+
         from tollbooth.nip44 import decrypt as nip44_decrypt
 
         operator_sk = RealPrivateKey.from_nsec(FAKE_NSEC)
@@ -499,6 +499,7 @@ class TestNIP44EncryptionIntegration:
     def test_observer_cannot_read_encrypted_content(self) -> None:
         """A third party without the patron's nsec cannot decrypt."""
         from pynostr.key import PrivateKey as RealPrivateKey
+
         from tollbooth.nip44 import decrypt as nip44_decrypt
 
         operator_sk = RealPrivateKey.from_nsec(FAKE_NSEC)

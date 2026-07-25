@@ -3,9 +3,9 @@
 import asyncio
 import json
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
-from tollbooth import UserLedger, InvoiceRecord, Tranche, NeonVault
+from tollbooth import InvoiceRecord, NeonVault, Tranche, UserLedger
 
 DATABASE_URL = os.environ.get(
     "NEON_DATABASE_URL",
@@ -19,7 +19,7 @@ DEMO_USER = "npub1_mock_realistic_feb23"
 
 def build_mock_ledger() -> UserLedger:
     """Build a ledger that looks like a real user with a few days of history."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     ledger = UserLedger()
 

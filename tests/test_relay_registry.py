@@ -81,14 +81,14 @@ class TestRelayRegistry:
 
     def test_cold_cache_unreachable_raises(self):
         reg = RelayRegistry(url="http://x/relays.json")
-        with patch("httpx.Client", return_value=_client_returning(RuntimeError("down"))):
+        with patch("httpx.Client", return_value=_client_returning(RuntimeError("down"))):  # noqa: SIM117
             with pytest.raises(RelayRegistryError):
                 reg.relays()
 
     def test_rejects_non_wss_and_empty(self):
         reg = RelayRegistry(url="http://x/relays.json")
         bad = {"version": "1.0.0", "updated_at": "x", "relays": [{"url": "http://nope"}]}
-        with patch("httpx.Client", return_value=_client_returning(_resp(bad))):
+        with patch("httpx.Client", return_value=_client_returning(_resp(bad))):  # noqa: SIM117
             with pytest.raises(RelayRegistryError):
                 reg.relays()
 

@@ -75,7 +75,7 @@ async def migrate_single_operator(
         )
         return {"success": True, "npub": npub, "schema": schema}
 
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.error(
             "Migration failed for operator %s schema=%s: %s",
             npub[:20], schema, exc,

@@ -19,11 +19,11 @@ import asyncio
 import json
 import os
 import sys
+from datetime import UTC
 from typing import Any
 
 from tollbooth import UserLedger
 from tollbooth.nostr_audit import AuditedVault, NostrAuditPublisher
-
 
 DEMO_USER = "npub1_demo_audit_feb23"
 
@@ -120,8 +120,8 @@ async def main() -> None:
 
     # ── Step 5: Snapshot (triggers audit event) ─────────────────
     banner("5. Snapshot → triggers Nostr audit event (snapshot)")
-    from datetime import datetime, timezone
-    ts = datetime.now(timezone.utc).isoformat()
+    from datetime import datetime
+    ts = datetime.now(UTC).isoformat()
     snap_id = await vault.snapshot_ledger(DEMO_USER, ledger.to_json(), ts)
     print(f"  Snapshot → id={snap_id}")
     print("  Snapshot audit event published")
@@ -165,7 +165,7 @@ async def main() -> None:
             ws.close()
     except ImportError:
         print("  websocket-client not installed — skipping relay verification")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"  Relay verification failed (non-fatal): {e}")
 
     # ── Summary ─────────────────────────────────────────────────

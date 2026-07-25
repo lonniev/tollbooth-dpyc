@@ -21,7 +21,6 @@ from tollbooth.identity_proof import (
 )
 from tollbooth.nostr_credentials import NostrCredentialExchange
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------

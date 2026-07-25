@@ -143,7 +143,7 @@ class BootstrapClient:
         try:
             authority_info = await self._resolve_authority()
             result.authority_npub = authority_info.get("npub", "")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             result.error = f"Cannot resolve Authority: {e}"
             logger.warning("Bootstrap: %s", result.error)
             return result
@@ -189,6 +189,7 @@ class BootstrapClient:
         """Poll Nostr relays for bootstrap config DM from the Authority."""
         try:
             from pynostr.key import PublicKey  # type: ignore[import-untyped]
+
             from tollbooth.bootstrap_relay import receive_bootstrap_config
 
             if authority_npub.startswith("npub1"):
@@ -203,6 +204,6 @@ class BootstrapClient:
             )
             self._relay_diag = diag
             return config
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self._relay_diag = str(exc)
             return None

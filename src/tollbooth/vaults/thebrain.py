@@ -21,7 +21,7 @@ Correct API endpoints (TheBrain Cloud API):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -130,7 +130,7 @@ class TheBrainVault:
         )
         try:
             data = resp.json()
-        except Exception:
+        except Exception:  # noqa: BLE001
             resp.raise_for_status()
             return {}
         if "id" in data:
@@ -297,7 +297,7 @@ class TheBrainVault:
         )
         try:
             data = resp.json()
-        except Exception:
+        except Exception:  # noqa: BLE001
             resp.raise_for_status()
             return {}
         if "id" in data:
@@ -469,7 +469,7 @@ class TheBrainVault:
         ``"{user_id}/ledger"``.
         Returns the daily child thought ID.
         """
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         cache_key = f"{user_id}/{today}"
 
         # Fast path: cached daily child ID -> single set_note call

@@ -1,6 +1,6 @@
 """Tests for tollbooth.constraints.periodic — PeriodicRefreshConstraint + ISO parser."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -18,7 +18,7 @@ from tollbooth.constraints.periodic import (
 
 def _ctx(utc_now=None):
     if utc_now is None:
-        utc_now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        utc_now = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
     return ConstraintContext(
         ledger=LedgerSnapshot(),
         patron=PatronIdentity(),
@@ -133,7 +133,7 @@ class TestPeriodicRefresh:
         result = c.evaluate(_ctx())  # 12:00 UTC
         assert result.retry_after is not None
         # Window end = 11:00 + 2H = 13:00 UTC
-        expected = datetime(2026, 3, 1, 13, 0, tzinfo=timezone.utc)
+        expected = datetime(2026, 3, 1, 13, 0, tzinfo=UTC)
         assert result.retry_after == expected
 
     def test_no_window_start(self):

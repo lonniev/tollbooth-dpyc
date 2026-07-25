@@ -1,11 +1,13 @@
 """Tests for the @runtime.paid_tool() decorator."""
 
+from datetime import UTC
+
 import pytest
 from pynostr.key import PrivateKey as _PK
 
+from tollbooth import identity_proof as _id_proof
 from tollbooth.runtime import OperatorRuntime
 from tollbooth.tool_identity import ToolIdentity, capability_uuid
-from tollbooth import identity_proof as _id_proof
 
 
 @pytest.fixture(autouse=True)
@@ -98,10 +100,11 @@ class FakeLedgerCache:
     """In-memory ledger cache for testing."""
 
     def __init__(self, balance: int = 1000):
-        from tollbooth.ledger import UserLedger, Tranche
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc).isoformat()
+        from tollbooth.ledger import Tranche, UserLedger
+
+        now = datetime.now(UTC).isoformat()
         self._ledgers: dict[str, UserLedger] = {}
         self._default_balance = balance
         self._Tranche = Tranche

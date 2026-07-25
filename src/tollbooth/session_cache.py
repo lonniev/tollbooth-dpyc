@@ -20,14 +20,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Generic, TypeVar
+from typing import TypeVar
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
 
-class SessionCache(Generic[T]):
+class SessionCache[T]:
     """TTL-based in-memory session cache.
 
     Type parameter T is the operator's session object (e.g., a dataclass

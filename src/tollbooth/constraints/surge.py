@@ -111,7 +111,7 @@ class SurgePricingConstraint(ToolConstraint):
     def from_dict(cls, data: dict[str, Any]) -> SurgePricingConstraint:
         raw_tiers = data.get("tiers", [])
         if not isinstance(raw_tiers, list):
-            raise ValueError("'tiers' must be a list")
+            raise TypeError("'tiers' must be a list")
 
         tiers = []
         for t in raw_tiers:

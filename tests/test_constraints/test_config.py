@@ -8,10 +8,9 @@ from tollbooth.constraints.config import (
     load_constraint,
     validate_step,
 )
-from tollbooth.constraints.temporal import TemporalWindowConstraint
-from tollbooth.constraints.supply import FiniteSupplyConstraint
 from tollbooth.constraints.pricing import FreeTrialConstraint
-
+from tollbooth.constraints.supply import FiniteSupplyConstraint
+from tollbooth.constraints.temporal import TemporalWindowConstraint
 
 # ---------------------------------------------------------------------------
 # CONSTRAINT_REGISTRY

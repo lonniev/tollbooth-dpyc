@@ -105,7 +105,7 @@ async def _fetch_nip11(relay_url: str) -> dict[str, Any]:
         return {"error": f"connect_error: {exc}"}
     except json.JSONDecodeError:
         return {"error": "invalid_json"}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
 
 
@@ -173,7 +173,7 @@ def test_ws_connectivity(
             "latency_ms": round(latency, 1),
             "error": None,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         latency = (time.monotonic() - t0) * 1000
         return {
             "relay": relay_url,
@@ -273,7 +273,7 @@ def _test_subscription_filter(
 
     try:
         ws = create_connection(relay_url, timeout=_WS_CONNECT_TIMEOUT)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"accepted": False, "event_count": 0, "error": str(exc)}
 
     try:
@@ -286,7 +286,7 @@ def _test_subscription_filter(
         while True:
             try:
                 raw = ws.recv()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 break
 
             try:
@@ -317,7 +317,7 @@ def _test_subscription_filter(
             "event_count": event_count,
             "error": None,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"accepted": False, "event_count": 0, "error": str(exc)}
     finally:
         try:
@@ -367,7 +367,7 @@ def _self_dm_roundtrip(
     # Publish
     try:
         ws = create_connection(relay_url, timeout=_WS_CONNECT_TIMEOUT)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"success": False, "roundtrip_ms": None, "event_id": None, "error": f"connect: {exc}"}
 
     try:
@@ -404,7 +404,7 @@ def _self_dm_roundtrip(
 
     try:
         ws2 = create_connection(relay_url, timeout=_WS_CONNECT_TIMEOUT)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {
             "success": False,
             "roundtrip_ms": None,
@@ -420,7 +420,7 @@ def _self_dm_roundtrip(
         while True:
             try:
                 raw = ws2.recv()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 break
 
             try:
@@ -436,9 +436,7 @@ def _self_dm_roundtrip(
                 if isinstance(evt, dict) and evt.get("id") == event_id:
                     found = True
                     break
-            elif msg[0] == "EOSE":
-                break
-            elif msg[0] in ("CLOSED", "NOTICE"):
+            elif msg[0] == "EOSE" or msg[0] in ("CLOSED", "NOTICE"):
                 break
 
         roundtrip = (time.monotonic() - t0) * 1000
@@ -454,7 +452,7 @@ def _self_dm_roundtrip(
             "event_id": event_id,
             "error": None if found else "event not found after publish",
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {
             "success": False,
             "roundtrip_ms": None,
@@ -501,7 +499,7 @@ async def courier_health(
         privkey_hex = pk.hex()
         pubkey_hex = pk.public_key.hex()
         npub = pk.public_key.bech32()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {
             "success": False,
             "error": f"Invalid operator nsec: {exc}",
@@ -626,7 +624,7 @@ async def courier_ping(
         privkey_hex = pk.hex()
         pubkey_hex = pk.public_key.hex()
         operator_npub = pk.public_key.bech32()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {
             "success": False,
             "error": f"Invalid operator nsec: {exc}",
@@ -635,7 +633,7 @@ async def courier_ping(
     # Resolve recipient
     try:
         recipient_hex = _npub_to_hex(npub)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {
             "success": False,
             "error": f"Invalid recipient npub: {exc}",
@@ -681,7 +679,7 @@ async def courier_ping(
     for relay_url in relays:
         try:
             ws = create_connection(relay_url, timeout=_WS_CONNECT_TIMEOUT)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             relay_confirmations.append({
                 "relay": relay_url,
                 "confirmed": False,
@@ -712,7 +710,7 @@ async def courier_ping(
                         "confirmed": False,
                         "error": f"unexpected response: {msg[0] if isinstance(msg, list) else 'unknown'}",
                     })
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 relay_confirmations.append({
                     "relay": relay_url,
                     "confirmed": False,

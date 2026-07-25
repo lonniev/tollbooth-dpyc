@@ -8,15 +8,15 @@
 """
 
 import json
+import logging
 import sys
 import time
 
 from pynostr.key import PrivateKey
 
-from tollbooth.nostr_credentials import NostrCredentialExchange
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
+from tollbooth.nostr_credentials import NostrCredentialExchange
 
-import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                     stream=sys.stderr)
 logger = logging.getLogger(__name__)
@@ -71,7 +71,7 @@ def main():
     try:
         ex.send_dm(TARGET_NPUB, payload_text)
         print("DM sent successfully!")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         print(f"ERROR sending DM: {exc}")
         sys.exit(1)
 
@@ -99,7 +99,7 @@ def main():
         # Fetch from relays
         try:
             ex._fetch_dms_from_relays()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             print(f"  Relay fetch error: {exc}")
 
         # Check buffer
@@ -121,7 +121,7 @@ def main():
                     try:
                         pt = ex._decrypt_dm(event, target_hex)
                         print(f"  >>> DECRYPTED: {pt[:200]}")
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001
                         print(f"  >>> Decrypt failed: {exc}")
 
         if event_count > 0:

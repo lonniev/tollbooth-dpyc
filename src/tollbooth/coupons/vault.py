@@ -14,7 +14,7 @@ pick up the tables on first paid call.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from tollbooth.coupons.models import (
@@ -343,7 +343,7 @@ class CouponsVault:
         params: list[Any] = [npub, *clean]
         try:
             result = await self._neon._execute(sql, params)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("fetch_redemptions_for_chain failed: %s", exc)
             return {}
         out: dict[str, CouponRedemption] = {}
@@ -405,4 +405,4 @@ class CouponsVault:
     @staticmethod
     def now_utc() -> datetime:
         """Convenience helper — UTC ``datetime`` for window checks."""
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)

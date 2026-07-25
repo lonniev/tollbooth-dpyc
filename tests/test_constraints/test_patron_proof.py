@@ -1,6 +1,6 @@
 """Tests for tollbooth.constraints.patron_proof — PatronProofConstraint (M3.6)."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 from tollbooth.constraints.base import (
@@ -11,7 +11,7 @@ from tollbooth.constraints.base import (
 )
 from tollbooth.constraints.patron_proof import PatronProofConstraint
 
-_NOW = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 6, 11, 12, 0, tzinfo=UTC)
 
 
 def _ctx(dpop_token="", npub="npub1patron", tool_name="expensive_tool"):

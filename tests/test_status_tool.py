@@ -12,11 +12,11 @@ from tollbooth.tools.status import (
 
 
 def _call(**over):
-    kw = dict(
-        service="svc", slug="svc", version="1.2.3",
-        tollbooth_version="0.44.3", vault_ok=True, courier_ok=True,
-        operator_npub="npub1op", process_id=4242, env={},
-    )
+    kw = {
+        "service": "svc", "slug": "svc", "version": "1.2.3",
+        "tollbooth_version": "0.44.3", "vault_ok": True, "courier_ok": True,
+        "operator_npub": "npub1op", "process_id": 4242, "env": {},
+    }
     kw.update(over)
     return build_service_status(**kw)
 

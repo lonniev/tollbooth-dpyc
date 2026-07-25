@@ -8,18 +8,17 @@ import pytest
 from pynostr.event import Event  # type: ignore[import-untyped]
 from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
+from tollbooth.btcpay_client import BTCPayClient
 from tollbooth.certificate import CertificateError, reset_jti_store, verify_certificate_auto
+from tollbooth.ledger import UserLedger
+from tollbooth.ledger_cache import LedgerCache
 from tollbooth.nostr_certificate import (
     NOSTR_CERT_KIND,
     NOSTR_CERT_LABEL,
     NOSTR_CERT_TAG,
     verify_nostr_certificate,
 )
-from tollbooth.ledger import UserLedger
-from tollbooth.ledger_cache import LedgerCache
-from tollbooth.btcpay_client import BTCPayClient
 from tollbooth.tools.credits import purchase_credits_tool
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -167,7 +166,7 @@ class TestVerifyNostrCertificateInvalid:
             verify_nostr_certificate(event_json, npub)
 
     def test_wrong_signer(self, nostr_keypair):
-        private_key, npub = nostr_keypair
+        _private_key, npub = nostr_keypair
         other_key = PrivateKey()
         event_json = _sign_nostr_certificate(other_key, jti="jti-wrong-signer")
         with pytest.raises(CertificateError, match="not signed by registered Authority"):

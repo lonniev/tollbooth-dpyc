@@ -22,7 +22,6 @@ from tollbooth.runtime import OperatorRuntime
 from tollbooth.slug_tools import make_slug_tool
 from tollbooth.tool_identity import capability_uuid
 
-
 # --------------------------------------------------------------------------
 # Param-schema language
 # --------------------------------------------------------------------------
@@ -48,7 +47,7 @@ class TestValidateParamSchema:
 
 
 class TestValidateParams:
-    schema = {
+    schema = {  # noqa: RUF012
         "from_city": {"type": "string"},
         "to_city": {"type": "string"},
         "max_stops": {"type": "int", "required": False},
@@ -237,7 +236,7 @@ class TestUnregisterDynamicTool:
         assert capability_uuid("dyn:find_airline_flights") not in rt._tool_registry
 
     def test_removes_by_uuid(self) -> None:
-        rt, fake = _wired_runtime()
+        rt, _fake = _wired_runtime()
         rt.register_dynamic_tool(name="q", param_schema={}, runner=_runner)
         tid = capability_uuid("dyn:q")
         assert rt.unregister_dynamic_tool(tid) is True
@@ -260,9 +259,9 @@ class TestUnregisterDynamicTool:
 
 def test_fastmcp_generates_typed_schema() -> None:
     pytest.importorskip("fastmcp")
-    from fastmcp.tools import Tool
-
     import functools
+
+    from fastmcp.tools import Tool
 
     async def runner(params: dict, npub: str, dpop_token: str) -> dict:
         return {}

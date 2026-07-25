@@ -1,6 +1,6 @@
 """Tests for SurgePricingConstraint."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -19,7 +19,7 @@ def _ctx(tool: str = "fetch", demand: int = 0) -> ConstraintContext:
         ledger=LedgerSnapshot(balance_api_sats=100),
         patron=PatronIdentity(npub="npub1test"),
         env=EnvironmentSnapshot(
-            utc_now=datetime.now(timezone.utc),
+            utc_now=datetime.now(UTC),
             tool_name=tool,
             global_demand=((tool, demand),),
         ),
@@ -89,7 +89,7 @@ class TestSurgePricingConstraint:
             ledger=LedgerSnapshot(),
             patron=PatronIdentity(),
             env=EnvironmentSnapshot(
-                utc_now=datetime.now(timezone.utc),
+                utc_now=datetime.now(UTC),
                 tool_name="fetch",
             ),
         )
@@ -181,7 +181,7 @@ class TestPriceModifierSurge:
 class TestEnvironmentSnapshotDemand:
     def test_demand_for_known_tool(self):
         env = EnvironmentSnapshot(
-            utc_now=datetime.now(timezone.utc),
+            utc_now=datetime.now(UTC),
             tool_name="fetch",
             global_demand=(("fetch", 42), ("post", 10)),
         )
@@ -190,11 +190,11 @@ class TestEnvironmentSnapshotDemand:
 
     def test_demand_for_unknown_tool(self):
         env = EnvironmentSnapshot(
-            utc_now=datetime.now(timezone.utc),
+            utc_now=datetime.now(UTC),
             global_demand=(("fetch", 42),),
         )
         assert env.demand_for("other") == 0
 
     def test_empty_demand(self):
-        env = EnvironmentSnapshot(utc_now=datetime.now(timezone.utc))
+        env = EnvironmentSnapshot(utc_now=datetime.now(UTC))
         assert env.demand_for("anything") == 0

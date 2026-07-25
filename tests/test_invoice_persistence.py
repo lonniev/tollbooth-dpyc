@@ -4,7 +4,6 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from tollbooth.tools.credits import direct_purchase_tool
 
 from tollbooth.btcpay_client import BTCPayClient
 from tollbooth.ledger import InvoiceRecord, UserLedger
@@ -12,6 +11,7 @@ from tollbooth.ledger_cache import LedgerCache
 from tollbooth.tools.credits import (
     check_balance_tool,
     check_payment_tool,
+    direct_purchase_tool,
     restore_credits_tool,
 )
 

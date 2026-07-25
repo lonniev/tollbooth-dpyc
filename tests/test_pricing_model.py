@@ -6,9 +6,8 @@ import json
 
 import pytest
 
-from tollbooth.tool_identity import capability_uuid
 from tollbooth.pricing_model import PipelineStep, PricingModel, ToolPrice
-
+from tollbooth.tool_identity import capability_uuid
 
 # ---------------------------------------------------------------------------
 # ToolPrice

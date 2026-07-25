@@ -6,7 +6,7 @@ import os
 import pytest
 from pynostr.key import PrivateKey
 
-from tollbooth.nip04 import decrypt, encrypt, _get_shared_secret
+from tollbooth.nip04 import _get_shared_secret, decrypt, encrypt
 
 
 class TestNip04Decrypt:

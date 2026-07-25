@@ -29,7 +29,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from typing import Any
+from typing import Any, Self
 
 import httpx
 
@@ -144,7 +144,7 @@ class X402Client:
 
             try:
                 payload = self._sign_payment(payment_header, url)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("x402 payment signing failed: %s", exc)
                 return resp  # can't pay — return the 402
 
@@ -177,10 +177,10 @@ class X402Client:
         """Close the underlying HTTP client."""
         await self._http.aclose()
 
-    async def __aenter__(self) -> X402Client:
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *exc: Any) -> None:
+    async def __aexit__(self, *exc: object) -> None:
         await self.close()
 
     # -- Private ---------------------------------------------------------------
@@ -194,7 +194,7 @@ class X402Client:
         # the current (V2) protocol only. A V1 response is an upstream-version
         # situation, not a crash — narrow explicitly (also satisfies mypy).
         if not isinstance(payment_required, PaymentRequired):
-            raise ValueError(
+            raise TypeError(
                 "Unsupported x402 payment-required version (expected V2). "
                 "Upgrade the upstream x402 service."
             )
@@ -205,12 +205,12 @@ class X402Client:
         # Select the first acceptable payment requirement
         selected = payment_required.accepts[0]
         if not isinstance(selected, PaymentRequirements):
-            raise ValueError(
+            raise TypeError(
                 "Unsupported x402 payment-requirements version (expected V2)."
             )
 
-        import time
         import os
+        import time
 
         now = int(time.time())
         nonce = "0x" + os.urandom(32).hex()

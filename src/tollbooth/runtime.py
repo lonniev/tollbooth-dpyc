@@ -47,10 +47,13 @@ import logging
 import os
 import signal
 import threading
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from tollbooth.tool_identity import ToolIdentity
+
+from datetime import UTC
 
 from tollbooth.identity_proof import require_proof
 from tollbooth.tool_identity import capability_uuid
@@ -73,7 +76,7 @@ def resolve_npub(npub: str) -> str:
     try:
         from pynostr.key import PublicKey
         PublicKey.from_npub(npub)
-    except Exception:
+    except Exception:  # noqa: BLE001
         raise ValueError(f"Invalid npub: bech32 decode failed for {npub[:20]}...")
     return npub
 
@@ -134,7 +137,7 @@ class OperatorRuntime:
         self,
         *,
         nsec_env_var: str = "TOLLBOOTH_NOSTR_OPERATOR_NSEC",
-        tool_registry: dict[str, "ToolIdentity"] | None = None,
+        tool_registry: dict[str, ToolIdentity] | None = None,
         operator_credential_template: Any | None = None,
         patron_credential_template: Any | None = None,
         operator_credential_greeting: str = "",
@@ -375,7 +378,7 @@ class OperatorRuntime:
                 await asyncio.wait_for(
                     self._shutdown_flush_ledger(), timeout=8.0,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.error(
                     "Graceful shutdown timed out after 8s — "
                     "some entries may be lost."
@@ -395,7 +398,7 @@ class OperatorRuntime:
                 result = cb()
                 if asyncio.iscoroutine(result) or asyncio.isfuture(result):
                     await result
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("Shutdown cleanup callback failed: %s", exc)
         self._cleanup_callbacks.clear()
 
@@ -426,6 +429,7 @@ class OperatorRuntime:
 
         import os
         import time as _time
+
         from tollbooth.vaults import NeonVault
 
         if self._vault_source == "env":
@@ -586,7 +590,7 @@ class OperatorRuntime:
                     await cv.ensure_schema()
                     self._courier._exchange._credential_vault = cv
                     logger.info("Attached credential vault to courier (late init)")
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.warning("Credential vault late-attach failed: %s", exc)
             elif (hasattr(self._courier, '_exchange')
                     and self._courier._exchange._credential_vault is None):
@@ -616,7 +620,7 @@ class OperatorRuntime:
             credential_vault = NeonCredentialVault(neon_vault=v)
             await credential_vault.ensure_schema()
             logger.info("Credential vault initialized (NeonCredentialVault)")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("No persistent credential vault (%s): %s", type(exc).__name__, exc)
 
         templates = {}
@@ -784,8 +788,8 @@ class OperatorRuntime:
         """Lazy accessor for the PricingResolver (requires vault)."""
         if self._pricing_resolver is None:
             vault = await self.vault()
-            from tollbooth.pricing_store import PricingModelStore
             from tollbooth.pricing_resolver import PricingResolver
+            from tollbooth.pricing_store import PricingModelStore
             store = PricingModelStore(neon_vault=vault)
             self._pricing_resolver = PricingResolver(
                 store=store,
@@ -972,8 +976,8 @@ class OperatorRuntime:
                         "capacity. Free tools remain available."
                     ),
                     "next_steps": [
-                        "Try again later — capacity is restored by the operator's "
-                        "Authority, not by retrying now"
+                        ("Try again later — capacity is restored by the operator's "
+                        "Authority, not by retrying now")
                     ],
                 }
             if resolver.last_error_permanent:
@@ -988,8 +992,8 @@ class OperatorRuntime:
                         "Free tools remain available."
                     ),
                     "next_steps": [
-                        "Notify the operator — this is an operator-side "
-                        "database repair, not a patron-actionable error"
+                        ("Notify the operator — this is an operator-side "
+                        "database repair, not a patron-actionable error")
                     ],
                 }
             return 0, {
@@ -1074,7 +1078,7 @@ class OperatorRuntime:
                         coupon_map = CouponRedemptionMap(
                             entries=tuple(redemptions.items()),
                         )
-                    except Exception as ce:
+                    except Exception as ce:  # noqa: BLE001
                         logger.warning(
                             "Coupon redemption pre-load failed for %s: %s",
                             name, ce,
@@ -1093,7 +1097,7 @@ class OperatorRuntime:
                     denial["error_code"] = ErrorCode.CONSTRAINT_DENIED
                     return cost, [], denial
                 effective_cost = effective_signed
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Constraint evaluation failed for %s: %s", name, exc)
             # Fall through with base cost — don't block the call
         return effective_cost, consumed_coupon_ids, None
@@ -1121,13 +1125,13 @@ class OperatorRuntime:
                 return
             try:
                 cv = await self.coupons_vault()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("coupons_vault unavailable for burn: %s", exc)
                 return
             for cid in consumed_coupon_ids:
                 try:
                     await cv.burn_use(cid, npub)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "burn_use failed (coupon=%s patron=%s): %s",
                         cid, npub[:20], exc,
@@ -1178,7 +1182,7 @@ class OperatorRuntime:
                             "Auto-reconciled %d invoice(s) for %s on cold start",
                             recon["reconciled"], npub[:20],
                         )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.debug("Auto-reconciliation skipped for %s: %s", npub[:20], exc)
 
         # Read-modify-write-through against the definitive store: the balance
@@ -1249,10 +1253,10 @@ class OperatorRuntime:
             # Money path: a failed rollback means the patron may have been
             # charged for a tool call that did not deliver. Loud, not silent —
             # surfaces in logs for manual reconciliation.
-            logger.error(
+            logger.exception(
                 "credit rollback FAILED after a failed tool call (tool_id=%s) — "
                 "patron may have been charged without delivery; reconcile manually",
-                tool_id, exc_info=True,
+                tool_id,
             )
 
     # ------------------------------------------------------------------
@@ -1291,7 +1295,7 @@ class OperatorRuntime:
             try:
                 await self.vault()
                 vault_ok = True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 bootstrap_error = str(exc)
 
         # 3. Operator credential check — template fields vs vault contents
@@ -1463,7 +1467,7 @@ class OperatorRuntime:
             else:
                 logger.info("No credentials found for %s (service=%s)", npub[:20], service)
             return result or {}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Credential vault load failed (%s): %s", type(exc).__name__, exc)
             return {}
 
@@ -1526,7 +1530,7 @@ class OperatorRuntime:
                 return False
             await courier._exchange._vault_store(svc, patron_npub, credentials)
             return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Patron session store failed: %s", exc)
             return False
 
@@ -1682,7 +1686,7 @@ class OperatorRuntime:
         # Stage 1: load from vault
         try:
             creds = await self.load_patron_session(patron_npub, service=svc)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None, "vault_bootstrapping"
 
         if not creds or not creds.get("access_token"):
@@ -1706,7 +1710,7 @@ class OperatorRuntime:
             op_creds = await self.load_credentials(
                 [opc.client_id_field, opc.client_secret_field],
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None, "token_expired"
 
         client_id = op_creds.get(opc.client_id_field, "")
@@ -1719,7 +1723,7 @@ class OperatorRuntime:
             new_token = await refresh_access_token(
                 client_id, client_secret, refresh_token, opc.token_url,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "OAuth token refresh failed for %s: %s", patron_npub[:20], exc,
             )
@@ -1746,7 +1750,7 @@ class OperatorRuntime:
                 extra = await opc.on_token_received(patron_npub, new_token)
                 if extra:
                     vault_data.update({k: str(v) for k, v in extra.items()})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("on_token_received callback failed on refresh: %s", exc)
 
         # Persist refreshed tokens
@@ -1966,9 +1970,7 @@ class OperatorRuntime:
         # Auto-fix common URL typos before rejecting
         if host:
             host = host.strip()
-            if host.startswith("htps://"):
-                host = "https://" + host[7:]
-            elif host.startswith("http://") and not host.startswith("https://"):
+            if host.startswith("htps://") or host.startswith("http://") and not host.startswith("https://"):
                 host = "https://" + host[7:]
         if host and not host.startswith("https://"):
             raise ValueError(
@@ -2037,8 +2039,8 @@ class OperatorRuntime:
 
     def _demand_window_key(self) -> str:
         """Current hourly demand window key."""
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00")
+        from datetime import datetime
+        return datetime.now(UTC).strftime("%Y-%m-%dT%H:00")
 
     _SUPPLY_TOTAL_KEY = "__total__"
 
@@ -2125,7 +2127,7 @@ class OperatorRuntime:
                 vault = await self.vault()
                 anchors = await vault.list_anchors(limit=1)
                 if anchors:
-                    from datetime import datetime, timezone
+                    from datetime import datetime
                     created = anchors[0].get("created_at", "")
                     if isinstance(created, str) and created:
                         last_ts = datetime.fromisoformat(created).timestamp()
@@ -2133,7 +2135,7 @@ class OperatorRuntime:
                         last_ts = created.timestamp()
                     else:
                         last_ts = 0.0
-                    age = datetime.now(timezone.utc).timestamp() - last_ts
+                    age = datetime.now(UTC).timestamp() - last_ts
                     if age < self._OTS_INTERVAL_SECONDS:
                         return  # recent enough
 
@@ -2148,7 +2150,7 @@ class OperatorRuntime:
                     )
                 else:
                     logger.warning("Opportunistic OTS notarization failed: %s", result.get("error"))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.debug("Opportunistic OTS notarization skipped: %s", exc)
             finally:
                 self._ots_running = False
@@ -2235,7 +2237,7 @@ class OperatorRuntime:
             creds = await self.load_credentials(
                 ["prefect_api_url", "prefect_api_key"],
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             # Transient — leave unresolved so the next job retries the probe.
             logger.debug("long-runner creds not loadable (will retry next job): %s", exc)
             return
@@ -2490,7 +2492,7 @@ class OperatorRuntime:
                         job["tool_id"], job["npub"], tool_kwargs=job["params"],
                     )
                     return
-                except (asyncio.TimeoutError, TimeoutError):
+                except TimeoutError:
                     # The attempt outran its budget and was cancelled. Treat as a
                     # terminal, refundable situation rather than retrying: another
                     # attempt would burn a second full budget the frontend has
@@ -2513,16 +2515,15 @@ class OperatorRuntime:
                         job["tool_id"], job["npub"], tool_kwargs=job["params"],
                     )
                     return
-                except Exception as exc:
+                except Exception:
                     # Generic message to the patron (an exception string can
                     # carry anything); full detail to operator logs only —
                     # same posture as paid_tool's catch_errors path. Domain
                     # errors a patron *should* see belong in the runner's
                     # returned dict, which flows through complete().
-                    logger.error(
-                        "Async job %s (%s) attempt %d/%d failed: %s",
+                    logger.exception(
+                        "Async job %s (%s) attempt %d/%d failed",
                         claim, kind, attempt, self._ASYNC_JOB_MAX_ATTEMPTS,
-                        exc, exc_info=True,
                     )
                     if attempt >= self._ASYNC_JOB_MAX_ATTEMPTS:
                         await store.fail(
@@ -2539,7 +2540,7 @@ class OperatorRuntime:
                     result = {"result": result}
                 await store.complete(claim, result)
                 return
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             # Store-level failure (Neon unreachable mid-job). Leave the row
             # as-is — the watchdog reclaims it once max_runtime elapses.
             logger.warning("Async job %s aborted: %s", claim, exc)
@@ -2739,7 +2740,7 @@ class OperatorRuntime:
                     await rt.rollback_debit(tool_id, npub, tool_kwargs=call_kwargs)
                     if catch_errors:
                         from tollbooth.constants import ErrorCode as _EC
-                        logger.error("Tool %s failed: %s", tool_id, exc, exc_info=True)
+                        logger.exception("Tool %s failed", tool_id)
                         # Map upstream-API auth failures to a friendlier code
                         # so calling agents can route directly to the OAuth
                         # refresh flow without parsing prose.
@@ -3191,14 +3192,14 @@ def register_standard_tools(
                         "notified to refill it. Please try again soon."
                     ),
                     "next_steps": [
-                        "Wait a few minutes, then retry purchase_credits — the "
+                        ("Wait a few minutes, then retry purchase_credits — the "
                         "operator needs to refill its certification balance at "
-                        "the Authority.",
+                        "the Authority."),
                     ],
                     "authority_npub": authority_npub,
                 }
             return {"success": False, "error": f"Authority certification failed: {e}"}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {"success": False, "error": f"Authority certification failed: {e}"}
 
         try:
@@ -3459,7 +3460,7 @@ def register_standard_tools(
         try:
             v = await rt.vault()
             vault_ok = v is not None
-        except Exception:
+        except Exception:  # noqa: BLE001
             vault_ok = rt._vault is not None
         # Trigger late-attach of credential vault if courier exists without one
         try:
@@ -3467,7 +3468,7 @@ def register_standard_tools(
             courier_ok = (c is not None
                           and hasattr(c, '_exchange')
                           and c._exchange._credential_vault is not None)
-        except Exception:
+        except Exception:  # noqa: BLE001
             courier_ok = False
 
         wheel_version = "unknown"
@@ -3481,7 +3482,7 @@ def register_standard_tools(
         # distinguish that from a resolved-but-empty value (still fingerprinted).
         try:
             op_npub: str | None = rt.operator_npub()
-        except Exception:
+        except Exception:  # noqa: BLE001
             op_npub = None
 
         from tollbooth.tools.status import build_service_status
@@ -3596,7 +3597,7 @@ def register_standard_tools(
             try:
                 await rt.vault()
                 vault_ok = True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 exc_str = str(exc)
                 exc_lower = exc_str.lower()
                 # An operator that can't find ITS OWN entry in the public DPYC
@@ -3712,9 +3713,10 @@ def register_standard_tools(
             if opc is not None:
                 try:
                     creds = await rt.load_patron_session(resolved, service=opc.service_name)
-                except Exception:
+                except Exception:  # noqa: BLE001
                     creds = None
                 import time as _t
+
                 from tollbooth.tools.status import build_upstream_oauth_block
                 block = build_upstream_oauth_block(
                     creds,
@@ -3904,7 +3906,7 @@ def register_standard_tools(
                     "message": f"Field '{field}' updated.",
                 }
             return {"success": False, "error": "No credential service configured."}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {"success": False, "error": str(e)}
 
     @tool
@@ -3938,7 +3940,7 @@ def register_standard_tools(
                     "message": f"Field '{field}' removed.",
                 }
             return {"success": False, "error": "No credential service configured."}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {"success": False, "error": str(e)}
 
     @tool
@@ -3970,7 +3972,7 @@ def register_standard_tools(
                 "fields": fields,
                 "count": len(fields),
             }
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {"success": False, "error": str(e)}
 
     # -- OAuth2 tools (only if oauth_provider is configured) ----------------
@@ -4196,7 +4198,7 @@ def register_standard_tools(
         try:
             certifier, _ = await rt._certifier()
             return await certifier.check_balance()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {
                 "success": False,
                 "error": f"Authority balance check failed: {e}",
@@ -4230,7 +4232,7 @@ def register_standard_tools(
                 )
 
             return result
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {"status": "error", "error": str(e)}
 
     @tool
@@ -4267,7 +4269,7 @@ def register_standard_tools(
             if rt._pricing_resolver is not None:
                 rt._pricing_resolver.refresh()
             return result
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {"status": "error", "error": str(e)}
 
     @tool
@@ -4314,7 +4316,7 @@ def register_standard_tools(
             # Return the fresh model
             from tollbooth.tools.pricing import get_pricing_model_tool
             return await get_pricing_model_tool(store, rt.operator_npub())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {"success": False, "error": str(e)}
 
     async def _remote_authority_call(
@@ -4325,8 +4327,9 @@ def register_standard_tools(
 
         Returns the remote tool's structured dict, or raises on failure.
         """
-        from tollbooth.registry import DEFAULT_REGISTRY_URL, DPYCRegistry
         from fastmcp import Client
+
+        from tollbooth.registry import DEFAULT_REGISTRY_URL, DPYCRegistry
 
         registry = DPYCRegistry(url=DEFAULT_REGISTRY_URL)
         try:
@@ -4417,7 +4420,7 @@ def register_standard_tools(
                     "service_url": service_url,
                 },
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not reach the Authority: {exc}"}
         result.setdefault("authority_npub", authority_npub)
         return result
@@ -4437,7 +4440,7 @@ def register_standard_tools(
                 "get_adoption_status",
                 {"operator_npub": rt.operator_npub()},
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not reach the Authority: {exc}"}
 
     @tool
@@ -4473,7 +4476,7 @@ def register_standard_tools(
             try:
                 await coro
                 steps.append({"step": label, "ok": True})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 steps.append({
                     "step": label,
                     "ok": False,
@@ -4483,7 +4486,7 @@ def register_standard_tools(
 
         try:
             vault = await rt.vault()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {
                 "success": False,
                 "error_type": type(exc).__name__,
@@ -4496,7 +4499,7 @@ def register_standard_tools(
             from tollbooth.pricing_store import PricingModelStore
             store = PricingModelStore(neon_vault=vault)
             await _try("PricingModelStore.ensure_schema", store.ensure_schema())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             steps.append({"step": "PricingModelStore.ensure_schema", "ok": False, "error": str(exc)[:500]})
 
         # Credential vault tables live on the same Neon. The live vault is on
@@ -4511,7 +4514,7 @@ def register_standard_tools(
             from tollbooth.vaults.neon import NeonCredentialVault
             cred_vault = NeonCredentialVault(neon_vault=vault)
             await _try("CredentialVault.ensure_schema", cred_vault.ensure_schema())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             steps.append({"step": "CredentialVault.ensure_schema", "ok": False, "error": str(exc)[:500]})
 
         all_ok = all(s.get("ok") for s in steps)
@@ -4713,7 +4716,7 @@ def register_standard_tools(
                         coupon_map = CouponRedemptionMap(
                             entries=tuple(redemptions.items()),
                         )
-                    except Exception as ce:
+                    except Exception as ce:  # noqa: BLE001
                         logger.warning(
                             "check_price coupon pre-load failed: %s", ce,
                         )
@@ -4974,9 +4977,9 @@ def register_standard_tools(
 
     if rt._ots_enabled:
         from tollbooth.tools.notarization import (
-            notarize_ledger_tool,
             get_notarization_proof_tool,
             list_notarizations_tool,
+            notarize_ledger_tool,
         )
 
         @tool
@@ -5094,5 +5097,5 @@ async def _call_oracle(
                     except (ValueError, TypeError):
                         return {"success": True, "result": block.text}
         return {"success": True, "result": str(result)}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"Oracle delegation failed: {e}"}

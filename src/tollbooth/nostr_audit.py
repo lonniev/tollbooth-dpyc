@@ -95,7 +95,7 @@ def _npub_to_hex(user_id: str) -> str:
 
         pk = PublicKey.from_npub(user_id)
         return pk.hex()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return user_id
 
 
@@ -149,7 +149,7 @@ class NostrAuditPublisher:
         try:
             self._private_key = PrivateKey.from_nsec(operator_nsec)
             self._pubkey_hex = self._private_key.public_key.hex()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Invalid operator nsec — audit events disabled: %s", exc)
             self._enabled = False
 
@@ -248,7 +248,7 @@ class NostrAuditPublisher:
             )
             thread.start()
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to construct Nostr audit event: %s", exc)
 
     def _publish_to_relays(self, message: str) -> None:
@@ -263,14 +263,13 @@ class NostrAuditPublisher:
                     logger.debug("Nostr relay %s: %s", relay_url, resp)
                 finally:
                     ws.close()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "Nostr relay %s failed (non-fatal): %s", relay_url, exc
                 )
 
     def close(self) -> None:
         """Cleanup (no persistent state to release)."""
-        pass
 
 
 class AuditedVault:

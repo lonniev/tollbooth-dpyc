@@ -16,7 +16,7 @@ import logging
 import re
 import secrets
 from typing import Any
-from urllib.parse import urlparse, urlunparse, parse_qs, urlencode, quote
+from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 

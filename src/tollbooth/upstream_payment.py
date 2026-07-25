@@ -162,7 +162,7 @@ def classify_upstream_payment(
             if isinstance(body, dict):
                 value = body.get("detail") or body.get("title") or body.get("error")
                 detail = str(value) if value is not None else None
-        except Exception:
+        except Exception:  # noqa: BLE001
             detail = None
     return upstream_payment_situation(
         service=service,

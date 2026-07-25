@@ -11,6 +11,7 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import TYPE_CHECKING
 
 from tollbooth.ledger import UserLedger
@@ -21,7 +22,8 @@ from tollbooth.vault_backend import (
 )
 
 if TYPE_CHECKING:
-    from typing import Callable, TypeVar
+    from collections.abc import Callable
+    from typing import TypeVar
 
     from tollbooth.vault_backend import VaultBackend
 
@@ -90,9 +92,7 @@ class LedgerCache:
             return False
         if entry.dirty_count >= self._flush_batch_size:
             return True
-        if time.monotonic() - entry.last_flush_time > self._flush_staleness_secs:
-            return True
-        return False
+        return time.monotonic() - entry.last_flush_time > self._flush_staleness_secs
 
     def flush_due(self, user_id: str) -> bool:
         """Check if a user's cache entry is due for flushing."""
@@ -146,13 +146,13 @@ class LedgerCache:
 
         Returns True if any tranches were migrated (entry should be flushed).
         """
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         migrated = False
         for t in ledger.tranches:
             if t.expires_at is None and t.remaining_sats > 0:
                 t.expires_at = (
-                    datetime.now(timezone.utc) + timedelta(days=7)
+                    datetime.now(UTC) + timedelta(days=7)
                 ).isoformat()
                 migrated = True
         if migrated:
@@ -288,7 +288,7 @@ class LedgerCache:
         """
         try:
             ledger_json = await self._vault.fetch_ledger(user_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Failed to load ledger from vault for %s — returning uncached empty ledger. Underlying error: %s: %s",
                 user_id, type(exc).__name__, exc,
@@ -323,7 +323,7 @@ class LedgerCache:
         """Flush wrapper that swallows exceptions — safe for create_task."""
         try:
             await self._flush_entry(user_id, entry)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning(
                 "Background flush failed for %s (swallowed).", user_id,
             )
@@ -344,7 +344,7 @@ class LedgerCache:
 
     async def _flush_entry(self, user_id: str, entry: _CacheEntry) -> bool:
         """Flush a single entry to vault with retry. Returns True on success."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         max_attempts = 1 + self._flush_retries
         for attempt in range(max_attempts):
@@ -358,10 +358,10 @@ class LedgerCache:
                 entry.dirty = False
                 entry.dirty_count = 0
                 entry.last_flush_time = time.monotonic()
-                self._last_flush_at = datetime.now(timezone.utc).isoformat()
+                self._last_flush_at = datetime.now(UTC).isoformat()
                 self._total_flushes += 1
                 return True
-            except Exception:
+            except Exception:  # noqa: BLE001
                 if attempt < max_attempts - 1:
                     logger.warning(
                         "Flush attempt %d/%d failed for %s, retrying in %.1fs...",
@@ -379,9 +379,8 @@ class LedgerCache:
         """Flush all dirty entries to vault. Returns count of flushed entries."""
         flushed = 0
         for user_id, entry in list(self._entries.items()):
-            if entry.dirty:
-                if await self._flush_entry(user_id, entry):
-                    flushed += 1
+            if entry.dirty and await self._flush_entry(user_id, entry):
+                flushed += 1
         return flushed
 
     async def snapshot_all(self, timestamp: str) -> int:
@@ -394,7 +393,7 @@ class LedgerCache:
                 )
                 if result is not None:
                     snapped += 1
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.warning("Failed to snapshot ledger for %s.", user_id)
         return snapped
 

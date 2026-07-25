@@ -12,6 +12,7 @@ from typing import Any
 
 from tollbooth.constraints.base import ConstraintSchema, ToolConstraint
 from tollbooth.constraints.expression import JsonExpressionConstraint
+from tollbooth.constraints.patron_proof import PatronProofConstraint
 from tollbooth.constraints.periodic import PeriodicRefreshConstraint
 from tollbooth.constraints.pricing import (
     BulkBonusConstraint,
@@ -21,10 +22,8 @@ from tollbooth.constraints.pricing import (
     LoyaltyDiscountConstraint,
 )
 from tollbooth.constraints.supply import FiniteSupplyConstraint
-from tollbooth.constraints.patron_proof import PatronProofConstraint
 from tollbooth.constraints.surge import SurgePricingConstraint
 from tollbooth.constraints.temporal import TemporalWindowConstraint
-
 
 # ---------------------------------------------------------------------------
 # Registry

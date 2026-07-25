@@ -51,7 +51,7 @@ class JobExecutor(Protocol):
 class InProcessExecutor:
     """Run the job as a concurrent asyncio task in this process (today's path)."""
 
-    def __init__(self, runtime: "OperatorRuntime") -> None:
+    def __init__(self, runtime: OperatorRuntime) -> None:
         self._runtime = runtime
 
     async def submit(self, claim: str, closure_b64: str | None) -> str:

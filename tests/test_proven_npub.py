@@ -12,7 +12,6 @@ from tollbooth.proven_npub import (
     parse_duration,
 )
 
-
 VALID_NPUB = "npub1l94pd4qu4eszrl6ek032ftcnsu3tt9a7xvq2zp7eaxeklp6mrpzssmq8pf"
 DPOP_TOKEN_A = "bold-hawk-42"
 DPOP_TOKEN_B = "calm-reef-77"

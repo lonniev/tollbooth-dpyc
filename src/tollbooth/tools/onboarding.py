@@ -52,7 +52,7 @@ async def load_vault_credentials(
             return None
         plaintext = courier_service._exchange._vault_decrypt(blob)
         return json.loads(plaintext)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.debug("Vault credential load failed for %s: %s", service, exc)
         return None
 

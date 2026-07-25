@@ -26,7 +26,7 @@ class AuthoritySettings(BaseSettings):
 
     # NOTE: neon_api_key / neon_org_id are NOT env settings. They are OPTIONAL Authority
     # secrets delivered via Secure Courier and read from the operator credential vault by
-    # network_books_health (the proactive compute-quota watch). See OPERATOR_CREDENTIAL_TEMPLATE
+    # network_persistence_health (the proactive compute-quota watch). See OPERATOR_CREDENTIAL_TEMPLATE
     # in authority/tools.py — an Authority enables the watch by delivering them, not by env.
 
     # Nostr audit (optional — enabled when both are set). Relays are governed

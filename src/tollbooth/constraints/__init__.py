@@ -25,6 +25,7 @@ from tollbooth.constraints.config import (
 )
 from tollbooth.constraints.expression import JsonExpressionConstraint
 from tollbooth.constraints.gate import ConstraintGate
+from tollbooth.constraints.patron_proof import PatronProofConstraint
 from tollbooth.constraints.periodic import PeriodicRefreshConstraint, parse_iso_duration
 from tollbooth.constraints.pricing import (
     BulkBonusConstraint,
@@ -33,42 +34,41 @@ from tollbooth.constraints.pricing import (
     HappyHourConstraint,
     LoyaltyDiscountConstraint,
 )
-from tollbooth.constraints.patron_proof import PatronProofConstraint
 from tollbooth.constraints.supply import FiniteSupplyConstraint
 from tollbooth.constraints.surge import SurgePricingConstraint
 from tollbooth.constraints.temporal import TemporalWindowConstraint
 
 __all__ = [
-    # Base
-    "ToolConstraint",
-    "ConstraintContext",
-    "ConstraintResult",
-    "ConstraintSchema",
-    "ParamSchema",
-    "PriceModifier",
-    "LedgerSnapshot",
-    "PatronIdentity",
-    "EnvironmentSnapshot",
-    # Constraints
-    "TemporalWindowConstraint",
-    "FiniteSupplyConstraint",
-    "PeriodicRefreshConstraint",
-    "CouponConstraint",
-    "FreeTrialConstraint",
-    "LoyaltyDiscountConstraint",
-    "BulkBonusConstraint",
-    "HappyHourConstraint",
-    "JsonExpressionConstraint",
-    "SurgePricingConstraint",
-    "PatronProofConstraint",
-    # Gate
-    "ConstraintGate",
     # Config
     "CONSTRAINT_REGISTRY",
+    "BulkBonusConstraint",
     "ConfigError",
+    "ConstraintContext",
+    # Gate
+    "ConstraintGate",
+    "ConstraintResult",
+    "ConstraintSchema",
+    "CouponConstraint",
+    "EnvironmentSnapshot",
+    "FiniteSupplyConstraint",
+    "FreeTrialConstraint",
+    "HappyHourConstraint",
+    "JsonExpressionConstraint",
+    "LedgerSnapshot",
+    "LoyaltyDiscountConstraint",
+    "ParamSchema",
+    "PatronIdentity",
+    "PatronProofConstraint",
+    "PeriodicRefreshConstraint",
+    "PriceModifier",
+    "SurgePricingConstraint",
+    # Constraints
+    "TemporalWindowConstraint",
+    # Base
+    "ToolConstraint",
     "get_all_schemas",
     "load_constraint",
-    "validate_step",
     # Utilities
     "parse_iso_duration",
+    "validate_step",
 ]

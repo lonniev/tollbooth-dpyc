@@ -6,7 +6,7 @@ Mirrors the pattern in tests/test_pricing_store.py: patches
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import httpx
@@ -18,7 +18,6 @@ from tollbooth.coupons.vault import (
     CouponsVault,
 )
 from tollbooth.vaults.neon import NeonQueryError, NeonVault
-
 
 DATABASE_URL = "postgresql://user:password@ep-test.us-east-2.aws.neon.tech/testdb"
 HTTP_ENDPOINT = "https://ep-test.us-east-2.aws.neon.tech/sql"
@@ -91,8 +90,8 @@ class TestMint:
             operator="npub1abc",
             name="FRESHMAN",
             discount_percent=50.0,
-            valid_from=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            valid_until=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            valid_from=datetime(2026, 5, 1, tzinfo=UTC),
+            valid_until=datetime(2026, 6, 1, tzinfo=UTC),
             uses_per_patron=1,
             total_uses=100,
         )
@@ -114,8 +113,8 @@ class TestMint:
                 operator="npub1abc",
                 name="DUP",
                 discount_percent=10.0,
-                valid_from=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                valid_until=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                valid_from=datetime(2026, 5, 1, tzinfo=UTC),
+                valid_until=datetime(2026, 6, 1, tzinfo=UTC),
             )
 
     @pytest.mark.asyncio
@@ -129,8 +128,8 @@ class TestMint:
                 operator="npub1abc",
                 name="X",
                 discount_percent=10.0,
-                valid_from=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                valid_until=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                valid_from=datetime(2026, 5, 1, tzinfo=UTC),
+                valid_until=datetime(2026, 6, 1, tzinfo=UTC),
             )
 
 

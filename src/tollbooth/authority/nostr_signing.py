@@ -80,7 +80,7 @@ class AuthorityNostrSigner:
         # Convert operator npub to hex for p-tag (best effort)
         try:
             operator_hex = _npub_to_hex(operator_npub)
-        except Exception:
+        except Exception:  # noqa: BLE001
             operator_hex = operator_npub  # fallback: use raw value
 
         event = Event(

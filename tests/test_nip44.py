@@ -17,7 +17,6 @@ from tollbooth.nip44 import (
     encrypt,
 )
 
-
 # ---------------------------------------------------------------------------
 # Padding
 # ---------------------------------------------------------------------------
@@ -252,7 +251,7 @@ class TestEncryptDecrypt:
 class TestConversationKeyVectors:
     """Validate conversation key derivation against official NIP-44 vectors."""
 
-    VECTORS = [
+    VECTORS = [  # noqa: RUF012
         (
             "315e59ff51cb9209768cf7da80791ddcaae56ac9775eb25b6dee1234bc5d2268",
             "c2f9d9948dc8c7c38321e4b85c8558872eafa0641cd269db76848a6073e69133",

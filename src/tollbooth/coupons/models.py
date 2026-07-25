@@ -3,26 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
 def _parse_dt(value: Any) -> datetime:
     """Coerce a Neon-returned timestamp (str or datetime) to UTC datetime."""
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
     if isinstance(value, str):
         s = value.replace("Z", "+00:00")
         dt = datetime.fromisoformat(s)
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
     raise TypeError(f"Cannot parse datetime from {type(value).__name__}: {value!r}")
 
 
 def _to_iso(value: datetime) -> str:
     """ISO-8601 string with explicit UTC offset for Neon TIMESTAMPTZ binds."""
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat()
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
 
 
 @dataclass

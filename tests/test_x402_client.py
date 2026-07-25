@@ -9,13 +9,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-
 # Skip entire module if optional deps not installed
 pytest.importorskip("x402")
 pytest.importorskip("eth_account")
 
 from tollbooth.x402_client import X402Client, _parse_chain_id, x402_wallet_template
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

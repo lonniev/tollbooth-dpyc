@@ -12,9 +12,9 @@ Shows how credits flow through the system:
 import asyncio
 import json
 import os
+from datetime import UTC
 
-from tollbooth import UserLedger, LedgerCache, NeonVault
-
+from tollbooth import LedgerCache, NeonVault, UserLedger
 
 DATABASE_URL = os.environ.get(
     "NEON_DATABASE_URL",
@@ -108,8 +108,8 @@ async def main() -> None:
 
         # ── Step 6: Snapshot (audit journal) ─────────────────────
         banner("6. Snapshot — append-only audit entry in transactions table")
-        from datetime import datetime, timezone
-        ts = datetime.now(timezone.utc).isoformat()
+        from datetime import datetime
+        ts = datetime.now(UTC).isoformat()
         snap_id = await vault.snapshot_ledger(DEMO_USER, cached_ledger.to_json(), ts)
         print(f"  Snapshot recorded → transaction id={snap_id}")
 

@@ -41,7 +41,7 @@ lives in this package and is shared across every Authority deployment.
 
 from __future__ import annotations
 
-from tollbooth.authority.nostr_signing import AuthorityNostrSigner, NOSTR_CERT_KIND
+from tollbooth.authority.nostr_signing import NOSTR_CERT_KIND, AuthorityNostrSigner
 from tollbooth.authority.onboarding import (
     AUTHORITY_APPROVAL_TEMPLATE,
     AUTHORITY_CLAIM_TEMPLATE,
@@ -63,11 +63,11 @@ __all__ = [
     "AUTHORITY_CLAIM_TEMPLATE",
     "AUTHORITY_DOMAIN_TOOLS",
     "AUTHORITY_TOOL_REGISTRY",
-    "AuthorityNostrSigner",
-    "AuthoritySettings",
     "NOSTR_CERT_KIND",
     "ONBOARDING_TEMPLATES",
     "OPERATOR_CREDENTIAL_TEMPLATE",
+    "AuthorityNostrSigner",
+    "AuthoritySettings",
     "OnboardingChallenge",
     "OnboardingState",
     "ReplayTracker",

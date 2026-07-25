@@ -9,23 +9,22 @@ from pynostr.key import PrivateKey
 
 from tollbooth.constants import ErrorCode
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
-from tollbooth.nip44 import encrypt as nip44_encrypt
 from tollbooth.nip04 import _get_shared_secret
+from tollbooth.nip44 import encrypt as nip44_encrypt
 from tollbooth.nostr_credentials import (
+    _KIND_ENCRYPTED_DM,
+    _KIND_GIFT_WRAP,
+    _KIND_METADATA,
+    _KIND_PRIVATE_DM,
+    _KIND_SEAL,
+    _TIMESTAMP_FUZZ_SECONDS,
     CourierError,
     CourierNotReady,
     CourierValidationError,
     NostrCredentialExchange,
     NostrProfile,
-    _KIND_ENCRYPTED_DM,
-    _KIND_GIFT_WRAP,
-    _KIND_METADATA,
-    _KIND_SEAL,
-    _KIND_PRIVATE_DM,
-    _TIMESTAMP_FUZZ_SECONDS,
     _parse_delimited_credentials,
 )
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -107,6 +106,7 @@ def _make_nip04_event(
 
     import base64
     import os
+
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     from cryptography.hazmat.primitives.padding import PKCS7
 
@@ -416,6 +416,7 @@ class TestReceiveValidation:
         # Manually build a NIP-04 event with non-JSON content
         import base64
         import os
+
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
         from cryptography.hazmat.primitives.padding import PKCS7
 
@@ -1358,7 +1359,7 @@ class TestSendDm:
         def reject_all(message: str) -> list:
             return [("wss://relay.test.com", False, "blocked: kind not allowed")]
 
-        with patch.object(ex, "_publish_to_relays", side_effect=reject_all):
+        with patch.object(ex, "_publish_to_relays", side_effect=reject_all):  # noqa: SIM117
             with pytest.raises(CourierError, match="All relay sends failed"):
                 ex.send_dm(patron.public_key.bech32(), "Rejected")
 
@@ -1482,10 +1483,10 @@ class TestRendezvousRelayPinning:
         # First call (wss://relay.down) raises; second (wss://relay.up) succeeds.
         call_state = {"n": 0}
 
-        def fake_send(_npub, _text, *, target_relay):  # noqa: ANN001
+        def fake_send(_npub, _text, *, target_relay):
             call_state["n"] += 1
             if target_relay == "wss://relay.down":
-                raise Exception("ECONNREFUSED")
+                raise Exception("ECONNREFUSED")  # noqa: TRY002
             # success on the second relay
 
         with patch.object(ex, "_start_subscription"), \

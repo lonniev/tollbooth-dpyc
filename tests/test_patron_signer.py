@@ -2,8 +2,8 @@
 
 from pynostr.key import PrivateKey
 
-from tollbooth.patron_signer import PatronSigner
 from tollbooth.identity_proof import verify_proof
+from tollbooth.patron_signer import PatronSigner
 
 
 def _agent():

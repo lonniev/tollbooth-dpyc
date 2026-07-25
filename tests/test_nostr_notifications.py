@@ -1,7 +1,7 @@
 """Tests for proactive low-balance and expiration Nostr DM notifications."""
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from pynostr.key import PrivateKey
@@ -15,7 +15,6 @@ from tollbooth.nostr_notifications import (
     _render_expiration_message,
     _render_warning_message,
 )
-
 
 # -- Fixtures ----------------------------------------------------------------
 
@@ -54,7 +53,7 @@ def _make_tranche(
 ) -> Tranche:
     """Create a test Tranche."""
     return Tranche(
-        granted_at=datetime.now(timezone.utc).isoformat(),
+        granted_at=datetime.now(UTC).isoformat(),
         original_sats=original,
         remaining_sats=remaining,
         invoice_id="test-inv",
@@ -377,7 +376,7 @@ class TestExpirationNotifications:
         npub = _make_npub()
 
         # Tranche expiring in 24 hours (within 48h window)
-        exp_time = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+        exp_time = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
         tranche = _make_tranche(remaining=500, expires_at=exp_time)
 
         mgr.check_and_notify(npub, balance=500, last_deposit=500, tranches=[tranche])
@@ -393,7 +392,7 @@ class TestExpirationNotifications:
         npub = _make_npub()
 
         # Tranche expiring in 72 hours (outside 48h window)
-        exp_time = (datetime.now(timezone.utc) + timedelta(hours=72)).isoformat()
+        exp_time = (datetime.now(UTC) + timedelta(hours=72)).isoformat()
         tranche = _make_tranche(remaining=500, expires_at=exp_time)
 
         mgr.check_and_notify(npub, balance=500, last_deposit=500, tranches=[tranche])
@@ -413,7 +412,7 @@ class TestExpirationNotifications:
         mgr = _make_manager()
         npub = _make_npub()
 
-        exp_time = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+        exp_time = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
         tranche = _make_tranche(remaining=500, expires_at=exp_time)
 
         # First call: sends expiration DM
@@ -430,7 +429,7 @@ class TestExpirationNotifications:
         npub = _make_npub()
 
         # Already expired tranche
-        exp_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        exp_time = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
         tranche = _make_tranche(remaining=500, expires_at=exp_time)
 
         mgr.check_and_notify(npub, balance=500, last_deposit=500, tranches=[tranche])
@@ -441,7 +440,7 @@ class TestExpirationNotifications:
         mgr = _make_manager()
         npub = _make_npub()
 
-        exp_time = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+        exp_time = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
         tranche = _make_tranche(remaining=0, expires_at=exp_time)
 
         mgr.check_and_notify(npub, balance=500, last_deposit=500, tranches=[tranche])
@@ -520,7 +519,7 @@ class TestPreferencesRespected:
             low_balance_dm=True, expiration_dm=False,
         ))
 
-        exp_time = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+        exp_time = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
         tranche = _make_tranche(remaining=500, expires_at=exp_time)
 
         # High balance so no low-balance DM, but tranche expiring
@@ -535,7 +534,7 @@ class TestPreferencesRespected:
             low_balance_dm=False, expiration_dm=False,
         ))
 
-        exp_time = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+        exp_time = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
         tranche = _make_tranche(remaining=500, expires_at=exp_time)
 
         # Below critical AND tranche expiring -- but all opted out
@@ -664,7 +663,7 @@ class TestCustomThresholds:
         npub = _make_npub()
 
         # Tranche expiring in 10 hours (within 12h custom window)
-        exp_time = (datetime.now(timezone.utc) + timedelta(hours=10)).isoformat()
+        exp_time = (datetime.now(UTC) + timedelta(hours=10)).isoformat()
         tranche = _make_tranche(remaining=500, expires_at=exp_time)
 
         mgr.check_and_notify(npub, balance=500, last_deposit=500, tranches=[tranche])
@@ -676,7 +675,7 @@ class TestCustomThresholds:
         npub = _make_npub()
 
         # Tranche expiring in 24 hours (outside 12h custom window)
-        exp_time = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+        exp_time = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
         tranche = _make_tranche(remaining=500, expires_at=exp_time)
 
         mgr.check_and_notify(npub, balance=500, last_deposit=500, tranches=[tranche])
@@ -693,7 +692,7 @@ class TestCombinedScenarios:
         mgr = _make_manager()
         npub = _make_npub()
 
-        exp_time = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+        exp_time = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
         tranche = _make_tranche(remaining=150, expires_at=exp_time)
 
         # 15% balance (warning) AND tranche expiring
@@ -708,8 +707,8 @@ class TestCombinedScenarios:
         mgr = _make_manager()
         npub = _make_npub()
 
-        exp1 = (datetime.now(timezone.utc) + timedelta(hours=20)).isoformat()
-        exp2 = (datetime.now(timezone.utc) + timedelta(hours=30)).isoformat()
+        exp1 = (datetime.now(UTC) + timedelta(hours=20)).isoformat()
+        exp2 = (datetime.now(UTC) + timedelta(hours=30)).isoformat()
         t1 = _make_tranche(remaining=300, expires_at=exp1)
         t2 = _make_tranche(remaining=200, expires_at=exp2)
 

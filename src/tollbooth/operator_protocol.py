@@ -42,7 +42,6 @@ from typing import Any, Protocol, runtime_checkable
 
 from tollbooth.actor_types import ActorRole, ObsoletePractice, ToolPath, ToolPathInfo
 
-
 # ── Library-level base catalog ────────────────────────────────────────
 #
 # Every Operator inherits these tools.  The agent_hint field is the

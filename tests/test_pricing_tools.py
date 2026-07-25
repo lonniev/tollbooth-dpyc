@@ -13,7 +13,6 @@ from tollbooth.tool_identity import capability_uuid
 from tollbooth.tools.pricing import get_pricing_model_tool, set_pricing_model_tool
 from tollbooth.vaults.neon import NeonVault
 
-
 # ---------------------------------------------------------------------------
 # Helpers (same pattern as test_pricing_store.py)
 # ---------------------------------------------------------------------------

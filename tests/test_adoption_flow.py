@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import tollbooth.authority.tools as at
 from tollbooth.constants import ErrorCode
 
-
 # ── Authority-side harness ────────────────────────────────────────────────
 
 
@@ -75,11 +74,10 @@ def _authority_tools(rt):
 
 
 async def test_receive_rejects_invalid_proof():
-    with _authority_tools(_rt()) as tools:
-        with patch.object(at, "verify_proof", MagicMock(return_value=False)):
-            r = await tools["receive_adoption_request"](
-                operator_npub="npub1op", dpop_token="bad", service_url="https://svc"
-            )
+    with _authority_tools(_rt()) as tools, patch.object(at, "verify_proof", MagicMock(return_value=False)):
+        r = await tools["receive_adoption_request"](
+            operator_npub="npub1op", dpop_token="bad", service_url="https://svc"
+        )
     assert r["success"] is False and r["error_code"] == ErrorCode.PROOF_INVALID
 
 
@@ -90,13 +88,12 @@ async def test_receive_requires_operator_npub():
 
 
 async def test_receive_happy_records_pending_and_notifies():
-    with _authority_tools(_rt()) as tools:
-        with patch.object(at, "verify_proof", MagicMock(return_value=True)), \
+    with _authority_tools(_rt()) as tools, patch.object(at, "verify_proof", MagicMock(return_value=True)), \
              patch.object(at.adoption_store, "ensure_schema", AsyncMock()), \
              patch.object(at.adoption_store, "upsert_pending", AsyncMock()) as upsert:
-            r = await tools["receive_adoption_request"](
-                operator_npub="npub1op", dpop_token="good", service_url="https://svc"
-            )
+        r = await tools["receive_adoption_request"](
+            operator_npub="npub1op", dpop_token="good", service_url="https://svc"
+        )
     assert r["success"] is True and r["status"] == "pending"
     upsert.assert_awaited_once()
     assert upsert.await_args.args[1] == "npub1op"  # operator_npub
@@ -107,16 +104,15 @@ async def test_receive_happy_records_pending_and_notifies():
 
 
 async def test_list_requires_authority_consent():
-    with _authority_tools(_rt()) as tools:
-        with patch.object(at, "_require_authority_consent",
-                          AsyncMock(return_value={"success": False, "error": "consent"})):
-            r = await tools["list_adoption_requests"](authority_proof="")
+    with _authority_tools(_rt()) as tools, patch.object(at, "_require_authority_consent",
+                      AsyncMock(return_value={"success": False, "error": "consent"})):
+        r = await tools["list_adoption_requests"](authority_proof="")
     assert r["success"] is False and r["error"] == "consent"
 
 
 async def test_list_returns_pending():
     pending = [{"operator_npub": "npub1op", "service_url": "u"}]
-    with _authority_tools(_rt()) as tools:
+    with _authority_tools(_rt()) as tools:  # noqa: SIM117
         with patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at.adoption_store, "ensure_schema", AsyncMock()), \
              patch.object(at.adoption_store, "prune_expired", AsyncMock(return_value=0)), \
@@ -129,15 +125,14 @@ async def test_list_returns_pending():
 
 
 async def test_approve_requires_consent():
-    with _authority_tools(_rt()) as tools:
-        with patch.object(at, "_require_authority_consent",
-                          AsyncMock(return_value={"success": False, "error": "consent"})):
-            r = await tools["approve_adoption"](operator_npub="npub1op", authority_proof="")
+    with _authority_tools(_rt()) as tools, patch.object(at, "_require_authority_consent",
+                      AsyncMock(return_value={"success": False, "error": "consent"})):
+        r = await tools["approve_adoption"](operator_npub="npub1op", authority_proof="")
     assert r["error"] == "consent"
 
 
 async def test_approve_not_found():
-    with _authority_tools(_rt()) as tools:
+    with _authority_tools(_rt()) as tools:  # noqa: SIM117
         with patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at.adoption_store, "ensure_schema", AsyncMock()), \
              patch.object(at.adoption_store, "get", AsyncMock(return_value=None)):
@@ -146,7 +141,7 @@ async def test_approve_not_found():
 
 
 async def test_approve_already_provisioned():
-    with _authority_tools(_rt()) as tools:
+    with _authority_tools(_rt()) as tools:  # noqa: SIM117
         with patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at.adoption_store, "ensure_schema", AsyncMock()), \
              patch.object(at.adoption_store, "get",
@@ -157,7 +152,7 @@ async def test_approve_already_provisioned():
 
 async def test_approve_happy_provisions_via_shared_helper():
     provisioned = {"success": True, "npub": "npub1op", "neon_database_url": "postgresql://op"}
-    with _authority_tools(_rt()) as tools:
+    with _authority_tools(_rt()) as tools:  # noqa: SIM117
         with patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at.adoption_store, "ensure_schema", AsyncMock()), \
              patch.object(at.adoption_store, "get",
@@ -247,7 +242,6 @@ async def test_request_adoption_verifies_proof_inline_without_vault():
 
     async def fake_require_proof(npub, dpop_token, tool_name, *, proven_cache=None, **kw):
         captured["proven_cache_is_none"] = proven_cache is None
-        return None  # proof accepted
 
     tools = _register_operator_tools(_operator_rt())
     with patch("tollbooth.identity_proof.require_proof", side_effect=fake_require_proof):

@@ -33,8 +33,10 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Any
 
+from tollbooth.constants import ErrorCode
 from tollbooth.credential_templates import (
     CredentialTemplate,
     FieldSpec,
@@ -43,7 +45,6 @@ from tollbooth.credential_templates import (
     validate_payload,
 )
 from tollbooth.credential_vault_backend import CredentialVaultBackend
-from tollbooth.constants import ErrorCode
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +375,7 @@ class NostrCredentialExchange:
             self._privkey_hex = pk.hex()
             self._pubkey_hex = pk.public_key.hex()
             self._npub = pk.public_key.bech32()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Invalid operator nsec — Secure Courier disabled: %s", exc)
             self._enabled = False
 
@@ -444,7 +445,7 @@ class NostrCredentialExchange:
             )
             thread.start()
             logger.info("Published kind 0 profile for %s", self._npub[:20])
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to publish profile: %s", exc)
 
     def send_dm(
@@ -523,7 +524,7 @@ class NostrCredentialExchange:
                         f"{url}: {err}" for url, ok, err in results if not ok
                     )
                     errors.append(f"NIP-17: {details}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             errors.append(f"NIP-17: {exc}")
             logger.debug("NIP-17 send failed: %s", exc)
 
@@ -556,7 +557,7 @@ class NostrCredentialExchange:
                         f"{url}: {err}" for url, ok, err in results if not ok
                     )
                     errors.append(f"NIP-04: {details}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             errors.append(f"NIP-04: {exc}")
             logger.debug("NIP-04 send failed: %s", exc)
 
@@ -637,7 +638,7 @@ class NostrCredentialExchange:
                         f"{url}: {err}" for url, ok, err in results if not ok
                     )
                     errors.append(f"NIP-17: {details}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             errors.append(f"NIP-17: {exc}")
             logger.debug("NIP-17 agent send failed: %s", exc)
 
@@ -671,7 +672,7 @@ class NostrCredentialExchange:
                         f"{url}: {err}" for url, ok, err in results if not ok
                     )
                     errors.append(f"NIP-04: {details}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             errors.append(f"NIP-04: {exc}")
             logger.debug("NIP-04 agent send failed: %s", exc)
 
@@ -833,7 +834,7 @@ class NostrCredentialExchange:
             return False
         try:
             recipient_hex = _npub_to_hex(recipient_npub)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
         filt: dict[str, Any] = {
@@ -850,7 +851,7 @@ class NostrCredentialExchange:
             try:
                 if self._query_one_relay_has_event(relay_url, sub_id, filt):
                     return True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "dedup query on %s failed (non-fatal): %s", relay_url, exc,
                 )
@@ -874,7 +875,7 @@ class NostrCredentialExchange:
             while True:
                 try:
                     raw = ws.recv()
-                except Exception:
+                except Exception:  # noqa: BLE001
                     return False
                 try:
                     msg = json.loads(raw)
@@ -889,7 +890,7 @@ class NostrCredentialExchange:
         finally:
             try:
                 ws.send(json.dumps(["CLOSE", sub_id]))
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
             ws.close()
 
@@ -947,11 +948,12 @@ class NostrCredentialExchange:
         await asyncio.to_thread(self._start_subscription)
 
         # Build the welcome message for the patron
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from tollbooth import __version__ as _tb_version
         from tollbooth.credential_templates import render_credential_payload_lines
 
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
         payload_lines = render_credential_payload_lines(template)
 
         # Detect self-DM (operator onboarding themselves). The explicit
@@ -1094,7 +1096,7 @@ class NostrCredentialExchange:
                         )
                     committed_relay = candidate_relay
                     break
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     # Catch broadly: relay socket errors, NACKs, NIP-44
                     # encryption issues all surface as different types.
                     # Move on to the next candidate; if none accept, the
@@ -1351,7 +1353,7 @@ class NostrCredentialExchange:
                     pt = self._decrypt_dm(
                         candidate, sender_hex, decrypt_privkey_hex=decrypt_privkey,
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pt = None
                     nack_reason = _NACK_TOKEN
                 if pt is not None:
@@ -1682,7 +1684,7 @@ class NostrCredentialExchange:
         )
         try:
             self.send_dm(sender_npub, success_text, target_relay=target_relay)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "Success DM to %s failed (non-fatal): %s",
                 sender_npub[:20], exc,
@@ -1722,7 +1724,7 @@ class NostrCredentialExchange:
         if reply_npub and reason:
             try:
                 self.send_dm(reply_npub, reason, target_relay=target_relay)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "Ack DM to %s failed (non-fatal): %s",
                     reply_npub[:20], exc,
@@ -1753,7 +1755,7 @@ class NostrCredentialExchange:
         )
         try:
             self.send_dm(sender_npub, error_text)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "Error DM to %s failed (non-fatal): %s",
                 sender_npub[:20], exc,
@@ -1891,7 +1893,7 @@ class NostrCredentialExchange:
                 return creds
             logger.warning("Vault blob decoded to non-dict, ignoring")
             return None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Vault credential decryption failed: %s", exc)
             return None
 
@@ -1919,7 +1921,7 @@ class NostrCredentialExchange:
                 "Credentials for %s/%s stored in vault", service, sender_npub[:16],
             )
             return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Vault credential storage failed for %s/%s: %s: %s. "
                 "Caller will surface this as persisted=false; the credential "
@@ -1981,7 +1983,7 @@ class NostrCredentialExchange:
 
         # Try to match by field names
         payload_fields = {
-            k for k in payload.keys() if k not in {"service", "version"}
+            k for k in payload if k not in {"service", "version"}
         }
         for tmpl in self._templates.values():
             template_fields = set(tmpl.fields.keys())
@@ -2059,7 +2061,7 @@ class NostrCredentialExchange:
         for relay_url in target_relays:
             try:
                 self._subscribe_one_relay(relay_url, sub_id, filters)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "Relay subscription %s failed (non-fatal): %s",
                     relay_url, exc,
@@ -2095,7 +2097,7 @@ class NostrCredentialExchange:
             while True:
                 try:
                     raw = ws.recv()
-                except Exception:
+                except Exception:  # noqa: BLE001
                     break
 
                 try:
@@ -2115,10 +2117,7 @@ class NostrCredentialExchange:
                         with self._lock:
                             self._received_events.append(event_data)
 
-                elif msg_type == "EOSE":
-                    break
-
-                elif msg_type == "CLOSED" or msg_type == "NOTICE":
+                elif msg_type == "EOSE" or msg_type == "CLOSED" or msg_type == "NOTICE":
                     break
 
             # Send CLOSE
@@ -2367,7 +2366,7 @@ class NostrCredentialExchange:
                 daemon=True,
             )
             thread.start()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug("Failed to create deletion event: %s", exc)
 
     def _publish_to_relays(
@@ -2402,7 +2401,7 @@ class NostrCredentialExchange:
                         results.append((relay_url, True, str(raw)))
                 finally:
                     ws.close()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "Relay publish %s failed (non-fatal): %s", relay_url, exc,
                 )
@@ -2442,7 +2441,7 @@ class NostrCredentialExchange:
                     return True, str(raw)
             finally:
                 ws.close()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "Single-relay publish %s failed (non-fatal): %s", relay_url, exc,
             )

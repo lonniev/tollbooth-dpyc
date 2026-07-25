@@ -161,10 +161,10 @@ def test_closure_seal_open_roundtrip_and_aad_binding():
     # round-trips with the right key + AAD
     assert json.loads(cipher.decrypt(sealed, aad="dpyc-closure/v1")) == spec
     # wrong AAD fails the tag check
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         cipher.decrypt(sealed, aad="wrong")
     # wrong key fails
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         VaultCipher("cd" * 32).decrypt(sealed, aad="dpyc-closure/v1")
 
 
@@ -234,7 +234,7 @@ async def test_fetch_closure_completed_shapes_and_completes(vault_and_rt):
 
 
 async def test_fetch_closure_failed_refunds(vault_and_rt):
-    vault, rt = vault_and_rt
+    _vault, rt = vault_and_rt
     _register_http_spec(rt)
     rt.set_async_executor(RecordingExecutor(
         outcome={"status": "failed", "result": None, "error": "CRASHED"}
@@ -299,7 +299,7 @@ async def test_fetch_closure_situation_surfaces_curated_fields(vault_and_rt):
     structured so a later poll returns the same thing — no raw upstream body."""
     from tollbooth.async_situation import AsyncJobSituation
 
-    vault, rt = vault_and_rt
+    _vault, rt = vault_and_rt
 
     async def build_closure(**params):
         return {"op": "http_request", "request": {"url": "https://x"}}
@@ -354,7 +354,7 @@ async def test_fetch_closure_situation_surfaces_curated_fields(vault_and_rt):
 async def test_fetch_closure_generic_exception_never_leaks_on_repoll(vault_and_rt):
     """A non-situation shape_result exception refunds generically AND the stored
     row must not carry the raw exception text (fixes a latent leak on re-poll)."""
-    vault, rt = vault_and_rt
+    _vault, rt = vault_and_rt
 
     async def build_closure(**params):
         return {"op": "http_request", "request": {"url": "https://x"}}
@@ -443,7 +443,7 @@ async def test_fetch_closure_still_running(vault_and_rt):
 
 
 async def test_fetch_closure_path_never_rekicks_run_job(vault_and_rt):
-    vault, rt = vault_and_rt
+    _vault, rt = vault_and_rt
     _register_http_spec(rt)
     rt.set_async_executor(RecordingExecutor(outcome=None))
 
@@ -466,7 +466,7 @@ async def test_fetch_closure_path_never_rekicks_run_job(vault_and_rt):
 # ---------------------------------------------------------------------------
 
 async def test_dispatch_failure_without_runner_refunds(vault_and_rt):
-    vault, rt = vault_and_rt
+    _vault, rt = vault_and_rt
     _register_http_spec(rt)
 
     class Boom:

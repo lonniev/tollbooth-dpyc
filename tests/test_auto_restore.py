@@ -12,7 +12,6 @@ from tollbooth.credential_vault_backend import (
 )
 from tollbooth.vaults.neon import NeonCredentialVault
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -61,7 +60,7 @@ class TestSessionBindingSQL:
     @pytest.mark.asyncio
     async def test_fetch_missing_returns_none(self):
         """Empty rows → None."""
-        vault, neon = _make_credential_vault({"rows": []})
+        vault, _neon = _make_credential_vault({"rows": []})
         result = await vault.fetch_session_binding("user_01", "thebrain")
         assert result is None
 
@@ -85,7 +84,7 @@ class TestSessionBindingSQL:
     @pytest.mark.asyncio
     async def test_delete_binding_not_found(self):
         """rowCount == 0 → False."""
-        vault, neon = _make_credential_vault({"rowCount": 0})
+        vault, _neon = _make_credential_vault({"rowCount": 0})
         result = await vault.delete_session_binding("user_01", "thebrain")
         assert result is False
 
@@ -325,7 +324,7 @@ class TestEnsureIdentity:
         vault.store_session_binding = AsyncMock()
 
         callback = AsyncMock(return_value={"session": "active"})
-        svc, exchange = _make_courier_service(vault=vault, on_received=callback)
+        svc, _exchange = _make_courier_service(vault=vault, on_received=callback)
 
         result = await svc.ensure_identity("user_01", service="thebrain")
         assert result == "npub1abc"

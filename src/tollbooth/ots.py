@@ -280,7 +280,7 @@ class OTSCalendarClient:
                         "OTS calendar %s returned HTTP %d: %s",
                         calendar, resp.status_code, resp.text[:200],
                     )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("OTS calendar %s unreachable: %s", calendar, exc)
 
         return results
@@ -314,7 +314,7 @@ class OTSCalendarClient:
                 calendar_url, resp.status_code,
             )
             return None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("OTS upgrade from %s failed: %s", calendar_url, exc)
             return None
 

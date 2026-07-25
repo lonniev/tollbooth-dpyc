@@ -49,7 +49,7 @@ async def request_credential_channel_tool(
             greeting=rt._operator_credential_greeting,
             recipient_npub=sender_npub,
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": str(e)}
 
 
@@ -133,7 +133,7 @@ async def receive_credentials_tool(
         if result.get("success") and service == rt.operator_credential_service and rt._credential_validator:
             try:
                 creds = await rt.load_credentials(list(fields.keys()))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 creds = {}
             complete = all(str(creds.get(n, "")).strip() for n in required)
             errors = rt._credential_validator(creds) if complete else []
@@ -170,7 +170,7 @@ async def receive_credentials_tool(
                 }
             rt._cashier = None
         return result
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": str(e)}
 
 
@@ -210,7 +210,7 @@ async def forget_credentials_tool(
                     "on_forget callback failed for service %s", service, exc_info=True,
                 )
         return result
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": str(e)}
 
 
@@ -229,7 +229,7 @@ async def request_patron_credentials_tool(
             greeting=rt._patron_credential_greeting,
             recipient_npub=sender_npub,
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": str(e)}
 
 
@@ -264,5 +264,5 @@ async def receive_patron_credentials_tool(
             sender_npub, service, dpop_token=dpop_token,
             request_tool="request_patron_credentials",
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": str(e)}

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from tollbooth.ots import MerkleTree, OTSCalendarClient
@@ -36,7 +36,7 @@ async def notarize_ledger_tool(
     """
     try:
         entries = await vault.fetch_all_balances()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"Failed to fetch balances: {e}"}
 
     if not entries:
@@ -57,7 +57,7 @@ async def notarize_ledger_tool(
         "npubs": [npub for npub, _ in sorted(entries, key=lambda e: e[0])],
     }
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     try:
         anchor_id = await vault.store_anchor(
             root_hash=root_hex,
@@ -68,7 +68,7 @@ async def notarize_ledger_tool(
             leaf_hashes_json=json.dumps(tree.get_leaf_hashes()),
             created_at=now.isoformat(),
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {
             "success": False,
             "error": f"Notarization computed but failed to store: {e}",
@@ -112,7 +112,7 @@ async def get_notarization_proof_tool(
     """
     try:
         anchor = await vault.fetch_anchor(notarization_id)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"Failed to fetch notarization: {e}"}
 
     if not anchor:
@@ -183,7 +183,7 @@ async def list_notarizations_tool(
     """
     try:
         anchors = await vault.list_anchors(limit=limit, status=status)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"Failed to list notarizations: {e}"}
 
     items: list[dict[str, Any]] = []

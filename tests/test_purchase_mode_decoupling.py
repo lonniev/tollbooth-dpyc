@@ -52,7 +52,7 @@ async def test_resolve_purchase_mode_rule(npub, expected):
 
 @pytest.mark.asyncio
 async def test_resolve_purchase_mode_unknown_npub_raises():
-    with patch.object(DPYCRegistry, "_fetch", AsyncMock(return_value=CHAIN_MEMBERS)):
+    with patch.object(DPYCRegistry, "_fetch", AsyncMock(return_value=CHAIN_MEMBERS)):  # noqa: SIM117
         with pytest.raises(ValueError, match="not in the dpyc-community registry"):
             await resolve_purchase_mode("npub1ghost")
 

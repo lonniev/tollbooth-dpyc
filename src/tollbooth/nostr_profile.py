@@ -73,7 +73,7 @@ def _fetch_one(relay_url: str, sub_filter: dict) -> tuple[int, dict] | None:
             ws.send(json.dumps(["CLOSE", sub]))
         finally:
             ws.close()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.debug("Profile fetch from %s failed: %s", relay_url, exc)
         return None
     return (best_ts, best) if best is not None else None
@@ -91,7 +91,7 @@ def fetch_profile(npub: str, relays: list[str] | None = None) -> dict[str, str] 
     relay_urls = relays or get_relays()
     try:
         hex_pk = _npub_to_hex(npub)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
     sub_filter = {"kinds": [_KIND_METADATA], "authors": [hex_pk], "limit": 1}
@@ -103,7 +103,7 @@ def fetch_profile(npub: str, relays: list[str] | None = None) -> dict[str, str] 
         for future in as_completed(futures, timeout=_TIMEOUT + 2):
             try:
                 result = future.result()
-            except Exception:
+            except Exception:  # noqa: BLE001, S112
                 continue
             if result is not None and result[0] > best_ts:
                 best_ts, best = result[0], result[1]
@@ -135,7 +135,7 @@ def publish_profile_event(
 
     try:
         expected = _npub_to_hex(npub)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return {"success": False, "error": f"Invalid npub: {npub!r}"}
     if signed_event.get("pubkey") != expected:
         return {
@@ -149,7 +149,7 @@ def publish_profile_event(
         ev = Event.from_dict(signed_event)
         if not ev.verify():
             return {"success": False, "error": "Event signature is invalid."}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": f"Could not verify event: {exc}"}
 
     message = json.dumps(["EVENT", signed_event])
@@ -164,7 +164,7 @@ def publish_profile_event(
             url = futures[future]
             try:
                 accepted, err = future.result()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 errors.append(f"{url}: {exc}")
                 continue
             if accepted:
@@ -194,5 +194,5 @@ def _publish_one(relay_url: str, message: str) -> tuple[bool, str | None]:
                 return (False, f"{relay_url}: unparseable ack {str(raw)[:80]}")
         finally:
             ws.close()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return (False, f"{relay_url}: {exc}")

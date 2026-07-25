@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from tollbooth.constraints.base import (
@@ -110,9 +110,9 @@ class PeriodicRefreshConstraint(ToolConstraint):
 
         # Determine effective window start / count
         if self.window_start is not None:
-            ws = datetime.fromisoformat(self.window_start.replace("Z", "+00:00"))
+            ws = datetime.fromisoformat(self.window_start)
             if ws.tzinfo is None:
-                ws = ws.replace(tzinfo=timezone.utc)
+                ws = ws.replace(tzinfo=UTC)
             window_end = ws + self._delta
             if now >= window_end:
                 # Window expired — new window, count resets
@@ -134,7 +134,7 @@ class PeriodicRefreshConstraint(ToolConstraint):
                     f"Rate limit reached ({self.max_per_window} per "
                     f"{self.window_duration}). Try again later."
                 ),
-                retry_after=window_end.astimezone(timezone.utc),
+                retry_after=window_end.astimezone(UTC),
                 metadata={"remaining_in_window": 0},
             )
 

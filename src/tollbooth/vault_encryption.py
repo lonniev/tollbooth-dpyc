@@ -116,5 +116,5 @@ class VaultCipher:
         try:
             raw = base64.b64decode(value)
             return len(raw) >= self._NONCE_SIZE + 16
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False

@@ -1,6 +1,6 @@
 """Tests for tollbooth.constraints.base — context, price modifier, result."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -12,7 +12,6 @@ from tollbooth.constraints.base import (
     PatronIdentity,
     PriceModifier,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -26,7 +25,7 @@ def _make_context(**overrides):
         patron=overrides.get("patron", PatronIdentity()),
         env=overrides.get(
             "env",
-            EnvironmentSnapshot(utc_now=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)),
+            EnvironmentSnapshot(utc_now=datetime(2026, 3, 1, 12, 0, tzinfo=UTC)),
         ),
     )
 
@@ -85,14 +84,14 @@ class TestPatronIdentity:
 
 class TestEnvironmentSnapshot:
     def test_requires_utc_now(self):
-        now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
         env = EnvironmentSnapshot(utc_now=now)
         assert env.utc_now == now
         assert env.tool_name == ""
         assert env.invocation_count == 0
 
     def test_frozen(self):
-        env = EnvironmentSnapshot(utc_now=datetime.now(tz=timezone.utc))
+        env = EnvironmentSnapshot(utc_now=datetime.now(tz=UTC))
         with pytest.raises(AttributeError):
             env.tool_name = "x"  # type: ignore[misc]
 

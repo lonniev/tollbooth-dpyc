@@ -12,7 +12,6 @@ from tollbooth.nostr_credentials import (
 )
 from tollbooth.secure_courier import SecureCourierService
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────
 
 
@@ -138,7 +137,7 @@ class TestMissingDeps:
         self, operator_nsec, relays, templates,
     ):
         """Graceful error when nostr dependencies are not installed."""
-        with patch("tollbooth.secure_courier._HAS_COURIER", False):
+        with patch("tollbooth.secure_courier._HAS_COURIER", False):  # noqa: SIM117
             with pytest.raises(RuntimeError, match="dependencies not installed"):
                 SecureCourierService(
                     operator_nsec=operator_nsec,
