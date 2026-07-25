@@ -143,10 +143,74 @@ async def test_neon_admin_client_parses_projects():
     assert [u.project_id for u in usage] == ["p1", "p2"]
     assert usage[0].compute_seconds_used == 700000  # from consumption_history
     assert usage[1].status == "unknown"             # absent from consumption
+    assert client.last_usage_note == ""             # clean read → no note
     # org_id and bearer auth were passed on the /projects call.
     first = http.get.await_args_list[0]
     assert first.kwargs["params"]["org_id"] == "org-1"
     assert first.kwargs["headers"]["Authorization"] == "Bearer neon_api_key_xxx"
+    # consumption_history is queried at DAILY granularity (a monthly bucket for an
+    # in-progress month can come back empty — the exact 'unknown' failure mode).
+    ch_call = next(c for c in http.get.await_args_list if "consumption_history" in c.args[0])
+    assert ch_call.kwargs["params"]["granularity"] == "daily"
+
+
+@pytest.mark.asyncio
+async def test_usage_note_explains_http_failure():
+    """When consumption_history HTTP-fails, usage is 'unknown' but NOT mute —
+    last_usage_note carries the status + Neon's own message."""
+    projects_payload = {"projects": [{"id": "p1", "name": "ancient-water"}]}
+
+    def _get(url, **kwargs):
+        r = MagicMock()
+        if "consumption_history" in url:
+            r.is_error = True
+            r.status_code = 403
+            r.text = "This feature requires a paid plan"
+        else:
+            r.is_error = False
+            r.json = MagicMock(return_value=projects_payload)
+        return r
+
+    http = AsyncMock()
+    http.get = AsyncMock(side_effect=_get)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("httpx.AsyncClient", return_value=http):
+        client = NeonAdminClient("neon_api_key_xxx", org_id="org-1")
+        usage = await client.project_usage()
+
+    assert usage[0].status == "unknown"
+    assert "403" in client.last_usage_note
+    assert "paid plan" in client.last_usage_note
+
+
+@pytest.mark.asyncio
+async def test_usage_note_explains_empty_rows():
+    """A successful consumption_history call with no compute rows still explains
+    itself rather than showing a blank 'unknown'."""
+    projects_payload = {"projects": [{"id": "p1", "name": "ancient-water"}]}
+    consumption_payload = {"projects": []}  # call worked, but no usage rows
+
+    def _get(url, **kwargs):
+        r = MagicMock()
+        r.is_error = False
+        r.json = MagicMock(
+            return_value=consumption_payload if "consumption_history" in url else projects_payload
+        )
+        return r
+
+    http = AsyncMock()
+    http.get = AsyncMock(side_effect=_get)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("httpx.AsyncClient", return_value=http):
+        client = NeonAdminClient("neon_api_key_xxx", org_id="org-1")
+        usage = await client.project_usage()
+
+    assert usage[0].status == "unknown"
+    assert "no compute rows" in client.last_usage_note
 
 
 # --------------------------------------------------------------------------

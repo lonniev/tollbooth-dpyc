@@ -110,6 +110,10 @@ class NeonAdminClient:
         self._org_id = org_id
         self._allowance_seconds = allowance_seconds
         self._base_url = base_url.rstrip("/")
+        # Diagnostic breadcrumb from the last consumption_history probe: "" when
+        # compute numbers came back clean, otherwise a short, credential-free
+        # reason the caller can surface so "unknown" is never mute.
+        self.last_usage_note: str = ""
 
     async def project_usage(self) -> list[ProjectUsage]:
         """List every project's compute posture for the current period.
@@ -152,7 +156,9 @@ class NeonAdminClient:
             # that lives in Neon's consumption_history endpoint. Fetch it here so
             # used_pct/status are real instead of "unknown". Best-effort: a failure
             # leaves usage None ("unknown") rather than breaking the probe.
-            used_by_id = await self._compute_seconds_by_project(client, headers)
+            used_by_id, self.last_usage_note = (
+                await self._compute_seconds_by_project(client, headers)
+            )
 
         out: list[ProjectUsage] = []
         for p in projects:
@@ -174,26 +180,35 @@ class NeonAdminClient:
 
     async def _compute_seconds_by_project(
         self, client: Any, headers: dict[str, str]
-    ) -> dict[str, int]:
+    ) -> tuple[dict[str, int], str]:
         """Sum each project's ``compute_time_seconds`` for the current billing
         period via Neon's ``consumption_history`` endpoint (the /projects list
         omits it, so used_pct would otherwise always be 'unknown').
 
-        Best-effort and tolerant: any failure or unexpected shape returns an empty
-        map, so usage degrades to None rather than turning a health probe into an
-        outage.
+        Returns ``(used_by_project_id, note)``. ``note`` is ``""`` on a clean read
+        and otherwise a short, credential-free reason usage is unavailable — an
+        HTTP status + Neon's own message, a transport error, or "no rows in
+        range". Best-effort and tolerant: any failure returns an empty map (usage
+        degrades to None) but NEVER a mute one — a health probe that can't read
+        usage should say why, not just show "unknown".
+
+        Granularity is **daily**, not monthly: a monthly bucket for an
+        *in-progress* month can come back empty (the period hasn't closed), which
+        is precisely how usage silently read as "unknown". Daily buckets exist
+        from the 1st onward and sum to month-to-date compute.
         """
         from datetime import datetime
 
         try:
             now = datetime.now(UTC)
             # Current period ≈ the calendar month — Neon Free resets on the 1st,
-            # which is what quota_reset_at reflects. One monthly bucket covers it.
+            # which is what quota_reset_at reflects. Day-granular buckets from the
+            # 1st to now sum to month-to-date (≤ 31 buckets/project, under limit).
             start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             params: dict[str, str] = {
                 "from": start.isoformat().replace("+00:00", "Z"),
                 "to": now.isoformat().replace("+00:00", "Z"),
-                "granularity": "monthly",
+                "granularity": "daily",
                 "limit": "100",
             }
             if self._org_id:
@@ -204,16 +219,19 @@ class NeonAdminClient:
                 headers=headers,
             )
             if resp.is_error:
-                logger.info(
-                    "Neon consumption_history %s: %s",
-                    resp.status_code,
-                    resp.text[:200].strip(),
-                )
-                return {}
+                msg = resp.text[:180].strip()
+                logger.info("Neon consumption_history %s: %s", resp.status_code, msg)
+                hint = ""
+                if resp.status_code in (401, 403):
+                    hint = (
+                        " — the Neon key may lack consumption-metrics scope, or the"
+                        " plan doesn't expose per-project consumption"
+                    )
+                return {}, f"consumption_history {resp.status_code}{hint}: {msg}"
             data = resp.json()
         except Exception as exc:  # noqa: BLE001 — best-effort probe; must never raise
             logger.info("Neon consumption_history read failed: %s", exc)
-            return {}
+            return {}, f"consumption_history read error: {str(exc)[:160]}"
 
         out: dict[str, int] = {}
         rows = (data.get("projects") if isinstance(data, dict) else None) or []
@@ -235,4 +253,11 @@ class NeonAdminClient:
                         seen = True
             if seen:
                 out[pid] = int(total)
-        return out
+        if not out:
+            # The call SUCCEEDED but carried no compute rows for the window —
+            # distinct from an HTTP failure, and worth saying so.
+            return {}, (
+                "consumption_history returned no compute rows for the current "
+                f"period ({len(rows)} project entries, none with usage)"
+            )
+        return out, ""

@@ -1461,6 +1461,10 @@ def register_authority_tools(
                     "configured": True,
                     "projects": [u.to_dict() for u in usage],
                 }
+                # When compute reads 'unknown', say WHY — the consumption_history
+                # probe's own reason — so it's never a mute blank.
+                if client.last_usage_note:
+                    neon_api["usage_note"] = client.last_usage_note
             except Exception as exc:  # noqa: BLE001
                 neon_api = {
                     "configured": True,

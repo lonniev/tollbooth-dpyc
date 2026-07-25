@@ -3,6 +3,22 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.71.2 — 2026-07-25
+
+### Fixed — proactive Neon compute usage reads real numbers (and never blanks)
+
+The consumption-history probe queried Neon at **monthly** granularity, but a
+monthly bucket for an *in-progress* month can come back empty — so every
+project's compute read `null` / `status: "unknown"` even with a valid key and
+`configured: true`. Query at **daily** granularity now (buckets exist from the
+1st onward, summed to month-to-date).
+
+And the probe no longer fails mutely: when compute is still unavailable — an HTTP
+error, a scope/plan limitation, or simply no rows in range — the reason rides
+back on `neon_api.usage_note` (status + Neon's own message, credential-free), so
+`unknown` always says *why* instead of showing a blank. Tests cover the daily
+query, the HTTP-failure note, and the empty-rows note.
+
 ## 0.71.1 — 2026-07-25
 
 ### Fixed — renamed-with-frozen-UUID tools resolve their real wire name in proofs
