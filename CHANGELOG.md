@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.71.0 — 2026-07-25
+
+### Changed — "Books" is now "Persistence" throughout the SDK surface
+
+The "Books" metaphor is retired. It always read as *more* than the ledgers, and
+the persistence layer is not forever Neon — so the symbols now name the concern,
+not the implementation. Clean break, no compat alias (per doctrine):
+
+- `network_books_health` → **`network_persistence_health`** (the Authority tool;
+  UUID frozen). Its `own_books` field → **`own_store`**; `OwnBooksStatus` →
+  `OwnStoreStatus`; the `neon_books_alert` channel → `neon_persistence_alert`.
+- Pricing Studio ships the matching FE rename (`network_persistence_health`
+  lookup + `own_store` decode) — **Authorities must redeploy on 0.71.0** for the
+  live call to resolve against the new build.
+
+### Fixed — proactive Neon watch surfaces real compute usage, and real errors
+
+- `NeonAdminClient.project_usage` now reads per-project `compute_time_seconds`
+  from Neon's `consumption_history/projects` endpoint (the `/projects` list omits
+  it), so `used_pct`/`status` are real instead of always `"unknown"`. Best-effort
+  and tolerant — a consumption-history failure degrades usage to `None`, never an
+  outage.
+- A failing `/projects` call now surfaces Neon's own message, and front-loads the
+  most common cause — an org-scoped key missing `neon_org_id` — as an actionable
+  hint instead of a bare status line.
+
+### Changed — ruff 0.16.0 clean, fleet-wide
+
+Cleaned every ruff 0.16.0 violation across the SDK: targeted inline `# noqa`
+where a lint is intentional (best-effort probes, deliberate broad catches),
+genuine fixes everywhere else. No global ignore, no pinned-back linter — all code
+is our responsibility.
+
 ## 0.70.0 — 2026-07-24
 
 ### Added — `NEON_API_KEY` is a Secure-Courier–delivered Authority secret, not env
