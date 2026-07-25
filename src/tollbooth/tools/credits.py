@@ -5,17 +5,17 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import platform
-from datetime import date, datetime, timedelta, timezone
 from collections.abc import Awaitable, Callable
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from tollbooth.btcpay_client import BTCPayClient, BTCPayAuthError, BTCPayError
+from tollbooth.btcpay_client import BTCPayAuthError, BTCPayClient, BTCPayError
 from tollbooth.certificate import CertificateError, verify_certificate_auto
 from tollbooth.config import TollboothConfig
+from tollbooth.constants import LOW_BALANCE_FLOOR_API_SATS, MAX_INVOICE_SATS
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
 from tollbooth.vault_backend import LedgerUnavailableError, LedgerWriteError
-from tollbooth.constants import LOW_BALANCE_FLOOR_API_SATS, MAX_INVOICE_SATS
 
 
 def _invoice_owner(invoice: dict[str, Any]) -> str | None:
@@ -80,7 +80,7 @@ async def _create_purchase_invoice(
     if "orderId" not in invoice_metadata:
         purpose_slug = str(invoice_metadata.get("purpose", "purchase"))
         user_slug = str(user_id)[:16]
-        ts = int(datetime.now(timezone.utc).timestamp())
+        ts = int(datetime.now(UTC).timestamp())
         invoice_metadata["orderId"] = f"dpyc-{purpose_slug}-{user_slug}-{ts}"
 
     try:
@@ -108,7 +108,7 @@ async def _create_purchase_invoice(
         invoice_id=invoice_id,
         amount_sats=amount_sats,
         multiplier=1,
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
     )
     if getattr(ledger, "_vault_unavailable", False):
         logger.error(
@@ -127,7 +127,7 @@ async def _create_purchase_invoice(
     if invoice_id:
         try:
             bolt11 = await btcpay.get_lightning_invoice(invoice_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.debug("Failed to fetch BOLT11 for invoice %s", invoice_id)
 
     result: dict[str, Any] = {
@@ -162,7 +162,7 @@ async def _create_purchase_invoice(
         try:
             await invoice_dm_callback(dm_text)
             result["invoice_dm_sent"] = True
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("Invoice DM delivery failed for %s.", user_id)
             result["invoice_dm_sent"] = False
 
@@ -206,7 +206,7 @@ async def purchase_credits_tool(
                     "error": f"Account suspended: {reason}. "
                     "Credit purchases are not available for banned members.",
                 }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Ban check failed for %s — denying purchase (fail-closed): %s",
                 user_id,
@@ -331,7 +331,7 @@ async def check_payment_tool(
 
         amount_str = invoice.get("amount", "0")
         amount_sats = int(float(amount_str))
-        settled_at = datetime.now(timezone.utc).isoformat()
+        settled_at = datetime.now(UTC).isoformat()
 
         def _apply_settlement(led: UserLedger) -> int:
             # Runs against FRESH ledger state inside the CAS write-through, and
@@ -411,7 +411,7 @@ async def check_balance_tool(
 ) -> dict[str, Any]:
     """Return the user's current credit balance and usage summary."""
     ledger = await cache.get_fresh(user_id)
-    today = date.today().isoformat()
+    today = date.today().isoformat()  # noqa: DTZ011
 
     vault_unavailable = getattr(ledger, "_vault_unavailable", False)
 
@@ -443,8 +443,8 @@ async def check_balance_tool(
     next_exp = ledger.next_expiration()
     if next_exp:
         result["next_expiration_iso"] = next_exp
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
+    from datetime import datetime
+    now = datetime.now(UTC)
     active = [t for t in ledger.tranches if t.remaining_sats > 0 and not t.is_expired_at(now)]
     expired = [t for t in ledger.tranches if t.remaining_sats > 0 and t.is_expired_at(now)]
     result["active_tranches"] = len(active)
@@ -598,7 +598,7 @@ async def restore_credits_tool(
     ledger.record_invoice_settled(
         invoice_id=invoice_id,
         api_sats_credited=credited,
-        settled_at=datetime.now(timezone.utc).isoformat(),
+        settled_at=datetime.now(UTC).isoformat(),
         btcpay_status=status,
     )
     cache.mark_dirty(user_id)
@@ -663,7 +663,7 @@ async def reconcile_pending_invoices(
             ledger.record_invoice_settled(
                 invoice_id=invoice_id,
                 api_sats_credited=credited,
-                settled_at=datetime.now(timezone.utc).isoformat(),
+                settled_at=datetime.now(UTC).isoformat(),
                 btcpay_status=status,
             )
             changed = True
@@ -754,8 +754,8 @@ async def account_statement_tool(
         days: Number of days of daily usage to include (default 30).
     """
     ledger = await cache.get_fresh(user_id)
-    now = datetime.now(timezone.utc)
-    today = date.today()
+    now = datetime.now(UTC)
+    today = date.today()  # noqa: DTZ011
 
     # -- Account summary ---------------------------------------------------
     summary: dict[str, Any] = {
@@ -888,7 +888,7 @@ async def btcpay_status_tool(
             result["server_reachable"] = True
         except BTCPayError:
             result["server_reachable"] = False
-        except Exception:
+        except Exception:  # noqa: BLE001
             result["server_reachable"] = False
 
         # Store check
@@ -899,7 +899,7 @@ async def btcpay_status_tool(
             result["store_name"] = "unauthorized"
         except BTCPayError:
             result["store_name"] = None
-        except Exception:
+        except Exception:  # noqa: BLE001
             result["store_name"] = None
 
         # API key permissions check
@@ -917,7 +917,7 @@ async def btcpay_status_tool(
             }
         except BTCPayError as e:
             result["api_key_permissions"] = {"error": str(e)}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             result["api_key_permissions"] = {"error": str(e)}
     else:
         result["server_reachable"] = None

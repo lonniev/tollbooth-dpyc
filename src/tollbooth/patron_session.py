@@ -32,7 +32,8 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable, Generic, TypeVar
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
 
 from tollbooth.session_cache import SessionCache
 
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
-class PatronSessionCache(Generic[T]):
+class PatronSessionCache[T]:
     """Session cache with Neon vault persistence.
 
     Type parameter T is the operator's session object.
@@ -93,7 +94,7 @@ class PatronSessionCache(Generic[T]):
                 self._service, npub[:20],
             )
             return session
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Vault session restore failed: %s", exc)
             return None
 

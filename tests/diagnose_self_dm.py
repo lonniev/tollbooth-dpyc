@@ -178,7 +178,7 @@ async def main():
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(operator_npub, service="schwab-operator")
         logger.info("receive result: %s", json.dumps(result, indent=2))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.error("receive FAILED: %s", exc)
 
         # Debug: dump buffer state

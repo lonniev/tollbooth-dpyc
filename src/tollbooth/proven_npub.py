@@ -94,8 +94,7 @@ def parse_duration(text: str) -> int | None:
     if unit_secs is None:
         raise ValueError(f"Unknown time unit: {unit_str!r} in {text!r}")
     result = amount * unit_secs
-    if result > MAX_PROVEN_TTL:
-        result = MAX_PROVEN_TTL
+    result = min(result, MAX_PROVEN_TTL)
     return result
 
 _VAULT_KEY_PREFIX = "proven_npub:"
@@ -291,7 +290,7 @@ class ProvenNpubCache:
                 "Proof persisted to vault for dpop_token_hash=%s npub=%s",
                 record.dpop_token_hash[:12], record.npub[:20],
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Vault store for proven npub failed (non-fatal): %s", exc)
 
     async def _vault_fetch(self, dpop_token_hash: str, npub: str) -> ProvenNpub | None:
@@ -303,7 +302,7 @@ class ProvenNpubCache:
                 return None
             decrypted = self._vault._decrypt(raw)
             return ProvenNpub.from_json(decrypted)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Vault fetch for proven npub failed (non-fatal): %s", exc)
             return None
 

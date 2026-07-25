@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -147,4 +147,4 @@ class TemporalWindowConstraint(ToolConstraint):
                 candidate += timedelta(days=1)
 
         # Convert back to UTC for the result
-        return candidate.astimezone(timezone.utc)
+        return candidate.astimezone(UTC)

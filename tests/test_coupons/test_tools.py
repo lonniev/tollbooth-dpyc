@@ -8,7 +8,7 @@ CouponsVault stands in for the real Neon-backed vault.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +18,7 @@ from tollbooth.tools import coupons as ct
 
 OP = "npub1operator"
 PATRON = "npub1patron"
-_NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
 
 def _coupon(**over):
@@ -27,17 +27,17 @@ def _coupon(**over):
     Default window brackets the real ``datetime.now`` the redeem path uses,
     so an unmodified fixture reads as currently active.
     """
-    now = datetime.now(timezone.utc)
-    base = dict(
-        id="c-1",
-        name="SUMMER",
-        discount_percent=10.0,
-        valid_from=now - timedelta(days=1),
-        valid_until=now + timedelta(days=1),
-        uses_per_patron=1,
-        total_uses=None,
-        times_redeemed=0,
-    )
+    now = datetime.now(UTC)
+    base = {
+        "id": "c-1",
+        "name": "SUMMER",
+        "discount_percent": 10.0,
+        "valid_from": now - timedelta(days=1),
+        "valid_until": now + timedelta(days=1),
+        "uses_per_patron": 1,
+        "total_uses": None,
+        "times_redeemed": 0,
+    }
     base.update(over)
     ns = SimpleNamespace(**base)
     ns.to_dict = lambda: {k: base[k] for k in ("id", "name", "discount_percent")}
@@ -74,11 +74,11 @@ class FakeVault:
 # ── mint ──────────────────────────────────────────────────────────────
 
 async def _mint(cv, **over):
-    kw = dict(
-        name="SUMMER", discount_percent=10.0,
-        valid_from="2026-06-01T00:00:00Z", valid_until="2026-07-01T00:00:00Z",
-        uses_per_patron=1, total_uses=None,
-    )
+    kw = {
+        "name": "SUMMER", "discount_percent": 10.0,
+        "valid_from": "2026-06-01T00:00:00Z", "valid_until": "2026-07-01T00:00:00Z",
+        "uses_per_patron": 1, "total_uses": None,
+    }
     kw.update(over)
     return await ct.mint_coupon_tool(cv, OP, **kw)
 
@@ -230,11 +230,11 @@ async def test_update_requires_coupon_id():
 
 
 def _update_kw(**over):
-    kw = dict(
-        name=None, discount_percent=None, valid_from=None, valid_until=None,
-        uses_per_patron=None, total_uses=None,
-        clear_uses_per_patron=False, clear_total_uses=False,
-    )
+    kw = {
+        "name": None, "discount_percent": None, "valid_from": None, "valid_until": None,
+        "uses_per_patron": None, "total_uses": None,
+        "clear_uses_per_patron": False, "clear_total_uses": False,
+    }
     kw.update(over)
     return kw
 
@@ -334,8 +334,8 @@ async def test_redeem_unknown_code():
 
 @pytest.mark.asyncio
 async def test_redeem_not_yet_active():
-    coupon = _coupon(valid_from=datetime.now(timezone.utc) + timedelta(days=2),
-                     valid_until=datetime.now(timezone.utc) + timedelta(days=3))
+    coupon = _coupon(valid_from=datetime.now(UTC) + timedelta(days=2),
+                     valid_until=datetime.now(UTC) + timedelta(days=3))
     cv = FakeVault(find_by_name=coupon)
     r = await ct.redeem_coupon_tool(cv, OP, PATRON, "SOON")
     assert r["success"] is False and "isn't active yet" in r["error"]
@@ -343,8 +343,8 @@ async def test_redeem_not_yet_active():
 
 @pytest.mark.asyncio
 async def test_redeem_window_closed():
-    coupon = _coupon(valid_from=datetime.now(timezone.utc) - timedelta(days=3),
-                     valid_until=datetime.now(timezone.utc) - timedelta(days=1))
+    coupon = _coupon(valid_from=datetime.now(UTC) - timedelta(days=3),
+                     valid_until=datetime.now(UTC) - timedelta(days=1))
     cv = FakeVault(find_by_name=coupon)
     r = await ct.redeem_coupon_tool(cv, OP, PATRON, "OLD")
     assert r["success"] is False and "Window is closed" in r["error"]
@@ -352,8 +352,8 @@ async def test_redeem_window_closed():
 
 @pytest.mark.asyncio
 async def test_redeem_fully_claimed():
-    coupon = _coupon(valid_from=datetime.now(timezone.utc) - timedelta(days=1),
-                     valid_until=datetime.now(timezone.utc) + timedelta(days=1),
+    coupon = _coupon(valid_from=datetime.now(UTC) - timedelta(days=1),
+                     valid_until=datetime.now(UTC) + timedelta(days=1),
                      total_uses=5, times_redeemed=5)
     cv = FakeVault(find_by_name=coupon)
     r = await ct.redeem_coupon_tool(cv, OP, PATRON, "FULL")

@@ -8,7 +8,6 @@ import pytest
 from tollbooth.credential_vault_backend import CredentialVaultBackend
 from tollbooth.vaults.neon import NeonCredentialVault, NeonVault
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

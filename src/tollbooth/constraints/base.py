@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Context snapshots — frozen, read-only views of patron/env state
 # ---------------------------------------------------------------------------

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Self
 
 import httpx
-
 
 # ---------------------------------------------------------------------------
 # Exception hierarchy
@@ -236,7 +235,7 @@ class BTCPayClient:
         """Close the underlying HTTP client."""
         await self._client.aclose()
 
-    async def __aenter__(self) -> BTCPayClient:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *args: object) -> None:

@@ -12,6 +12,7 @@ characterized in isolation; the proof stage is pinned by its own test.
 
 from __future__ import annotations
 
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -76,12 +77,13 @@ class FakeGate:
 
 class FakeLedgerCache:
     def __init__(self, balance=1000):
+        from datetime import datetime
+
         from tollbooth.ledger import Tranche
-        from datetime import datetime, timezone
         self._ledgers: dict = {}
         self._balance = balance
         self._Tranche = Tranche
-        self._now = datetime.now(timezone.utc).isoformat()
+        self._now = datetime.now(UTC).isoformat()
 
     async def get(self, npub):
         if npub not in self._ledgers:

@@ -4,7 +4,7 @@ import asyncio
 import os
 import time
 
-from tollbooth import UserLedger, NeonVault
+from tollbooth import NeonVault, UserLedger
 
 DATABASE_URL = os.environ.get(
     "NEON_DATABASE_URL",

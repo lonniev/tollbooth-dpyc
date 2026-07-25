@@ -9,7 +9,6 @@ import pytest
 
 from tollbooth.shortlinks import create_shortlink
 
-
 FAKE_SHORT_URL = "https://tb.link/abc123"
 
 

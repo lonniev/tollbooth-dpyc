@@ -10,7 +10,7 @@ runtime or FastMCP — mirroring ``tools/credits.py``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -30,13 +30,13 @@ def _parse_window(value: str, label: str) -> datetime:
     Raises ``ValueError`` with an operator-facing message on bad input.
     """
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value)
     except (ValueError, TypeError) as exc:
         raise ValueError(
             f"{label} must be ISO-8601 (e.g. '2026-06-01T00:00:00Z'); got {value!r}."
         ) from exc
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -91,7 +91,7 @@ async def mint_coupon_tool(
         )
     except CouponAlreadyExists as exc:
         return {"success": False, "error": str(exc)}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": f"mint failed: {exc}"}
 
     return {"success": True, "coupon": _format_coupon(coupon)}
@@ -101,7 +101,7 @@ async def list_coupons_tool(cv: Any, operator: str) -> dict[str, Any]:
     """List every coupon this operator has minted (newest first)."""
     try:
         coupons = await cv.list_for_operator(operator)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": f"list failed: {exc}"}
 
     return {
@@ -176,7 +176,7 @@ async def update_coupon_tool(
         return {"success": False, "error": str(exc)}
     except CouponNotFound:
         return {"success": False, "error": f"No coupon {coupon_id!r} owned by this operator."}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": f"update failed: {exc}"}
 
     return {"success": True, "coupon": _format_coupon(updated)}
@@ -189,7 +189,7 @@ async def delete_coupon_tool(cv: Any, operator: str, coupon_id: str) -> dict[str
 
     try:
         deleted = await cv.delete(coupon_id, operator)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": f"delete failed: {exc}"}
 
     if not deleted:
@@ -212,7 +212,7 @@ async def redeem_coupon_tool(
                 "error": f"No coupon named {code!r}. Check the spelling and try again.",
             }
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if now < coupon.valid_from:
             return {
                 "success": False,
@@ -230,7 +230,7 @@ async def redeem_coupon_tool(
             return {"success": False, "error": "That coupon has been fully claimed."}
 
         pc = await cv.redeem(coupon.id, patron_npub)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": f"redeem failed: {exc}"}
 
     uses_remaining: Any
@@ -256,10 +256,10 @@ async def list_my_coupons_tool(
     """List this patron's redemptions on this operator, with per-row status."""
     try:
         views = await cv.list_redemptions_for_patron(patron_npub, operator=operator)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": f"list failed: {exc}"}
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows: list[dict[str, Any]] = []
     for v in views:
         ok, reason = v.is_usable(now)
@@ -289,7 +289,7 @@ async def forget_coupon_tool(
 
     try:
         removed = await cv.forget(coupon_id, patron_npub)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": f"forget failed: {exc}"}
 
     if not removed:

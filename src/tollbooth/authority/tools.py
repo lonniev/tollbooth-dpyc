@@ -38,6 +38,11 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
+from tollbooth.authority import adoption_store, neon_alert_store
+from tollbooth.authority.nostr_signing import AuthorityNostrSigner
+from tollbooth.authority.onboarding import ONBOARDING_TEMPLATES, OnboardingState
+from tollbooth.authority.replay import ReplayTracker
+from tollbooth.authority.settings import AuthoritySettings
 from tollbooth.constants import ErrorCode
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.identity_proof import (
@@ -58,12 +63,6 @@ from tollbooth.tool_identity import (
     ToolIdentity,
     capability_uuid,
 )
-
-from tollbooth.authority import adoption_store, neon_alert_store
-from tollbooth.authority.nostr_signing import AuthorityNostrSigner
-from tollbooth.authority.onboarding import ONBOARDING_TEMPLATES, OnboardingState
-from tollbooth.authority.replay import ReplayTracker
-from tollbooth.authority.settings import AuthoritySettings
 
 logger = logging.getLogger(__name__)
 
@@ -132,10 +131,10 @@ REJECT_ADOPTION_UUID          = "7dbcfa85-f776-5306-a6dc-9032f1dcb9b3"
 GET_ADOPTION_STATUS_UUID      = "45c1b7b4-93ac-52e3-ad5a-8fac1b05fad1"
 # Tenant-schema ownership repair (owner consent)
 REPAIR_OPERATOR_SCHEMA_UUID   = "b626ee48-dcd7-5ef2-93dd-0be12364acbb"
-# Neon books health — 402 alerts (inbound from operators) + proactive watch
+# Neon persistence health — 402 alerts (inbound from operators) + proactive watch
 RECEIVE_NEON_402_ALERT_UUID   = "bdb94fb1-454a-5804-8885-42ba93f1446d"
 LIST_NEON_ALERTS_UUID         = "b8079cbd-bc1e-579c-86fa-897a0a0641bd"
-NETWORK_BOOKS_HEALTH_UUID     = "07706702-fac9-50d0-b69d-d706a71b9101"
+NETWORK_PERSISTENCE_HEALTH_UUID     = "07706702-fac9-50d0-b69d-d706a71b9101"
 
 
 AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
@@ -240,22 +239,22 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         category="restricted",
         intent="Owner repair: reassign all table ownership in an operator's tenant schema to its own role.",
     ),
-    # -- Neon books health --
+    # -- Neon persistence health --
     ToolIdentity(
         tool_id=RECEIVE_NEON_402_ALERT_UUID,
         capability="receive_neon_402_alert",
         category="free",
-        intent="Inbound: an operator reports its Neon books are 402-locked (operator-proof gated).",
+        intent="Inbound: an operator reports its Neon store is 402-locked (operator-proof gated).",
     ),
     ToolIdentity(
         tool_id=LIST_NEON_ALERTS_UUID,
         capability="list_neon_alerts",
         category="restricted",
-        intent="Owner queue: list operators that reported a Neon-402 (books locked).",
+        intent="Owner queue: list operators that reported a Neon-402 (store locked).",
     ),
     ToolIdentity(
-        tool_id=NETWORK_BOOKS_HEALTH_UUID,
-        capability="network_books_health",
+        tool_id=NETWORK_PERSISTENCE_HEALTH_UUID,
+        capability="network_persistence_health",
         category="restricted",
         intent="Owner view: proactive per-project Neon compute-quota posture + reactive alerts.",
     ),
@@ -453,8 +452,9 @@ async def _register_operator_via_oracle(
     service_url: str,
     authority_npub: str,
 ) -> str:
-    from tollbooth.registry import resolve_oracle_service
     from fastmcp import Client
+
+    from tollbooth.registry import resolve_oracle_service
 
     signer = _get_nostr_signer()
     oracle_info = await resolve_oracle_service(signer.npub)
@@ -478,8 +478,9 @@ async def _update_operator_via_oracle(
     display_name: str,
     authority_npub: str,
 ) -> str:
-    from tollbooth.registry import resolve_oracle_service
     from fastmcp import Client
+
+    from tollbooth.registry import resolve_oracle_service
 
     signer = _get_nostr_signer()
     oracle_info = await resolve_oracle_service(signer.npub)
@@ -499,8 +500,9 @@ async def _deregister_operator_via_oracle(
     operator_npub: str,
     authority_npub: str,
 ) -> str:
-    from tollbooth.registry import resolve_oracle_service
     from fastmcp import Client
+
+    from tollbooth.registry import resolve_oracle_service
 
     signer = _get_nostr_signer()
     oracle_info = await resolve_oracle_service(signer.npub)
@@ -519,8 +521,9 @@ async def _register_via_oracle(
     service_url: str,
     upstream_authority_npub: str,
 ) -> str:
-    from tollbooth.registry import resolve_oracle_service
     from fastmcp import Client
+
+    from tollbooth.registry import resolve_oracle_service
 
     signer = _get_nostr_signer()
     oracle_info = await resolve_oracle_service(signer.npub)
@@ -647,7 +650,7 @@ async def _resend_bootstrap_dm(npub: str) -> bool:
             )
             logger.info("Bootstrap config DM (re)sent to operator %s", npub[:16])
         return sent
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("Bootstrap DM resend failed for %s: %s", npub[:16], exc)
         return False
 
@@ -672,7 +675,7 @@ async def _maybe_refresh_bootstrap_dm(npub: str) -> None:
         sent_at = int(stamp) if stamp else 0
         if time.time() - sent_at >= _BOOTSTRAP_DM_REFRESH_SECONDS:
             await _resend_bootstrap_dm(npub)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.debug("Bootstrap DM refresh check skipped for %s: %s", npub[:16], exc)
 
 
@@ -702,9 +705,9 @@ async def _provision_operator(
         vault = await runtime.vault()
         from tollbooth.authority.tenant_provisioner import (
             ensure_bootstrap_table,
+            neon_url_for_operator,
             provision_operator_schema,
             store_operator_config,
-            neon_url_for_operator,
         )
         await ensure_bootstrap_table(vault)
         s = _get_settings()
@@ -724,7 +727,7 @@ async def _provision_operator(
             await store_operator_config(vault, npub, "role_password", encrypted_pw)
             logger.info("Provisioned Neon tenant for operator %s schema=%s (role-isolated)", npub[:16], schema)
             await _resend_bootstrap_dm(npub)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("Neon tenant provisioning failed (non-fatal): %s", exc)
 
     # Register in community registry via Oracle
@@ -739,7 +742,7 @@ async def _provision_operator(
             service_url=service_url,
             authority_npub=signer.npub,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("Oracle operator registration failed (non-fatal): %s", exc)
 
     return {
@@ -909,7 +912,7 @@ def register_authority_tools(
                 "commit_url": commit_url,
                 "message": f"Operator {npub[:16]}... updated in community registry.",
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Update failed: {exc}"}
 
     @tool
@@ -955,7 +958,7 @@ def register_authority_tools(
                 "commit_url": commit_url,
                 "message": f"Operator {npub[:16]}... removed from community registry.",
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Deregistration failed: {exc}"}
 
     @tool
@@ -975,7 +978,7 @@ def register_authority_tools(
             vault = await runtime.vault()
             from tollbooth.authority.tenant_provisioner import get_all_operator_config
             config = await get_all_operator_config(vault, npub)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Failed to retrieve config: {exc}"}
 
         if not config:
@@ -1181,7 +1184,7 @@ def register_authority_tools(
                 ),
                 recipient_npub=runtime.operator_npub(),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.info("Owner-notification DM skipped for %s: %s", operator_npub[:16], exc)
 
     @tool
@@ -1228,7 +1231,7 @@ def register_authority_tools(
             vault = await runtime.vault()
             await adoption_store.ensure_schema(vault)
             await adoption_store.upsert_pending(vault, operator_npub, service_url)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not record request: {exc}"}
 
         await _notify_owner_of_request(operator_npub, service_url)
@@ -1264,38 +1267,38 @@ def register_authority_tools(
             await adoption_store.ensure_schema(vault)
             await adoption_store.prune_expired(vault)
             pending = await adoption_store.list_pending(vault)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not list requests: {exc}"}
         return {"success": True, "count": len(pending), "requests": pending}
 
     # ------------------------------------------------------------------
-    # Neon books health — the accounting books are the Authority's charge
+    # Neon persistence health — the accounting store are the Authority's charge
     # ------------------------------------------------------------------
 
     async def _notify_owner_of_neon_402(operator_npub: str, detail: str) -> None:
         """Best-effort heads-up DM to the Authority owner that an operator's
-        books are 402-locked. Never raises; the durable row is the record."""
+        store is 402-locked. Never raises; the durable row is the record."""
         try:
             exchange = _get_nostr_exchange()
             await exchange.open_channel(
-                "neon_books_alert",
+                "neon_persistence_alert",
                 greeting=(
-                    f"⚠ Operator {operator_npub[:16]}... reports its Neon books are "
+                    f"⚠ Operator {operator_npub[:16]}... reports its Neon store is "
                     "402-locked (compute/storage quota exhausted) — paid tools are "
-                    "down for its patrons. Review with network_books_health / "
+                    "down for its patrons. Review with network_persistence_health / "
                     "list_neon_alerts and restore capacity (upgrade the plan or wait "
                     "for the quota reset)."
                 ),
                 recipient_npub=runtime.operator_npub(),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.info("Neon-402 owner DM skipped for %s: %s", operator_npub[:16], exc)
 
     @tool
     async def receive_neon_402_alert(
         npub: Annotated[
             str,
-            Field(description="The reporting operator's Nostr npub (the one whose books are locked)."),
+            Field(description="The reporting operator's Nostr npub (the one whose store is locked)."),
         ] = "",
         dpop_token: Annotated[
             str,
@@ -1310,13 +1313,13 @@ def register_authority_tools(
             Field(description="Short, credential-free error summary (the Neon 402 message)."),
         ] = "",
     ) -> dict[str, Any]:
-        """Inbound: an operator reports its Neon books are 402-locked.
+        """Inbound: an operator reports its Neon store is 402-locked.
 
         Called MCP-to-MCP by the operator's runtime the instant it catches a
         Neon HTTP 402 on its own database. Verifies the operator controls
         ``npub`` (inline Schnorr bound to this tool's wire name), records a
         durable latest-state row, and fires a best-effort owner-notification
-        DM. This is how the Authority learns the books are dark BEFORE a patron
+        DM. This is how the Authority learns the store is dark BEFORE a patron
         files a complaint.
         """
         if not npub:
@@ -1334,8 +1337,8 @@ def register_authority_tools(
             vault = await runtime.vault()
             await neon_alert_store.ensure_schema(vault)
             await neon_alert_store.record(vault, npub, detail)
-        except Exception as exc:
-            # The Authority's OWN books may be down too (shared project). Still
+        except Exception as exc:  # noqa: BLE001
+            # The Authority's OWN store may be down too (shared project). Still
             # try to reach the human, and report honestly rather than 500.
             await _notify_owner_of_neon_402(npub, detail)
             return {"success": False, "error": f"Could not record alert: {exc}"}
@@ -1357,9 +1360,9 @@ def register_authority_tools(
             Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
         ] = "",
     ) -> dict[str, Any]:
-        """Owner queue: operators that reported a Neon-402 (books locked).
+        """Owner queue: operators that reported a Neon-402 (store locked).
 
-        Restricted to the Authority owner. A companion to network_books_health:
+        Restricted to the Authority owner. A companion to network_persistence_health:
         this is the reactive list (operators that already went dark); the health
         tool adds the proactive per-project compute posture.
         """
@@ -1372,18 +1375,18 @@ def register_authority_tools(
             vault = await runtime.vault()
             await neon_alert_store.ensure_schema(vault)
             alerts = await neon_alert_store.list_all(vault)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not list alerts: {exc}"}
         return {"success": True, "count": len(alerts), "alerts": alerts}
 
     @tool
-    async def network_books_health(
+    async def network_persistence_health(
         authority_proof: Annotated[
             str,
             Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
         ] = "",
     ) -> dict[str, Any]:
-        """Owner view: the health of the DPYC economy's accounting books (Neon).
+        """Owner view: the health of the DPYC economy's accounting store (Neon).
 
         Restricted to the Authority owner. Three layers, from most to least
         proactive:
@@ -1393,31 +1396,31 @@ def register_authority_tools(
            reset date, and a status ladder (ok/warning/critical/exhausted) so a
            project can be topped up BEFORE it 402s. ``configured=false`` when no
            key is present (deliver one to enable the proactive watch).
-        2. ``own_books`` — reactive self-detection: whether the Authority's OWN
+        2. ``own_store`` — reactive self-detection: whether the Authority's OWN
            database answers, or is itself 402-locked. Always available.
         3. ``operator_alerts`` — operators that reported a 402 (from
            receive_neon_402_alert). Reactive, but immediate.
         """
         err = await _require_authority_consent(
-            runtime, authority_proof, runtime.runtime_name("network_books_health"),
+            runtime, authority_proof, runtime.runtime_name("network_persistence_health"),
         )
         if err:
             return err
 
         from tollbooth.vaults.neon import NeonQueryError
 
-        # (2) Reactive self-probe of the Authority's own books.
-        own_books: dict[str, Any]
+        # (2) Reactive self-probe of the Authority's own store.
+        own_store: dict[str, Any]
         try:
             vault = await runtime.vault()
             await vault._execute("SELECT 1 AS one")
-            own_books = {"status": "ok", "detail": ""}
+            own_store = {"status": "ok", "detail": ""}
         except NeonQueryError as exc:
             status = "quota_exceeded" if getattr(exc, "status", 0) == 402 else "error"
-            own_books = {"status": status, "detail": str(exc)[:300]}
+            own_store = {"status": status, "detail": str(exc)[:300]}
             vault = None
-        except Exception as exc:
-            own_books = {"status": "unreachable", "detail": str(exc)[:300]}
+        except Exception as exc:  # noqa: BLE001
+            own_store = {"status": "unreachable", "detail": str(exc)[:300]}
             vault = None
 
         # (3) Operator-reported alerts (best-effort — needs a live vault).
@@ -1426,7 +1429,7 @@ def register_authority_tools(
             try:
                 await neon_alert_store.ensure_schema(vault)
                 operator_alerts = await neon_alert_store.list_all(vault)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.info("Could not read operator Neon alerts: %s", exc)
 
         # (1) Proactive per-project compute posture. neon_api_key/neon_org_id are OPTIONAL
@@ -1435,7 +1438,7 @@ def register_authority_tools(
         neon_creds: dict[str, str] = {}
         try:
             neon_creds = await runtime._load_vault_creds(OPERATOR_CREDENTIAL_TEMPLATE.service)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.info("Could not load Neon watch secrets from vault: %s", exc)
         neon_api_key = (neon_creds.get("neon_api_key") or "").strip()
         neon_org_id = (neon_creds.get("neon_org_id") or "").strip()
@@ -1458,7 +1461,7 @@ def register_authority_tools(
                     "configured": True,
                     "projects": [u.to_dict() for u in usage],
                 }
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 neon_api = {
                     "configured": True,
                     "error": f"Neon API read failed: {str(exc)[:200]}",
@@ -1469,20 +1472,20 @@ def register_authority_tools(
         project_statuses = [p.get("status") for p in neon_api.get("projects", [])]
         ladder = ["exhausted", "critical", "warning", "ok"]
         overall = "ok"
-        if own_books["status"] == "quota_exceeded" or operator_alerts:
+        if own_store["status"] == "quota_exceeded" or operator_alerts:
             overall = "exhausted"
         else:
             for rung in ladder:
                 if rung in project_statuses:
                     overall = rung
                     break
-            if own_books["status"] in ("error", "unreachable"):
+            if own_store["status"] in ("error", "unreachable"):
                 overall = "critical" if overall == "ok" else overall
 
         return {
             "success": True,
             "overall_status": overall,
-            "own_books": own_books,
+            "own_store": own_store,
             "operator_alerts": operator_alerts,
             "operator_alert_count": len(operator_alerts),
             "neon_api": neon_api,
@@ -1514,7 +1517,7 @@ def register_authority_tools(
             vault = await runtime.vault()
             await adoption_store.ensure_schema(vault)
             row = await adoption_store.get(vault, operator_npub)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not read request: {exc}"}
         if row is None:
             return {
@@ -1561,7 +1564,7 @@ def register_authority_tools(
             vault = await runtime.vault()
             await adoption_store.ensure_schema(vault)
             hit = await adoption_store.mark(vault, operator_npub, adoption_store.REJECTED)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not reject request: {exc}"}
         if not hit:
             return {
@@ -1605,9 +1608,9 @@ def register_authority_tools(
             return {"success": False, "error": "operator_npub must be a valid npub1..."}
         try:
             from tollbooth.authority.tenant_provisioner import (
+                restore_operator_grants,
                 schema_name_for_npub,
                 transfer_schema_ownership,
-                restore_operator_grants,
             )
             vault = await runtime.vault()
             schema = schema_name_for_npub(operator_npub)
@@ -1616,7 +1619,7 @@ def register_authority_tools(
             await vault._execute(f'GRANT "{schema}" TO CURRENT_USER')
             await transfer_schema_ownership(vault, schema)
             await restore_operator_grants(vault, schema)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Schema repair failed: {exc}"}
         return {
             "success": True,
@@ -1646,7 +1649,7 @@ def register_authority_tools(
             vault = await runtime.vault()
             await adoption_store.ensure_schema(vault)
             row = await adoption_store.get(vault, operator_npub)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not read status: {exc}"}
         if row is None:
             return {
@@ -1693,7 +1696,7 @@ def register_authority_tools(
                 ),
                 recipient_npub=candidate_npub,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             _onboarding.complete()
             return {"success": False, "error": f"Failed to send DM challenge: {exc}"}
 
@@ -1734,13 +1737,13 @@ def register_authority_tools(
         try:
             exchange = _get_nostr_exchange()
             await exchange.receive(sender_npub=candidate_npub, service="authority_claim")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"No valid claim DM received: {exc}"}
 
         try:
             signer = _get_nostr_signer()
             parent_npub = await resolve_my_parent_npub(signer.npub)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Failed to resolve parent Authority: {exc}"}
 
         try:
@@ -1759,7 +1762,7 @@ def register_authority_tools(
                 ),
                 recipient_npub=parent_npub,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Failed to send approval request to parent Authority: {exc}"}
 
         return {
@@ -1797,12 +1800,12 @@ def register_authority_tools(
         try:
             exchange = _get_nostr_exchange()
             await exchange.receive(sender_npub=parent_npub, service="authority_approval")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"No approval received from parent Authority: {exc}"}
 
         try:
             await _set_authority_npub(candidate_npub)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {
                 "success": False,
                 "error": (
@@ -1820,7 +1823,7 @@ def register_authority_tools(
                 service_url=service_url,
                 upstream_authority_npub=parent_npub,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Oracle registration failed (Authority still activated): %s", exc)
 
         _onboarding.complete()

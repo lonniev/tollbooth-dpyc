@@ -240,7 +240,7 @@ def verify_identity_credential(
     # 7. Verify signer matches claimed operator
     try:
         operator_hex = _npub_to_hex(operator_npub)
-    except Exception:
+    except Exception:  # noqa: BLE001
         operator_hex = ""
     if operator_hex and event.pubkey != operator_hex:
         raise IdentityCredentialError(

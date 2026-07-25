@@ -269,7 +269,7 @@ class SecureCourierService:
                     )
                     if extra and isinstance(extra, dict):
                         result.update(extra)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "on_credentials_received callback failed: %s", exc,
                     )
@@ -285,7 +285,7 @@ class SecureCourierService:
                     )
                     self._credentials[sender_npub] = credential
                     result["identity_credential_issued"] = True
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Identity credential issuance failed: %s", exc,
                     )
@@ -317,7 +317,7 @@ class SecureCourierService:
                         )
                         result["credential_card_dm_sent"] = True
 
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.warning("Credential card generation failed: %s", exc)
 
             # NEVER echo credential values
@@ -380,7 +380,7 @@ class SecureCourierService:
 
         try:
             npub = await vault.fetch_session_binding(caller_id, service)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug("Session binding lookup failed: %s", exc)
             return None
 
@@ -394,7 +394,7 @@ class SecureCourierService:
             )
             if result.get("success"):
                 return npub
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug("Session restoration failed: %s", exc)
 
         return None
@@ -444,7 +444,7 @@ class SecureCourierService:
         if vault is not None and isinstance(vault, SessionBindingBackend):
             try:
                 await vault.store_session_binding(caller_id, service, npub)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to store session binding: %s", exc)
 
     async def _delete_binding(
@@ -455,7 +455,7 @@ class SecureCourierService:
         if vault is not None and isinstance(vault, SessionBindingBackend):
             try:
                 await vault.delete_session_binding(caller_id, service)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to delete session binding: %s", exc)
 
     # -- Credential card -----------------------------------------------------
@@ -490,7 +490,7 @@ class SecureCourierService:
         qr_png: bytes | None = None
         try:
             qr_png = render_qr(ncred)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug("QR rendering skipped: %s", exc)
 
         return ncred, qr_png
@@ -524,7 +524,7 @@ class SecureCourierService:
                 from tollbooth.media_upload import upload_to_nostr_build
 
                 image_url = await upload_to_nostr_build(qr_png)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "QR upload to nostr.build failed (non-fatal): %s", exc,
                 )
@@ -554,7 +554,7 @@ class SecureCourierService:
                 recipient_npub[:16] + "...",
                 service,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Credential card DM delivery failed (non-fatal): %s", exc,
             )
@@ -597,7 +597,7 @@ class SecureCourierService:
                     )
                     if extra and isinstance(extra, dict):
                         result.update(extra)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "on_credentials_received callback failed: %s", exc,
                     )

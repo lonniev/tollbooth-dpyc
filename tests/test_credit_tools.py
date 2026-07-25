@@ -2,7 +2,7 @@
 
 import json
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,9 +17,10 @@ from tollbooth.btcpay_client import (
 )
 from tollbooth.certificate import reset_jti_store
 from tollbooth.config import TollboothConfig
+from tollbooth.constants import MAX_INVOICE_SATS
 from tollbooth.ledger import ToolUsage, Tranche, UserLedger
 from tollbooth.ledger_cache import LedgerCache
-from tollbooth.nostr_certificate import NOSTR_CERT_KIND, NOSTR_CERT_TAG, NOSTR_CERT_LABEL
+from tollbooth.nostr_certificate import NOSTR_CERT_KIND, NOSTR_CERT_LABEL, NOSTR_CERT_TAG
 from tollbooth.tools.credits import (
     account_statement_tool,
     btcpay_status_tool,
@@ -29,8 +30,6 @@ from tollbooth.tools.credits import (
     purchase_credits_tool,
     reconcile_pending_invoices,
 )
-from tollbooth.constants import MAX_INVOICE_SATS
-
 
 # ---------------------------------------------------------------------------
 # Module-level Nostr test keypair for certificate signing
@@ -89,7 +88,7 @@ def _clean_jti_store():
 # Helpers
 # ---------------------------------------------------------------------------
 
-_PAST = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+_PAST = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
 
 
 def _tranche(
@@ -566,7 +565,7 @@ class TestCheckBalance:
     @pytest.mark.asyncio
     async def test_expiration_fields_present(self) -> None:
         """check_balance includes tranche expiration analytics."""
-        soon = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
+        soon = (datetime.now(UTC) + timedelta(hours=12)).isoformat()
         ledger = UserLedger(tranches=[
             _tranche(100, expires_at=soon),
             _tranche(200, expires_at=None),
@@ -990,7 +989,7 @@ class TestAccountStatement:
     async def test_daily_usage_respects_days_param(self) -> None:
         """Daily log only includes entries within the requested window."""
         ledger = _ledger_with_balance(5000)
-        today = date.today()
+        today = date.today()  # noqa: DTZ011
         # Add entries for 3 days
         for offset in (0, 15, 45):
             day = (today - timedelta(days=offset)).isoformat()

@@ -133,11 +133,11 @@ def store(vault):
 
 
 async def _create(store, **kw) -> str:
-    defaults = dict(
-        npub=NPUB, kind="slow_thing", tool_id=TOOL_ID,
-        params={"mode": "live", "difficulty": "hard"},
-        max_runtime_seconds=300, result_ttl_seconds=900,
-    )
+    defaults = {
+        "npub": NPUB, "kind": "slow_thing", "tool_id": TOOL_ID,
+        "params": {"mode": "live", "difficulty": "hard"},
+        "max_runtime_seconds": 300, "result_ttl_seconds": 900,
+    }
     defaults.update(kw)
     return await store.create(**defaults)
 

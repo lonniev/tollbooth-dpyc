@@ -9,7 +9,6 @@ import pytest
 
 from tollbooth.media_upload import MediaUploadError, upload_to_nostr_build
 
-
 # ---------------------------------------------------------------------------
 # upload_to_nostr_build tests
 # ---------------------------------------------------------------------------
@@ -56,7 +55,7 @@ async def test_upload_server_error():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.media_upload.httpx.AsyncClient", return_value=mock_client):
+    with patch("tollbooth.media_upload.httpx.AsyncClient", return_value=mock_client):  # noqa: SIM117
         with pytest.raises(MediaUploadError, match="HTTP 500"):
             await upload_to_nostr_build(FAKE_PNG)
 
@@ -69,7 +68,7 @@ async def test_upload_timeout():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.media_upload.httpx.AsyncClient", return_value=mock_client):
+    with patch("tollbooth.media_upload.httpx.AsyncClient", return_value=mock_client):  # noqa: SIM117
         with pytest.raises(MediaUploadError, match="timed out"):
             await upload_to_nostr_build(FAKE_PNG)
 
@@ -84,7 +83,7 @@ async def test_upload_bad_response():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.media_upload.httpx.AsyncClient", return_value=mock_client):
+    with patch("tollbooth.media_upload.httpx.AsyncClient", return_value=mock_client):  # noqa: SIM117
         with pytest.raises(MediaUploadError, match="Unexpected response"):
             await upload_to_nostr_build(FAKE_PNG)
 

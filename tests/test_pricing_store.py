@@ -16,7 +16,6 @@ from tollbooth.pricing_model import PricingModel, ToolPrice
 from tollbooth.pricing_store import PricingModelStore
 from tollbooth.vaults.neon import NeonVault
 
-
 # ---------------------------------------------------------------------------
 # Helpers (same pattern as test_neon_vault.py)
 # ---------------------------------------------------------------------------

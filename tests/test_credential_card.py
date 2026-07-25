@@ -21,7 +21,6 @@ from tollbooth.credential_card import (
     render_qr,
 )
 
-
 # ── Fixtures ───────────────────────────────────────────────────────────
 
 

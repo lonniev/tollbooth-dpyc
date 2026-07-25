@@ -14,7 +14,6 @@ from tollbooth.constraints.base import (
 )
 from tollbooth.constraints.temporal import TemporalWindowConstraint
 
-
 # ---------------------------------------------------------------------------
 # CouponConstraint — references an operator-owned coupon by id
 # ---------------------------------------------------------------------------

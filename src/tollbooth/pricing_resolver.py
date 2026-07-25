@@ -151,7 +151,7 @@ class PricingResolver:
                         self._operator, attempt + 1,
                     )
                 return
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 if _is_permanent_sql_error(exc) or _is_quota_error(exc):
                     # Permission denied / missing relation, or a provider 402
@@ -207,7 +207,7 @@ class PricingResolver:
             return tool_id in self._cached_tool_ids
         return False
 
-    async def get_tool_pricing(self, tool_id: str) -> "ToolPricing":
+    async def get_tool_pricing(self, tool_id: str) -> ToolPricing:
         """Return a ToolPricing for *tool_id*, supporting ad valorem pricing.
 
         Returns a free ToolPricing if the tool is not in the active model.

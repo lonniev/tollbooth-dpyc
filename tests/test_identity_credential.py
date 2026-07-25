@@ -9,14 +9,13 @@ from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
 from tollbooth.identity_credential import (
     IDENTITY_CREDENTIAL_KIND,
-    IDENTITY_CREDENTIAL_TAG,
     IDENTITY_CREDENTIAL_LABEL,
+    IDENTITY_CREDENTIAL_TAG,
     IdentityCredentialError,
     sign_identity_credential,
-    verify_identity_credential,
     verify_credential_chain,
+    verify_identity_credential,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -45,7 +44,7 @@ def citizen_keys():
 class TestSignAndVerify:
     def test_round_trip(self, operator_keys, citizen_keys):
         """Sign and immediately verify — happy path."""
-        _, operator_nsec_bech32, _ = operator_keys
+        _, _operator_nsec_bech32, _ = operator_keys
         # Need nsec for signing
         op_pk = operator_keys[0]
         op_nsec = op_pk.bech32()  # nsec bech32

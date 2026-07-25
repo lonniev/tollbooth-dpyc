@@ -14,7 +14,6 @@ from typing import Any, Protocol, runtime_checkable
 
 from tollbooth.actor_types import ToolPath, ToolPathInfo
 
-
 # ── Library-level base catalog ────────────────────────────────────────
 
 AUTHORITY_BASE_CATALOG: list[ToolPathInfo] = [

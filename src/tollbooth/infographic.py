@@ -15,10 +15,9 @@ and ``InfographicSections`` dataclasses.  Three preset themes are provided:
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from xml.sax.saxutils import escape
-
 
 # ---------------------------------------------------------------------------
 # Theme & section configuration
@@ -238,7 +237,7 @@ def render_account_infographic(
     deposited = summary.get(theme.deposited_key, 0)
     tranches: list[dict[str, Any]] = data.get("active_tranches", [])
     tool_usage: list[dict[str, Any]] = data.get("tool_usage_all_time", [])
-    generated_at = data.get("generated_at", datetime.now(timezone.utc).isoformat())
+    generated_at = data.get("generated_at", datetime.now(UTC).isoformat())
 
     parts: list[str] = []
     cy = 16

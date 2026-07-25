@@ -62,7 +62,7 @@ def _open_closure(closure_b64: str, key_id: str) -> dict[str, Any]:
     key_hex = Secret.load(block).get()
     spec = json.loads(VaultCipher(key_hex).decrypt(closure_b64, aad=_CLOSURE_AAD))
     if not isinstance(spec, dict):
-        raise ValueError("closure did not decrypt to a job spec")
+        raise TypeError("closure did not decrypt to a job spec")
     return spec
 
 

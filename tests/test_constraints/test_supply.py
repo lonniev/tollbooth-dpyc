@@ -1,7 +1,6 @@
 """Tests for tollbooth.constraints.supply — FiniteSupplyConstraint."""
 
-from datetime import datetime, timezone
-
+from datetime import UTC, datetime
 
 from tollbooth.constraints.base import (
     ConstraintContext,
@@ -20,7 +19,7 @@ def _ctx(invocation_count=0, tool_name="my_tool", global_total=0):
         ledger=LedgerSnapshot(),
         patron=PatronIdentity(),
         env=EnvironmentSnapshot(
-            utc_now=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
+            utc_now=datetime(2026, 3, 1, 12, 0, tzinfo=UTC),
             tool_name=tool_name,
             invocation_count=invocation_count,
             global_demand=demand,

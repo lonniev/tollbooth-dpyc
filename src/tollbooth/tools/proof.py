@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,7 @@ def _first_public_ip(headers: dict[str, str], req: object) -> str:
     try:
         host = getattr(getattr(req, "client", None), "host", "") or ""
         return _global(host)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return ""
 
 
@@ -127,9 +128,9 @@ def harvest_request_origin() -> str | None:
         headers = {k.lower(): v for k, v in (get_http_headers() or {}).items()}
         try:
             req: object = get_http_request()
-        except Exception:
+        except Exception:  # noqa: BLE001
             req = None
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     return _assemble_origin(headers, req)
 
@@ -198,8 +199,8 @@ async def request_npub_proof_tool(
         # Stamp the request time into the preamble so the patron can see
         # when the challenge was raised. Kept to a single terse line — proof
         # DMs are succinct notifications, not documents.
-        from datetime import datetime, timezone
-        requested_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        from datetime import datetime
+        requested_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
         _greeting = f"{_greeting}\nRequested: {requested_at}"
         # Best-effort operator-observed provenance of the triggering client —
         # signed into the attestation so the human can judge an unsolicited ask.
@@ -214,7 +215,7 @@ async def request_npub_proof_tool(
         )
         if not result.get("success"):
             return result
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"Failed to send proof request: {e}"}
 
     # Extract the dpop_token phrase and rendezvous relay from the channel result.
@@ -270,8 +271,11 @@ async def receive_npub_proof_tool(
 
     exchange = courier._exchange
     from tollbooth.nostr_credentials import (
-        _npub_to_hex, _parse_delimited_credentials,
-        _NACK_TOKEN, _MAX_NACKS_PER_DRAIN, _courier_resolve_error,
+        _MAX_NACKS_PER_DRAIN,
+        _NACK_TOKEN,
+        _courier_resolve_error,
+        _npub_to_hex,
+        _parse_delimited_credentials,
     )
 
     patron_hex = _npub_to_hex(resolved)
@@ -336,7 +340,7 @@ async def receive_npub_proof_tool(
             plaintext = exchange._decrypt_dm(
                 candidate, patron_hex, decrypt_privkey_hex=decrypt_key,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             plaintext = None
             nack_reason = _NACK_TOKEN
             last_failure = "undecryptable DM"
@@ -388,7 +392,7 @@ async def receive_npub_proof_tool(
         if rt._on_npub_proven is not None:
             try:
                 await rt._on_npub_proven(resolved, matched_payload)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("on_npub_proven callback failed: %s", exc)
 
         cache = await rt.proven_npub_cache()
@@ -420,8 +424,8 @@ async def receive_npub_proof_tool(
         else:
             duration_human = f"{ttl_display // 60} minute{'s' if ttl_display >= 120 else ''}"
 
-        from datetime import datetime, timezone
-        expires_dt = datetime.fromtimestamp(record.expires_at, tz=timezone.utc)
+        from datetime import datetime
+        expires_dt = datetime.fromtimestamp(record.expires_at, tz=UTC)
         expires_str = expires_dt.strftime("%Y-%m-%d %H:%M UTC")
 
         npub_short = resolved[:16] + "..." if len(resolved) > 20 else resolved

@@ -1,7 +1,6 @@
 """Tests for tollbooth.constraints.pricing — all pricing constraints."""
 
-from datetime import datetime, timezone
-
+from datetime import UTC, datetime
 
 from tollbooth.constraints.base import (
     ConstraintContext,
@@ -26,7 +25,7 @@ def _ctx(
     balance=0,
 ):
     if utc_now is None:
-        utc_now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        utc_now = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
     return ConstraintContext(
         ledger=LedgerSnapshot(
             balance_api_sats=balance,
@@ -58,9 +57,9 @@ def _redemption(
     name: str = "FRESHMAN",
 ) -> CouponRedemption:
     if valid_from is None:
-        valid_from = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        valid_from = datetime(2026, 1, 1, tzinfo=UTC)
     if valid_until is None:
-        valid_until = datetime(2027, 1, 1, tzinfo=timezone.utc)
+        valid_until = datetime(2027, 1, 1, tzinfo=UTC)
     return CouponRedemption(
         coupon_id=coupon_id,
         name=name,
@@ -76,7 +75,7 @@ def _redemption(
 
 def _ctx_with_redemptions(*redemptions: CouponRedemption, utc_now=None) -> ConstraintContext:
     if utc_now is None:
-        utc_now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        utc_now = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
     rmap = CouponRedemptionMap(
         entries=tuple((r.coupon_id, r) for r in redemptions),
     )
@@ -122,8 +121,8 @@ class TestCouponConstraint:
         ctx = _ctx_with_redemptions(
             _redemption(
                 self.COUPON_ID,
-                valid_from=datetime(2030, 1, 1, tzinfo=timezone.utc),
-                valid_until=datetime(2031, 1, 1, tzinfo=timezone.utc),
+                valid_from=datetime(2030, 1, 1, tzinfo=UTC),
+                valid_until=datetime(2031, 1, 1, tzinfo=UTC),
             )
         )
         result = c.evaluate(ctx)
@@ -135,8 +134,8 @@ class TestCouponConstraint:
         ctx = _ctx_with_redemptions(
             _redemption(
                 self.COUPON_ID,
-                valid_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
-                valid_until=datetime(2025, 12, 1, tzinfo=timezone.utc),
+                valid_from=datetime(2025, 1, 1, tzinfo=UTC),
+                valid_until=datetime(2025, 12, 1, tzinfo=UTC),
             )
         )
         result = c.evaluate(ctx)

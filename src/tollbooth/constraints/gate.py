@@ -17,7 +17,7 @@ its ``ToolPrice``.  The gate fetches the chain from the
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from tollbooth.constraints.base import (
@@ -80,7 +80,7 @@ class ConstraintGate:
                 membership_tier=membership_tier,
             ),
             env=EnvironmentSnapshot(
-                utc_now=datetime.now(timezone.utc),
+                utc_now=datetime.now(UTC),
                 tool_name=tool_name,
                 invocation_count=invocation_count,
                 global_demand=tuple((global_demand or {}).items()),

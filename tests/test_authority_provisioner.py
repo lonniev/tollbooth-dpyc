@@ -4,10 +4,10 @@ ops (audit M2.4). Complements test_tenant_provisioner_grants.py. Was ~51%.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from unittest.mock import AsyncMock
 
 from tollbooth.authority import tenant_provisioner as tp
 

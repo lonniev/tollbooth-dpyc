@@ -1,4 +1,4 @@
-"""Neon books health — Authority alert (B) + proactive compute watch (C).
+"""Neon persistence health — Authority alert (B) + proactive compute watch (C).
 
 Covers:
   * AuthorityCertifier.report_neon_quota_exceeded — operator → Authority alert.

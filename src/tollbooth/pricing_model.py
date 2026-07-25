@@ -76,7 +76,7 @@ class ToolPrice:
             d["chain"] = [step.to_dict() for step in self.chain]
         return d
 
-    def to_tool_pricing(self) -> "ToolPricing":
+    def to_tool_pricing(self) -> ToolPricing:
         """Convert this declarative price entry to a runtime ToolPricing."""
         from tollbooth.pricing import ToolPricing
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from tollbooth.constraints.gate import ConstraintGate
 from tollbooth.coupons.models import CouponRedemption, CouponRedemptionMap
@@ -161,8 +161,8 @@ def _redemption(coupon_id: str, *, discount_percent: float = 50.0) -> CouponRede
         coupon_id=coupon_id,
         name="TEST",
         discount_percent=discount_percent,
-        valid_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        valid_until=datetime(2027, 1, 1, tzinfo=timezone.utc),
+        valid_from=datetime(2026, 1, 1, tzinfo=UTC),
+        valid_until=datetime(2027, 1, 1, tzinfo=UTC),
         uses_per_patron=10,
         total_uses=None,
         times_redeemed=0,
@@ -212,6 +212,6 @@ class TestCouponConsumeMarkers:
         rmap = CouponRedemptionMap(
             entries=((CID_A, _redemption(CID_A, discount_percent=10.0)),),
         )
-        denial, eff, consumed = _walk(chain, 100, coupon_redemptions=rmap)
+        denial, _eff, consumed = _walk(chain, 100, coupon_redemptions=rmap)
         assert denial is None
         assert consumed == [CID_A]  # only once

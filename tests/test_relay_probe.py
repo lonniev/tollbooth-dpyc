@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-
+from tollbooth import nostr_diagnostics
 from tollbooth.nostr_diagnostics import (
     probe_relay_liveness,
     resolve_relays,
 )
-from tollbooth import nostr_diagnostics
-
 
 # ---------------------------------------------------------------------------
 # Helpers

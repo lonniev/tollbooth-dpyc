@@ -1,7 +1,7 @@
 """Tests for ledger hardening: health metrics, signal handlers, background flush logging."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -137,7 +137,7 @@ class TestLastFlushAt:
         cache = _make_cache()
         await cache.get("user-1")
         cache.mark_dirty("user-1")
-        before = datetime.now(timezone.utc).isoformat()
+        before = datetime.now(UTC).isoformat()
         await cache.flush_dirty()
         assert cache._last_flush_at is not None
         assert cache._last_flush_at >= before

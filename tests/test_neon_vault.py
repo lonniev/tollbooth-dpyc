@@ -6,8 +6,7 @@ import httpx
 import pytest
 
 from tollbooth.vault_backend import LedgerVersionConflict
-from tollbooth.vaults.neon import NeonVault, NeonQueryError
-
+from tollbooth.vaults.neon import NeonQueryError, NeonVault
 
 # ---------------------------------------------------------------------------
 # Helpers

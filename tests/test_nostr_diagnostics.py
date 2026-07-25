@@ -18,7 +18,6 @@ from tollbooth.nostr_diagnostics import (
     courier_ping,
 )
 
-
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 def _operator_keys():
@@ -345,7 +344,7 @@ class TestSelfDmRoundtrip:
 
     def test_successful_roundtrip(self):
         """Self-DM published and retrieved successfully."""
-        nsec, privkey_hex, pubkey_hex, npub = _operator_keys()
+        _nsec, privkey_hex, pubkey_hex, _npub = _operator_keys()
 
         # Capture sent messages from the publish WS so the subscribe WS
         # can echo back the correct event_id.
@@ -392,7 +391,7 @@ class TestSelfDmRoundtrip:
 
     def test_publish_rejected(self):
         """Relay rejecting the publish returns failure."""
-        nsec, privkey_hex, pubkey_hex, npub = _operator_keys()
+        _nsec, privkey_hex, pubkey_hex, _npub = _operator_keys()
 
         publish_ws = MagicMock()
         publish_ws.recv = MagicMock(
@@ -407,7 +406,7 @@ class TestSelfDmRoundtrip:
 
     def test_event_not_found(self):
         """Event published but not found on subscribe returns failure."""
-        nsec, privkey_hex, pubkey_hex, npub = _operator_keys()
+        _nsec, privkey_hex, pubkey_hex, _npub = _operator_keys()
 
         publish_ws = MagicMock()
         publish_ws.recv = MagicMock(return_value=json.dumps(["OK", "evt123", True, ""]))
@@ -435,7 +434,7 @@ class TestSelfDmRoundtrip:
 
     def test_connect_failure(self):
         """Connection failure returns error."""
-        nsec, privkey_hex, pubkey_hex, npub = _operator_keys()
+        _nsec, privkey_hex, pubkey_hex, _npub = _operator_keys()
 
         with patch(
             "tollbooth.nostr_diagnostics.create_connection",
@@ -466,7 +465,7 @@ class TestSelfDmRoundtripWithCapture:
 
     def test_successful_roundtrip_captured(self):
         """Self-DM with captured event_id for precise verification."""
-        nsec, privkey_hex, pubkey_hex, npub = _operator_keys()
+        _nsec, privkey_hex, pubkey_hex, _npub = _operator_keys()
 
         publish_ws = MagicMock()
         publish_ws.recv = MagicMock(return_value=json.dumps(["OK", "evt123", True, ""]))
@@ -527,7 +526,7 @@ class TestCourierHealth:
     @pytest.mark.asyncio
     async def test_healthy_relay(self):
         """Single healthy relay reports all green."""
-        nsec, privkey_hex, pubkey_hex, npub = _operator_keys()
+        nsec, _privkey_hex, _pubkey_hex, npub = _operator_keys()
 
         nip11_doc = {
             "name": "Good Relay",
@@ -607,7 +606,7 @@ class TestCourierHealth:
     @pytest.mark.asyncio
     async def test_unreachable_relay(self):
         """Unreachable relay is reported cleanly."""
-        nsec, _, _, npub = _operator_keys()
+        nsec, _, _, _npub = _operator_keys()
 
         with patch(
             "tollbooth.nostr_diagnostics.create_connection",
@@ -628,7 +627,7 @@ class TestCourierHealth:
     @pytest.mark.asyncio
     async def test_multiple_relays_mixed(self):
         """Mix of healthy and unreachable relays."""
-        nsec, privkey_hex, pubkey_hex, npub = _operator_keys()
+        nsec, _privkey_hex, _pubkey_hex, _npub = _operator_keys()
 
         nip11_doc = {"name": "Good Relay", "supported_nips": [4]}
         mock_response = MagicMock()
@@ -731,7 +730,7 @@ class TestCourierPing:
     @pytest.mark.asyncio
     async def test_successful_ping(self):
         """Ping confirmed by relay."""
-        nsec, privkey_hex, pubkey_hex, npub = _operator_keys()
+        nsec, _privkey_hex, _pubkey_hex, npub = _operator_keys()
         recipient = PrivateKey()
         recipient_npub = recipient.public_key.bech32()
 
@@ -757,7 +756,7 @@ class TestCourierPing:
     @pytest.mark.asyncio
     async def test_ping_relay_rejects(self):
         """Relay rejecting the ping event."""
-        nsec, _, _, npub = _operator_keys()
+        nsec, _, _, _npub = _operator_keys()
         recipient = PrivateKey()
 
         mock_ws = MagicMock()
@@ -895,7 +894,7 @@ class TestCourierPing:
     @pytest.mark.asyncio
     async def test_ping_message_content(self):
         """Ping message includes operator npub and nonce."""
-        nsec, _, _, npub = _operator_keys()
+        nsec, _, _, _npub = _operator_keys()
         recipient = PrivateKey()
 
         mock_ws = MagicMock()

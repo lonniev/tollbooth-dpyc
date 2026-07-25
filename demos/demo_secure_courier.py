@@ -17,11 +17,10 @@ from pynostr.key import PrivateKey
 
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.nostr_credentials import (
-    NostrCredentialExchange,
     CourierTimeout,
     CourierValidationError,
+    NostrCredentialExchange,
 )
-
 
 RELAYS = [
     "wss://relay.primal.net",

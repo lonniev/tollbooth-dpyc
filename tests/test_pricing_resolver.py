@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import time
+import asyncio
 
 import pytest
 
-from tollbooth.tool_identity import capability_uuid
 from tollbooth.pricing_model import PipelineStep, PricingModel, ToolPrice
 from tollbooth.pricing_resolver import PricingResolver
-
+from tollbooth.tool_identity import capability_uuid
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -141,7 +140,7 @@ class TestCache:
         await resolver.get_cost(SEARCH_ID)
         assert store.call_count == 1
 
-        time.sleep(0.02)
+        await asyncio.sleep(0.02)
         await resolver.get_cost(SEARCH_ID)
         assert store.call_count == 2
 
@@ -171,7 +170,7 @@ class TestNeonUnavailable:
         assert resolver.neon_available is True
 
         store._fail = True
-        time.sleep(0.02)
+        await asyncio.sleep(0.02)
 
         cost = await resolver.get_cost(SEARCH_ID)
         assert cost == 0  # cache cleared, no stale fallback
@@ -187,7 +186,7 @@ class TestNeonUnavailable:
 
         store._fail = False
         store._model = _active_model()
-        time.sleep(0.02)
+        await asyncio.sleep(0.02)
 
         cost = await resolver.get_cost(SEARCH_ID)
         assert cost == 3
@@ -380,7 +379,7 @@ class TestErrorClassification:
 
         healed = _MockStore(model=_active_model())
         resolver._store = healed
-        time.sleep(0.02)
+        await asyncio.sleep(0.02)
         await resolver._ensure_fresh()
         assert resolver.neon_available is True
         assert resolver.last_error_permanent is False

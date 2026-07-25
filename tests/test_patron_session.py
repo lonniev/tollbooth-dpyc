@@ -1,7 +1,8 @@
 """Tests for PatronSessionCache — npub-keyed sessions."""
 
-import pytest
 from dataclasses import dataclass
+
+import pytest
 
 from tollbooth.patron_session import PatronSessionCache
 

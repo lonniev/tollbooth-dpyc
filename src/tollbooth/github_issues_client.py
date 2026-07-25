@@ -8,7 +8,7 @@ FastMCP and Spin hosts.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Self
 
 import httpx
 
@@ -130,7 +130,7 @@ class GitHubIssuesClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def __aenter__(self) -> GitHubIssuesClient:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *args: object) -> None:

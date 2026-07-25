@@ -9,7 +9,6 @@ import pytest
 
 from tollbooth.authority_client import AuthorityCertifier, AuthorityCertifyError
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -63,7 +63,6 @@ class FakeExchange:
         # Simulate a slow/timing-out relay (blocking, like websocket-client).
         if self._fetch_delay:
             time.sleep(self._fetch_delay)
-        return None
 
     def _find_dm_candidates(self, patron_hex):
         return list(self._candidates)

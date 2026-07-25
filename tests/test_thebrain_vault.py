@@ -1,12 +1,12 @@
 """Tests for TheBrainVault — VaultBackend via TheBrain Cloud API."""
 
+from datetime import UTC
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from tollbooth.vaults.thebrain import TheBrainVault
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -754,8 +754,8 @@ class TestStoreLedger:
 
     @pytest.mark.asyncio
     async def test_reuses_existing_daily_child(self) -> None:
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        from datetime import datetime
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
 
         vault = _vault()
         vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent-id"})
@@ -770,8 +770,8 @@ class TestStoreLedger:
 
     @pytest.mark.asyncio
     async def test_fast_path_uses_daily_child_cache(self) -> None:
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        from datetime import datetime
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
 
         vault = _vault()
         vault._daily_child_cache[f"user1/{today}"] = "cached-child-id"
@@ -783,8 +783,8 @@ class TestStoreLedger:
 
     @pytest.mark.asyncio
     async def test_stale_cache_falls_through(self) -> None:
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        from datetime import datetime
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
 
         vault = _vault()
         vault._daily_child_cache[f"user1/{today}"] = "stale-id"
@@ -813,8 +813,8 @@ class TestStoreLedger:
     @pytest.mark.asyncio
     async def test_search_fallback_finds_daily_child(self) -> None:
         """When graph returns stale data, search endpoint finds the child."""
-        from datetime import datetime, timezone
-        _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        from datetime import datetime
+        _today = datetime.now(UTC).strftime("%Y-%m-%d")
 
         vault = _vault()
         vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
@@ -833,8 +833,8 @@ class TestStoreLedger:
     @pytest.mark.asyncio
     async def test_creates_only_when_graph_and_search_both_miss(self) -> None:
         """Creates daily child only when both graph and search find nothing."""
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        from datetime import datetime
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
 
         vault = _vault()
         vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})
@@ -850,8 +850,8 @@ class TestStoreLedger:
     @pytest.mark.asyncio
     async def test_get_children_passes_no_cache_in_store_ledger(self) -> None:
         """store_ledger calls _get_children with no_cache=True."""
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        from datetime import datetime
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
 
         vault = _vault()
         vault._discover_members = AsyncMock(return_value={"user1/ledger": "ledger-parent"})

@@ -68,12 +68,12 @@ class OracleClient:
         ``AuthorityCertifier._parse_result``).
         """
         # Unwrap CallToolResult with .data dict (structured output)
-        if hasattr(result, "data") and isinstance(getattr(result, "data"), dict):
+        if hasattr(result, "data") and isinstance(result.data, dict):
             return result.data
 
         # Unwrap CallToolResult with .content list (text blocks)
         if hasattr(result, "content") and isinstance(
-            getattr(result, "content"), list
+            result.content, list
         ):
             result = result.content
 

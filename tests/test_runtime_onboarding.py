@@ -10,7 +10,6 @@ import pytest
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -606,9 +605,10 @@ class TestNpubEnforcement:
 class TestInitialPricingModel:
     def test_build_initial_pricing_model(self) -> None:
         """Generates a scaffold with all tools at 0 sats."""
+        import json
+
         from tollbooth.runtime import _build_initial_pricing_model
         from tollbooth.tool_identity import ToolIdentity, capability_uuid
-        import json
 
         search = ToolIdentity(
             tool_id=capability_uuid("search"),
@@ -639,8 +639,9 @@ class TestInitialPricingModel:
 
     def test_build_initial_empty_registry(self) -> None:
         """Empty registry produces an empty tools list."""
-        from tollbooth.runtime import _build_initial_pricing_model
         import json
+
+        from tollbooth.runtime import _build_initial_pricing_model
 
         rt = OperatorRuntime(tool_registry={}, service_name="Empty")
         result = _build_initial_pricing_model(rt, "Empty")

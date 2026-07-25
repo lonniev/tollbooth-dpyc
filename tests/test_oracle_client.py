@@ -9,7 +9,6 @@ import pytest
 
 from tollbooth.oracle_client import OracleClient, OracleClientError
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

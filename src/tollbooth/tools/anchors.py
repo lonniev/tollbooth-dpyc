@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from tollbooth.ots import MerkleTree, OTSCalendarClient
@@ -39,7 +39,7 @@ async def anchor_ledger_tool(
     # Fetch all balances from NeonVault
     try:
         entries = await vault.fetch_all_balances()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"Failed to fetch balances: {e}"}
 
     if not entries:
@@ -64,7 +64,7 @@ async def anchor_ledger_tool(
     }
 
     # Store anchor record
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     try:
         anchor_id = await vault.store_anchor(
             root_hash=root_hex,
@@ -75,7 +75,7 @@ async def anchor_ledger_tool(
             leaf_hashes_json=json.dumps(tree.get_leaf_hashes()),
             created_at=now.isoformat(),
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {
             "success": False,
             "error": f"Anchor computed but failed to store: {e}",
@@ -122,7 +122,7 @@ async def get_anchor_proof_tool(
     """
     try:
         anchor = await vault.fetch_anchor(anchor_id)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"Failed to fetch anchor: {e}"}
 
     if not anchor:
@@ -196,7 +196,7 @@ async def list_anchors_tool(
     """
     try:
         anchors = await vault.list_anchors(limit=limit, status=status)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"Failed to list anchors: {e}"}
 
     items: list[dict[str, Any]] = []

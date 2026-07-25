@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import inspect
 import re
-from typing import Annotated, Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Annotated, Any
 
 from pydantic import Field
 

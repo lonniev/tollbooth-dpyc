@@ -112,17 +112,17 @@ class AuthorityCertifier:
                 f"Failed to reach Authority at {self._authority_url}: {e}"
             ) from e
         # Best-effort — unwrap to a dict if we can, else return a bare ack.
-        if hasattr(result, "data") and isinstance(getattr(result, "data"), dict):
+        if hasattr(result, "data") and isinstance(result.data, dict):
             return result.data  # type: ignore[no-any-return]
         return {"success": True}
 
     def _parse_result(self, result: Any) -> dict[str, Any]:
         """Extract the certificate dict from the MCP tool result."""
         # Unwrap CallToolResult (fastmcp dataclass) — duck typing to avoid import
-        if hasattr(result, "data") and isinstance(getattr(result, "data"), dict):
+        if hasattr(result, "data") and isinstance(result.data, dict):
             result = result.data
         elif hasattr(result, "content") and isinstance(
-            getattr(result, "content"), list
+            result.content, list
         ):
             result = result.content
 

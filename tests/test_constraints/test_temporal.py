@@ -1,7 +1,6 @@
 """Tests for tollbooth.constraints.temporal — TemporalWindowConstraint."""
 
-from datetime import datetime, timezone
-
+from datetime import UTC, datetime
 
 from tollbooth.constraints.base import (
     ConstraintContext,
@@ -14,7 +13,7 @@ from tollbooth.constraints.temporal import TemporalWindowConstraint
 
 def _ctx(year=2026, month=3, day=2, hour=12, minute=0):
     """Build a context with a specific UTC time.  2026-03-02 is a Monday."""
-    utc_now = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+    utc_now = datetime(year, month, day, hour, minute, tzinfo=UTC)
     return ConstraintContext(
         ledger=LedgerSnapshot(),
         patron=PatronIdentity(),
@@ -112,7 +111,7 @@ class TestDaysOfWeek:
         result = c.evaluate(_ctx(day=7, hour=12))  # Saturday
         assert result.retry_after is not None
         # Should be on Monday (day=9)
-        retry_local = result.retry_after.astimezone(timezone.utc)
+        retry_local = result.retry_after.astimezone(UTC)
         assert retry_local.weekday() == 0  # Monday
 
 

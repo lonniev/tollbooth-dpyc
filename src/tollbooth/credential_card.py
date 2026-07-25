@@ -96,7 +96,7 @@ def _ncred_decode(ncred: str) -> dict[str, Any]:
     if not _HAS_PYNOSTR:
         raise CredentialCardError("pynostr required for ncred decoding")
 
-    hrp, bits5, spec = bech32_decode(ncred.lower())
+    hrp, bits5, _spec = bech32_decode(ncred.lower())
     if hrp != _HRP:
         raise CredentialCardInvalid(
             f"Invalid credential card prefix: expected '{_HRP}', got '{hrp}'"

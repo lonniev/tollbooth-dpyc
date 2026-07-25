@@ -171,7 +171,7 @@ def render_delimited_instructions(template: CredentialTemplate) -> str:
     lines.append("Reply with your credentials — paste each value between the @@@ markers:")
     lines.append("")
 
-    for name, spec in template.fields.items():
+    for name in template.fields:
         placeholder = f"PASTE_YOUR_{name.upper()}_HERE"
         lines.append(f"  {name} = @@@{placeholder}@@@")
 

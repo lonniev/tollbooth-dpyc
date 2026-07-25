@@ -7,8 +7,9 @@ import pytest
 from pynostr.event import Event  # type: ignore[import-untyped]
 from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
-from tollbooth.identity_proof import PROOF_EVENT_KIND as OPERATOR_PROOF_KIND, verify_proof as verify_operator_proof, verify_proof as verify_identity_proof
-
+from tollbooth.identity_proof import PROOF_EVENT_KIND as OPERATOR_PROOF_KIND
+from tollbooth.identity_proof import verify_proof as verify_identity_proof
+from tollbooth.identity_proof import verify_proof as verify_operator_proof
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -65,10 +65,10 @@ def send_bootstrap_config(
 
     Returns True if published to at least one relay.
     """
-    from pynostr.key import PrivateKey, PublicKey  # type: ignore[import-untyped]
     from pynostr.event import Event  # type: ignore[import-untyped]
-    from tollbooth.nip04 import encrypt as nip04_encrypt
+    from pynostr.key import PrivateKey, PublicKey  # type: ignore[import-untyped]
 
+    from tollbooth.nip04 import encrypt as nip04_encrypt
     from tollbooth.relay_registry import get_relays
     relay_urls = relays or get_relays()
 
@@ -143,7 +143,7 @@ def send_bootstrap_config(
                     "Relay %s rejected bootstrap config for %s: %s",
                     relay_url, operator_npub[:16], resp[:200],
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug("Failed to publish bootstrap config to %s: %s", relay_url, exc)
 
     return published > 0
@@ -166,8 +166,8 @@ def receive_bootstrap_config(
     Returns the config dict or None if not found.
     """
     from pynostr.key import PrivateKey  # type: ignore[import-untyped]
-    from tollbooth.nip04 import decrypt as nip04_decrypt
 
+    from tollbooth.nip04 import decrypt as nip04_decrypt
     from tollbooth.relay_registry import get_relays
     relay_urls = relays or get_relays()
 
@@ -239,7 +239,7 @@ def receive_bootstrap_config(
                                     "Bootstrap config received from %s via %s (ts=%d)",
                                     authority_pubkey_hex[:16], relay_url, ts,
                                 )
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001
                         relay_errors.append(f"{relay_url}: decrypt err: {exc}")
 
             ws.send(json.dumps(["CLOSE", sub_id]))
@@ -251,7 +251,7 @@ def receive_bootstrap_config(
             # carry a rotated-away role password, which fails worse than no
             # config at all. Newest-wins across all relays guards that.
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             relay_errors.append(f"{relay_url}: {exc}")
 
     diag = f"relays={len(relay_urls)}, events={events_found}"

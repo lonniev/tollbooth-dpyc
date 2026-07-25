@@ -92,8 +92,8 @@ def create_proof(nsec: str, tool_name: str) -> str:
     Returns:
         JSON string of the signed Nostr event.
     """
-    from pynostr.key import PrivateKey  # type: ignore[import-untyped]
     from pynostr.event import Event  # type: ignore[import-untyped]
+    from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
     if nsec.startswith("nsec1"):
         pk = PrivateKey.from_nsec(nsec)
@@ -202,8 +202,8 @@ def create_provenance_attestation(
     Returns:
         JSON string of the signed kind-27235 attestation event.
     """
-    from pynostr.key import PrivateKey  # type: ignore[import-untyped]
     from pynostr.event import Event  # type: ignore[import-untyped]
+    from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
     if operator_nsec.startswith("nsec1"):
         pk = PrivateKey.from_nsec(operator_nsec)
@@ -294,7 +294,7 @@ def verify_provenance_attestation(
 
     try:
         event = Event.from_dict(json.loads(attestation_json))
-    except Exception:
+    except Exception:  # noqa: BLE001
         result["reason"] = "malformed"
         return result
 
@@ -302,7 +302,7 @@ def verify_provenance_attestation(
         if not event.verify():
             result["reason"] = "bad_signature"
             return result
-    except Exception:
+    except Exception:  # noqa: BLE001
         result["reason"] = "bad_signature"
         return result
 
@@ -488,7 +488,7 @@ def _verify_proof_reason(
 
     try:
         event = Event.from_dict(event_dict)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.debug("identity_proof: invalid Nostr event structure")
         return PROOF_REASON_BAD_EVENT
 
@@ -496,7 +496,7 @@ def _verify_proof_reason(
         if not event.verify():
             logger.debug("identity_proof: signature verification failed")
             return PROOF_REASON_SIGNATURE_INVALID
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.debug("identity_proof: signature verification error")
         return PROOF_REASON_SIGNATURE_INVALID
 
@@ -506,7 +506,7 @@ def _verify_proof_reason(
 
     try:
         expected_hex = _npub_to_hex(expected_npub)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.debug("identity_proof: invalid expected npub")
         return PROOF_REASON_NPUB_MISMATCH
 
@@ -567,7 +567,7 @@ async def require_proof(
     dpop_token: str,
     tool_name: str,
     *,
-    proven_cache: "ProvenNpubCache | None" = None,
+    proven_cache: ProvenNpubCache | None = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
 ) -> dict[str, Any] | None:
     """Canonical proof-of-ownership gate. Returns ``None`` on success
@@ -618,16 +618,16 @@ async def require_proof(
             "error_code": ErrorCode.PROOF_REQUIRED,
             "error": "dpop_token is required.",
             "next_steps": [
-                "Either: sign a kind-27235 Nostr event with your nsec and pass "
+                ("Either: sign a kind-27235 Nostr event with your nsec and pass "
                 "it as `dpop_token` (one-shot, no relay round-trip). Shape: "
                 "RAW JSON (not base64, not NIP-98 'Authorization: Nostr <b64>'), "
                 "kind:27235, content:\"\", a `u` tag holding THIS tool's exact "
                 "name from tools/list (not the endpoint URL), created_at within "
                 f"{DEFAULT_WINDOW_SECONDS}s of now, and a random `nonce` tag "
-                "recommended to avoid same-second event-id collisions.",
-                "Or: call request_npub_proof, reply to the DM challenge from "
+                "recommended to avoid same-second event-id collisions."),
+                ("Or: call request_npub_proof, reply to the DM challenge from "
                 "your Nostr client, then call receive_npub_proof — pass the "
-                "returned dpop_token as `dpop_token` on every subsequent call.",
+                "returned dpop_token as `dpop_token` on every subsequent call."),
             ],
         }
 
@@ -637,7 +637,7 @@ async def require_proof(
         from tollbooth.runtime import resolve_npub as _resolve_npub
         try:
             resolved = _resolve_npub(npub)
-        except Exception:
+        except Exception:  # noqa: BLE001
             resolved = npub
 
         import hashlib as _hashlib
@@ -654,8 +654,8 @@ async def require_proof(
             "next_steps": [
                 "request_npub_proof(patron_npub=<patron_npub>)",
                 "Reply to the DM challenge from your Nostr client",
-                "receive_npub_proof(patron_npub=<patron_npub>) to cache a "
-                "fresh dpop_token",
+                ("receive_npub_proof(patron_npub=<patron_npub>) to cache a "
+                "fresh dpop_token"),
             ],
         }
 
@@ -678,8 +678,8 @@ async def require_proof(
             "next_steps": [
                 "request_npub_proof(patron_npub=<patron_npub>)",
                 "Reply to the DM challenge from your Nostr client",
-                "receive_npub_proof(patron_npub=<patron_npub>) to cache a "
-                "fresh dpop_token",
+                ("receive_npub_proof(patron_npub=<patron_npub>) to cache a "
+                "fresh dpop_token"),
             ],
         }
 

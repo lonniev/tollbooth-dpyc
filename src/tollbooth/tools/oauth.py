@@ -42,7 +42,7 @@ async def begin_oauth_tool(rt: Any, npub: str, dpop_token: str) -> dict[str, Any
         creds = await rt.load_credentials(
             [_id_field, _secret_field],
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         return {
             "success": False,
             "error": _CREDS_NOT_DELIVERED.format(field=_id_field),
@@ -60,7 +60,7 @@ async def begin_oauth_tool(rt: Any, npub: str, dpop_token: str) -> dict[str, Any
         from tollbooth.registry import resolve_service_by_name
         svc = await resolve_service_by_name("tollbooth-oauth2-callback")
         redirect_uri = svc["url"].rstrip("/")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"OAuth2 collector not found: {e}"}
 
     from tollbooth.oauth2_collector import (
@@ -146,8 +146,8 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
         creds = await rt.load_credentials(
             [_cid_field, _csec_field],
         )
-    except Exception as e:
-        logger.error("Failed to load operator credentials: %s", e, exc_info=True)
+    except Exception:
+        logger.exception("Failed to load operator credentials")
         return {"success": False, "error": "Operator credentials could not be loaded. Check operator logs."}
 
     client_id = creds.get(_cid_field, "")
@@ -158,7 +158,7 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
         from tollbooth.registry import resolve_service_by_name
         svc = await resolve_service_by_name("tollbooth-oauth2-collector")
         collector_url = svc["url"]
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"OAuth2 collector: {e}"}
 
     from tollbooth.oauth2_collector import (
@@ -184,8 +184,8 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
             opc.token_url,
             code_verifier=verifier,
         )
-    except Exception as e:
-        logger.error("Token exchange failed for %s: %s", resolved[:16], e, exc_info=True)
+    except Exception:
+        logger.exception("Token exchange failed for %s", resolved[:16])
         return {"success": False, "error": "Token exchange failed. Check operator logs."}
 
     # Build vault data from token.
@@ -207,7 +207,7 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
             extra = await opc.on_token_received(resolved, token)
             if extra:
                 vault_data.update({k: str(v) for k, v in extra.items()})
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {"success": False, "error": f"Post-token callback: {e}"}
 
     # Persist tokens to vault

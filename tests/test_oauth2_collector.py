@@ -28,6 +28,7 @@ _TEST_TOKEN = "https://provider.example.com/oauth/token"
 def _fake_encrypt(code: str, state: str) -> str:
     """Encrypt a code the same way the collector does (AES-256-GCM + base64)."""
     import os
+
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     key = hashlib.sha256(state.encode()).digest()
     iv = os.urandom(12)

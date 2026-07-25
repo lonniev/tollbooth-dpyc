@@ -14,7 +14,7 @@ import time
 from typing import Any
 
 import tollbooth.certificate as _cert_mod
-from tollbooth.certificate import CertificateError, UNDERSTOOD_PROTOCOLS
+from tollbooth.certificate import UNDERSTOOD_PROTOCOLS, CertificateError
 
 logger = logging.getLogger(__name__)
 
