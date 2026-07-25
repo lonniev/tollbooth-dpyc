@@ -169,8 +169,15 @@ class NeonAdminClient:
         # reason the caller can surface so "unknown" is never mute.
         self.last_usage_note: str = ""
 
-    async def project_usage(self) -> list[ProjectUsage]:
-        """List every project's compute posture for the current period.
+    async def project_usage(self, own_db_host: str = "") -> list[ProjectUsage]:
+        """List projects' quota posture for the current period.
+
+        When ``own_db_host`` (the Authority's own Neon hostname) is given, the
+        result is narrowed to the single project that hostname belongs to — so
+        the panel shows just this Authority's database, not every project the
+        org key can see. If the host can't be matched to a project, every
+        project is returned with an explanatory ``last_usage_note`` (never an
+        empty panel).
 
         Raises on transport/auth failure so the caller can distinguish "the
         key is bad" from "everything's healthy"; individual missing fields do
@@ -212,6 +219,13 @@ class NeonAdminClient:
             used_by_id, self.last_usage_note = (
                 await self._compute_seconds_by_project(client, headers)
             )
+            # Narrow to THIS Authority's own project by matching its DSN host to
+            # a project's endpoint host (needs the client still open).
+            own_project_id = ""
+            if own_db_host:
+                own_project_id = await self._match_own_project(
+                    client, headers, projects, own_db_host
+                )
 
         out: list[ProjectUsage] = []
         for p in projects:
@@ -237,6 +251,16 @@ class NeonAdminClient:
                 )
             )
 
+        # Narrow to the Authority's own project, if we matched one.
+        if own_db_host:
+            if own_project_id:
+                out = [u for u in out if u.project_id == own_project_id]
+            elif out:
+                self.last_usage_note = (
+                    f"{self.last_usage_note} | could not match this Authority's DB host "
+                    f"to one of {len(out)} projects; showing all"
+                ).strip(" |")
+
         # Self-verifying breadcrumb: if compute is unavailable AND we surfaced no
         # storage for any project, our field-name guess missed — name the real
         # keys once so the next read designs against ground truth, not a guess.
@@ -251,6 +275,49 @@ class NeonAdminClient:
                 f"{self.last_usage_note} | /projects fields available: {keys}"
             ).strip(" |")
         return out
+
+    @staticmethod
+    def _endpoint_id(host: str) -> str:
+        """The stable endpoint id from a Neon host — the first dot-segment with
+        any ``-pooler`` suffix stripped. ``ep-cool-name-a1b2-pooler.us-east-2
+        .aws.neon.tech`` → ``ep-cool-name-a1b2``. Pooler and direct hosts share
+        this id, so it matches a connection DSN to a control-plane endpoint.
+        """
+        first = (host or "").lower().split(".", 1)[0]
+        return first.removesuffix("-pooler")
+
+    async def _match_own_project(
+        self, client: Any, headers: dict[str, str], projects: list[Any], own_host: str
+    ) -> str:
+        """Return the project_id whose endpoint host matches ``own_host``, or "".
+
+        One ``/projects/{id}/endpoints`` call per project until a match is found
+        (typically the org's handful of projects). Best-effort and tolerant: any
+        error just means "no match" — the caller then shows all rather than none.
+        """
+        own_id = self._endpoint_id(own_host)
+        if not own_id:
+            return ""
+        for p in projects:
+            if not isinstance(p, dict):
+                continue
+            pid = str(p.get("id") or "")
+            if not pid:
+                continue
+            try:
+                resp = await client.get(
+                    f"{self._base_url}/projects/{pid}/endpoints", headers=headers
+                )
+                if resp.is_error:
+                    continue
+                endpoints = resp.json().get("endpoints") or []
+            except Exception:  # noqa: BLE001, S112 — best-effort match; never raise
+                continue
+            for ep in endpoints:
+                host = ep.get("host") if isinstance(ep, dict) else None
+                if host and self._endpoint_id(str(host)) == own_id:
+                    return pid
+        return ""
 
     async def _compute_seconds_by_project(
         self, client: Any, headers: dict[str, str]

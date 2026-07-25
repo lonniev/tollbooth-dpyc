@@ -1455,8 +1455,12 @@ def register_authority_tools(
         else:
             from tollbooth.authority.neon_admin import NeonAdminClient
             try:
+                # Narrow the watch to THIS Authority's own project by matching its
+                # DSN host (from the vault it just probed) — no extra config; the
+                # org key sees many projects but the owner cares about one.
+                own_host = getattr(vault, "endpoint_host", "") if vault is not None else ""
                 client = NeonAdminClient(neon_api_key, org_id=neon_org_id)
-                usage = await client.project_usage()
+                usage = await client.project_usage(own_db_host=own_host)
                 neon_api = {
                     "configured": True,
                     "projects": [u.to_dict() for u in usage],

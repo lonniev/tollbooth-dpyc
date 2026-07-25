@@ -116,6 +116,7 @@ class NeonVault:
             timeout=30.0,
         )
         self._version_cache: dict[str, int] = {}
+        self._endpoint_host = hostname
 
         # Field encryption — if nsec provided, all stored values are AES-256-GCM encrypted.
         # Without nsec, vault operates in plaintext mode. Every production caller
@@ -132,6 +133,16 @@ class NeonVault:
                 "values (including balances) will be PLAINTEXT. This is only "
                 "acceptable for tests; production callers must pass a key."
             )
+
+    @property
+    def endpoint_host(self) -> str:
+        """The Neon hostname this vault connects to — e.g.
+        ``ep-cool-name-a1b2c3d4-pooler.us-east-2.aws.neon.tech``. Used to
+        identify which control-plane project is THIS Authority's own, so the
+        proactive watch can show just that project instead of every project the
+        org key can see.
+        """
+        return self._endpoint_host
 
     def _encrypt(self, plaintext: str) -> str:
         """Encrypt if cipher is configured, otherwise passthrough."""

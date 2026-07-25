@@ -305,6 +305,82 @@ async def test_breadcrumb_names_fields_when_guess_misses():
     assert "some_other_size" in client.last_usage_note
 
 
+@pytest.mark.asyncio
+async def test_own_db_host_narrows_to_one_project():
+    """Given the Authority's DSN host, only the project whose endpoint matches is
+    returned — the other projects the org key can see are dropped."""
+    projects_payload = {
+        "projects": [
+            {"id": "mine-123", "name": "Authority", "synthetic_storage_size": 36_000_000},
+            {"id": "other-456", "name": "shortlinks", "synthetic_storage_size": 31_000_000},
+        ]
+    }
+    endpoints = {
+        "mine-123": {"endpoints": [{"host": "ep-billowing-brook-a1b2c3.us-east-2.aws.neon.tech"}]},
+        "other-456": {"endpoints": [{"host": "ep-quiet-forest-z9y8x7.us-east-2.aws.neon.tech"}]},
+    }
+
+    def _get(url, **kwargs):
+        r = MagicMock()
+        r.is_error = False
+        if "consumption_history" in url:
+            r.is_error = True
+            r.status_code = 403
+            r.text = "Scale plans and above."
+        elif "/endpoints" in url:
+            pid = url.split("/projects/")[1].split("/endpoints")[0]
+            r.json = MagicMock(return_value=endpoints[pid])
+        else:
+            r.json = MagicMock(return_value=projects_payload)
+        return r
+
+    http = AsyncMock()
+    http.get = AsyncMock(side_effect=_get)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("httpx.AsyncClient", return_value=http):
+        client = NeonAdminClient("neon_api_key_xxx", org_id="org-1")
+        # DSN uses the pooler host — the -pooler suffix must still match.
+        usage = await client.project_usage(
+            own_db_host="ep-billowing-brook-a1b2c3-pooler.us-east-2.aws.neon.tech"
+        )
+
+    assert [u.project_id for u in usage] == ["mine-123"]
+    assert "could not match" not in client.last_usage_note
+
+
+@pytest.mark.asyncio
+async def test_own_db_host_no_match_shows_all_with_note():
+    """An unmatchable host falls back to all projects, never an empty panel."""
+    projects_payload = {"projects": [{"id": "p1", "name": "a"}, {"id": "p2", "name": "b"}]}
+
+    def _get(url, **kwargs):
+        r = MagicMock()
+        r.is_error = False
+        if "consumption_history" in url:
+            r.is_error = True
+            r.status_code = 403
+            r.text = "Scale plans and above."
+        elif "/endpoints" in url:
+            r.json = MagicMock(return_value={"endpoints": [{"host": "ep-nomatch.x.neon.tech"}]})
+        else:
+            r.json = MagicMock(return_value=projects_payload)
+        return r
+
+    http = AsyncMock()
+    http.get = AsyncMock(side_effect=_get)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("httpx.AsyncClient", return_value=http):
+        client = NeonAdminClient("neon_api_key_xxx", org_id="org-1")
+        usage = await client.project_usage(own_db_host="ep-something-else.x.neon.tech")
+
+    assert len(usage) == 2                       # never an empty panel
+    assert "could not match" in client.last_usage_note
+
+
 # --------------------------------------------------------------------------
 # C — durable alert store roundtrip against a fake vault
 # --------------------------------------------------------------------------

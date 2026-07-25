@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.71.5 — 2026-07-25
+
+### Changed — persistence watch shows only THIS Authority's own project
+
+The org-scoped Neon key can see every project in the org; the Authority only
+cares about its own. `network_persistence_health` now narrows to the single
+project whose Neon endpoint matches the Authority's own DSN host — matched by
+endpoint id (pooler/direct hosts share it), read from the vault the tool already
+probes, with **no new configuration**. If the host can't be matched, it falls
+back to showing all projects with a `usage_note` (never an empty panel).
+
 ## 0.71.4 — 2026-07-25
 
 ### Changed — storage drives the health status when compute-hours can't be read
