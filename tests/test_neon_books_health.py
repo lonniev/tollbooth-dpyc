@@ -252,10 +252,27 @@ async def test_free_plan_heartbeat_from_projects_list():
     d = usage[0].to_dict()
     assert d["last_active_at"] == "2026-07-25T09:30:00Z"
     assert d["storage_mb"] == pytest.approx(42.0, abs=0.1)
-    assert d["status"] == "unknown"          # compute still honestly unknown
+    assert d["storage_pct"] == pytest.approx(7.8, abs=0.2)   # 42 MB of 512 MiB
+    assert d["used_pct"] is None                             # compute honestly unknown
+    assert d["status"] == "ok"                               # but storage drives a real status
     assert "Scale plans" in client.last_usage_note
     # storage WAS surfaced, so the field-name breadcrumb must NOT fire.
     assert "fields available" not in client.last_usage_note
+
+
+def test_storage_drives_status_when_compute_unknown():
+    """A near-full Free project reads warning/critical from storage alone."""
+    from tollbooth.authority.neon_admin import FREE_STORAGE_BYTES
+
+    near_full = ProjectUsage(
+        project_id="p", name="brimming",
+        compute_seconds_used=None, allowance_seconds=DEFAULT_ALLOWANCE_SECONDS,
+        quota_reset_at=None,
+        storage_bytes=int(FREE_STORAGE_BYTES * 0.97),  # 97% of the 0.5 GiB cap
+    )
+    assert near_full.used_pct is None          # compute unknown
+    assert near_full.storage_pct == pytest.approx(97.0, abs=0.5)
+    assert near_full.status == "critical"      # storage ≥ 95%
 
 
 @pytest.mark.asyncio

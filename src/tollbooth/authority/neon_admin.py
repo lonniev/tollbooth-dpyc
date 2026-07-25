@@ -34,14 +34,40 @@ NEON_API_BASE = "https://console.neon.tech/api/v2"
 FREE_COMPUTE_HOURS = 191.9
 DEFAULT_ALLOWANCE_SECONDS = int(FREE_COMPUTE_HOURS * 3600)
 
+# Neon Free plan storage allowance = 0.5 GiB per project. Storage is READABLE on
+# Free (it rides on the /projects list), so it — not the Scale-only compute-hour
+# metric — is the quota signal the health ladder can actually use on Free.
+FREE_STORAGE_BYTES = 512 * 1024 * 1024
+
 # Fraction-of-allowance thresholds for the health status ladder.
 WARNING_AT = 0.80
 CRITICAL_AT = 0.95
 
+_LADDER_SEVERITY = {"exhausted": 3, "critical": 2, "warning": 1, "ok": 0}
+
+
+def _ladder(frac: float | None) -> str | None:
+    """Map a used-fraction to a rung, or None when the fraction is unknown."""
+    if frac is None:
+        return None
+    if frac >= 1.0:
+        return "exhausted"
+    if frac >= CRITICAL_AT:
+        return "critical"
+    if frac >= WARNING_AT:
+        return "warning"
+    return "ok"
+
 
 @dataclass
 class ProjectUsage:
-    """One Neon project's compute posture for the current billing period."""
+    """One Neon project's quota posture for the current billing period.
+
+    Two axes: compute-hours (Scale-only to read; ``None`` on Free) and storage
+    (Free-readable). ``status`` is the worse of whichever axes are known, so a
+    Free project still reports a real, storage-driven health instead of a mute
+    ``unknown``.
+    """
 
     project_id: str
     name: str
@@ -53,6 +79,7 @@ class ProjectUsage:
     # consumption API), these still prove the project is alive and how full it is.
     last_active_at: str | None = None
     storage_bytes: int | None = None
+    storage_allowance_bytes: int = FREE_STORAGE_BYTES
 
     @property
     def used_fraction(self) -> float | None:
@@ -66,18 +93,30 @@ class ProjectUsage:
         return None if frac is None else round(frac * 100.0, 1)
 
     @property
+    def storage_fraction(self) -> float | None:
+        if self.storage_bytes is None or self.storage_allowance_bytes <= 0:
+            return None
+        return self.storage_bytes / self.storage_allowance_bytes
+
+    @property
+    def storage_pct(self) -> float | None:
+        frac = self.storage_fraction
+        return None if frac is None else round(frac * 100.0, 1)
+
+    @property
     def status(self) -> str:
-        """ok | warning | critical | exhausted | unknown."""
-        frac = self.used_fraction
-        if frac is None:
+        """ok | warning | critical | exhausted | unknown.
+
+        The worse of the compute and storage ladders, ignoring whichever is
+        unknown. ``unknown`` only when NEITHER axis can be read.
+        """
+        rungs = [
+            r for r in (_ladder(self.used_fraction), _ladder(self.storage_fraction))
+            if r is not None
+        ]
+        if not rungs:
             return "unknown"
-        if frac >= 1.0:
-            return "exhausted"
-        if frac >= CRITICAL_AT:
-            return "critical"
-        if frac >= WARNING_AT:
-            return "warning"
-        return "ok"
+        return max(rungs, key=lambda r: _LADDER_SEVERITY[r])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,11 +132,15 @@ class ProjectUsage:
             "quota_reset_at": self.quota_reset_at,
             "status": self.status,
             # Free-plan heartbeat fields (present even when compute is 'unknown').
+            # storage is the Free-readable quota signal that drives `status` when
+            # compute-hours aren't available.
             "last_active_at": self.last_active_at,
             "storage_mb": (
                 None if self.storage_bytes is None
                 else round(self.storage_bytes / 1_000_000.0, 1)
             ),
+            "storage_allowance_mb": round(self.storage_allowance_bytes / 1_000_000.0, 1),
+            "storage_pct": self.storage_pct,
         }
 
 

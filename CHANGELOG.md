@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.71.4 — 2026-07-25
+
+### Changed — storage drives the health status when compute-hours can't be read
+
+A Free project showed a grey `unknown` for every project because `status` was
+compute-only, and compute-hours are Scale-gated. But **storage is Free-readable**
+and is itself a real quota (Neon Free ≈ 0.5 GiB/project). `status` is now the
+worse of the compute and storage ladders, ignoring whichever is unknown — so a
+36 MB Free project reports a green `ok` at ~7% storage instead of `unknown`, and
+one approaching the cap warns/criticals honestly. `to_dict` adds `storage_pct`
+and `storage_allowance_mb` alongside `storage_mb`; compute stays `null` with the
+`usage_note` explaining it needs Scale.
+
 ## 0.71.3 — 2026-07-25
 
 ### Added — Free-plan persistence heartbeat (compute-hours need Neon Scale)
