@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.71.3 — 2026-07-25
+
+### Added — Free-plan persistence heartbeat (compute-hours need Neon Scale)
+
+Neon's `consumption_history` (per-project compute hours) is a **Scale-plan**
+feature — on Free it 403s, so `used_pct`/`status` stay honestly `unknown`. The
+proactive watch no longer stops there: it now reads a heartbeat straight off the
+`/projects` list we already fetch (no extra call, Free-OK) — each project's
+`last_active_at` (liveness) and `storage_mb` (how full it is). `usage_note` still
+states plainly that compute-hour percentages require Scale.
+
+A self-verifying breadcrumb guards the field names: if compute is unavailable and
+no storage surfaced, `usage_note` names the actual `/projects` keys, so a Neon
+schema drift is diagnosed from the next reading rather than guessed at.
+
 ## 0.71.2 — 2026-07-25
 
 ### Fixed — proactive Neon compute usage reads real numbers (and never blanks)

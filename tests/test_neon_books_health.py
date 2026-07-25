@@ -213,6 +213,81 @@ async def test_usage_note_explains_empty_rows():
     assert "no compute rows" in client.last_usage_note
 
 
+@pytest.mark.asyncio
+async def test_free_plan_heartbeat_from_projects_list():
+    """On Free (consumption_history 403s) the /projects list still yields a
+    heartbeat: last-active + storage read straight off each project object."""
+    projects_payload = {
+        "projects": [
+            {
+                "id": "p1",
+                "name": "ancient-water",
+                "quota_reset_at": "2026-08-01T00:00:00Z",
+                "compute_last_active_at": "2026-07-25T09:30:00Z",
+                "synthetic_storage_size": 42_000_000,
+            }
+        ]
+    }
+
+    def _get(url, **kwargs):
+        r = MagicMock()
+        if "consumption_history" in url:
+            r.is_error = True
+            r.status_code = 403
+            r.text = "This endpoint is not available. It is included with Scale plans and above."
+        else:
+            r.is_error = False
+            r.json = MagicMock(return_value=projects_payload)
+        return r
+
+    http = AsyncMock()
+    http.get = AsyncMock(side_effect=_get)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("httpx.AsyncClient", return_value=http):
+        client = NeonAdminClient("neon_api_key_xxx", org_id="org-1")
+        usage = await client.project_usage()
+
+    d = usage[0].to_dict()
+    assert d["last_active_at"] == "2026-07-25T09:30:00Z"
+    assert d["storage_mb"] == pytest.approx(42.0, abs=0.1)
+    assert d["status"] == "unknown"          # compute still honestly unknown
+    assert "Scale plans" in client.last_usage_note
+    # storage WAS surfaced, so the field-name breadcrumb must NOT fire.
+    assert "fields available" not in client.last_usage_note
+
+
+@pytest.mark.asyncio
+async def test_breadcrumb_names_fields_when_guess_misses():
+    """If our heartbeat field names miss (no storage surfaced) while compute is
+    unavailable, the note names the real /projects keys for the next iteration."""
+    projects_payload = {"projects": [{"id": "p1", "name": "x", "some_other_size": 5}]}
+
+    def _get(url, **kwargs):
+        r = MagicMock()
+        if "consumption_history" in url:
+            r.is_error = True
+            r.status_code = 403
+            r.text = "Scale plans and above."
+        else:
+            r.is_error = False
+            r.json = MagicMock(return_value=projects_payload)
+        return r
+
+    http = AsyncMock()
+    http.get = AsyncMock(side_effect=_get)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("httpx.AsyncClient", return_value=http):
+        client = NeonAdminClient("neon_api_key_xxx", org_id="org-1")
+        await client.project_usage()
+
+    assert "fields available" in client.last_usage_note
+    assert "some_other_size" in client.last_usage_note
+
+
 # --------------------------------------------------------------------------
 # C — durable alert store roundtrip against a fake vault
 # --------------------------------------------------------------------------

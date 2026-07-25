@@ -48,6 +48,11 @@ class ProjectUsage:
     compute_seconds_used: int | None
     allowance_seconds: int
     quota_reset_at: str | None
+    # Free-plan heartbeat: read straight from the /projects list (no Scale-only
+    # consumption endpoint). When compute-hours can't be read (Free 403s the
+    # consumption API), these still prove the project is alive and how full it is.
+    last_active_at: str | None = None
+    storage_bytes: int | None = None
 
     @property
     def used_fraction(self) -> float | None:
@@ -87,6 +92,12 @@ class ProjectUsage:
             "used_pct": self.used_pct,
             "quota_reset_at": self.quota_reset_at,
             "status": self.status,
+            # Free-plan heartbeat fields (present even when compute is 'unknown').
+            "last_active_at": self.last_active_at,
+            "storage_mb": (
+                None if self.storage_bytes is None
+                else round(self.storage_bytes / 1_000_000.0, 1)
+            ),
         }
 
 
@@ -152,10 +163,9 @@ class NeonAdminClient:
 
             projects = data.get("projects") if isinstance(data, dict) else None
             projects = projects or []
-            # The /projects LIST does not carry per-project compute consumption —
-            # that lives in Neon's consumption_history endpoint. Fetch it here so
-            # used_pct/status are real instead of "unknown". Best-effort: a failure
-            # leaves usage None ("unknown") rather than breaking the probe.
+            # Per-project COMPUTE-HOUR consumption lives in Neon's consumption_history
+            # endpoint — a Scale-plan feature. On Free it 403s, and used_pct/status
+            # stay "unknown"; last_usage_note explains why. Best-effort either way.
             used_by_id, self.last_usage_note = (
                 await self._compute_seconds_by_project(client, headers)
             )
@@ -165,6 +175,9 @@ class NeonAdminClient:
             if not isinstance(p, dict):
                 continue
             pid = str(p.get("id") or "")
+            # Heartbeat fields live on the /projects list object itself (Free-OK).
+            last_active = p.get("compute_last_active_at") or p.get("updated_at")
+            storage = p.get("synthetic_storage_size")
             out.append(
                 ProjectUsage(
                     project_id=pid,
@@ -174,8 +187,26 @@ class NeonAdminClient:
                     quota_reset_at=(
                         str(p["quota_reset_at"]) if p.get("quota_reset_at") else None
                     ),
+                    last_active_at=str(last_active) if last_active else None,
+                    storage_bytes=(
+                        int(storage) if isinstance(storage, (int, float)) else None
+                    ),
                 )
             )
+
+        # Self-verifying breadcrumb: if compute is unavailable AND we surfaced no
+        # storage for any project, our field-name guess missed — name the real
+        # keys once so the next read designs against ground truth, not a guess.
+        if (
+            not used_by_id
+            and out
+            and all(u.storage_bytes is None for u in out)
+            and isinstance(projects[0], dict)
+        ):
+            keys = ", ".join(sorted(projects[0].keys()))
+            self.last_usage_note = (
+                f"{self.last_usage_note} | /projects fields available: {keys}"
+            ).strip(" |")
         return out
 
     async def _compute_seconds_by_project(
