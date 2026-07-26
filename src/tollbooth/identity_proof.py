@@ -337,6 +337,234 @@ def verify_provenance_attestation(
     return result
 
 
+DELEGATION_GRANT_TOOL = "npub_delegation_grant"
+"""``u``-tag sentinel marking a kind-27235 event as a **patron-signed
+delegation grant** (a "secretary" authorization). Distinct from
+``OWNERSHIP_SENTINEL`` and ``PROVENANCE_ATTESTATION_TOOL`` so the three
+kind-27235 roles are disjoint: a plain ownership proof can never be re-read as
+an open-ended delegation, nor a delegation mistaken for a caller's ownership
+proof."""
+
+
+def create_delegation_grant(
+    patron_nsec: str,
+    *,
+    secretary_pubkey_hex: str,
+    scope: str,
+    challenge: str | None = None,
+    expires_at: int | None = None,
+) -> str:
+    """Sign a patron delegation grant naming an ephemeral "secretary" key.
+
+    A patron who has proven ownership of an npub may want an ephemeral
+    "secretary" key to act on their behalf — e.g. publish a Nostr note — without
+    ever surrendering the patron nsec. A bare "this key acts for me" claim is
+    unverifiable; anyone could assert it. This grant makes the delegation
+    **checkable** by anchoring it in a signature from the one asset an impostor
+    does not hold — the *patron's* own key. The signed kind-27235 event binds:
+
+    - ``secretary``: the ephemeral pubkey being authorized (the whole point —
+      "naming the ephemeral pubkey"). A grant is useless to any other key.
+    - ``scope``: what the secretary may do (e.g. ``"nostr_publish"``), so a
+      grant for one purpose does not silently authorize another.
+    - ``challenge`` (optional): the one-time ``dpop_token`` of a
+      ``request_npub_proof`` exchange, folding the grant into that round-trip so
+      it cannot be replayed against a different exchange.
+    - ``grant_expires`` (optional): a Unix expiry, so a secretary key is
+      time-bounded rather than able to act forever.
+
+    This is the reverse-direction counterpart of
+    :func:`create_provenance_attestation`: there the *Operator* attests a
+    request it sends; here the *patron* authorizes a secretary that acts. A
+    verifier (:func:`verify_delegation_grant`) confirms the patron signed it and
+    that this exact secretary/scope/exchange is what was granted — provenance is
+    thus **patron-signed**, never **secretary-asserted**.
+
+    Args:
+        patron_nsec: The patron's private key (bech32 ``nsec1...`` or hex) — the
+            npub whose authority is being delegated.
+        secretary_pubkey_hex: Hex pubkey of the ephemeral secretary key being
+            authorized to act on the patron's behalf.
+        scope: The action the secretary is granted (e.g. ``"nostr_publish"``).
+        challenge: Optional one-time ``dpop_token`` slug binding this grant to a
+            specific proof exchange. Omitted when not given.
+        expires_at: Optional Unix timestamp after which the grant is no longer
+            valid. Omitted (no expiry) when not given.
+
+    Returns:
+        JSON string of the signed kind-27235 grant event.
+    """
+    from pynostr.event import Event  # type: ignore[import-untyped]
+    from pynostr.key import PrivateKey  # type: ignore[import-untyped]
+
+    if patron_nsec.startswith("nsec1"):
+        pk = PrivateKey.from_nsec(patron_nsec)
+    else:
+        pk = PrivateKey(bytes.fromhex(patron_nsec))
+
+    tags = [
+        ["u", DELEGATION_GRANT_TOOL],
+        ["secretary", secretary_pubkey_hex],
+        ["scope", scope],
+        ["nonce", secrets.token_hex(16)],
+    ]
+    if challenge:
+        tags.append(["challenge", challenge])
+    if expires_at is not None:
+        tags.append(["grant_expires", str(expires_at)])
+
+    event = Event(
+        pubkey=pk.public_key.hex(),
+        kind=PROOF_EVENT_KIND,
+        content="",
+        created_at=int(time.time()),
+        tags=tags,
+    )
+    event.sign(pk.hex())
+    return json.dumps(event.to_dict())
+
+
+def verify_delegation_grant(
+    grant_json: str,
+    *,
+    expected_patron_npub: str,
+    expected_secretary_pubkey_hex: str,
+    expected_scope: str | None = None,
+    expected_challenge: str | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Verify a patron delegation grant against what the caller expects.
+
+    Confirms the grant is a well-formed, correctly-signed kind-27235 event whose
+    signer is the expected patron and whose bound facts (secretary, and — when
+    the caller pins them — scope and challenge) match, and that any embedded
+    expiry has not lapsed. Only then may a secretary key be trusted to act on
+    the patron's behalf.
+
+    Like :func:`verify_provenance_attestation` this performs **cryptographic**
+    verification only and consults no registry. There is no freshness window on
+    ``created_at`` (a grant is a standing authorization the patron minted
+    deliberately, not a per-call proof) — its lifetime is governed solely by the
+    optional ``grant_expires`` bound *into* the signature, which a relay cannot
+    rewrite. Re-reading a grant is not a replay, so it is not consumed.
+
+    Args:
+        grant_json: JSON string of the signed kind-27235 grant event.
+        expected_patron_npub: The npub (bech32) the grant must be signed by.
+        expected_secretary_pubkey_hex: Hex pubkey the grant must name as
+            secretary.
+        expected_scope: Optional scope the grant must carry; when given, a
+            grant for a different scope is refused.
+        expected_challenge: Optional ``dpop_token`` the grant must be bound to;
+            when given, a grant bound to a different (or no) exchange is refused.
+        now: Optional Unix time to evaluate expiry against (defaults to the
+            current wall clock); present for deterministic testing.
+
+    Returns a dict with:
+        ``valid``: bool — signature valid, patron matches, all pinned fields
+            match, and the grant is unexpired.
+        ``patron_pubkey_hex``: str | None — recovered signer, for the caller to
+            resolve/judge (present whenever the signature verified, even if a
+            bound field mismatched).
+        ``secretary_pubkey_hex``: str | None — the secretary named in the grant.
+        ``scope``: str | None — the scope named in the grant.
+        ``expires_at``: int | None — the embedded expiry, if any.
+        ``reason``: str — machine-readable failure cause when ``valid`` is False
+            (``"pynostr_missing"``, ``"malformed"``, ``"bad_signature"``,
+            ``"wrong_kind"``, ``"not_grant"``, ``"patron_mismatch"``,
+            ``"secretary_mismatch"``, ``"scope_mismatch"``,
+            ``"challenge_mismatch"``, ``"expired"``), else ``"ok"``.
+    """
+    result: dict[str, Any] = {
+        "valid": False,
+        "patron_pubkey_hex": None,
+        "secretary_pubkey_hex": None,
+        "scope": None,
+        "expires_at": None,
+        "reason": "ok",
+    }
+
+    try:
+        from pynostr.event import Event  # type: ignore[import-untyped]
+    except ImportError:
+        logger.warning("pynostr not installed — cannot verify delegation grant")
+        result["reason"] = "pynostr_missing"
+        return result
+
+    if not isinstance(grant_json, str) or len(grant_json) > MAX_PROOF_JSON_BYTES:
+        result["reason"] = "malformed"
+        return result
+
+    try:
+        event = Event.from_dict(json.loads(grant_json))
+    except Exception:  # noqa: BLE001
+        result["reason"] = "malformed"
+        return result
+
+    try:
+        if not event.verify():
+            result["reason"] = "bad_signature"
+            return result
+    except Exception:  # noqa: BLE001
+        result["reason"] = "bad_signature"
+        return result
+
+    # Signature valid — surface the true signer regardless of any bound-field
+    # mismatch, so the caller can judge an unexpected patron/impostor.
+    result["patron_pubkey_hex"] = event.pubkey
+
+    if event.kind != PROOF_EVENT_KIND:
+        result["reason"] = "wrong_kind"
+        return result
+
+    def _tag(name: str) -> str | None:
+        for tag in event.tags:
+            if len(tag) >= 2 and tag[0] == name:
+                return tag[1]
+        return None
+
+    if _tag("u") != DELEGATION_GRANT_TOOL:
+        result["reason"] = "not_grant"
+        return result
+
+    result["secretary_pubkey_hex"] = _tag("secretary")
+    result["scope"] = _tag("scope")
+    raw_expiry = _tag("grant_expires")
+    if raw_expiry is not None:
+        try:
+            result["expires_at"] = int(raw_expiry)
+        except (TypeError, ValueError):
+            result["expires_at"] = None
+
+    try:
+        expected_patron_hex = _npub_to_hex(expected_patron_npub)
+    except Exception:  # noqa: BLE001
+        result["reason"] = "patron_mismatch"
+        return result
+    if event.pubkey != expected_patron_hex:
+        result["reason"] = "patron_mismatch"
+        return result
+
+    if result["secretary_pubkey_hex"] != expected_secretary_pubkey_hex:
+        result["reason"] = "secretary_mismatch"
+        return result
+    if expected_scope is not None and result["scope"] != expected_scope:
+        result["reason"] = "scope_mismatch"
+        return result
+    if expected_challenge is not None and _tag("challenge") != expected_challenge:
+        result["reason"] = "challenge_mismatch"
+        return result
+
+    if result["expires_at"] is not None:
+        clock = time.time() if now is None else now
+        if clock > result["expires_at"]:
+            result["reason"] = "expired"
+            return result
+
+    result["valid"] = True
+    return result
+
+
 # Replay protection: track consumed proof event IDs within the window
 _consumed_proofs: dict[str, float] = {}  # event_id → expiry time
 _CONSUMED_CLEANUP_INTERVAL = 120  # seconds between cleanups
