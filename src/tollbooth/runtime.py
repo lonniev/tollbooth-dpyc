@@ -1705,18 +1705,30 @@ class OperatorRuntime:
         if not creds or not creds.get("access_token"):
             return None, "no_credentials"
 
-        # Stage 2: check expiration
+        # Stage 2: decide whether the cached access token still serves.
+        #
+        # A still-valid cached access token must NOT be reported as a live
+        # session right up to the instant it expires: doing so never touches
+        # the refresh token, so a revoked or expired refresh token stays
+        # hidden until the first *write* fails hours later (issue #154 —
+        # read-only tools returned connected: true from a cached token, then
+        # the first post failed with oauth_token_expired).  When a refresh is
+        # possible, refresh proactively once the token enters a leeway window
+        # before expiry so the refresh token is exercised — and a dead one
+        # surfaces honestly — while the patron is still interacting.  When no
+        # refresh is possible, there is nothing to exercise, so the cached
+        # token serves until its real expiry (leeway collapses to zero).
         import time as _time
         expires_at = float(creds.get("expires_at", "0"))
-        if _time.time() <= expires_at:
-            return creds, ""  # still valid
-
-        # Stage 3: refresh if enabled
-        if not opc.refresh_enabled:
-            return None, "token_expired"
-
         refresh_token = creds.get("refresh_token", "")
-        if not refresh_token:
+        can_refresh = opc.refresh_enabled and bool(refresh_token)
+        leeway = opc.refresh_leeway_seconds if can_refresh else 0
+        if _time.time() < expires_at - leeway:
+            return creds, ""  # cached token comfortably serves
+
+        # Stage 3: refresh if possible; otherwise the cached token has lapsed
+        # (or is inside the leeway window with no way to renew it).
+        if not can_refresh:
             return None, "token_expired"
 
         try:

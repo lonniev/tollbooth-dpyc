@@ -648,3 +648,168 @@ class TestNpubAndProofValidationHelpers:
         # Any non-empty string passes the param-presence check; cache-lookup
         # validity is checked later in debit_or_deny.
         assert rt.proof_validation_error("bold-hawk-42") is None
+
+
+# ---------------------------------------------------------------------------
+# restore_oauth_session proactive refresh (issue #154)
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreOAuthSessionProactiveRefresh:
+    """restore_oauth_session must exercise the refresh token before a cached
+    access token fully lapses.
+
+    Otherwise read-only tools report a live session (connected: true) off a
+    cached access token while the refresh token is silently dead, and only the
+    first *write* — after the access token expires — discovers it, forcing a
+    full begin_oauth round trip (issue #154).
+    """
+
+    def _oauth_runtime(self, *, refresh_enabled: bool = True, leeway: int = 300):
+        from tollbooth.oauth_config import OAuthProviderConfig
+        opc = OAuthProviderConfig(
+            authorize_url="https://provider.example/authorize",
+            token_url="https://provider.example/token",
+            service_name="x",
+            client_id_field="app_key",
+            client_secret_field="app_secret",
+            refresh_enabled=refresh_enabled,
+            refresh_leeway_seconds=leeway,
+        )
+        return OperatorRuntime(
+            tool_registry={}, service_name="Test", oauth_provider=opc,
+        )
+
+    @pytest.mark.asyncio
+    async def test_near_expiry_exercises_refresh_and_surfaces_dead_token(self, monkeypatch):
+        """A still-valid-but-near-expiry access token whose refresh token is
+        dead must return token_expired, not report a live session."""
+        import time as _t
+
+        import tollbooth.oauth2_collector as collector
+
+        rt = self._oauth_runtime(leeway=300)
+        # Access token still valid for another 60s — inside the 300s leeway.
+        creds = {
+            "access_token": "cached-live-token",
+            "refresh_token": "expired-refresh",
+            "expires_at": str(_t.time() + 60),
+        }
+
+        async def _load_patron_session(npub, service=None):
+            return dict(creds)
+
+        async def _load_credentials(fields):
+            return {"app_key": "cid", "app_secret": "csec"}
+
+        async def _dead_refresh(*args, **kwargs):
+            raise RuntimeError("invalid_grant: refresh token expired")
+
+        monkeypatch.setattr(rt, "load_patron_session", _load_patron_session)
+        monkeypatch.setattr(rt, "load_credentials", _load_credentials)
+        monkeypatch.setattr(collector, "refresh_access_token", _dead_refresh)
+
+        result, situation = await rt.restore_oauth_session(VALID_NPUB)
+        assert result is None
+        assert situation == "token_expired"
+
+    @pytest.mark.asyncio
+    async def test_near_expiry_refresh_success_rotates_and_persists(self, monkeypatch):
+        """When the refresh token is still good, the proactive refresh rotates
+        the tokens, carries forward non-token fields, and persists them."""
+        import time as _t
+
+        import tollbooth.oauth2_collector as collector
+
+        rt = self._oauth_runtime(leeway=300)
+        creds = {
+            "access_token": "old",
+            "refresh_token": "r1",
+            "expires_at": str(_t.time() + 60),
+            "account_hash": "keep-me",
+        }
+        stored: dict[str, str] = {}
+
+        async def _load_patron_session(npub, service=None):
+            return dict(creds)
+
+        async def _load_credentials(fields):
+            return {"app_key": "cid", "app_secret": "csec"}
+
+        async def _ok_refresh(*args, **kwargs):
+            return {
+                "access_token": "new",
+                "refresh_token": "r2",
+                "expires_at": _t.time() + 3600,
+                "token_type": "Bearer",
+            }
+
+        async def _store(npub, data, service=None):
+            stored.update(data)
+            return True
+
+        monkeypatch.setattr(rt, "load_patron_session", _load_patron_session)
+        monkeypatch.setattr(rt, "load_credentials", _load_credentials)
+        monkeypatch.setattr(rt, "store_patron_session", _store)
+        monkeypatch.setattr(collector, "refresh_access_token", _ok_refresh)
+
+        result, situation = await rt.restore_oauth_session(VALID_NPUB)
+        assert situation == ""
+        assert result["access_token"] == "new"
+        assert result["refresh_token"] == "r2"
+        assert result["account_hash"] == "keep-me"  # non-token field carried forward
+        assert stored["access_token"] == "new"  # rotated tokens persisted to vault
+
+    @pytest.mark.asyncio
+    async def test_comfortably_valid_token_served_without_refresh(self, monkeypatch):
+        """A token far from expiry is served from cache — no needless refresh."""
+        import time as _t
+
+        import tollbooth.oauth2_collector as collector
+
+        rt = self._oauth_runtime(leeway=300)
+        creds = {
+            "access_token": "fresh",
+            "refresh_token": "r1",
+            "expires_at": str(_t.time() + 3600),  # an hour out, well past the leeway
+        }
+        refreshed = {"called": False}
+
+        async def _load_patron_session(npub, service=None):
+            return dict(creds)
+
+        async def _boom(*args, **kwargs):
+            refreshed["called"] = True
+            raise AssertionError("must not refresh a comfortably-valid token")
+
+        monkeypatch.setattr(rt, "load_patron_session", _load_patron_session)
+        monkeypatch.setattr(collector, "refresh_access_token", _boom)
+
+        result, situation = await rt.restore_oauth_session(VALID_NPUB)
+        assert situation == ""
+        assert result["access_token"] == "fresh"
+        assert refreshed["called"] is False
+
+    @pytest.mark.asyncio
+    async def test_refresh_disabled_serves_until_real_expiry(self, monkeypatch):
+        """With no refresh possible, the leeway collapses to zero — a valid
+        cached token still serves rather than being prematurely reported expired."""
+        import time as _t
+
+        rt = self._oauth_runtime(refresh_enabled=False, leeway=300)
+        # 60s of life left — inside what would be the leeway window — but no
+        # refresh is possible, so the cached token must still serve.
+        creds = {
+            "access_token": "fresh",
+            "refresh_token": "",
+            "expires_at": str(_t.time() + 60),
+        }
+
+        async def _load_patron_session(npub, service=None):
+            return dict(creds)
+
+        monkeypatch.setattr(rt, "load_patron_session", _load_patron_session)
+
+        result, situation = await rt.restore_oauth_session(VALID_NPUB)
+        assert situation == ""
+        assert result["access_token"] == "fresh"
