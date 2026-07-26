@@ -98,7 +98,7 @@ issue's author of record is the caller's npub, stamped into the body.
 ### 4. Register Standard Tools + Domain Tools
 
 ```python
-# This single call registers all 26+ standard DPYC tools and returns
+# This single call registers all 40+ standard DPYC tools and returns
 # the slug-prefixed @tool decorator for the operator's own paid tools.
 tool = register_standard_tools(mcp, "weather", runtime,
     service_name="my-weather-service",
@@ -204,6 +204,7 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 |------|------|---------|
 | `request_npub_proof` | Free | Send a proof challenge DM to a patron |
 | `receive_npub_proof` | Free | Verify the patron's Schnorr-signed proof response |
+| `check_proof_status` | Free | Read-only check of a dpop_token's remaining validity |
 
 ### Authority Balance
 
@@ -223,7 +224,9 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 |------|------|---------|
 | `get_pricing_model` | Free | Current pricing model with tool registry and constraints |
 | `set_pricing_model` | Free | Update the pricing model (operator-restricted, requires proof) |
+| `reset_pricing_model` | Free | Delete all pricing models and re-initialize (operator-restricted) |
 | `list_constraint_types` | Free | Available constraint types and their parameters |
+| `list_canonical_identities` | Free | Canonical `(tool_id, mcp_name, category, intent)` inventory — source of truth for Reconcile |
 
 ### OpenTimestamps (when `ots_enabled=True`)
 
@@ -291,12 +294,20 @@ That's the entire Authority `server.py`. Everything below is wheel-provided.
 | `register_authority_npub` | Free | Step 1 of Authority self-claim — DM challenge to the candidate |
 | `confirm_authority_claim` | Free | Step 2 — verify candidate's DM, escalate to parent Authority |
 | `check_authority_approval` | Free | Step 3 — confirm parent's approval, activate Authority |
+| `receive_adoption_request` | Free (operator-proof gated) | Inbound: record an operator's request to be adopted |
+| `list_adoption_requests` | Free (owner) | Owner queue — list pending operator-adoption requests |
+| `approve_adoption` | Free (owner) | Approve a pending adoption request and provision the operator |
+| `reject_adoption` | Free (owner) | Reject a pending operator-adoption request |
+| `get_adoption_status` | Free | Read the status of an operator's adoption request |
+| `repair_operator_schema` | Free (owner) | Reassign all table ownership in an operator's tenant schema to its own role |
+| `list_neon_alerts` | Free (owner) | Owner queue — operators that reported a Neon-402 (persistence store locked) |
+| `network_persistence_health` | Free (owner) | Proactive per-project Neon quota posture + reactive alerts |
 
 The 3-step onboarding flow escalates to whichever upstream Authority the candidate's `dpyc-community` registry entry names — Prime for direct-of-Prime, NA for NE, etc. (`tollbooth.registry.resolve_my_parent_npub`, added v0.20.0).
 
 ### What the package exports
 
-`tollbooth.authority` is a thin facade over six supporting modules, all promoted from forked Authority repos in v0.21.0–v0.22.0:
+`tollbooth.authority` is a thin facade over its supporting modules. The core six were promoted from forked Authority repos in v0.21.0–v0.22.0:
 
 - `onboarding` — `OnboardingState`, `OnboardingChallenge`, claim/approval credential templates
 - `nostr_signing` — `AuthorityNostrSigner` (Schnorr certificate signer)
@@ -304,6 +315,12 @@ The 3-step onboarding flow escalates to whichever upstream Authority the candida
 - `tenant_provisioner` — Neon schema + LOGIN-role provisioning
 - `role_migration` — CLI for migrating legacy schemas to per-operator roles
 - `settings` — `AuthoritySettings` (pydantic-settings env reader)
+
+Three more were added as the Authority took on adoption and Neon-quota stewardship:
+
+- `adoption_store` — durable store for deferred operator-adoption requests
+- `neon_admin` — Neon control-plane client for the proactive compute/storage-quota watch
+- `neon_alert_store` — durable store for operator Neon-402 quota alerts
 
 Each runtime singleton (signer, replay tracker, settings, onboarding state) is lazy-initialized on first tool call; Authority MCPs are one-per-process so module-level state is effectively per-Authority.
 
@@ -334,7 +351,8 @@ OperatorRuntime(
     # Identity & network
     nsec_env_var="TOLLBOOTH_NOSTR_OPERATOR_NSEC",          # Env var name (default)
     service_name="My Service",
-    relays=["wss://relay.damus.io"],                       # Override default relays
+    # Relays are drawn from the shared dpyc-community relays.json registry —
+    # not a constructor argument.
 
     # Billing
     vault_source="authority",     # "authority" (default) or "env" (self-provisioned)
@@ -486,7 +504,7 @@ Every tool that accepts `npub` also requires `proof` — a JSON-serialized Schno
 }
 ```
 
-Inline proofs must be less than 60 seconds old. Cached proofs (via `ProvenNpubCache`) support patron-chosen TTL up to 24 hours. Consumed event IDs are tracked to prevent replay.
+Inline proofs must be less than 60 seconds old. Cached proofs (via `ProvenNpubCache`) support patron-chosen TTL up to a hard cap of 30 days. Consumed event IDs are tracked to prevent replay.
 
 **Poison-keyed proof tokens:** For non-restricted tools, proof is a
 poison phrase (e.g., `bold-hawk-42`) returned by `request_npub_proof` /
@@ -494,7 +512,7 @@ poison phrase (e.g., `bold-hawk-42`) returned by `request_npub_proof` /
 passes it as the `proof` parameter on every subsequent paid tool call.
 The MCP stores only `sha256(poison):npub` in the vault — never the raw
 poison. Proofs survive unlimited MCP restarts; duration is patron-chosen
-(up to 7 days).
+(up to a 30-day hard cap).
 
 ---
 
@@ -558,9 +576,10 @@ pip install tollbooth-dpyc[nostr,x402]
 |----------|----------|---------|
 | `TOLLBOOTH_NOSTR_OPERATOR_NSEC` | Yes | The single bootstrap key. Identity, Secure Courier, audit signing. |
 | `NEON_DATABASE_URL` | Trust-root only | Neon Postgres URL. Only for `vault_source="env"` (self-provisioned Authority). |
-| `TOLLBOOTH_NOSTR_RELAYS` | No | Comma-separated relay URLs (overrides defaults). |
 
 Certified operators (the default) do **not** set `NEON_DATABASE_URL`. They discover it from the Authority via encrypted Nostr DM during bootstrap.
+
+The Nostr relay set is not an env var — it is drawn from the shared `relays.json` registry in the dpyc-community repo (single source of truth, cached with a 3-day TTL).
 
 All other secrets (BTCPay, API keys, OAuth tokens) flow through Secure Courier — never env vars.
 
