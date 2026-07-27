@@ -113,14 +113,66 @@ def fetch_profile(npub: str, relays: list[str] | None = None) -> dict[str, str] 
     return {k: v for k, v in best.items() if k in _PROFILE_FIELDS and isinstance(v, str)}
 
 
+def publish_event(signed_event: dict | str, relays: list[str] | None = None) -> dict:
+    """Relay an ALREADY-SIGNED event and report per-relay results.
+
+    Kind-agnostic transport. Does NOT verify signer identity — the caller owns
+    authorship policy, because legitimate callers exist where the signer is
+    deliberately NOT the claimed subject (e.g. an ephemeral scribe key
+    annotating on a proven patron's behalf). Fans the event out to all relays
+    in parallel (one thread each; wall-clock ~ the single slowest relay) and
+    parses each ack strictly per NIP-20 — only ``["OK", <id>, true, …]`` counts
+    as accepted.
+
+    Returns ``{success, event_id, accepted, attempted, relays}`` where
+    ``relays`` is a list of ``{relay, accepted, error}`` — one entry per relay.
+    On a malformed ``signed_event`` returns ``{success: False, error}`` instead.
+    """
+    if isinstance(signed_event, str):
+        try:
+            signed_event = json.loads(signed_event)
+        except (json.JSONDecodeError, TypeError):
+            return {"success": False, "error": "signed_event is not valid JSON."}
+    if not isinstance(signed_event, dict):
+        return {"success": False, "error": "signed_event must be a JSON object."}
+
+    message = json.dumps(["EVENT", signed_event])
+    from tollbooth.relay_registry import get_relays
+    relay_urls = relays or get_relays()
+
+    results: list[dict] = []
+    accepted = 0
+    with ThreadPoolExecutor(max_workers=len(relay_urls)) as pool:
+        futures = {pool.submit(_publish_one, url, message): url for url in relay_urls}
+        for future in as_completed(futures, timeout=_TIMEOUT + 2):
+            url = futures[future]
+            try:
+                ok, err = future.result()
+            except Exception as exc:  # noqa: BLE001
+                results.append({"relay": url, "accepted": False, "error": f"{url}: {exc}"})
+                continue
+            if ok:
+                accepted += 1
+            results.append({"relay": url, "accepted": ok, "error": err})
+
+    return {
+        "success": accepted > 0,
+        "event_id": signed_event.get("id"),
+        "accepted": accepted,
+        "attempted": len(relay_urls),
+        "relays": results,
+    }
+
+
 def publish_profile_event(
     signed_event: dict | str, npub: str, relays: list[str] | None = None,
 ) -> dict:
     """Relay a CLIENT-SIGNED kind-0 event after verifying it belongs to ``npub``.
 
     The wheel does NOT sign — it verifies (kind 0, pubkey == npub, valid
-    signature) and fans the event out to relays. Returns
-    ``{success, ok, total, errors}``.
+    signature) and then delegates the actual relay fan-out to the kind-agnostic
+    ``publish_event`` transport. Authorship policy lives HERE; transport lives
+    there. Returns ``{success, ok, total, errors}``.
     """
     if isinstance(signed_event, str):
         try:
@@ -152,27 +204,14 @@ def publish_profile_event(
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": f"Could not verify event: {exc}"}
 
-    message = json.dumps(["EVENT", signed_event])
-    from tollbooth.relay_registry import get_relays
-    relay_urls = relays or get_relays()
-
-    ok = 0
-    errors: list[str] = []
-    with ThreadPoolExecutor(max_workers=len(relay_urls)) as pool:
-        futures = {pool.submit(_publish_one, url, message): url for url in relay_urls}
-        for future in as_completed(futures, timeout=_TIMEOUT + 2):
-            url = futures[future]
-            try:
-                accepted, err = future.result()
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{url}: {exc}")
-                continue
-            if accepted:
-                ok += 1
-            elif err:
-                errors.append(err)
-
-    return {"success": ok > 0, "ok": ok, "total": len(relay_urls), "errors": errors}
+    result = publish_event(signed_event, relays)
+    errors = [r["error"] for r in result["relays"] if r["error"]]
+    return {
+        "success": result["success"],
+        "ok": result["accepted"],
+        "total": result["attempted"],
+        "errors": errors,
+    }
 
 
 def _publish_one(relay_url: str, message: str) -> tuple[bool, str | None]:
