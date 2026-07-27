@@ -3,6 +3,56 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.72.0 — 2026-07-27
+
+### Added — `publish_event()`, a kind-agnostic relay transport primitive
+
+The wheel had four relay-publish implementations and a consumer could reach none
+of them. `publish_profile_event` is kind-0 only and gates on
+`signed_event["pubkey"] == _npub_to_hex(npub)`; `_publish_one` and the three
+`_publish_to_relays` fan-outs are all private. So a consumer holding a
+legitimately-signed event of another kind had nothing to call — and one grew its
+own copy, the first relay fanout to live outside the wheel.
+
+`nostr_profile.publish_event(signed_event, relays=None)` is that missing
+primitive: pure, kind-agnostic transport that relays an already-signed event in
+parallel and reports `{success, event_id, accepted, attempted, relays}` with a
+per-relay `{relay, accepted, error}` breakdown. Acks are parsed strictly per
+NIP-20 — only `["OK", <id>, true, …]` counts as accepted, so a rate-limit
+rejection is never miscounted as published.
+
+It deliberately does **not** verify signer identity. Legitimate callers exist
+where the signer is not the claimed subject — an ephemeral "scribe" key
+publishing on behalf of a proven patron npub is the motivating case, and
+`publish_profile_event`'s identity gate rejects exactly that by construction.
+Authorship policy belongs to the caller; this layer is transport.
+
+### Changed — `publish_profile_event` delegates its fan-out
+
+It keeps its own kind-0, `signer == npub`, and Schnorr-signature validation and
+then hands the relay work to `publish_event` — which is the proof the new
+primitive's shape is right. Its `{success, ok, total, errors}` return is
+unchanged, so existing callers need no edits.
+
+The three class-based `_publish_to_relays` methods (`nostr_audit`,
+`nostr_notifications`, `nostr_credentials`) are untouched; they carry per-class
+relay state and consolidating them is a separate change.
+
+### Fixed — a dead refresh token no longer hides behind a live access token
+
+`restore_oauth_session` returned any unexpired cached access token as a live
+session, so the refresh token was never exercised. A revoked or expired refresh
+token stayed invisible until the first *write* failed hours later — read-only
+tools reported `connected: true` right up to the moment a post failed with
+`oauth_token_expired`.
+
+Tokens are now refreshed proactively once they enter a leeway window before
+expiry (`OAuthProviderConfig.refresh_leeway_seconds`, default 300), so a dead
+refresh token surfaces honestly at read time while the patron is still present.
+The leeway collapses to zero when no refresh is possible — `refresh_enabled` off
+or no stored refresh token — so a non-refreshable token still serves right up to
+its real expiry and never reports a premature expiry.
+
 ## 0.71.5 — 2026-07-25
 
 ### Changed — persistence watch shows only THIS Authority's own project
