@@ -2226,6 +2226,20 @@ class OperatorRuntime:
         self._async_executor_explicit = True
         self._async_executor_resolved = True
 
+    def uses_async_jobs(self) -> bool:
+        """True when this server has opted into the claim-check async-job path.
+
+        A server opts in by registering at least one job runner or spec, or by
+        installing a custom executor explicitly. Servers that never do so run no
+        background work at all, so ``service_status`` omits the ``async_jobs`` /
+        ``durable_jobs`` diagnostics entirely rather than advertising an inert
+        background-job subsystem — a present-but-idle block reads to an agent as
+        "there is a job subsystem here" and invites invented denial reasons.
+        """
+        return bool(
+            self._job_runners or self._job_specs or self._async_executor_explicit
+        )
+
     def durable_key_id(self) -> str:
         """Stable, non-secret per-operator selector for the closure key.
 
@@ -3510,6 +3524,11 @@ def register_standard_tools(
         except Exception:  # noqa: BLE001
             op_npub = None
 
+        # Only servers that opted into the claim-check async-job path report
+        # background-task diagnostics; the rest omit async_jobs/durable_jobs so
+        # an idle subsystem never reads as a live, denial-capable one.
+        uses_async = rt.uses_async_jobs()
+
         from tollbooth.tools.status import build_service_status
         status = build_service_status(
             service=service_name or slug,
@@ -3521,6 +3540,7 @@ def register_standard_tools(
             operator_npub=op_npub,
             process_id=os.getpid(),
             env=os.environ,
+            include_async_jobs=uses_async,
         )
         # What a patron must supply beyond npub proof (oauth / secure_courier /
         # none). Free and unauthenticated so an agent can answer "do I need
@@ -3529,8 +3549,9 @@ def register_standard_tools(
         # Durable long-runner diagnostics: the non-secret key_id names the
         # operator's Prefect Secret block (dpyc-closure-key-<key_id>), and
         # whether a detached executor is currently installed. Helps an operator
-        # provision the matching block without guessing.
-        if op_npub:
+        # provision the matching block without guessing. Gated on uses_async so
+        # a server with no background jobs never advertises a detached executor.
+        if op_npub and uses_async:
             from tollbooth.async_executor import InProcessExecutor
 
             status["durable_jobs"] = {

@@ -57,12 +57,19 @@ def build_service_status(
     operator_npub: str | None,
     process_id: int,
     env: Mapping[str, str],
+    include_async_jobs: bool = False,
 ) -> dict[str, Any]:
     """Assemble the service_status payload.
 
     ``operator_npub`` is ``None`` only when the runtime could not resolve it
     (the shim caught an exception); a resolved value — even an empty string —
     is fingerprinted, preserving the original closure's behavior.
+
+    ``include_async_jobs`` gates the background-task diagnostic: it is emitted
+    only when the server has actually opted into the async-job path (see
+    ``OperatorRuntime.uses_async_jobs``). A server that runs no background work
+    omits the block entirely rather than reporting an inert ``memory (default)``
+    backend that an agent would misread as a live, denial-capable subsystem.
     """
     build_info: dict[str, str] = {}
     for key in _BUILD_INFO_KEYS:
@@ -74,7 +81,7 @@ def build_service_status(
     if operator_npub is not None:
         op_npub_hash = hashlib.sha256(operator_npub.encode()).hexdigest()[:12]
 
-    return {
+    status: dict[str, Any] = {
         "success": True,
         "service": service,
         "slug": slug,
@@ -85,8 +92,10 @@ def build_service_status(
         "operator_npub_hash": op_npub_hash,
         "process_id": process_id,
         "build_info": build_info or None,
-        "async_jobs": build_docket_diagnostic(env),
     }
+    if include_async_jobs:
+        status["async_jobs"] = build_docket_diagnostic(env)
+    return status
 
 
 def build_upstream_oauth_block(

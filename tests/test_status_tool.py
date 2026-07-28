@@ -54,11 +54,18 @@ def test_docket_diagnostic_memory_scheme_is_not_durable():
     assert d["backend"] == "memory" and d["durable_across_recycles"] is False
 
 
-def test_service_status_includes_async_jobs_block():
-    assert _call(env={"FASTMCP_DOCKET_URL": "redis://h:6379"})["async_jobs"][
-        "durable_across_recycles"
-    ] is True
-    assert _call()["async_jobs"]["docket_url_set"] is False
+def test_service_status_includes_async_jobs_block_when_opted_in():
+    assert _call(
+        include_async_jobs=True, env={"FASTMCP_DOCKET_URL": "redis://h:6379"}
+    )["async_jobs"]["durable_across_recycles"] is True
+    assert _call(include_async_jobs=True)["async_jobs"]["docket_url_set"] is False
+
+
+def test_service_status_omits_async_jobs_block_by_default():
+    # A server that never opted into async jobs must not advertise an inert
+    # background-task subsystem — the block is absent entirely, not falsy.
+    assert "async_jobs" not in _call()
+    assert "async_jobs" not in _call(env={"FASTMCP_DOCKET_URL": "redis://h:6379"})
 
 
 def test_operator_npub_fingerprint_is_sha256_prefix():

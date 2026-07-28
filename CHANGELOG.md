@@ -3,6 +3,32 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.73.0 — 2026-07-28
+
+### Changed — `service_status` omits async-job diagnostics for servers that run none
+
+`service_status` unconditionally emitted an `async_jobs` block (and, for any
+registered operator, a `durable_jobs` block) for **every** server — even one
+that runs no background work. A server like schwab-mcp, which registers no job
+runners, reported `async_jobs: {backend: "memory (default)", …}` and a full
+`durable_jobs` block with `detached_executor_resolved: false`. To an agent that
+reads as a live, inert background-job subsystem, and it invents denial reasons
+from it ("the detached executor isn't resolved — maybe that's why my call
+failed"). The falsity is the harm: an honest status omits what the server does
+not have.
+
+Both blocks are now gated on the new `OperatorRuntime.uses_async_jobs()`
+predicate — true only when the server opted into the claim-check async-job path
+by registering a job runner or spec (`register_job_runner` /
+`register_job_spec`) or installing an executor explicitly (`set_async_executor`).
+Operators that use async jobs (optionality, excalibur) keep both blocks
+unchanged; operators that never do (schwab, taxsort, thebrain, cypher, sample,
+the Authorities) drop them entirely — the keys are **absent**, not falsy.
+
+`build_service_status` grows an `include_async_jobs: bool = False` parameter so
+the pure assembler stays testable; the runtime passes `uses_async_jobs()`. No
+consumer reads these blocks, so the change needs no downstream code edits.
+
 ## 0.72.0 — 2026-07-27
 
 ### Added — `publish_event()`, a kind-agnostic relay transport primitive
