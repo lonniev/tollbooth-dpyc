@@ -3,6 +3,71 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.74.0 — 2026-07-28
+
+### Added — `tollbooth.llm_route`: one place that decides where an operator's LLM calls go
+
+Three operators had independently grown the same code. excalibur-mcp (`resolve.py`,
+`refine.py`), optionality-mcp (`claude.py`), and taxsort-mcp (`tools/advisors.py`) each
+pinned `https://api.anthropic.com/v1/messages`, each declared its own copy of the
+server-side web-search tool, and two carried a byte-identical `clamp_timeout` down to the
+same 30/900/210 bounds. `optionality-mcp/claude.py` records the lineage in its own
+docstring — *"Modeled after `taxsort-mcp/tools/advisors.py`"*. They had already drifted:
+taxsort sits a model generation behind the other two.
+
+Per the SDK's DRY charter that is a wheel concern, so it moves here. A model change is
+now a restart rather than three releases.
+
+**The account is per model client, never per fleet.** The Factory and the operators
+happen to draw on one provider key today; that is resource allocation, not design.
+`LlmRoute` is therefore a frozen value object a caller constructs and holds — with its
+`api_key` passed in — never module state read from the environment. Two clients in one
+process can hold two different provider accounts with no change to this module. The
+environment supplies defaults; it is not the authority. A test constructs two routes with
+different keys precisely so a later refactor cannot quietly reintroduce a global.
+
+`LlmRoute.__repr__` redacts the key. A route rides inside detached job specs, log lines,
+and tracebacks; the dataclass default would have printed the operator's provider key into
+every one of them.
+
+The default route is a model router (OpenRouter) rather than a single lab, so the model
+behind a tier is configuration instead of a migration. Its Anthropic-compatible endpoint
+reads `x-api-key` and passes Anthropic's server-side `web_search` / `web_fetch`
+declarations through even to non-Anthropic models, so a caller's tool plumbing survives a
+model change untouched. Tier aliases (`writer`, `reader`) match the vocabulary of the
+Factory's CI-side resolver so the estate reads as one system, but the two resolve
+independently — neither reads the other's configuration. An explicit provider slug passes
+through untouched; an unrecognised alias raises rather than falling back to some default
+model, because a silent fallback is a bill nobody chose.
+
+Rollback to a direct Anthropic account is `TOLLBOOTH_LLM_ENDPOINT` plus the two model
+variables, and redelivering an Anthropic key. Nothing else changes.
+
+### Fixed — an exhausted model-router account was reported as a transient blip
+
+`llm_failure_situation` curates a provider refusal into an `AsyncJobSituation`, replacing
+per-operator copies of the same logic — and correcting them.
+
+Every copy detected an unfunded account by matching Anthropic's wording (`credit
+balance`, `purchase credits`, `plans & billing`), because Anthropic reports an empty
+account as a **400**. A model router reports it as a **402** reading *"Insufficient
+credits"*, which matches none of those needles. The result was an exhausted account
+curated as a generic transient failure: the operator's "feed me" alert never fired,
+schedulers kept hammering an endpoint that could not recover, and patrons were told to
+retry forever. The classifier now recognises both providers' wording, treats a bare 402
+from a metered LLM provider as unfunded, and reads a message-only signal so audit paths
+holding just an exception string classify the same way as paths holding a response.
+
+New `ErrorCode` members: `LLM_PROVIDER_UNFUNDED`, `LLM_PROVIDER_AUTH`,
+`LLM_MODEL_UNKNOWN`, `UPSTREAM_RATE_LIMITED`. The first two keep the wire strings
+eXcalibur already emits (`operator_llm_unfunded`, `operator_llm_auth`) so no consumer's
+UX branching breaks. `LLM_MODEL_UNKNOWN` is new and non-transient: a slug the provider no
+longer recognises is the signature of a marketplace retiring a model under a running
+deployment, and it stays broken until someone edits the configuration.
+
+Distinct from `tollbooth.upstream_payment`, which reads a bare 402 from a *business* API
+as a lapsed human subscription. That one renews; this one tops up.
+
 ## 0.73.0 — 2026-07-28
 
 ### Changed — `service_status` omits async-job diagnostics for servers that run none
