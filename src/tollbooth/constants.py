@@ -101,6 +101,21 @@ class ErrorCode:
     # the upstream provider. Non-transient: retrying will not help until the
     # subscription is restored. Built by tollbooth.upstream_payment.
     UPSTREAM_SUBSCRIPTION_REQUIRED = "upstream_subscription_required"
+    # An upstream refused because it is being asked to serve too fast. The only
+    # situation in this family that a retry can actually clear.
+    UPSTREAM_RATE_LIMITED = "upstream_rate_limited"
+
+    # The Operator's LLM provider (model router or lab) refused the call. These are
+    # Operator COGS problems — the patron can do nothing about any of them, so each is
+    # non-transient and each is worth waking the Operator for. Built by
+    # tollbooth.llm_route. Distinct from UPSTREAM_SUBSCRIPTION_REQUIRED: a business
+    # API's 402 means a human renews a plan, whereas a metered LLM account is topped up.
+    LLM_PROVIDER_UNFUNDED = "operator_llm_unfunded"  # account out of credit
+    LLM_PROVIDER_AUTH = "operator_llm_auth"          # key missing, wrong, or revoked
+    # The configured model slug is one the provider does not recognise — the signature
+    # of a marketplace renaming or retiring a model under a running deployment. Permanent
+    # until someone edits the configuration, so never report it as retryable.
+    LLM_MODEL_UNKNOWN = "operator_llm_model_unknown"
 
     # OAuth session-restoration situations (from
     # OperatorRuntime.restore_oauth_session → oauth_situation_response).

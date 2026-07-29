@@ -192,6 +192,16 @@ from tollbooth.async_situation import (
     AsyncJobSituation,
     situation_response_from_row,
 )
+from tollbooth.llm_route import (
+    LlmRoute,
+    build_messages_request,
+    classify_llm_failure,
+    llm_failure_situation,
+    model_for,
+    resolve_route,
+    web_fetch_tool,
+    web_search_tool,
+)
 from tollbooth.upstream_payment import (
     classify_upstream_payment,
     is_x402_payment_challenge,
@@ -302,6 +312,7 @@ __all__ = [
     "JsonExpressionConstraint",
     "LedgerCache",
     "LedgerSnapshot",
+    "LlmRoute",
     "LoyaltyDiscountConstraint",
     "MerkleTree",
     "NeonQueryError",
@@ -356,7 +367,9 @@ __all__ = [
     "VaultCipher",
     "X402Client",
     "async_validate_operator_tools",
+    "build_messages_request",
     "capability_uuid",
+    "classify_llm_failure",
     "classify_upstream_payment",
     "courier_health",
     "courier_ping",
@@ -368,7 +381,9 @@ __all__ = [
     "ensure_bootstrapped",
     "get_relays",
     "is_x402_payment_challenge",
+    "llm_failure_situation",
     "make_slug_tool",
+    "model_for",
     "probe_relay_liveness",
     "render_qr",
     "resolve_authority_npub",
@@ -376,6 +391,7 @@ __all__ = [
     "resolve_npub",
     "resolve_oracle_service",
     "resolve_relays",
+    "resolve_route",
     "resolve_service_by_name",
     # Identity Credential
     "sign_identity_credential",
@@ -389,5 +405,7 @@ __all__ = [
     "verify_nostr_certificate",
     # Operator Proof & Npub Ownership
     "verify_proof",
+    "web_fetch_tool",
+    "web_search_tool",
     "x402_wallet_template",
 ]
