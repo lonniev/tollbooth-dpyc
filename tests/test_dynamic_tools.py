@@ -46,6 +46,40 @@ class TestValidateParamSchema:
         assert validate_param_schema(["a", "b"])  # type: ignore[arg-type]
 
 
+class TestDefaultTypeChecking:
+    def test_default_must_match_declared_type(self) -> None:
+        errs = validate_param_schema(
+            {"since_ms": {"type": "int", "required": False, "default": "soon"}},
+        )
+        assert any("default must be of type int" in e for e in errs)
+
+    def test_matching_default_is_accepted(self) -> None:
+        assert validate_param_schema(
+            {"since_ms": {"type": "int", "required": False, "default": 0}},
+        ) == []
+
+    def test_bool_is_not_an_int_default(self) -> None:
+        """bool subclasses int in Python; a True default would reach a query as 1."""
+        errs = validate_param_schema(
+            {"since_ms": {"type": "int", "required": False, "default": True}},
+        )
+        assert any("default must be of type int" in e for e in errs)
+
+    def test_none_default_declares_a_nullable_param(self) -> None:
+        """``coalesce($title, i.title)`` wants a bound null, not a dropped name."""
+        assert validate_param_schema(
+            {"title": {"type": "string", "required": False, "default": None}},
+        ) == []
+
+    def test_nullable_param_accepts_null_at_call_time(self) -> None:
+        schema = {"title": {"type": "string", "required": False, "default": None}}
+        assert validate_params(schema, {"title": None}) == []
+
+    def test_non_nullable_param_still_rejects_null(self) -> None:
+        schema = {"title": {"type": "string", "required": False}}
+        assert validate_params(schema, {"title": None}) != []
+
+
 class TestValidateParams:
     schema = {  # noqa: RUF012
         "from_city": {"type": "string"},
@@ -136,6 +170,56 @@ class TestBuildDynamicHandler:
         h = build_dynamic_handler("find_airline_flights", SCHEMA, runner)
         await h(from_city="JFK", to_city="LHR", max_stops=1)
         assert captured["params"] == {"from_city": "JFK", "to_city": "LHR", "max_stops": 1}
+
+    async def test_omitted_optional_binds_its_declared_default(self) -> None:
+        """The four-day cypher-mcp outage, in miniature.
+
+        ``list_capabilities`` declared ``since_ms`` optional and its Cypher
+        referenced ``$since_ms`` unconditionally. Omitting it dropped the name
+        entirely, so the query ran against a parameter that was never bound and
+        died — every no-argument call failing, refunded, for four days. A backend
+        that interpolates each declared name needs *something* to bind.
+        """
+        captured: dict[str, Any] = {}
+
+        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+            captured["params"] = params
+            return {}
+
+        schema = {
+            "since_ms": {"type": "int", "required": False, "default": 0},
+            "note": {"type": "string", "required": False, "default": ""},
+        }
+        h = build_dynamic_handler("list_capabilities", schema, runner)
+        await h()
+        assert captured["params"] == {"since_ms": 0, "note": ""}
+
+        # A supplied value still wins over the default.
+        await h(since_ms=123)
+        assert captured["params"]["since_ms"] == 123
+
+    async def test_declared_default_is_published_in_the_signature(self) -> None:
+        """A caller reading tools/list must see the value it will actually get,
+        not a null that the declared type does not even admit."""
+
+        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+            return {}
+
+        schema = {"since_ms": {"type": "int", "required": False, "default": 0}}
+        h = build_dynamic_handler("list_capabilities", schema, runner)
+        assert inspect.signature(h).parameters["since_ms"].default == 0
+
+    async def test_optional_without_default_is_still_dropped(self) -> None:
+        """Absence stays expressible — some backends branch on it."""
+        captured: dict[str, Any] = {}
+
+        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+            captured["params"] = params
+            return {}
+
+        h = build_dynamic_handler("find_airline_flights", SCHEMA, runner)
+        await h(from_city="JFK", to_city="LHR")
+        assert "max_stops" not in captured["params"]
 
 
 # --------------------------------------------------------------------------
