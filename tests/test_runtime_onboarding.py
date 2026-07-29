@@ -209,7 +209,7 @@ class TestOnboardingStatus:
                 "btcpay_host": "https://pay.example.com",
                 "btcpay_api_key": "key123",
                 "btcpay_store_id": "store456",
-            }
+            }, ""
         rt._load_vault_creds = _mock_vault_creds
 
         result = await rt.onboarding_status()
@@ -239,7 +239,7 @@ class TestOnboardingStatus:
         rt._vault = MagicMock()
 
         async def _partial_creds(service, npub_override=None):
-            return {"btcpay_host": "https://pay.example.com"}
+            return {"btcpay_host": "https://pay.example.com"}, ""
         rt._load_vault_creds = _partial_creds
 
         result = await rt.onboarding_status()
@@ -258,7 +258,7 @@ class TestOnboardingStatus:
         rt._vault = MagicMock()
 
         async def _required_only(service, npub_override=None):
-            return {"required_key": "value"}
+            return {"required_key": "value"}, ""
         rt._load_vault_creds = _required_only
 
         result = await rt.onboarding_status()
@@ -336,7 +336,7 @@ class TestPatronOnboardingStatus:
         rt._vault = MagicMock()
 
         async def _empty(service, npub_override=None):
-            return {}
+            return {}, ""
         rt._load_vault_creds = _empty
 
         result = await rt.patron_onboarding_status("npub1patron")
@@ -353,7 +353,7 @@ class TestPatronOnboardingStatus:
         rt._vault = MagicMock()
 
         async def _full(service, npub_override=None):
-            return {"api_key": "key123", "brain_id": "brain-uuid"}
+            return {"api_key": "key123", "brain_id": "brain-uuid"}, ""
         rt._load_vault_creds = _full
 
         result = await rt.patron_onboarding_status("npub1patron")
@@ -481,7 +481,7 @@ class TestLoadCredentials:
         rt._operator_npub = "npub1testfake"
 
         with patch("tollbooth.tools.onboarding.load_config_from_vault", new_callable=AsyncMock) as mock_load:
-            mock_load.return_value = {"btcpay_host": "https://pay.example.com"}
+            mock_load.return_value = ({"btcpay_host": "https://pay.example.com"}, "")
             rt._courier = MagicMock()
 
             await rt.load_credentials(["btcpay_host"])
@@ -500,7 +500,7 @@ class TestLoadCredentials:
         rt._operator_npub = "npub1testfake"
 
         with patch("tollbooth.tools.onboarding.load_config_from_vault", new_callable=AsyncMock) as mock_load:
-            mock_load.return_value = {"api_key": "k"}
+            mock_load.return_value = ({"api_key": "k"}, "")
             rt._courier = MagicMock()
 
             await rt.load_credentials(["api_key"], service="test-patron")
@@ -524,11 +524,11 @@ class TestCashier:
         mock_client = MagicMock()
 
         with patch("tollbooth.tools.onboarding.load_config_from_vault", new_callable=AsyncMock) as mock_load:
-            mock_load.return_value = {
+            mock_load.return_value = ({
                 "btcpay_host": "https://pay.test",
                 "btcpay_api_key": "key",
                 "btcpay_store_id": "store",
-            }
+            }, "")
             rt._courier = MagicMock()
 
             with patch("tollbooth.btcpay_client.BTCPayClient") as mock_cls:
@@ -545,7 +545,7 @@ class TestCashier:
         rt._operator_npub = "npub1testfake"
 
         with patch("tollbooth.tools.onboarding.load_config_from_vault", new_callable=AsyncMock) as mock_load:
-            mock_load.return_value = {}
+            mock_load.return_value = ({}, "")
             rt._courier = MagicMock()
 
             with pytest.raises(ValueError, match="BTCPay not configured"):

@@ -1344,9 +1344,10 @@ class OperatorRuntime:
         # delivered operator secret surfaces under `configured` and is visible in Studio — but
         # an auto-included field that was never delivered is omitted, not nagged. See
         # classify_operator_secrets.
+        vault_situation = ""
         if self._operator_credential_template is not None:
             effective = self._courier_operator_template()
-            vault_creds = await self._load_vault_creds(
+            vault_creds, vault_situation = await self._load_vault_creds(
                 self._operator_credential_template.service,
             )
             cfg, miss, opt = classify_operator_secrets(
@@ -1354,16 +1355,32 @@ class OperatorRuntime:
                 set(self._operator_credential_template.fields),
                 set(vault_creds),
             )
+            if vault_situation:
+                # WHAT the operator must deliver comes from the template and is
+                # knowable without the vault — that guidance is this tool's whole
+                # job, so it stays. What is NOT knowable is what they have
+                # already delivered, so no field may be called absent: an unread
+                # vault must never send an operator to re-deliver secrets that
+                # are sitting there. `unknown` says exactly that much.
+                miss = [{**m, "status": "unknown"} for m in miss]
+                opt = [{**o, "status": "unknown"} for o in opt]
             configured.extend(cfg)
             missing.extend(miss)
             optional_missing.extend(opt)
 
-        ready = len(missing) == 0
+        # An unread vault is not a clean bill of health: with no `missing` entries
+        # to show for it, "ready" would be asserted from an unanswered question.
+        ready = len(missing) == 0 and not vault_situation
         if ready:
             summary = "Operator is fully configured and ready to serve."
         else:
             secret_missing = [m for m in missing if m["category"] == "secret"]
             parts = []
+            if vault_situation:
+                parts.append(
+                    f"credential vault could not be read ({vault_situation}) — "
+                    "delivered secrets could not be confirmed either way"
+                )
             if not identity_ok:
                 parts.append(f"Set {self._nsec_env_var} to boot")
             if not vault_ok:
@@ -1386,6 +1403,7 @@ class OperatorRuntime:
             "summary": summary,
             "bootstrap_error": bootstrap_error,
             "vault_ok": vault_ok,
+            "vault_situation": vault_situation,
             "credential_greeting": self._operator_credential_greeting,
             "credential_service": self.operator_credential_service,
             "operator_name": self._service_name,
@@ -1416,11 +1434,10 @@ class OperatorRuntime:
                 exc_info=True,
             )
 
-        vault_creds = await self._load_vault_creds(
+        vault_creds, vault_situation = await self._load_vault_creds(
             self._patron_credential_template.service,
             npub_override=patron_npub,
         )
-
         configured = []
         missing = []
         for name, spec in self._patron_credential_template.fields.items():
@@ -1433,19 +1450,31 @@ class OperatorRuntime:
                 entry = {
                     "field": name,
                     "category": "patron_secret",
-                    "status": "missing",
+                    # Same rule as the operator side: when the vault could not be
+                    # read, what this patron has delivered is unknown, not absent.
+                    "status": "unknown" if vault_situation else "missing",
                     "lifecycle": spec.lifecycle,
                     "how": spec.description if spec.description else "Deliver via Secure Courier.",
                 }
                 if spec.required:
                     missing.append(entry)
 
-        ready = len(missing) == 0
+        ready = len(missing) == 0 and not vault_situation
+        if vault_situation:
+            summary = (
+                f"Could not read the credential vault ({vault_situation}) — "
+                "what you have already delivered could not be confirmed either way."
+            )
+        elif ready:
+            summary = "Patron credentials configured."
+        else:
+            summary = f"Missing: {', '.join(m['field'] for m in missing)}"
         return {
             "ready": ready,
             "configured": configured,
             "missing": missing,
-            "summary": "Patron credentials configured." if ready else f"Missing: {', '.join(m['field'] for m in missing)}",
+            "summary": summary,
+            "vault_situation": vault_situation,
             "credential_type": "set_once",
             "credential_greeting": self._patron_credential_greeting,
             "credential_service": self.patron_credential_service,
@@ -1455,34 +1484,54 @@ class OperatorRuntime:
         self,
         service: str,
         npub_override: str | None = None,
-    ) -> dict[str, str]:
-        """Load credentials from vault for a given service."""
+    ) -> tuple[dict[str, str], str]:
+        """Load credentials from vault for a given service.
+
+        Returns ``(creds, situation)``.  A ``situation`` of ``""`` means the
+        vault answered — and an empty ``creds`` alongside it genuinely means
+        nothing is stored.  A non-empty ``situation`` means the question could
+        not be asked, and callers must not read that as an absence of
+        credentials.  See ``load_vault_credentials`` for the full vocabulary.
+        """
+        from tollbooth.constants import ErrorCode
+        from tollbooth.persistence_errors import classify_persistence_failure
+        from tollbooth.tools.onboarding import load_vault_credentials
+
         try:
-            from tollbooth.tools.onboarding import load_vault_credentials
-            courier = await self.courier()
-            if courier is None:
-                logger.debug("No courier available for credential load (service=%s)", service)
-                return {}
-            has_vault = (hasattr(courier, '_exchange')
-                         and courier._exchange._credential_vault is not None)
-            if not has_vault:
-                logger.warning(
-                    "Courier has no credential vault — cannot load credentials "
-                    "(service=%s, npub=%s)",
-                    service, (npub_override or "operator")[:20],
-                )
-                return {}
+            # Deriving the operator npub needs the nsec, so it is as capable of
+            # failing on an unbooted process as the courier is — both belong
+            # inside the guard.
             npub = npub_override or self.operator_npub()
-            result = await load_vault_credentials(courier, service, npub)
-            if result:
-                logger.info("Loaded %d credential fields for %s (service=%s)",
-                            len(result), npub[:20], service)
-            else:
-                logger.info("No credentials found for %s (service=%s)", npub[:20], service)
-            return result or {}
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Credential vault load failed (%s): %s", type(exc).__name__, exc)
-            return {}
+            courier = await self.courier()
+        except Exception as exc:  # noqa: BLE001 — identity/courier are I/O too
+            situation = classify_persistence_failure(exc)
+            logger.warning(
+                "Courier unavailable for credential load (service=%s): %s — reporting %s",
+                service, exc, situation,
+            )
+            return {}, situation
+
+        if courier is None:
+            logger.warning(
+                "No courier available for credential load (service=%s)", service,
+            )
+            return {}, ErrorCode.SECURE_COURIER_UNAVAILABLE
+
+        result, situation = await load_vault_credentials(courier, service, npub)
+        if situation:
+            logger.warning(
+                "Credential vault could not answer for %s (service=%s): %s",
+                npub[:20], service, situation,
+            )
+            return {}, situation
+
+        creds = result or {}
+        if creds:
+            logger.info("Loaded %d credential fields for %s (service=%s)",
+                        len(creds), npub[:20], service)
+        else:
+            logger.info("No credentials found for %s (service=%s)", npub[:20], service)
+        return creds, ""
 
     async def load_credentials(
         self,
@@ -1492,18 +1541,25 @@ class OperatorRuntime:
     ) -> dict[str, str]:
         """Load specific credentials from the Secure Courier vault.
 
+        Convenience read: returns only the requested fields that are present,
+        and ``{}`` when the vault holds none of them **or could not be read**.
+        Callers for whom that difference changes what they should tell someone
+        must use ``_load_vault_creds`` or ``load_patron_session`` instead, which
+        return the situation alongside the credentials.
+
         Args:
             field_names: Which fields to load.
             service: Credential service name. Defaults to operator credential service.
         """
         from tollbooth.tools.onboarding import load_config_from_vault
         svc = service or self.operator_credential_service
-        return await load_config_from_vault(
+        creds, _situation = await load_config_from_vault(
             await self.courier(),
             svc,
             self.operator_npub(),
             field_names,
         )
+        return creds
 
     # ------------------------------------------------------------------
     # Patron session persistence (general-purpose)
@@ -1552,12 +1608,21 @@ class OperatorRuntime:
         patron_npub: str,
         *,
         service: str | None = None,
-    ) -> dict[str, str] | None:
+    ) -> tuple[dict[str, str] | None, str]:
         """Restore patron session credentials from the encrypted vault.
 
         Call this on session miss (e.g., after process restart) before
-        returning "no active session." If credentials exist in the vault,
-        returns them as a dict. Returns None if not found.
+        returning "no active session."
+
+        Returns ``(creds, situation)``:
+
+        * ``(creds, "")`` — the vault answered and holds these credentials.
+        * ``(None, "")`` — the vault answered and holds nothing for this
+          patron. **This, and only this, means "never onboarded."**
+        * ``(None, situation)`` — the vault could not be read. Treat this as
+          "unknown", never as "no credentials": telling a connected patron to
+          re-authorize because a container was cold is the exact misreport this
+          signature exists to prevent.
 
         Args:
             patron_npub: The patron's npub (vault key).
@@ -1566,8 +1631,13 @@ class OperatorRuntime:
         """
         svc = service or self.patron_credential_service
         if not svc:
-            return None
-        return await self._load_vault_creds(svc, npub_override=patron_npub) or None
+            return None, ""
+        creds, situation = await self._load_vault_creds(
+            svc, npub_override=patron_npub,
+        )
+        if situation:
+            return None, situation
+        return (creds or None), ""
 
     # ------------------------------------------------------------------
     # Field-level patron credential CRUD (read-merge-write)
@@ -1618,9 +1688,19 @@ class OperatorRuntime:
         svc = self._patron_storage_service(service)
         if not svc:
             return False
-        existing = await self.load_patron_session(patron_npub, service=svc) or {}
-        existing[field] = value
-        return await self.store_patron_session(patron_npub, existing, service=svc)
+        existing, situation = await self.load_patron_session(patron_npub, service=svc)
+        if situation:
+            # Read-merge-WRITE: merging into an unread blob and storing it would
+            # overwrite every field we failed to read — silently destroying the
+            # patron's access_token and refresh_token. Refuse the write instead.
+            logger.warning(
+                "Refusing credential merge for %s (service=%s): vault unreadable (%s)",
+                patron_npub[:20], svc, situation,
+            )
+            return False
+        merged = dict(existing or {})
+        merged[field] = value
+        return await self.store_patron_session(patron_npub, merged, service=svc)
 
     async def delete_patron_credential(
         self,
@@ -1633,11 +1713,20 @@ class OperatorRuntime:
         svc = self._patron_storage_service(service)
         if not svc:
             return False
-        existing = await self.load_patron_session(patron_npub, service=svc) or {}
-        if field not in existing:
+        existing, situation = await self.load_patron_session(patron_npub, service=svc)
+        if situation:
+            # Same hazard as update: a write built on an unread blob erases the
+            # fields we could not see. "Absent" is not knowable right now.
+            logger.warning(
+                "Refusing credential delete for %s (service=%s): vault unreadable (%s)",
+                patron_npub[:20], svc, situation,
+            )
+            return False
+        remaining = dict(existing or {})
+        if field not in remaining:
             return True  # already absent
-        del existing[field]
-        return await self.store_patron_session(patron_npub, existing, service=svc)
+        del remaining[field]
+        return await self.store_patron_session(patron_npub, remaining, service=svc)
 
     async def get_patron_credential(
         self,
@@ -1646,12 +1735,12 @@ class OperatorRuntime:
         *,
         service: str | None = None,
     ) -> str | None:
-        """Read a single credential field. Returns None if absent."""
+        """Read a single credential field. Returns None if absent or unreadable."""
         svc = self._patron_storage_service(service)
         if not svc:
             return None
-        existing = await self.load_patron_session(patron_npub, service=svc) or {}
-        return existing.get(field)
+        existing, _situation = await self.load_patron_session(patron_npub, service=svc)
+        return (existing or {}).get(field)
 
     async def list_patron_credential_fields(
         self,
@@ -1663,8 +1752,8 @@ class OperatorRuntime:
         svc = self._patron_storage_service(service)
         if not svc:
             return []
-        existing = await self.load_patron_session(patron_npub, service=svc) or {}
-        return list(existing.keys())
+        existing, _situation = await self.load_patron_session(patron_npub, service=svc)
+        return list((existing or {}).keys())
 
     # ------------------------------------------------------------------
     # OAuth session restore (generic refresh-and-persist)
@@ -1687,8 +1776,18 @@ class OperatorRuntime:
             ``access_token``, ``token_json``, and ``expires_at``.
 
             ``(None, situation)`` on failure — *situation* is one of
-            ``"no_oauth_config"``, ``"no_credentials"``,
-            ``"token_expired"``, or ``"vault_bootstrapping"``.
+            ``"no_oauth_config"``, ``"no_credentials"``, ``"token_expired"``,
+            ``"operator_not_configured"``, or a persistence situation from
+            ``classify_persistence_failure`` (``"vault_bootstrapping"``,
+            ``"persistence_quota_exceeded"``, ``"persistence_misconfigured"``).
+
+        Each situation is a different instruction to a different person, so none
+        of them may stand in for another.  ``no_credentials`` sends the patron
+        to re-authorize; ``operator_not_configured`` sends the *operator* to
+        deliver secrets; ``persistence_quota_exceeded`` sends the Authority to
+        restore capacity; ``vault_bootstrapping`` asks only for patience. They
+        were all reported as ``no_credentials`` or ``token_expired`` until the
+        vault read learned to say which one it meant.
         """
         opc = self._oauth_provider
         if opc is None:
@@ -1696,11 +1795,11 @@ class OperatorRuntime:
 
         svc = opc.service_name
 
-        # Stage 1: load from vault
-        try:
-            creds = await self.load_patron_session(patron_npub, service=svc)
-        except Exception:  # noqa: BLE001
-            return None, "vault_bootstrapping"
+        # Stage 1: load from vault. A vault that could not answer is NOT a
+        # patron who never authorized — propagate what actually happened.
+        creds, situation = await self.load_patron_session(patron_npub, service=svc)
+        if situation:
+            return None, situation
 
         if not creds or not creds.get("access_token"):
             return None, "no_credentials"
@@ -1731,17 +1830,27 @@ class OperatorRuntime:
         if not can_refresh:
             return None, "token_expired"
 
-        try:
-            op_creds = await self.load_credentials(
-                [opc.client_id_field, opc.client_secret_field],
-            )
-        except Exception:  # noqa: BLE001
-            return None, "token_expired"
+        # The OPERATOR's app credentials, needed to perform the refresh. Read
+        # through the situated primitive: an unreadable operator vault has
+        # nothing to do with the patron's token, yet reporting it as
+        # `token_expired` sent patrons to re-authorize a session that was fine.
+        op_creds, op_situation = await self._load_vault_creds(
+            self.operator_credential_service,
+        )
+        if op_situation:
+            return None, op_situation
 
         client_id = op_creds.get(opc.client_id_field, "")
         client_secret = op_creds.get(opc.client_secret_field, "")
         if not client_id or not client_secret:
-            return None, "token_expired"
+            # The vault answered and the operator has not delivered these. An
+            # operator setup gap, not a lapsed patron session — and the one
+            # person who can fix it is not the patron.
+            logger.warning(
+                "Cannot refresh OAuth for %s: operator has not delivered %s/%s",
+                patron_npub[:20], opc.client_id_field, opc.client_secret_field,
+            )
+            return None, "operator_not_configured"
 
         try:
             from tollbooth.oauth2_collector import refresh_access_token
@@ -1751,6 +1860,17 @@ class OperatorRuntime:
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "OAuth token refresh failed for %s: %s", patron_npub[:20], exc,
+            )
+            return None, "token_expired"
+
+        # A response carrying no access token is a refusal wearing a 200. Writing
+        # it back would store `access_token: ""` over the working credentials and
+        # turn a transient hiccup into a session the patron has to rebuild by
+        # hand — so treat it as the failed refresh it is and persist nothing.
+        if not new_token.get("access_token"):
+            logger.warning(
+                "OAuth refresh for %s returned no access_token; leaving the "
+                "vaulted credentials untouched", patron_npub[:20],
             )
             return None, "token_expired"
 
@@ -1951,6 +2071,43 @@ class OperatorRuntime:
                     "This is a deployment-side issue, not a patron action."
                 ),
                 "next_steps": ["Contact the operator"],
+            },
+            # The vault read can now say WHY it couldn't answer. Without these
+            # three the honest situations would land in the unknown branch and
+            # be told to re-authorize — the very advice they must not receive.
+            "secure_courier_unavailable": {
+                "error_code": ErrorCode.SECURE_COURIER_UNAVAILABLE,
+                "error": (
+                    "The Secure Courier isn't available yet, so the credential "
+                    "vault can't be reached. Your authorization is unaffected."
+                ),
+                "next_steps": ["Repeat your request shortly — no re-authentication needed."],
+            },
+            "persistence_quota_exceeded": {
+                "error_code": ErrorCode.PERSISTENCE_QUOTA_EXCEEDED,
+                "error": (
+                    "The operator's database has reached its provider quota, so "
+                    "stored credentials can't be read right now. Retrying will "
+                    "NOT help, and your authorization is unaffected — the "
+                    "operator's Authority must restore capacity."
+                ),
+                "next_steps": [
+                    ("Try again later — capacity is restored by the operator's "
+                     "Authority, not by retrying now"),
+                ],
+            },
+            "persistence_misconfigured": {
+                "error_code": ErrorCode.PERSISTENCE_MISCONFIGURED,
+                "error": (
+                    "The operator's credential store rejected the read with a "
+                    "permanent error — this will NOT resolve by retrying, and "
+                    "your authorization is unaffected. The operator must repair "
+                    "the store."
+                ),
+                "next_steps": [
+                    ("Notify the operator — this is an operator-side repair, "
+                     "not a patron-actionable error"),
+                ],
             },
         }
 
@@ -3758,7 +3915,9 @@ def register_standard_tools(
             opc = rt._oauth_provider
             if opc is not None:
                 try:
-                    creds = await rt.load_patron_session(resolved, service=opc.service_name)
+                    creds, _situation = await rt.load_patron_session(
+                        resolved, service=opc.service_name,
+                    )
                 except Exception:  # noqa: BLE001
                     creds = None
                 import time as _t

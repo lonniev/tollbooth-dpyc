@@ -3,6 +3,74 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.75.0 — 2026-07-29
+
+### Fixed — a vault that couldn't be read said "you never authorized"
+
+An eXcalibur post sat unpublished for two days while every 30-minute scheduler tick told
+its owner their X authorization was missing or expired. X was connected the whole time and
+the account was funded. All three reported reasons were false.
+
+The vault read collapsed every failure into "empty", and "empty" was read as "this patron
+never onboarded". Three layers each swallowed: `load_vault_credentials` turned an absent
+courier, an unattached vault, and *any* exception into `None` (at `logger.debug`);
+`_load_vault_creds` did the same into `{}`; and `restore_oauth_session` turned `{}` into
+`no_credentials`. Its `except Exception: return None, "vault_bootstrapping"` was
+unreachable — the layer below had already eaten the exception — so `vault_bootstrapping`
+was a situation the SDK could describe but never emit.
+
+The scheduler is the most cold-start-exposed caller there is: the 30-minute cadence exists
+precisely so Neon can scale to zero between ticks. It hit the no-I/O branch every time.
+
+**The vault read now speaks the vocabulary `ErrorCode` already defines.** No new concepts
+were invented; the situations and their copy were already written and merely unreachable.
+
+- `load_vault_credentials` / `load_config_from_vault` / `_load_vault_creds` /
+  `load_patron_session` return `(value, situation)`. The load-bearing distinction:
+  `({}, "")` means *the vault answered and holds nothing* — the only result that may ever
+  become `no_credentials` — while `(None, situation)` means *we could not ask*.
+- New `tollbooth.persistence_errors.classify_persistence_failure` names a failed read as
+  `persistence_quota_exceeded` / `persistence_misconfigured` / `vault_bootstrapping`,
+  defaulting optimistically. `PricingResolver`'s private `_is_permanent_sql_error` and
+  `_is_quota_error` move here as the shared implementation — the peer of
+  `llm_route.classify_llm_failure` and `upstream_payment.classify_upstream_payment`.
+- `restore_oauth_session` propagates the vault's situation instead of flattening it, and
+  a refresh blocked by *undelivered operator app credentials* now reports
+  `operator_not_configured` rather than `token_expired` — that gap is the operator's to
+  close, and the patron was being sent to fix it.
+- `check_oauth_status` reads the operator's app credentials through the situated path too.
+  A cold vault previously yielded blank client credentials and burned the patron's
+  single-use authorization code against the provider, failing with a message that named
+  nothing — right after they had clicked Allow.
+- `oauth_situation_response` gained entries for `secure_courier_unavailable`,
+  `persistence_quota_exceeded`, and `persistence_misconfigured`, so no producible
+  situation falls through to `oauth_situation_unknown` and gets told to re-authorize.
+  The two non-retryable ones say so explicitly.
+
+### Fixed — read-merge-write could erase a patron's tokens
+
+`update_patron_credential` and `delete_patron_credential` merged into whatever
+`load_patron_session` returned and wrote the result back. On an unreadable vault that was
+`{}`, so the store was overwritten with a single field — silently destroying the patron's
+`access_token` and `refresh_token`. Both now refuse the write when the vault could not be
+read. Relatedly, an OAuth refresh response carrying no `access_token` is a refusal wearing
+a 200; it is no longer persisted over working credentials.
+
+### Changed — onboarding status distinguishes "not delivered" from "not readable"
+
+`onboarding_status` and `patron_onboarding_status` still list what must be delivered (that
+comes from the template and is knowable without the vault), but mark each entry `unknown`
+rather than `missing` when the vault could not be read, carry a `vault_situation` field,
+and never report `ready` on the strength of a question that went unanswered.
+
+### Tests
+
+The gap that let this survive: every existing test mocked `restore_oauth_session` to
+return a situation, verifying the mapping table while nothing exercised the producer. New
+`tests/test_vault_read_situations.py` tests the producer end, including the negative
+assertion that matters most — an unreadable vault never yields `no_credentials` — plus the
+merge guards and a check that no producible situation falls through to unknown.
+
 ## 0.74.0 — 2026-07-28
 
 ### Added — `tollbooth.llm_route`: one place that decides where an operator's LLM calls go
