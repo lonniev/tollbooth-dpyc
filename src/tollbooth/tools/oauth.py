@@ -128,9 +128,13 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
     resolved = rt.resolve_npub(npub)
 
     # Load pending state (PKCE verifier, redirect_uri)
-    pending = await rt.load_patron_session(
+    pending, pending_situation = await rt.load_patron_session(
         resolved, service=f"_oauth_pending_{oauth_service}",
     )
+    if pending_situation:
+        # Mid-dance: the patron has already clicked Allow. Telling them to start
+        # over because the vault was cold would discard a completed grant.
+        return rt.oauth_situation_response(pending_situation)
     if not pending or "redirect_uri" not in pending:
         return {
             "success": False,
@@ -143,12 +147,17 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
     _cid_field = opc.client_id_field
     _csec_field = opc.client_secret_field
     try:
-        creds = await rt.load_credentials(
-            [_cid_field, _csec_field],
-        )
+        creds, op_situation = await rt._load_vault_creds(rt.operator_credential_service)
     except Exception:
         logger.exception("Failed to load operator credentials")
         return {"success": False, "error": "Operator credentials could not be loaded. Check operator logs."}
+
+    if op_situation:
+        # The patron has already clicked Allow; the authorization code is real
+        # and waiting. Exchanging it with blank client credentials would burn a
+        # single-use code and fail at the provider with a message that names
+        # nothing. Say what actually happened instead.
+        return rt.oauth_situation_response(op_situation)
 
     client_id = creds.get(_cid_field, "")
     client_secret = creds.get(_csec_field, "")

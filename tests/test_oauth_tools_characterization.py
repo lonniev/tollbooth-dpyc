@@ -51,8 +51,11 @@ def _runtime(*, opc=OPC, on_token=None):
     rt = OperatorRuntime(tool_registry={}, service_name="Test", oauth_provider=opc)
     rt.require_caller_proof = AsyncMock(return_value=None)
     rt.load_credentials = AsyncMock(return_value={"app_key": "CID", "secret": "CSEC"})
+    rt._load_vault_creds = AsyncMock(
+        return_value=({"app_key": "CID", "secret": "CSEC"}, ""),
+    )
     rt.store_patron_session = AsyncMock(return_value=True)
-    rt.load_patron_session = AsyncMock(return_value=None)
+    rt.load_patron_session = AsyncMock(return_value=(None, ""))
     return rt
 
 
@@ -130,7 +133,7 @@ async def test_begin_oauth_collector_not_found():
 @pytest.mark.asyncio
 async def test_check_status_no_pending_flow():
     rt = _runtime()
-    rt.load_patron_session = AsyncMock(return_value=None)
+    rt.load_patron_session = AsyncMock(return_value=(None, ""))
     tools = _register(rt)
     r = await tools["check_oauth_status"](npub=PATRON, dpop_token="ok")
     assert r["success"] is False and "No pending OAuth flow" in r["error"]
@@ -139,7 +142,7 @@ async def test_check_status_no_pending_flow():
 @pytest.mark.asyncio
 async def test_check_status_code_pending():
     rt = _runtime()
-    rt.load_patron_session = AsyncMock(return_value={"redirect_uri": "https://c.example", "pkce_verifier": "V"})
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
     tools = _register(rt)
     with patch("tollbooth.registry.resolve_service_by_name",
                new=AsyncMock(return_value={"url": "https://collector.example"})), \
@@ -152,7 +155,7 @@ async def test_check_status_code_pending():
 @pytest.mark.asyncio
 async def test_check_status_completes_and_persists_tokens():
     rt = _runtime()
-    rt.load_patron_session = AsyncMock(return_value={"redirect_uri": "https://c.example", "pkce_verifier": "V"})
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
     tools = _register(rt)
     token = {"access_token": "AT", "token_type": "Bearer", "refresh_token": "RT", "expires_at": 1999}
     with patch("tollbooth.registry.resolve_service_by_name",
@@ -176,7 +179,7 @@ async def test_check_status_completes_and_persists_tokens():
 @pytest.mark.asyncio
 async def test_check_status_exchange_failure():
     rt = _runtime()
-    rt.load_patron_session = AsyncMock(return_value={"redirect_uri": "https://c.example", "pkce_verifier": "V"})
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
     tools = _register(rt)
     with patch("tollbooth.registry.resolve_service_by_name",
                new=AsyncMock(return_value={"url": "https://collector.example"})), \
@@ -191,7 +194,7 @@ async def test_check_status_exchange_failure():
 @pytest.mark.asyncio
 async def test_check_status_on_token_received_merges_extra():
     rt = _runtime(on_token=AsyncMock(return_value={"account_hash": "H123"}))
-    rt.load_patron_session = AsyncMock(return_value={"redirect_uri": "https://c.example"})
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example"}, ""))
     tools = _register(rt)
     token = {"access_token": "AT", "token_type": "Bearer"}
     with patch("tollbooth.registry.resolve_service_by_name",

@@ -87,7 +87,7 @@ def _runtime_with_exchange(exchange, *, on_proven=None):
     rt._courier = SimpleNamespace(_exchange=exchange)
     rt._on_npub_proven = on_proven
     # Stub persistence the drain doesn't exercise.
-    rt.load_patron_session = AsyncMock(return_value={})  # no challenge_ts
+    rt.load_patron_session = AsyncMock(return_value=({}, ""))  # no challenge_ts
     record = SimpleNamespace(verified_at=1000.0, expires_at=1000.0 + 7200)
     cache = SimpleNamespace(mark_proven=AsyncMock(return_value=record))
     rt.proven_npub_cache = AsyncMock(return_value=cache)

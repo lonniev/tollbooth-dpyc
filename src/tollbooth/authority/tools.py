@@ -1437,7 +1437,13 @@ def register_authority_tools(
         # key, the watch degrades to the reactive self-probe + operator alerts above.
         neon_creds: dict[str, str] = {}
         try:
-            neon_creds = await runtime._load_vault_creds(OPERATOR_CREDENTIAL_TEMPLATE.service)
+            neon_creds, neon_situation = await runtime._load_vault_creds(
+                OPERATOR_CREDENTIAL_TEMPLATE.service,
+            )
+            if neon_situation:
+                logger.info(
+                    "Could not read Neon watch secrets from vault: %s", neon_situation,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.info("Could not load Neon watch secrets from vault: %s", exc)
         neon_api_key = (neon_creds.get("neon_api_key") or "").strip()

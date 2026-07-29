@@ -78,9 +78,18 @@ class PatronSessionCache[T]:
             return session
 
         try:
-            creds = await self._runtime.load_patron_session(
+            creds, situation = await self._runtime.load_patron_session(
                 npub, service=self._service,
             )
+            if situation:
+                # An unreadable vault is not an absent session. Returning None
+                # here would have the caller announce "no active session" and
+                # send the patron to re-onboard over a cold container.
+                logger.warning(
+                    "Cannot restore %s session for %s: vault unreadable (%s)",
+                    self._service, npub[:20], situation,
+                )
+                return None
             if not creds:
                 return None
 

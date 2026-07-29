@@ -697,16 +697,16 @@ class TestRestoreOAuthSessionProactiveRefresh:
         }
 
         async def _load_patron_session(npub, service=None):
-            return dict(creds)
+            return dict(creds), ""
 
-        async def _load_credentials(fields):
-            return {"app_key": "cid", "app_secret": "csec"}
+        async def _load_vault_creds(service, npub_override=None):
+            return {"app_key": "cid", "app_secret": "csec"}, ""
 
         async def _dead_refresh(*args, **kwargs):
             raise RuntimeError("invalid_grant: refresh token expired")
 
         monkeypatch.setattr(rt, "load_patron_session", _load_patron_session)
-        monkeypatch.setattr(rt, "load_credentials", _load_credentials)
+        monkeypatch.setattr(rt, "_load_vault_creds", _load_vault_creds)
         monkeypatch.setattr(collector, "refresh_access_token", _dead_refresh)
 
         result, situation = await rt.restore_oauth_session(VALID_NPUB)
@@ -731,10 +731,10 @@ class TestRestoreOAuthSessionProactiveRefresh:
         stored: dict[str, str] = {}
 
         async def _load_patron_session(npub, service=None):
-            return dict(creds)
+            return dict(creds), ""
 
-        async def _load_credentials(fields):
-            return {"app_key": "cid", "app_secret": "csec"}
+        async def _load_vault_creds(service, npub_override=None):
+            return {"app_key": "cid", "app_secret": "csec"}, ""
 
         async def _ok_refresh(*args, **kwargs):
             return {
@@ -749,7 +749,7 @@ class TestRestoreOAuthSessionProactiveRefresh:
             return True
 
         monkeypatch.setattr(rt, "load_patron_session", _load_patron_session)
-        monkeypatch.setattr(rt, "load_credentials", _load_credentials)
+        monkeypatch.setattr(rt, "_load_vault_creds", _load_vault_creds)
         monkeypatch.setattr(rt, "store_patron_session", _store)
         monkeypatch.setattr(collector, "refresh_access_token", _ok_refresh)
 
@@ -776,7 +776,7 @@ class TestRestoreOAuthSessionProactiveRefresh:
         refreshed = {"called": False}
 
         async def _load_patron_session(npub, service=None):
-            return dict(creds)
+            return dict(creds), ""
 
         async def _boom(*args, **kwargs):
             refreshed["called"] = True
@@ -806,7 +806,7 @@ class TestRestoreOAuthSessionProactiveRefresh:
         }
 
         async def _load_patron_session(npub, service=None):
-            return dict(creds)
+            return dict(creds), ""
 
         monkeypatch.setattr(rt, "load_patron_session", _load_patron_session)
 

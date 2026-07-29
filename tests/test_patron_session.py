@@ -18,8 +18,10 @@ class FakeRuntime:
     def __init__(self):
         self._vault: dict[tuple[str, str], dict] = {}
 
-    async def load_patron_session(self, npub: str, service: str = "") -> dict | None:
-        return self._vault.get((service, npub))
+    async def load_patron_session(
+        self, npub: str, service: str = "",
+    ) -> tuple[dict | None, str]:
+        return self._vault.get((service, npub)), ""
 
     async def store_patron_session(self, npub: str, data: dict, service: str = "") -> None:
         self._vault[(service, npub)] = data

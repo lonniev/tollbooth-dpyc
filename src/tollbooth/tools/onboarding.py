@@ -25,36 +25,74 @@ async def load_vault_credentials(
     courier_service: Any,
     service: str,
     operator_npub: str,
-) -> dict[str, str] | None:
+) -> tuple[dict[str, str] | None, str]:
     """Load credentials from the Secure Courier vault for a given service.
 
     This is the generic helper that any operator can use.  It accesses
     the courier's credential vault, fetches the encrypted blob, decrypts
     it, and returns the credential dict.
 
+    Returns ``(creds, situation)`` — the same discriminated shape
+    ``OperatorRuntime.restore_oauth_session`` uses.  The distinction the whole
+    stack rests on is:
+
+    * ``({}, "")`` — **the vault answered and holds nothing for this key.**
+      Only this may ever be read as "never onboarded".
+    * ``(None, situation)`` — we could not ask.  Reporting this as "nothing
+      stored" is what let a cold container tell a connected patron they had
+      never authorized, and an out-of-quota database tell a funded patron they
+      were broke.
+
+    ``situation`` is an ``ErrorCode`` value the caller can hand straight to a
+    situation table: ``secure_courier_unavailable``, ``vault_bootstrapping``,
+    ``persistence_quota_exceeded``, or ``persistence_misconfigured``.
+
     Args:
         courier_service: The operator's ``SecureCourierService`` instance.
         service: The credential template service name (e.g.,
             ``"tollbooth-sample-operator"``).
         operator_npub: The operator's npub (vault key).
-
-    Returns:
-        Dict of credential field names to values, or None if not found.
     """
+    from tollbooth.constants import ErrorCode
+    from tollbooth.persistence_errors import classify_persistence_failure
+
     if courier_service is None:
-        return None
+        return None, ErrorCode.SECURE_COURIER_UNAVAILABLE
+
+    vault = getattr(
+        getattr(courier_service, "_exchange", None), "_credential_vault", None,
+    )
+    if vault is None:
+        # The courier exists but its vault hasn't been attached yet —
+        # ``OperatorRuntime.courier()`` retries this attachment on each call, so
+        # it is a cold-start state, not an absence of credentials.
+        return None, ErrorCode.VAULT_BOOTSTRAPPING
+
     try:
-        vault = courier_service._exchange._credential_vault
-        if vault is None:
-            return None
         blob = await vault.fetch_credentials(service, operator_npub)
-        if blob is None:
-            return None
+    except Exception as exc:  # noqa: BLE001 — classified, never swallowed
+        situation = classify_persistence_failure(exc)
+        logger.warning(
+            "Vault credential fetch failed for %s (%s): %s — reporting %s",
+            service, type(exc).__name__, exc, situation,
+        )
+        return None, situation
+
+    if blob is None:
+        return {}, ""  # the vault answered: nothing is stored here
+
+    try:
         plaintext = courier_service._exchange._vault_decrypt(blob)
-        return json.loads(plaintext)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Vault credential load failed for %s: %s", service, exc)
-        return None
+        return json.loads(plaintext), ""
+    except Exception as exc:  # noqa: BLE001 — a stored blob we cannot read
+        # Reaching here means the vault HELD something and we could not open it:
+        # a wrong key or a corrupt record. Never a cold start, and never
+        # "nothing stored" — waiting will not fix either one.
+        logger.warning(
+            "Vault credential decode failed for %s (%s): %s",
+            service, type(exc).__name__, exc,
+        )
+        return None, ErrorCode.PERSISTENCE_MISCONFIGURED
 
 
 # ---------------------------------------------------------------------------
@@ -67,27 +105,32 @@ async def load_config_from_vault(
     service: str,
     operator_npub: str,
     field_names: list[str],
-) -> dict[str, str]:
+) -> tuple[dict[str, str], str]:
     """Load specific config fields from the Secure Courier vault.
 
-    Returns a dict of field_name → value for fields that are present
-    in the vault.  Missing fields are omitted from the result.
+    Returns ``(fields, situation)``.  ``fields`` maps field_name → value for the
+    requested names present in the vault; names absent from the vault are simply
+    omitted.  ``situation`` is ``""`` when the vault answered — so an empty dict
+    with an empty situation means "asked, and the operator has delivered none of
+    these", which is a genuine onboarding state rather than a fault.
 
     Use this to hydrate operator config at runtime::
 
-        creds = await load_config_from_vault(
+        creds, situation = await load_config_from_vault(
             courier, "my-service", npub,
             ["api_key", "api_secret", "host"]
         )
+        if situation:
+            return warming_up_response(situation)
         client = MyClient(
             api_key=creds.get("api_key"),
             api_secret=creds.get("api_secret"),
             host=creds.get("host"),
         )
     """
-    vault_creds = await load_vault_credentials(
+    vault_creds, situation = await load_vault_credentials(
         courier_service, service, operator_npub,
     )
     if vault_creds is None:
-        return {}
-    return {k: v for k, v in vault_creds.items() if k in field_names}
+        return {}, situation
+    return {k: v for k, v in vault_creds.items() if k in field_names}, ""

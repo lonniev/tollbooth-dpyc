@@ -16,28 +16,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from tollbooth.pricing import ToolPricing
 
+from tollbooth.persistence_errors import is_permanent_sql_error, is_quota_error
 from tollbooth.pricing_model import PipelineStep, PricingModel
 
 logger = logging.getLogger(__name__)
-
-# Postgres SQLSTATE classes that will never resolve by retrying — the
-# operator's database needs repair, not patience. Class 28 = invalid
-# authorization, class 3D = invalid catalog, class 42 = syntax errors and
-# access-rule violations (42501 permission denied, 42P01 undefined table).
-_PERMANENT_SQLSTATE_CLASSES = ("28", "3D", "42")
-
-
-def _is_permanent_sql_error(exc: Exception) -> bool:
-    """True when *exc* is a NeonQueryError carrying a permanent SQLSTATE."""
-    code = getattr(exc, "code", "")
-    return bool(code) and code[:2] in _PERMANENT_SQLSTATE_CLASSES
-
-
-def _is_quota_error(exc: Exception) -> bool:
-    """True when *exc* is the persistence provider (Neon) refusing with HTTP
-    402 — the database has exhausted its compute/storage quota. Non-transient
-    and distinct from a SQL fault: the books are locked for billing, not code."""
-    return getattr(exc, "status", 0) == 402
 
 
 class PricingResolver:
@@ -91,7 +73,7 @@ class PricingResolver:
         relation, auth failure) — the operator must repair the database.
         Meaningful only while ``neon_available`` is False.
         """
-        return self._last_error is not None and _is_permanent_sql_error(self._last_error)
+        return self._last_error is not None and is_permanent_sql_error(self._last_error)
 
     @property
     def last_error_quota(self) -> bool:
@@ -101,7 +83,7 @@ class PricingResolver:
         database must upgrade the plan or wait for the quota to reset.
         Meaningful only while ``neon_available`` is False.
         """
-        return self._last_error is not None and _is_quota_error(self._last_error)
+        return self._last_error is not None and is_quota_error(self._last_error)
 
     @property
     def last_error_summary(self) -> str:
@@ -153,7 +135,7 @@ class PricingResolver:
                 return
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                if _is_permanent_sql_error(exc) or _is_quota_error(exc):
+                if is_permanent_sql_error(exc) or is_quota_error(exc):
                     # Permission denied / missing relation, or a provider 402
                     # (quota exhausted) — retrying with backoff cannot help;
                     # record and report immediately rather than burning the
@@ -169,7 +151,7 @@ class PricingResolver:
         logger.warning(
             "Pricing model load failed for %s (%s, %s: %s)",
             self._operator,
-            "permanent SQL error" if (last_exc is not None and _is_permanent_sql_error(last_exc)) else f"{self._HYDRATION_RETRIES} attempts",
+            "permanent SQL error" if (last_exc is not None and is_permanent_sql_error(last_exc)) else f"{self._HYDRATION_RETRIES} attempts",
             type(last_exc).__name__, last_exc,
         )
         self._last_error = last_exc
