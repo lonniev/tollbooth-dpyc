@@ -40,12 +40,36 @@ VALID_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 # runner(params, npub, dpop_token) -> awaitable[dict]
 Runner = Callable[[dict[str, Any], str, str], Awaitable[dict[str, Any]]]
 
+# Distinguishes "no default declared" from "default declared as None", which are
+# different instructions: drop the param, versus bind an explicit null.
+_UNSET = object()
+
+
+def _is_of_type(value: Any, py: type | None) -> bool:
+    """Does *value* satisfy the declared python type?
+
+    ``bool`` is a subtype of ``int`` in Python, so the numeric checks exclude it
+    explicitly — otherwise ``True`` would pass as an int and reach a query as 1.
+    """
+    if py is int:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if py is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if py is not None:
+        return isinstance(value, py)
+    return True
+
 
 def validate_param_schema(param_schema: dict[str, Any]) -> list[str]:
     """Validate the shape of an author-supplied param schema. Returns errors.
 
     ``param_schema`` maps a param name to a spec ``{"type": ..., "required":
-    true|false, "description": ...}``; ``type`` is one of :data:`PYTHON_TYPES`.
+    true|false, "default": ..., "description": ...}``; ``type`` is one of
+    :data:`PYTHON_TYPES`.
+
+    A declared ``default`` must match the declared ``type``. It is what an
+    omitted optional param binds to — see :func:`build_dynamic_handler` for why
+    an optional param that binds to nothing is a latent break.
     """
     errors: list[str] = []
     if not isinstance(param_schema, dict):
@@ -55,6 +79,15 @@ def validate_param_schema(param_schema: dict[str, Any]) -> list[str]:
             errors.append(f"param '{name}' spec must be an object")
             continue
         t = spec.get("type", "string")
+        # An explicit ``None`` default means "bind null" — the idiom a backend
+        # uses to branch on absence itself, e.g. Cypher's
+        # ``coalesce($title, i.title)``. Everything else must type-match.
+        if (
+            t in PYTHON_TYPES
+            and spec.get("default", _UNSET) not in (_UNSET, None)
+            and not _is_of_type(spec["default"], PYTHON_TYPES[t])
+        ):
+            errors.append(f"param '{name}' default must be of type {t}")
         if t not in PYTHON_TYPES:
             errors.append(
                 f"param '{name}' has unknown type '{t}' "
@@ -83,17 +116,12 @@ def validate_params(
                 errors.append(f"missing required param '{name}'")
             continue
         t = spec.get("type", "string")
-        py = PYTHON_TYPES.get(t)
         val = params[name]
-        if py is int:
-            ok = isinstance(val, int) and not isinstance(val, bool)
-        elif py is float:
-            ok = isinstance(val, (int, float)) and not isinstance(val, bool)
-        elif py is not None:
-            ok = isinstance(val, py)
-        else:
-            ok = True
-        if not ok:
+        # A param whose schema declares a ``None`` default is nullable: null is
+        # the value its backend expects when the caller said nothing.
+        if val is None and spec.get("default", _UNSET) is None:
+            continue
+        if not _is_of_type(val, PYTHON_TYPES.get(t)):
             errors.append(f"param '{name}' must be of type {t}")
 
     for name in params:
@@ -114,14 +142,32 @@ def build_dynamic_handler(
 
     The handler exposes one flat keyword param per ``param_schema`` entry
     (typed via :data:`PYTHON_TYPES`) plus ``npub`` and ``dpop_token``. Its body
-    collects the supplied declared params into a dict — omitted optional
-    params are dropped, never passed as ``None`` — and awaits
+    collects the supplied declared params into a dict and awaits
     ``runner(params, npub, dpop_token)``.
+
+    **An omitted optional param binds its declared ``default`` if it has one.**
+    Dropping it instead is what broke cypher-mcp's ``list_capabilities`` for four
+    days: a backend that interpolates every declared name — a Cypher template
+    referencing ``$since_ms``, a SQL statement, a prompt slot — cannot run at all
+    when the binding simply isn't there, and the caller sees a bare execution
+    failure with nothing naming the missing parameter. Never passing ``None`` was
+    right (a null would have reached the query as a silent wrong answer); the
+    mistake was having nothing to pass in its place.
+
+    An optional param with no declared default is still dropped, since some
+    backends legitimately branch on absence — but authors of interpolating
+    backends should declare one.
     """
     schema = param_schema or {}
 
     async def handler(**kwargs: Any) -> dict[str, Any]:
-        params = {k: v for k, v in kwargs.items() if k in schema and v is not None}
+        params: dict[str, Any] = {}
+        for pname, spec in schema.items():
+            supplied = kwargs.get(pname)
+            if supplied is not None:
+                params[pname] = supplied
+            elif "default" in spec:
+                params[pname] = spec["default"]
         return await runner(
             params, kwargs.get("npub") or "", kwargs.get("dpop_token") or ""
         )
@@ -133,12 +179,19 @@ def build_dynamic_handler(
         # Runtime-constructed annotation; mypy can't see `py` as a type.
         ann = Annotated[py, Field(description=spec.get("description", ""))]  # type: ignore[valid-type]
         required = spec.get("required", True)
+        if required:
+            sig_default: Any = inspect.Parameter.empty
+        else:
+            # Surface the author's default in the tool's published schema, so a
+            # caller reading tools/list sees the value it will actually get
+            # rather than a null the declared type does not even admit.
+            sig_default = spec.get("default", None)
         sig_params.append(
             inspect.Parameter(
                 pname,
                 inspect.Parameter.KEYWORD_ONLY,
                 annotation=ann,
-                default=inspect.Parameter.empty if required else None,
+                default=sig_default,
             )
         )
         annotations[pname] = ann

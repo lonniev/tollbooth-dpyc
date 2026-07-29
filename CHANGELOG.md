@@ -3,6 +3,36 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.75.1 — 2026-07-29
+
+### Fixed — a synthesized tool dropped optional params its backend still needed
+
+`cypher_list_capabilities` failed on **every** no-argument call for four days
+(2026-07-26 → 07-29), refunding each time — five `rollback:` tranches record it. The
+Porter's Tier-1 semantic-triage tool, unusable, and silent about why: the caller saw only
+`tool_execution_failed`.
+
+`build_dynamic_handler` dropped an omitted optional param rather than passing `None`.
+That much was right — a null would have reached the query as a *silent wrong answer*
+rather than an error. The mistake was having nothing to pass in its place: a backend that
+interpolates every declared name (a Cypher template referencing `$since_ms`, a SQL
+statement, a prompt slot) cannot run at all when the binding simply is not there.
+
+The param-schema language gains a **`default`**:
+
+- An omitted optional param binds its declared default instead of vanishing.
+- A declared `default` must match the declared `type` — and `bool` is excluded from `int`,
+  so a `True` default cannot reach a query as `1`.
+- An explicit `default: None` declares the param **nullable**: bind an actual null. That is
+  the idiom a backend uses to branch on absence itself, e.g. Cypher's
+  `coalesce($title, i.title)` — and `claim_issue` carried exactly that latent break.
+- The default is published in the tool's signature, so a caller reading `tools/list` sees
+  the value it will actually get rather than a `null` the declared type does not admit.
+- An optional param with no declared default is still dropped; absence stays expressible.
+
+The type-check shared by schema validation and call validation is now one helper rather
+than two copies.
+
 ## 0.75.0 — 2026-07-29
 
 ### Fixed — a vault that couldn't be read said "you never authorized"
