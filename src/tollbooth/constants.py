@@ -123,6 +123,11 @@ class ErrorCode:
     # via next_steps, but the error_code preserves the diagnostic
     # specificity the calling agent needs to phrase patron-facing output.
     OAUTH_TOKEN_EXPIRED = "oauth_token_expired"          # returning patron, refresh token aged out / revoked
+    # The refresh could not be COMPLETED — timeout, connect failure, 429, 5xx, a
+    # body that wasn't JSON. Deliberately distinct from OAUTH_TOKEN_EXPIRED:
+    # nothing here says the grant is bad, so this must never send a patron
+    # through OAuth again. Retryable, and the only OAuth situation that is.
+    OAUTH_REFRESH_UNAVAILABLE = "oauth_refresh_unavailable"
     OAUTH_NOT_YET_AUTHORIZED = "oauth_not_yet_authorized"  # first-time patron, no token in vault
     OAUTH_NOT_WIRED = "oauth_not_wired"                  # operator MCP has no OAuthProviderConfig
     OPERATOR_CREDENTIALS_MISSING = "operator_credentials_missing"  # vault load failed

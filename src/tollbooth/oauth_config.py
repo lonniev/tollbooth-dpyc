@@ -36,6 +36,10 @@ class OAuthProviderConfig:
         on_token_received: Optional async callback ``(npub, token_dict) -> dict``
             called after successful token exchange. Return dict is merged into
             vault storage (e.g., Schwab returns ``{"account_hash": "..."}``).
+            On the *refresh* path it runs while holding that patron's refresh
+            lock, so it must not call back into ``restore_oauth_session`` (or any
+            paid tool that does) for the same npub — that would deadlock. Use the
+            ``token_dict`` it is handed instead of resolving the session again.
         refresh_enabled: Whether to auto-refresh expired tokens on session restore.
         refresh_leeway_seconds: How long *before* a cached access token's
             expiry to refresh proactively on session restore. A still-valid

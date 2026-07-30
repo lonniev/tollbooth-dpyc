@@ -222,9 +222,13 @@ class TestRestoreOAuthSessionSituations:
     async def test_refresh_without_access_token_preserves_the_vault(
         self, monkeypatch,
     ) -> None:
-        """A 200 carrying no access_token is a refusal in disguise. Persisting it
+        """A 200 carrying no access_token must not touch the vault. Persisting it
         would write access_token="" over working credentials and force the patron
-        to rebuild a session by hand."""
+        to rebuild a session by hand.
+
+        It reports ``refresh_unavailable``, not ``token_expired``: the provider
+        never said the grant was dead, and a patron who re-authorized would hand
+        a brand-new token to the same malformed endpoint."""
         import time as _t
 
         from tollbooth import oauth2_collector as collector
@@ -254,7 +258,7 @@ class TestRestoreOAuthSessionSituations:
 
         creds, situation = await rt.restore_oauth_session(VALID_NPUB)
         assert creds is None
-        assert situation == "token_expired"
+        assert situation == "refresh_unavailable"
         assert stored == [], "a hollow refresh must not touch the vault"
 
 

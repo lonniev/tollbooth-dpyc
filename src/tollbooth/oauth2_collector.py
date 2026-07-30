@@ -17,6 +17,7 @@ Not exported from ``__init__.py`` — import directly::
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -34,6 +35,96 @@ logger = logging.getLogger(__name__)
 
 class OAuthCollectorError(Exception):
     """Base exception for OAuth2 collector operations."""
+
+
+class OAuthRefreshDenied(OAuthCollectorError):
+    """The provider REFUSED the grant: this refresh token will never work again.
+
+    The only situation in this module that a human must act on. Raised for the
+    OAuth2 error codes that name a dead grant (``invalid_grant``,
+    ``invalid_request``, ``unauthorized_client``, ``invalid_client``) — the
+    patron has to re-authorize.
+    """
+
+    def __init__(self, detail: str, *, status_code: int = 0, oauth_error: str = ""):
+        self.detail = detail
+        self.status_code = status_code
+        self.oauth_error = oauth_error
+        super().__init__(detail)
+
+
+class OAuthRefreshUnavailable(OAuthCollectorError):
+    """The refresh could not be *completed* — which says nothing about the grant.
+
+    A timeout, a connection failure, a 429, a 5xx, a body that isn't JSON. The
+    stored refresh token may be perfectly good; we simply don't know yet, so the
+    caller must report "try again", never "re-authorize".
+
+    ``token_may_have_rotated`` is the honest part. Providers that rotate
+    single-use refresh tokens (X does) rotate them when the request *arrives*,
+    not when we read the answer — so a read timeout can leave the provider
+    holding a new token we never saw, and our stored one already spent. When
+    that's possible we say so instead of pretending the failure was clean.
+    """
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        status_code: int = 0,
+        token_may_have_rotated: bool = False,
+    ):
+        self.detail = detail
+        self.status_code = status_code
+        self.token_may_have_rotated = token_may_have_rotated
+        super().__init__(detail)
+
+
+# ---------------------------------------------------------------------------
+# Token-endpoint transport
+# ---------------------------------------------------------------------------
+
+# A token endpoint is not a CDN. httpx's bare default gives 5 seconds to EVERY
+# phase, which is a thin margin for an outbound POST to a provider's auth host —
+# and the consequence of losing that race is not a slow page, it is a patron
+# told to re-authorize a session that was never broken.
+TOKEN_ENDPOINT_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0)
+
+# Retried ONLY when the connection never opened, which is the one failure that
+# provably didn't reach the provider. A read timeout is left to fail: the
+# provider may have already rotated a single-use refresh token, and asking again
+# with the spent one is how a working grant gets revoked.
+_TOKEN_CONNECT_ATTEMPTS = 3
+_TOKEN_CONNECT_BACKOFF_S = 1.0
+
+# OAuth2 error codes (RFC 6749 §5.2) that mean the grant itself is gone.
+# Everything else is treated as "we don't know yet".
+_GRANT_IS_DEAD = frozenset({
+    "invalid_grant", "invalid_request", "unauthorized_client", "invalid_client",
+})
+
+
+async def _post_token_endpoint(
+    token_endpoint: str, credentials: str, body: dict[str, str],
+) -> httpx.Response:
+    """POST a form-encoded grant request, retrying only an unopened connection."""
+    last: Exception | None = None
+    for attempt in range(_TOKEN_CONNECT_ATTEMPTS):
+        try:
+            async with httpx.AsyncClient(timeout=TOKEN_ENDPOINT_TIMEOUT) as http:
+                return await http.post(
+                    token_endpoint,
+                    headers={
+                        "Authorization": f"Basic {credentials}",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    content=urllib.parse.urlencode(body),
+                )
+        except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+            last = exc
+            if attempt + 1 < _TOKEN_CONNECT_ATTEMPTS:
+                await asyncio.sleep(_TOKEN_CONNECT_BACKOFF_S * (attempt + 1))
+    raise last  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +276,8 @@ async def exchange_code_for_token(
 
     Raises:
         httpx.HTTPStatusError: If the token endpoint returns an error status.
+        httpx.TransportError: If the endpoint could not be reached at all (the
+            connect phase is retried first — see ``_post_token_endpoint``).
     """
     credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
 
@@ -196,17 +289,9 @@ async def exchange_code_for_token(
     if code_verifier:
         body["code_verifier"] = code_verifier
 
-    async with httpx.AsyncClient() as http:
-        resp = await http.post(
-            token_endpoint,
-            headers={
-                "Authorization": f"Basic {credentials}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            content=urllib.parse.urlencode(body),
-        )
-        resp.raise_for_status()
-        token = resp.json()
+    resp = await _post_token_endpoint(token_endpoint, credentials, body)
+    resp.raise_for_status()
+    token = resp.json()
 
     token["expires_at"] = time.time() + token.get("expires_in", 1800)
     return token
@@ -229,26 +314,93 @@ async def refresh_access_token(
     Returns:
         New token dict with ``access_token``, ``expires_at``, and
         optionally a rotated ``refresh_token``.
+
+    Raises:
+        OAuthRefreshDenied: The provider named the grant dead. A human must
+            re-authorize; no retry will ever help.
+        OAuthRefreshUnavailable: The refresh didn't complete (timeout, connect
+            failure, 429, 5xx, unparseable body). The grant may be perfectly
+            fine — retry, and do NOT send the patron back through OAuth.
+
+    Why the two are separated: this function is the only place that sees the
+    HTTP status and the provider's error body, so it is the only place that
+    *can* tell "your session is gone" from "the network was busy". Collapsing
+    both into one exception is what made a five-second blip read to a patron as
+    "your X access expired".
     """
     credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
 
-    async with httpx.AsyncClient() as http:
-        resp = await http.post(
-            token_endpoint,
-            headers={
-                "Authorization": f"Basic {credentials}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            content=urllib.parse.urlencode({
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-            }),
-        )
-        resp.raise_for_status()
+    try:
+        resp = await _post_token_endpoint(token_endpoint, credentials, {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        })
+    except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+        # Every attempt failed to open a connection, so the provider never saw
+        # the request and the stored refresh token is untouched.
+        raise OAuthRefreshUnavailable(
+            f"token endpoint unreachable: {exc}",
+        ) from exc
+    except httpx.HTTPError as exc:
+        # A read/write timeout means the request DID arrive. If this provider
+        # rotates single-use refresh tokens, ours may already be spent.
+        raise OAuthRefreshUnavailable(
+            f"token endpoint did not answer: {exc}", token_may_have_rotated=True,
+        ) from exc
+
+    if resp.status_code >= 400:
+        oauth_error, detail = _token_error_fields(resp)
+        # These details are logged. A provider that echoes the rejected grant
+        # back in its error body would otherwise write a live credential into
+        # the operator's logs — so the token never survives the trip out.
+        detail = _redact(detail, refresh_token)
+        if oauth_error in _GRANT_IS_DEAD:
+            raise OAuthRefreshDenied(
+                detail, status_code=resp.status_code, oauth_error=oauth_error,
+            )
+        # A 429 or 5xx is the provider asking for patience, not revoking
+        # anything. A 4xx we can't name is likelier a transport or gateway
+        # artifact than a considered refusal — treat it as unknown rather than
+        # sending the patron to re-authorize on a guess.
+        raise OAuthRefreshUnavailable(detail, status_code=resp.status_code)
+
+    try:
         token = resp.json()
+    except Exception as exc:  # a 200 that isn't JSON is not a refusal
+        raise OAuthRefreshUnavailable(
+            f"token endpoint returned non-JSON on {resp.status_code}: {exc}",
+            status_code=resp.status_code,
+            token_may_have_rotated=True,
+        ) from exc
 
     token["expires_at"] = time.time() + token.get("expires_in", 1800)
     return token
+
+
+def _redact(text: str, secret: str) -> str:
+    """*text* with *secret* masked. A short secret is not worth matching on."""
+    if not secret or len(secret) < 8:
+        return text
+    return text.replace(secret, "<redacted>")
+
+
+def _token_error_fields(resp: httpx.Response) -> tuple[str, str]:
+    """``(oauth_error_code, human_detail)`` from a token-endpoint error response.
+
+    The RFC 6749 §5.2 body is ``{"error": ..., "error_description": ...}``. A
+    provider that answers with HTML or an empty body yields an empty code, which
+    lands in the "we don't know" branch by design.
+    """
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    code = str(body.get("error", "")).strip()
+    described = str(body.get("error_description", "") or body.get("detail", "")).strip()
+    detail = described or (resp.text or "")[:200] or f"HTTP {resp.status_code}"
+    return code, f"{resp.status_code} {code or 'unspecified'}: {detail}".strip()
 
 
 # ---------------------------------------------------------------------------
