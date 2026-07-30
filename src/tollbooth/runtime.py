@@ -2005,6 +2005,49 @@ class OperatorRuntime:
                 patron_npub, opc, svc, creds, refresh_token,
             )
 
+    async def invalidate_oauth_access_token(self, patron_npub: str) -> bool:
+        """Retire the cached access token so the next restore refreshes it.
+
+        Call this when the upstream API rejects an access token (401/403) that
+        our own records still considered fresh. Rewrites the vaulted
+        ``expires_at`` to the past and leaves every other field — crucially the
+        refresh token — untouched, so ``restore_oauth_session`` falls through
+        its cached-token shortcut and spends the refresh token instead.
+
+        This is what makes a rejected access token *self-healing*. Without it
+        the stored expiry keeps asserting the dead token is good until it
+        actually lapses, so every call until then fails the same way and the
+        only escape offered to the patron is a full re-authorization they did
+        not need. With it, the next call renews and the patron never learns
+        anything happened — and if the grant really is dead, the refresh says
+        so in the provider's own words (``token_expired``) rather than ours.
+
+        Returns ``True`` if an expiry was retired. ``False`` means there was
+        nothing to do — no OAuth config, or no vaulted session to amend — never
+        that the invalidation failed, because a session we cannot read is
+        already going to be re-resolved from scratch.
+        """
+        opc = self._oauth_provider
+        if opc is None:
+            return False
+
+        svc = opc.service_name
+        creds, situation = await self.load_patron_session(patron_npub, service=svc)
+        if situation or not creds or not creds.get("access_token"):
+            return False
+
+        # Epoch 0 rather than "": a stored empty string reads as "says nothing"
+        # (_epoch_seconds → 0.0) and would work by accident. Being explicit
+        # keeps the record honest for anyone reading the vault directly.
+        await self.store_patron_session(
+            patron_npub, {**creds, "expires_at": "0"}, service=svc,
+        )
+        logger.info(
+            "Upstream rejected the access token for %s; retired its cached "
+            "expiry so the next call refreshes.", patron_npub[:20],
+        )
+        return True
+
     def _oauth_refresh_lock(self, service: str, patron_npub: str) -> asyncio.Lock:
         """The refresh lock for one patron's session with one provider.
 
@@ -2243,6 +2286,10 @@ class OperatorRuntime:
         - ``refresh_unavailable`` → ``oauth_refresh_unavailable`` (the refresh
           never completed; the session is probably fine, so this one does NOT
           route to begin_oauth)
+        - ``token_rejected`` → ``oauth_token_rejected`` (the upstream API
+          refused the access token; raised by callers after a 401/403, paired
+          with ``invalidate_oauth_access_token`` so the next call renews — also
+          does NOT route to begin_oauth)
         - ``no_credentials`` → ``oauth_not_yet_authorized`` (first-time
           patron with no vault entry)
         - ``vault_bootstrapping`` → ``warming_up``
@@ -2295,6 +2342,26 @@ class OperatorRuntime:
                     "Repeat your request shortly — no re-authentication needed.",
                     ("If it persists across several attempts, THEN reconnect — "
                      "a genuinely dead grant reports itself as "
+                     "oauth_token_expired, not this."),
+                ],
+            },
+            # The upstream API refused the ACCESS token, not the grant. By the
+            # time this is returned the cached expiry has been retired, so the
+            # next call spends the refresh token and either succeeds silently
+            # or reports token_expired on the provider's authority. Sending the
+            # patron through OAuth here would re-authorize a live account.
+            "token_rejected": {
+                "error_code": ErrorCode.OAUTH_TOKEN_REJECTED,
+                "error": (
+                    "The upstream provider rejected the access token we had on "
+                    "file. That is the short-lived half of your authorization "
+                    "and it has been flagged for renewal — your account link "
+                    "itself is very likely fine."
+                ),
+                "next_steps": [
+                    "Repeat your request — the next attempt renews the token.",
+                    ("If it persists across several attempts, THEN reconnect — "
+                     "a genuinely dead authorization reports itself as "
                      "oauth_token_expired, not this."),
                 ],
             },
