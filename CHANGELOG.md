@@ -3,6 +3,27 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added — per-field credential delivery timestamps
+
+When a patron or operator couriers a credential, the vault now records
+**when** each field arrived. Listings can answer "how old is this secret?"
+— the question that matters for deciding whether to rotate it.
+
+- Reserved `__meta__.delivered_at` map inside the encrypted credential blob
+  (values stay values; bookkeeping never surfaces as a field name).
+- Stamped on Secure Courier receive, credential-card redeem, and
+  `update_patron_credential` (re-delivery rewinds the age even if the value
+  is unchanged). Unrelated fields keep their prior stamp.
+- `get_patron_credential_fields` returns `delivered_at: {field: iso|null}`
+  alongside the existing `fields` name list.
+- Operator and patron onboarding status stretch each configured entry with
+  `delivered_at` when known. Legacy blobs list with a null / omitted stamp
+  rather than inventing one.
+
+Resolves #166 (the leftover from #132 / #133).
+
 ## 0.75.1 — 2026-07-29
 
 ### Fixed — a synthesized tool dropped optional params its backend still needed
