@@ -128,6 +128,13 @@ class ErrorCode:
     # nothing here says the grant is bad, so this must never send a patron
     # through OAuth again. Retryable, and the only OAuth situation that is.
     OAUTH_REFRESH_UNAVAILABLE = "oauth_refresh_unavailable"
+    # The upstream API rejected the ACCESS token (401/403) while our records
+    # still considered it fresh. That says nothing about the refresh token, so
+    # it is not OAUTH_TOKEN_EXPIRED: an access token is the short-lived half of
+    # the grant and a rejected one is routinely cured by spending the refresh
+    # token. Reported after the cached expiry has been invalidated, so the very
+    # next call renews — retryable, like OAUTH_REFRESH_UNAVAILABLE.
+    OAUTH_TOKEN_REJECTED = "oauth_token_rejected"
     OAUTH_NOT_YET_AUTHORIZED = "oauth_not_yet_authorized"  # first-time patron, no token in vault
     OAUTH_NOT_WIRED = "oauth_not_wired"                  # operator MCP has no OAuthProviderConfig
     OPERATOR_CREDENTIALS_MISSING = "operator_credentials_missing"  # vault load failed

@@ -9,13 +9,17 @@ three are told ``invalid_grant``, and three owners are advised to reconnect an
 account that was never disconnected. A strict provider goes further and revokes
 the grant it saw replayed, which turns the advice into a self-fulfilling one.
 
-Two properties are asserted here, and they are the whole fix:
+Three properties are asserted here, and they are the whole fix:
 
 1. **Concurrency collapses to one refresh.** N callers, one HTTP exchange, and
    the waiters read the winner's token rather than spending a retired one.
 2. **Only the provider may declare a session dead.** A timeout, a 429, a 5xx —
    none of them are evidence about the grant, and none may reach a patron as
    "your access expired".
+3. **A rejected access token renews itself.** A 401 from the upstream API is
+   about the short-lived half of the grant; retiring the cached expiry lets the
+   next call spend the refresh token instead of stranding the patron behind a
+   cache that keeps insisting the dead token is good.
 """
 
 from __future__ import annotations
@@ -302,7 +306,112 @@ class TestTransientRefreshFailures:
 
 
 # ---------------------------------------------------------------------------
-# 3. The collector's own reading of a token-endpoint answer
+# 3. A rejected ACCESS token is not a dead grant
+# ---------------------------------------------------------------------------
+
+
+def _fresh_session(refresh_token: str = "r1") -> dict[str, str]:
+    """A vaulted session whose access token our records still call good."""
+    return {
+        "access_token": "access-0",
+        "refresh_token": refresh_token,
+        "expires_at": str(time.time() + 7200),
+    }
+
+
+class TestRejectedAccessToken:
+    """The upstream API says 401 while the vault says the token is fine.
+
+    The access token is the short-lived half of the grant, and the refresh
+    token is right there — so this is a renewal, not a re-authorization. What
+    made it a re-authorization was the *stored expiry*: it kept asserting the
+    dead token was good, so every retry short-circuited on the cache and failed
+    identically until the real expiry hours later.
+    """
+
+    @pytest.mark.asyncio
+    async def test_invalidating_makes_the_next_restore_actually_refresh(
+        self, monkeypatch,
+    ):
+        """The whole point: the cached-token shortcut must stop firing."""
+        import tollbooth.oauth2_collector as collector
+
+        rt = _runtime()
+        vault = _FakeVault(rt, {NPUB_A: _fresh_session()})
+        provider = _RotatingProvider()
+        monkeypatch.setattr(collector, "refresh_access_token", provider)
+
+        # Precondition — without invalidation the cache serves and nobody calls out.
+        creds, situation = await rt.restore_oauth_session(NPUB_A)
+        assert (creds["access_token"], situation) == ("access-0", "")
+        assert provider.calls == [], "a fresh cached token must not be refreshed"
+
+        assert await rt.invalidate_oauth_access_token(NPUB_A) is True
+
+        creds, situation = await rt.restore_oauth_session(NPUB_A)
+        assert situation == ""
+        assert creds["access_token"] == "access-1", "the rejected token was renewed"
+        assert provider.calls == ["r1"], "exactly one refresh, spending the live token"
+        assert vault.sessions[NPUB_A]["refresh_token"] == "r2"
+
+    @pytest.mark.asyncio
+    async def test_invalidating_keeps_the_refresh_token(self):
+        """Retire the expiry and nothing else — the refresh token IS the cure.
+
+        Clobbering it here would convert a self-healing 401 into the dead grant
+        the patron was wrongly told they already had.
+        """
+        rt = _runtime()
+        vault = _FakeVault(rt, {NPUB_A: _fresh_session()})
+
+        await rt.invalidate_oauth_access_token(NPUB_A)
+
+        stored = vault.sessions[NPUB_A]
+        assert stored["refresh_token"] == "r1"
+        assert stored["access_token"] == "access-0"
+        assert float(stored["expires_at"]) <= 0
+
+    @pytest.mark.asyncio
+    async def test_a_grant_that_really_is_dead_still_says_so(self, monkeypatch):
+        """Renewal is an attempt, not an excuse — if the provider refuses the
+        refresh token, the patron does need to reconnect and must be told."""
+        import tollbooth.oauth2_collector as collector
+
+        rt = _runtime()
+        _FakeVault(rt, {NPUB_A: _fresh_session(refresh_token="retired")})
+        monkeypatch.setattr(collector, "refresh_access_token", _RotatingProvider())
+
+        await rt.invalidate_oauth_access_token(NPUB_A)
+        creds, situation = await rt.restore_oauth_session(NPUB_A)
+
+        assert creds is None
+        assert situation == "token_expired"
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_invalidate_is_not_a_failure(self):
+        """No vaulted session means the next call re-resolves from scratch
+        anyway, so there is nothing to retire and nothing to report."""
+        rt = _runtime()
+        _FakeVault(rt, {})
+
+        assert await rt.invalidate_oauth_access_token(NPUB_A) is False
+
+    def test_the_rejected_situation_never_advises_reconnecting(self):
+        """The failure this whole section exists to prevent."""
+        from tollbooth.constants import ErrorCode
+
+        rt = _runtime()
+        response = rt.oauth_situation_response("token_rejected")
+
+        assert response["error_code"] == ErrorCode.OAUTH_TOKEN_REJECTED
+        assert response["success"] is False
+        steps = " ".join(response["next_steps"]).lower()
+        assert "begin_oauth" not in steps
+        assert "repeat your request" in steps
+
+
+# ---------------------------------------------------------------------------
+# 4. The collector's own reading of a token-endpoint answer
 # ---------------------------------------------------------------------------
 
 
