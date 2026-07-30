@@ -21,37 +21,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-async def load_vault_credentials(
+async def load_vault_blob(
     courier_service: Any,
     service: str,
     operator_npub: str,
-) -> tuple[dict[str, str] | None, str]:
-    """Load credentials from the Secure Courier vault for a given service.
+) -> tuple[dict[str, Any] | None, str]:
+    """Load the raw credential blob (including reserved ``__meta__``).
 
-    This is the generic helper that any operator can use.  It accesses
-    the courier's credential vault, fetches the encrypted blob, decrypts
-    it, and returns the credential dict.
-
-    Returns ``(creds, situation)`` — the same discriminated shape
-    ``OperatorRuntime.restore_oauth_session`` uses.  The distinction the whole
-    stack rests on is:
-
-    * ``({}, "")`` — **the vault answered and holds nothing for this key.**
-      Only this may ever be read as "never onboarded".
-    * ``(None, situation)`` — we could not ask.  Reporting this as "nothing
-      stored" is what let a cold container tell a connected patron they had
-      never authorized, and an out-of-quota database tell a funded patron they
-      were broke.
-
-    ``situation`` is an ``ErrorCode`` value the caller can hand straight to a
-    situation table: ``secure_courier_unavailable``, ``vault_bootstrapping``,
-    ``persistence_quota_exceeded``, or ``persistence_misconfigured``.
-
-    Args:
-        courier_service: The operator's ``SecureCourierService`` instance.
-        service: The credential template service name (e.g.,
-            ``"tollbooth-sample-operator"``).
-        operator_npub: The operator's npub (vault key).
+    Same ``(value, situation)`` contract as ``load_vault_credentials`` —
+    ``({}, "")`` means the vault answered and holds nothing; ``(None, situation)``
+    means we could not ask.  Use this when the caller needs delivery
+    timestamps (``__meta__.delivered_at``); prefer ``load_vault_credentials``
+    for plain field values.
     """
     from tollbooth.constants import ErrorCode
     from tollbooth.persistence_errors import classify_persistence_failure
@@ -83,7 +64,14 @@ async def load_vault_credentials(
 
     try:
         plaintext = courier_service._exchange._vault_decrypt(blob)
-        return json.loads(plaintext), ""
+        decoded = json.loads(plaintext)
+        if not isinstance(decoded, dict):
+            logger.warning(
+                "Vault credential decode for %s produced non-dict; treating as empty",
+                service,
+            )
+            return {}, ""
+        return decoded, ""
     except Exception as exc:  # noqa: BLE001 — a stored blob we cannot read
         # Reaching here means the vault HELD something and we could not open it:
         # a wrong key or a corrupt record. Never a cold start, and never
@@ -93,6 +81,49 @@ async def load_vault_credentials(
             service, type(exc).__name__, exc,
         )
         return None, ErrorCode.PERSISTENCE_MISCONFIGURED
+
+
+async def load_vault_credentials(
+    courier_service: Any,
+    service: str,
+    operator_npub: str,
+) -> tuple[dict[str, str] | None, str]:
+    """Load credentials from the Secure Courier vault for a given service.
+
+    This is the generic helper that any operator can use.  It accesses
+    the courier's credential vault, fetches the encrypted blob, decrypts
+    it, and returns the credential dict.
+
+    Returns ``(creds, situation)`` — the same discriminated shape
+    ``OperatorRuntime.restore_oauth_session`` uses.  The distinction the whole
+    stack rests on is:
+
+    * ``({}, "")`` — **the vault answered and holds nothing for this key.**
+      Only this may ever be read as "never onboarded".
+    * ``(None, situation)`` — we could not ask.  Reporting this as "nothing
+      stored" is what let a cold container tell a connected patron they had
+      never authorized, and an out-of-quota database tell a funded patron they
+      were broke.
+
+    ``situation`` is an ``ErrorCode`` value the caller can hand straight to a
+    situation table: ``secure_courier_unavailable``, ``vault_bootstrapping``,
+    ``persistence_quota_exceeded``, or ``persistence_misconfigured``.
+
+    Reserved bookkeeping (``__meta__`` / delivery timestamps) is stripped —
+    values only.  Use ``load_vault_blob`` when you need the stamps.
+
+    Args:
+        courier_service: The operator's ``SecureCourierService`` instance.
+        service: The credential template service name (e.g.,
+            ``"tollbooth-sample-operator"``).
+        operator_npub: The operator's npub (vault key).
+    """
+    from tollbooth.credential_meta import strip_meta
+
+    result, situation = await load_vault_blob(courier_service, service, operator_npub)
+    if situation or result is None:
+        return None, situation
+    return strip_meta(result), ""
 
 
 # ---------------------------------------------------------------------------

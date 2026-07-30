@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 
 from datetime import UTC
 
+from tollbooth.credential_meta import CredentialFieldDetail
 from tollbooth.identity_proof import require_proof
 from tollbooth.tool_identity import capability_uuid
 from tollbooth.vault_backend import LedgerUnavailableError, LedgerWriteError
@@ -100,6 +101,8 @@ def classify_operator_secrets(
     effective_fields: dict[str, Any],
     declared_names: set[str],
     vault_names: set[str],
+    *,
+    delivered_at: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     """Sort operator credential fields into (configured, missing, optional_missing).
 
@@ -117,16 +120,24 @@ def classify_operator_secrets(
     That last rule is deliberate: auto-included fields are opt-in *by delivery*, so an
     operator that never uses field reports must not be nagged with a permanent
     "optional_missing: github_token". They appear only once actually delivered.
+
+    When *delivered_at* is supplied (``{field: ISO-8601}``), each configured entry
+    also carries that timestamp so Studio / onboarding can answer "how old is this
+    secret?" without a second round-trip.
     """
+    stamps = delivered_at or {}
     configured: list[dict[str, str]] = []
     missing: list[dict[str, str]] = []
     optional_missing: list[dict[str, str]] = []
     for name, spec in effective_fields.items():
         if name in vault_names:
-            configured.append({
+            entry: dict[str, str] = {
                 "field": name, "category": "secret",
                 "status": "configured", "lifecycle": spec.lifecycle,
-            })
+            }
+            if name in stamps:
+                entry["delivered_at"] = stamps[name]
+            configured.append(entry)
         elif name in declared_names:
             entry = {
                 "field": name, "category": "secret", "status": "missing",
@@ -1362,17 +1373,22 @@ class OperatorRuntime:
         # template (declared secrets + the auto-included optional field-report secrets) so a
         # delivered operator secret surfaces under `configured` and is visible in Studio — but
         # an auto-included field that was never delivered is omitted, not nagged. See
-        # classify_operator_secrets.
+        # classify_operator_secrets. Delivery timestamps (when recorded) ride on each
+        # configured entry as `delivered_at`.
         vault_situation = ""
         if self._operator_credential_template is not None:
+            from tollbooth.credential_meta import delivered_at_map, strip_meta
+
             effective = self._courier_operator_template()
-            vault_creds, vault_situation = await self._load_vault_creds(
+            vault_blob, vault_situation = await self._load_vault_blob(
                 self._operator_credential_template.service,
             )
+            vault_creds = strip_meta(vault_blob)
             cfg, miss, opt = classify_operator_secrets(
                 effective.fields,
                 set(self._operator_credential_template.fields),
                 set(vault_creds),
+                delivered_at=delivered_at_map(vault_blob),
             )
             if vault_situation:
                 # WHAT the operator must deliver comes from the template and is
@@ -1453,18 +1469,25 @@ class OperatorRuntime:
                 exc_info=True,
             )
 
-        vault_creds, vault_situation = await self._load_vault_creds(
+        from tollbooth.credential_meta import delivered_at_map, strip_meta
+
+        vault_blob, vault_situation = await self._load_vault_blob(
             self._patron_credential_template.service,
             npub_override=patron_npub,
         )
+        vault_creds = strip_meta(vault_blob)
+        stamps = delivered_at_map(vault_blob)
         configured = []
         missing = []
         for name, spec in self._patron_credential_template.fields.items():
             if name in vault_creds:
-                configured.append({
+                entry: dict[str, str] = {
                     "field": name, "category": "patron_secret", "status": "configured",
                     "lifecycle": spec.lifecycle,
-                })
+                }
+                if name in stamps:
+                    entry["delivered_at"] = stamps[name]
+                configured.append(entry)
             else:
                 entry = {
                     "field": name,
@@ -1511,8 +1534,12 @@ class OperatorRuntime:
         nothing is stored.  A non-empty ``situation`` means the question could
         not be asked, and callers must not read that as an absence of
         credentials.  See ``load_vault_credentials`` for the full vocabulary.
+
+        Credential values only — reserved ``__meta__`` is stripped.  Use
+        ``_load_vault_blob`` when delivery timestamps are needed.
         """
         from tollbooth.constants import ErrorCode
+        from tollbooth.credential_meta import strip_meta
         from tollbooth.persistence_errors import classify_persistence_failure
         from tollbooth.tools.onboarding import load_vault_credentials
 
@@ -1544,13 +1571,46 @@ class OperatorRuntime:
             )
             return {}, situation
 
-        creds = result or {}
+        creds = strip_meta(result or {})
         if creds:
             logger.info("Loaded %d credential fields for %s (service=%s)",
                         len(creds), npub[:20], service)
         else:
             logger.info("No credentials found for %s (service=%s)", npub[:20], service)
         return creds, ""
+
+    async def _load_vault_blob(
+        self,
+        service: str,
+        npub_override: str | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Load the raw vault blob (including ``__meta__.delivered_at``).
+
+        Same situation contract as ``_load_vault_creds``.  Prefer the stripped
+        form for secret use; use this for field listings / onboarding status.
+        """
+        from tollbooth.constants import ErrorCode
+        from tollbooth.persistence_errors import classify_persistence_failure
+        from tollbooth.tools.onboarding import load_vault_blob
+
+        try:
+            npub = npub_override or self.operator_npub()
+            courier = await self.courier()
+        except Exception as exc:  # noqa: BLE001
+            situation = classify_persistence_failure(exc)
+            logger.warning(
+                "Courier unavailable for credential blob load (service=%s): %s — reporting %s",
+                service, exc, situation,
+            )
+            return {}, situation
+
+        if courier is None:
+            return {}, ErrorCode.SECURE_COURIER_UNAVAILABLE
+
+        result, situation = await load_vault_blob(courier, service, npub)
+        if situation:
+            return {}, situation
+        return result or {}, ""
 
     async def load_credentials(
         self,
@@ -1590,6 +1650,7 @@ class OperatorRuntime:
         credentials: dict[str, str],
         *,
         service: str | None = None,
+        just_delivered: list[str] | None = None,
     ) -> bool:
         """Persist patron session credentials to the encrypted vault.
 
@@ -1598,12 +1659,20 @@ class OperatorRuntime:
         encrypted with the operator's key and stored in Neon, keyed
         by (service, patron_npub). Survives process restarts.
 
+        Delivery timestamps (``__meta__.delivered_at``) are stamped for
+        new/changed fields via ``_vault_store``.  Pass *just_delivered*
+        when the write is an explicit field delivery (re-courier /
+        ``update_patron_credential``) so the stamp records receipt even
+        if the value happens to match the previous one.
+
         Args:
             patron_npub: The patron's npub (vault key).
             credentials: Dict of credential fields to store (e.g.,
                 ``{"token_json": "...", "account_hash": "..."}``).
             service: Credential service name. Defaults to
                 patron_credential_service.
+            just_delivered: Optional field names that arrived on this
+                write.  ``None`` stamps any value that changed.
 
         Returns True on success, False on failure.
         """
@@ -1616,8 +1685,10 @@ class OperatorRuntime:
             if courier is None or courier._exchange._credential_vault is None:
                 logger.warning("No credential vault for patron session storage.")
                 return False
-            await courier._exchange._vault_store(svc, patron_npub, credentials)
-            return True
+            ok = await courier._exchange._vault_store(
+                svc, patron_npub, credentials, just_delivered=just_delivered,
+            )
+            return ok
         except Exception as exc:  # noqa: BLE001
             logger.warning("Patron session store failed: %s", exc)
             return False
@@ -1697,7 +1768,9 @@ class OperatorRuntime:
         """Add or update a single credential field, preserving all others.
 
         Decrypts the existing blob, merges the field, re-encrypts,
-        and stores. Creates a new blob if none exists.
+        and stores. Creates a new blob if none exists.  Records a
+        fresh ``delivered_at`` for *field* (re-delivery of the same
+        value still rewinds the age).
 
         On OAuth-only operators (no ``patron_credential_template``),
         falls back to writing into the OAuth provider's vault entry
@@ -1719,7 +1792,9 @@ class OperatorRuntime:
             return False
         merged = dict(existing or {})
         merged[field] = value
-        return await self.store_patron_session(patron_npub, merged, service=svc)
+        return await self.store_patron_session(
+            patron_npub, merged, service=svc, just_delivered=[field],
+        )
 
     async def delete_patron_credential(
         self,
@@ -1767,12 +1842,42 @@ class OperatorRuntime:
         *,
         service: str | None = None,
     ) -> list[str]:
-        """List field names stored for a patron (names only, not values)."""
+        """List field names stored for a patron (names only, not values).
+
+        Reserved ``__meta__`` is never listed.  For delivery timestamps use
+        ``list_patron_credential_field_details``.
+        """
+        details = await self.list_patron_credential_field_details(
+            patron_npub, service=service,
+        )
+        return [d["field"] for d in details]
+
+    async def list_patron_credential_field_details(
+        self,
+        patron_npub: str,
+        *,
+        service: str | None = None,
+    ) -> list[CredentialFieldDetail]:
+        """List stored patron credential fields with delivery timestamps.
+
+        Returns ``[{"field": name, "delivered_at": iso_or_None}, ...]`` —
+        names only, never values.  ``delivered_at`` is ``None`` for fields
+        vaulted before timestamps existed.  Reserved ``__meta__`` is never
+        listed.
+        """
+        from tollbooth.credential_meta import (
+            credential_field_names,
+            get_delivered_at,
+        )
+
         svc = self._patron_storage_service(service)
         if not svc:
             return []
-        existing, _situation = await self.load_patron_session(patron_npub, service=svc)
-        return list((existing or {}).keys())
+        blob, _situation = await self._load_vault_blob(svc, npub_override=patron_npub)
+        return [
+            CredentialFieldDetail(field=name, delivered_at=get_delivered_at(blob, name))
+            for name in credential_field_names(blob)
+        ]
 
     # ------------------------------------------------------------------
     # OAuth session restore (generic refresh-and-persist)
@@ -4308,11 +4413,13 @@ def register_standard_tools(
     ) -> dict[str, Any]:
         """List stored patron credential field names (not values).
 
-        Returns the names of fields stored for a patron. Values
+        Returns the names of fields stored for a patron, plus each
+        field's ``delivered_at`` ISO-8601 timestamp when known (null
+        for secrets vaulted before timestamps were recorded). Values
         are never exposed — use this to verify which fields are
-        configured. Free. Proof of npub ownership is required: the
-        list of configured fields is itself sensitive (reveals
-        which integrations a patron has set up).
+        configured and how old each one is. Free. Proof of npub
+        ownership is required: the list of configured fields is itself
+        sensitive (reveals which integrations a patron has set up).
 
         Args:
             npub: The patron's Nostr public key (npub1...).
@@ -4325,10 +4432,15 @@ def register_standard_tools(
         if err := await rt.require_caller_proof(npub, dpop_token, "get_patron_credential_fields"):
             return err
         try:
-            fields = await rt.list_patron_credential_fields(npub)
+            details = await rt.list_patron_credential_field_details(npub)
+            fields = [d["field"] for d in details]
+            delivered_at = {
+                d["field"]: d["delivered_at"] for d in details
+            }
             return {
                 "success": True,
                 "fields": fields,
+                "delivered_at": delivered_at,
                 "count": len(fields),
             }
         except Exception as e:  # noqa: BLE001

@@ -1187,13 +1187,17 @@ class NostrCredentialExchange:
         Returns a success dict (``encryption: "vault"``) on a complete vault
         hit, else ``{"success": False}``.
         """
+        from tollbooth.credential_meta import strip_meta
+
         vault_service = self._resolve_service(service)
         if self._credential_vault is None or not vault_service:
             return {"success": False}
 
-        vaulted = await self._vault_fetch(vault_service, sender_npub)
-        if vaulted is None:
+        vaulted_blob = await self._vault_fetch(vault_service, sender_npub)
+        if vaulted_blob is None:
             return {"success": False}
+        # Never hand ``__meta__`` to callbacks / credential cards as a field.
+        vaulted = strip_meta(vaulted_blob)
 
         template = self._templates[vault_service]
         required_fields = {
@@ -1452,15 +1456,25 @@ class NostrCredentialExchange:
                 f"more of: {', '.join(template.fields.keys())}."
             )
 
-        existing: dict[str, str] = {}
+        from tollbooth.credential_meta import strip_meta
+
+        existing: dict[str, Any] = {}
         if self._credential_vault is not None:
             existing = await self._vault_fetch(template.service, sender_npub) or {}
-        merged = {**existing, **delivered}
+        # Merge plain values only — delivery stamps are applied inside _vault_store.
+        merged = {**strip_meta(existing), **delivered}
 
-        # Store the MERGED blob, honestly report outcome.
+        # Store the MERGED blob, honestly report outcome. Stamp every field that
+        # arrived in this reply (re-courier counts as a fresh delivery even when
+        # the value is unchanged — "how old is this secret?" means last receipt).
         persisted = True
         if self._credential_vault is not None:
-            persisted = await self._vault_store(template.service, sender_npub, merged)
+            persisted = await self._vault_store(
+                template.service,
+                sender_npub,
+                merged,
+                just_delivered=list(delivered.keys()),
+            )
 
         # ACK only if persistence actually worked — telling the patron "got it"
         # when the vault write failed is the root of the lag-and-confusion bugs.
@@ -1624,10 +1638,16 @@ class NostrCredentialExchange:
 
         # Store in vault, honestly report persistence outcome. Pre-0.33.0
         # this was a fire-and-forget that always claimed success — root
-        # cause of the ncred state-lag bug class.
+        # cause of the ncred state-lag bug class. Every field on the card
+        # is a fresh delivery for timestamp purposes.
         persisted = True
         if self._credential_vault is not None and resolved:
-            persisted = await self._vault_store(resolved, user_npub, credentials)
+            persisted = await self._vault_store(
+                resolved,
+                user_npub,
+                credentials,
+                just_delivered=list(credentials.keys()),
+            )
 
         # Count sensitive fields
         sensitive_count = 0
@@ -1880,8 +1900,12 @@ class NostrCredentialExchange:
 
     async def _vault_fetch(
         self, service: str, sender_npub: str,
-    ) -> dict[str, str] | None:
-        """Fetch and decrypt credentials from the vault."""
+    ) -> dict[str, Any] | None:
+        """Fetch and decrypt credentials from the vault.
+
+        May include the reserved ``__meta__`` key (delivery timestamps).
+        Callers that need plain field values should run ``strip_meta`` first.
+        """
         assert self._credential_vault is not None
         blob = await self._credential_vault.fetch_credentials(service, sender_npub)
         if blob is None:
@@ -1898,9 +1922,20 @@ class NostrCredentialExchange:
             return None
 
     async def _vault_store(
-        self, service: str, sender_npub: str, credentials: dict[str, str],
+        self,
+        service: str,
+        sender_npub: str,
+        credentials: dict[str, Any],
+        *,
+        just_delivered: list[str] | None = None,
     ) -> bool:
         """Encrypt and store credentials in the vault.
+
+        Stamps ``__meta__.delivered_at`` for newly delivered fields so
+        listings can answer "how old is this secret?" (issue #166).  When
+        *just_delivered* is given those names get a fresh timestamp; when
+        omitted, any field whose value changed vs. the prior blob is stamped
+        and unchanged fields keep their prior timestamp.
 
         Returns True if the write actually reached Neon, False if it failed
         (vault unreachable, schema not provisioned, permission denied, etc.).
@@ -1912,7 +1947,15 @@ class NostrCredentialExchange:
         """
         assert self._credential_vault is not None
         try:
-            plaintext = json.dumps(credentials)
+            from tollbooth.credential_meta import apply_delivery_timestamps
+
+            previous = await self._vault_fetch(service, sender_npub)
+            stamped = apply_delivery_timestamps(
+                credentials,
+                previous=previous,
+                just_delivered=just_delivered,
+            )
+            plaintext = json.dumps(stamped)
             blob = self._vault_encrypt(plaintext)
             await self._credential_vault.store_credentials(
                 service, sender_npub, blob,

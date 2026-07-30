@@ -203,14 +203,15 @@ class TestOnboardingStatus:
         rt = _make_runtime(operator_template=BTCPAY_TEMPLATE)
         rt._vault = MagicMock()
 
-        # Mock vault credentials to return all fields
-        async def _mock_vault_creds(service, npub_override=None):
+        # Mock vault blob to return all fields (onboarding reads via _load_vault_blob
+        # so delivered_at can ride on configured entries).
+        async def _mock_vault_blob(service, npub_override=None):
             return {
                 "btcpay_host": "https://pay.example.com",
                 "btcpay_api_key": "key123",
                 "btcpay_store_id": "store456",
             }, ""
-        rt._load_vault_creds = _mock_vault_creds
+        rt._load_vault_blob = _mock_vault_blob
 
         result = await rt.onboarding_status()
 
@@ -238,9 +239,9 @@ class TestOnboardingStatus:
         rt = _make_runtime(operator_template=BTCPAY_TEMPLATE)
         rt._vault = MagicMock()
 
-        async def _partial_creds(service, npub_override=None):
+        async def _partial_blob(service, npub_override=None):
             return {"btcpay_host": "https://pay.example.com"}, ""
-        rt._load_vault_creds = _partial_creds
+        rt._load_vault_blob = _partial_blob
 
         result = await rt.onboarding_status()
 
@@ -259,7 +260,7 @@ class TestOnboardingStatus:
 
         async def _required_only(service, npub_override=None):
             return {"required_key": "value"}, ""
-        rt._load_vault_creds = _required_only
+        rt._load_vault_blob = _required_only
 
         result = await rt.onboarding_status()
 
@@ -337,7 +338,7 @@ class TestPatronOnboardingStatus:
 
         async def _empty(service, npub_override=None):
             return {}, ""
-        rt._load_vault_creds = _empty
+        rt._load_vault_blob = _empty
 
         result = await rt.patron_onboarding_status("npub1patron")
 
@@ -354,7 +355,7 @@ class TestPatronOnboardingStatus:
 
         async def _full(service, npub_override=None):
             return {"api_key": "key123", "brain_id": "brain-uuid"}, ""
-        rt._load_vault_creds = _full
+        rt._load_vault_blob = _full
 
         result = await rt.patron_onboarding_status("npub1patron")
 

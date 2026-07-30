@@ -538,8 +538,13 @@ class TestReceiveValidation:
 
         assert result["success"] is True
         assert result["still_missing_required"] == []  # api_secret was preserved
+        from tollbooth.credential_meta import get_delivered_at, strip_meta
+
         merged = await ex._vault_fetch("x", npub)
-        assert merged == {"api_key": "new", "api_secret": "kept"}
+        assert strip_meta(merged) == {"api_key": "new", "api_secret": "kept"}
+        # Partial re-delivery stamps the new field; the kept field retains its stamp.
+        assert get_delivered_at(merged, "api_key") is not None
+        assert get_delivered_at(merged, "api_secret") is not None
 
 
 # ── Freshness and Replay Tests ────────────────────────────────────────
