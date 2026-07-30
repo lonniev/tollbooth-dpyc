@@ -5,6 +5,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## 0.76.0 — 2026-07-30
+
+Three OAuth situations that all reached patrons as "your access expired" are now
+told apart. Only one of them ever meant it.
+
+### Fixed — a rejected access token renews itself instead of stranding the patron
+
+An upstream 401 refuses the **access** token — the short-lived half of the grant,
+with the refresh token sitting right there unused. What turned that into a
+re-authorization was the stored expiry: it kept asserting the dead token was good,
+so every retry short-circuited on the cache and failed identically until the real
+expiry hours later. The only escape offered was a full reconnect the patron never
+needed — and on a provider that rotates refresh tokens, reconnecting to chase a blip
+is how a working grant gets thrown away.
+
+`invalidate_oauth_access_token(patron_npub)` retires the cached expiry and touches
+nothing else — crucially not the refresh token, which is the cure — so the next
+`restore_oauth_session` renews. If the grant genuinely is dead, the provider says so
+and we report `token_expired` on its authority rather than our own guess.
+
+New situation `token_rejected` → `ErrorCode.OAUTH_TOKEN_REJECTED`, whose `next_steps`
+deliberately omit `begin_oauth`, on the rule established below: only the provider may
+declare a session dead.
+
+This closes the gap left open in 0.75.x deliberately. Consumers mapped an interactive
+401 straight to `oauth_token_expired` while their own scheduler code treated the same
+401 as transient and self-healing — a post that 401'd at 23:00 posted cleanly an hour
+later. Both paths can now agree.
+
 ### Added — per-field credential delivery timestamps
 
 When a patron or operator couriers a credential, the vault now records
