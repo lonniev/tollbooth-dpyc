@@ -81,6 +81,21 @@ def resolve_npub(npub: str) -> str:
     return npub
 
 
+def _epoch_seconds(value: Any) -> float:
+    """A vaulted ``expires_at`` as epoch seconds, or ``0.0`` if it says nothing.
+
+    Vault values are strings, and a token exchange whose response omitted
+    ``expires_in`` writes ``""`` — on which a bare ``float()`` raises, aborting
+    a session restore with a ValueError about string conversion rather than any
+    statement about the session. Zero is the honest reading of an unknown
+    expiry: treat the token as due for refresh.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def classify_operator_secrets(
     effective_fields: dict[str, Any],
     declared_names: set[str],
@@ -228,6 +243,10 @@ class OperatorRuntime:
         self._npub_proof_greeting = npub_proof_greeting
         self._on_npub_proven = on_npub_proven  # async callback(npub, payload)
         self._oauth_provider = oauth_provider  # OAuthProviderConfig or None
+        # One refresh at a time per (service, patron). A rotating single-use
+        # refresh token cannot survive being spent twice at once — see
+        # _oauth_refresh_lock.
+        self._oauth_refresh_locks: dict[str, asyncio.Lock] = {}
         # Cost computed by the most recent debit_or_deny, stashed so a paid
         # tool body (e.g. certify_credits) can read it without recomputing.
         self._last_debit_cost: int = 0
@@ -1881,9 +1900,10 @@ class OperatorRuntime:
 
             ``(None, situation)`` on failure — *situation* is one of
             ``"no_oauth_config"``, ``"no_credentials"``, ``"token_expired"``,
-            ``"operator_not_configured"``, or a persistence situation from
-            ``classify_persistence_failure`` (``"vault_bootstrapping"``,
-            ``"persistence_quota_exceeded"``, ``"persistence_misconfigured"``).
+            ``"refresh_unavailable"``, ``"operator_not_configured"``, or a
+            persistence situation from ``classify_persistence_failure``
+            (``"vault_bootstrapping"``, ``"persistence_quota_exceeded"``,
+            ``"persistence_misconfigured"``).
 
         Each situation is a different instruction to a different person, so none
         of them may stand in for another.  ``no_credentials`` sends the patron
@@ -1892,6 +1912,11 @@ class OperatorRuntime:
         restore capacity; ``vault_bootstrapping`` asks only for patience. They
         were all reported as ``no_credentials`` or ``token_expired`` until the
         vault read learned to say which one it meant.
+
+        ``token_expired`` is the narrowest of them and is stated only when the
+        provider itself named the grant dead.  A refresh that merely failed to
+        complete is ``refresh_unavailable`` — retryable, and never a reason to
+        send anyone back through OAuth.
         """
         opc = self._oauth_provider
         if opc is None:
@@ -1922,7 +1947,7 @@ class OperatorRuntime:
         # refresh is possible, there is nothing to exercise, so the cached
         # token serves until its real expiry (leeway collapses to zero).
         import time as _time
-        expires_at = float(creds.get("expires_at", "0"))
+        expires_at = _epoch_seconds(creds.get("expires_at"))
         refresh_token = creds.get("refresh_token", "")
         can_refresh = opc.refresh_enabled and bool(refresh_token)
         leeway = opc.refresh_leeway_seconds if can_refresh else 0
@@ -1934,6 +1959,78 @@ class OperatorRuntime:
         if not can_refresh:
             return None, "token_expired"
 
+        # Stage 4: refresh, and do it ALONE.
+        #
+        # Providers that honor OAuth2 rotation (X among them) issue a new
+        # refresh token on every use and invalidate the old one; a strict one
+        # revokes the whole grant when it sees a spent token replayed. So N
+        # callers refreshing the same patron at the same instant is not N
+        # chances to succeed — it is one success and N-1 `invalid_grant`s, each
+        # of which reads to its patron as "your session expired". Worse, the
+        # replay itself can retire a grant that was working.
+        #
+        # This is not a hypothetical: an operator whose scheduler launches one
+        # publisher per due post fires them together, so four posts due at
+        # 10:30 meant four simultaneous refreshes of one token and four posts
+        # held for "oauth_token_expired" while the account was fine.
+        #
+        # The lock serializes them, and the re-read behind it means the waiters
+        # collect the winner's fresh token instead of racing the provider for
+        # another one. In-process only, which matches where the contention comes
+        # from — a fan-out of jobs inside one server. Two containers refreshing
+        # the same patron in the same second remains possible and remains rare,
+        # and now degrades to a retryable situation rather than a dead grant.
+        async with self._oauth_refresh_lock(svc, patron_npub):
+            fresh, fresh_situation = await self.load_patron_session(
+                patron_npub, service=svc,
+            )
+            if fresh_situation:
+                # The re-read is an optimization, not a gate: we already hold a
+                # session that stage 1 read successfully. A vault that went quiet
+                # in the interim is no reason to abandon it — proceed exactly as
+                # this code did before the lock existed.
+                logger.debug(
+                    "Refresh re-read for %s could not answer (%s); using the "
+                    "session already in hand", patron_npub[:20], fresh_situation,
+                )
+            elif fresh and fresh.get("access_token"):
+                if _time.time() < _epoch_seconds(fresh.get("expires_at")) - leeway:
+                    # Somebody else refreshed while we waited. Nothing to do.
+                    return fresh, ""
+                creds = fresh
+                refresh_token = fresh.get("refresh_token", "") or refresh_token
+
+            return await self._perform_oauth_refresh(
+                patron_npub, opc, svc, creds, refresh_token,
+            )
+
+    def _oauth_refresh_lock(self, service: str, patron_npub: str) -> asyncio.Lock:
+        """The refresh lock for one patron's session with one provider.
+
+        Created on demand and keyed per patron, so refreshing one patron's token
+        never blocks another's. Only reached by a caller that already holds a
+        vaulted session, so the map cannot be grown by unknown npubs.
+        """
+        key = f"{service}:{patron_npub}"
+        lock = self._oauth_refresh_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._oauth_refresh_locks[key] = lock
+        return lock
+
+    async def _perform_oauth_refresh(
+        self,
+        patron_npub: str,
+        opc: Any,
+        svc: str,
+        creds: dict[str, str],
+        refresh_token: str,
+    ) -> tuple[dict[str, str] | None, str]:
+        """Exchange ``refresh_token`` for a new pair and persist it.
+
+        Called only from ``restore_oauth_session``, and only while holding that
+        patron's refresh lock.
+        """
         # The OPERATOR's app credentials, needed to perform the refresh. Read
         # through the situated primitive: an unreadable operator vault has
         # nothing to do with the patron's token, yet reporting it as
@@ -1956,12 +2053,42 @@ class OperatorRuntime:
             )
             return None, "operator_not_configured"
 
+        from tollbooth.oauth2_collector import (
+            OAuthRefreshDenied,
+            OAuthRefreshUnavailable,
+            refresh_access_token,
+        )
         try:
-            from tollbooth.oauth2_collector import refresh_access_token
             new_token = await refresh_access_token(
                 client_id, client_secret, refresh_token, opc.token_url,
             )
+        except OAuthRefreshDenied as exc:
+            # The provider named the grant dead. This is the ONE case where
+            # sending the patron back through OAuth is the right advice.
+            logger.warning(
+                "OAuth grant refused for %s: %s", patron_npub[:20], exc.detail,
+            )
+            return None, "token_expired"
+        except OAuthRefreshUnavailable as exc:
+            # We never learned whether the grant is good. Saying "expired" here
+            # is a guess, and the guess costs the patron a re-authorization.
+            if exc.token_may_have_rotated:
+                logger.warning(
+                    "OAuth refresh for %s reached the provider but did not "
+                    "answer (%s). If it rotates single-use refresh tokens, the "
+                    "stored one may now be spent — the next attempt will say so "
+                    "plainly.", patron_npub[:20], exc.detail,
+                )
+            else:
+                logger.warning(
+                    "OAuth refresh for %s could not be completed: %s",
+                    patron_npub[:20], exc.detail,
+                )
+            return None, "refresh_unavailable"
         except Exception as exc:  # noqa: BLE001
+            # An unclassified failure. Kept terminal deliberately: an unknown
+            # cause reported as retryable would hold a post silently forever,
+            # and never tell anyone what to do about it.
             logger.warning(
                 "OAuth token refresh failed for %s: %s", patron_npub[:20], exc,
             )
@@ -1971,12 +2098,16 @@ class OperatorRuntime:
         # it back would store `access_token: ""` over the working credentials and
         # turn a transient hiccup into a session the patron has to rebuild by
         # hand — so treat it as the failed refresh it is and persist nothing.
+        #
+        # Reported as unavailable, not expired: the provider never said the grant
+        # was dead, and a patron who re-authorized would hand a fresh token to
+        # the same malformed endpoint. Somebody should look at the provider.
         if not new_token.get("access_token"):
             logger.warning(
                 "OAuth refresh for %s returned no access_token; leaving the "
                 "vaulted credentials untouched", patron_npub[:20],
             )
-            return None, "token_expired"
+            return None, "refresh_unavailable"
 
         # Build vault data from refreshed token
         import json as _json
@@ -2107,7 +2238,10 @@ class OperatorRuntime:
         Standard situations:
 
         - ``token_expired`` → ``oauth_token_expired`` (returning patron,
-          refresh token revoked or aged out)
+          refresh token revoked or aged out — the provider said so)
+        - ``refresh_unavailable`` → ``oauth_refresh_unavailable`` (the refresh
+          never completed; the session is probably fine, so this one does NOT
+          route to begin_oauth)
         - ``no_credentials`` → ``oauth_not_yet_authorized`` (first-time
           patron with no vault entry)
         - ``vault_bootstrapping`` → ``warming_up``
@@ -2142,6 +2276,26 @@ class OperatorRuntime:
                     "Reconnect to continue."
                 ),
                 "next_steps": oauth_recovery,
+            },
+            # The refresh attempt never got an answer. Its whole reason for
+            # existing is to NOT be token_expired: the recovery steps below
+            # deliberately omit begin_oauth, because re-authorizing is both
+            # unnecessary and (for a provider that rotates refresh tokens) a way
+            # to lose a working grant chasing a network blip.
+            "refresh_unavailable": {
+                "error_code": ErrorCode.OAUTH_REFRESH_UNAVAILABLE,
+                "error": (
+                    "The upstream provider didn't answer the token refresh, so "
+                    "we don't yet know whether the session is still good. Your "
+                    "authorization is very likely unaffected — this is a network "
+                    "or provider hiccup, not an expired session."
+                ),
+                "next_steps": [
+                    "Repeat your request shortly — no re-authentication needed.",
+                    ("If it persists across several attempts, THEN reconnect — "
+                     "a genuinely dead grant reports itself as "
+                     "oauth_token_expired, not this."),
+                ],
             },
             "no_credentials": {
                 "error_code": ErrorCode.OAUTH_NOT_YET_AUTHORIZED,

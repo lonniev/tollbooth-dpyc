@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## [Unreleased]
 
 ### Added — per-field credential delivery timestamps
 
@@ -23,6 +23,76 @@ When a patron or operator couriers a credential, the vault now records
   rather than inventing one.
 
 Resolves #166 (the leftover from #132 / #133).
+
+### Fixed — a refresh token cannot be spent four times at once
+
+eXcalibur's 22:30 tick on 2026-07-29 found four posts due, launched four publishers, and
+held all four for `oauth_token_expired`. The X account was connected. Nothing had expired.
+
+The scheduler launches one publisher per due post and they run together, so four
+publishers meant four `restore_oauth_session` calls in the same second, and four refresh
+POSTs presenting the **same** refresh token. X honors OAuth2 refresh-token rotation: a
+refresh token is single-use, the answer carries its replacement, and a provider that sees a
+retired one replayed is entitled to treat it as theft and revoke the grant. So the
+concurrency was never four chances to succeed — it was one success and three
+`invalid_grant`s, each of which reached its owner as "your X access expired", and a real
+risk of retiring a grant that was working.
+
+`restore_oauth_session` now refreshes **one patron at a time**, and re-reads the vault
+behind the lock: the waiters collect the winner's rotated token instead of racing the
+provider for another one. The lock is per `(service, npub)` — one patron's refresh never
+queues another's — and in-process, which is where the contention comes from (a fan-out of
+jobs inside one server). Two containers refreshing the same patron in the same second stays
+possible, stays rare, and now degrades to a retryable situation rather than a dead grant.
+
+### Fixed — five seconds of network weather read as "your session expired"
+
+`refresh_access_token` used a bare `httpx.AsyncClient()`, which allows **5 seconds for
+every phase** against a provider's auth host, and `raise_for_status()`, which makes a
+timeout, a 429, a 503 and a genuine `invalid_grant` indistinguishable. `restore_oauth_session`
+caught all of them as one `Exception` and reported `token_expired`. So a blip cost a patron
+a re-authorization — and worse, a *read* timeout means the request did arrive, so a rotating
+provider may have issued a replacement token we threw away, leaving the stored one spent.
+That is how a five-second hiccup permanently bricks a working grant.
+
+The token endpoint now gets the same budget this fleet already gives X's API — 10s connect,
+30s read/write — and retries **only** the connect phase, the one failure that provably never
+reached the provider. A read timeout is left to fail, because asking again with a possibly
+spent token is how a grant gets revoked.
+
+`refresh_access_token` is the only place that sees the HTTP status and the provider's error
+body, so it is now the only place that decides what happened:
+
+- `OAuthRefreshDenied` — the provider named the grant dead (`invalid_grant`,
+  `invalid_request`, `unauthorized_client`, `invalid_client`). The one case where sending a
+  patron back through OAuth is correct advice.
+- `OAuthRefreshUnavailable` — the refresh did not complete: timeout, connect failure, 429,
+  5xx, a 4xx with no OAuth2 error code, a body that wasn't JSON. Nothing here is evidence
+  about the grant. It carries `token_may_have_rotated` when the request reached the provider,
+  so the log says plainly that the stored token may now be spent.
+
+An unclassified exception stays terminal on purpose: an unknown cause reported as retryable
+would hold work silently forever and never tell anyone what to do about it.
+
+### Added — `oauth_refresh_unavailable`, the one retryable OAuth situation
+
+New situation `refresh_unavailable` → `ErrorCode.OAUTH_REFRESH_UNAVAILABLE`. Its
+`next_steps` deliberately **omit** `begin_oauth`: re-authorizing is unnecessary when the
+grant was never refused, and for a rotating provider it is a way to lose a working session
+chasing a network blip. A genuinely dead grant still reports `oauth_token_expired` and still
+sends the patron to reconnect, so the escalation ladder is intact — retry, then reconnect
+when the provider actually says so.
+
+A 200 carrying no `access_token` moves from `token_expired` to this situation for the same
+reason: the provider never refused anything, and a patron who re-authorized would hand a
+brand-new token to the same malformed endpoint.
+
+### Fixed — an unreadable `expires_at` aborted the session restore
+
+A token exchange whose response omitted `expires_in` vaults `expires_at: ""`, and a bare
+`float("")` raises — so the next restore failed with a string-conversion error instead of
+saying anything about the session. An unreadable expiry now reads as zero, which is the
+honest interpretation: refresh it.
 
 ## 0.75.1 — 2026-07-29
 
