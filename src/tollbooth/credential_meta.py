@@ -26,6 +26,7 @@ from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
+
 # Reserved top-level key.  Must never surface as a field name in listings,
 # onboarding classification, or credential-card payloads.
 class CredentialFieldDetail(TypedDict):
