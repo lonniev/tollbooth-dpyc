@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 
 from datetime import UTC
 
+from tollbooth.credential_meta import CredentialFieldDetail
 from tollbooth.identity_proof import require_proof
 from tollbooth.tool_identity import capability_uuid
 from tollbooth.vault_backend import LedgerUnavailableError, LedgerWriteError
@@ -1856,7 +1857,7 @@ class OperatorRuntime:
         patron_npub: str,
         *,
         service: str | None = None,
-    ) -> list[dict[str, str | None]]:
+    ) -> list[CredentialFieldDetail]:
         """List stored patron credential fields with delivery timestamps.
 
         Returns ``[{"field": name, "delivered_at": iso_or_None}, ...]`` —
@@ -1874,7 +1875,7 @@ class OperatorRuntime:
             return []
         blob, _situation = await self._load_vault_blob(svc, npub_override=patron_npub)
         return [
-            {"field": name, "delivered_at": get_delivered_at(blob, name)}
+            CredentialFieldDetail(field=name, delivered_at=get_delivered_at(blob, name))
             for name in credential_field_names(blob)
         ]
 

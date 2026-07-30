@@ -24,10 +24,23 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypedDict
 
 # Reserved top-level key.  Must never surface as a field name in listings,
 # onboarding classification, or credential-card payloads.
+class CredentialFieldDetail(TypedDict):
+    """One row of a credential-field listing: the name, and when it arrived.
+
+    A plain ``dict[str, str | None]`` cannot say that only ONE of these is nullable, so
+    every read of ``["field"]`` widened to ``str | None`` and infected its callers. The
+    field name always exists; ``delivered_at`` is None for blobs vaulted before timestamps
+    were recorded.
+    """
+
+    field: str
+    delivered_at: str | None
+
+
 META_KEY = "__meta__"
 _DELIVERED_AT = "delivered_at"
 
