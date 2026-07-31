@@ -2184,7 +2184,7 @@ class OperatorRuntime:
                 "refresh_unavailable", detail=exc.detail,
                 status_code=exc.status_code,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # An unclassified failure. It used to be reported as `token_expired`
             # on the reasoning that an unknown cause must not look retryable —
             # but that traded a silent hold for a wrong instruction, and the
@@ -2272,16 +2272,18 @@ class OperatorRuntime:
         does, leaving every credential untouched. Best-effort: failing to record
         a suspicion must never turn into failing the refresh path itself.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         if creds.get(_REFRESH_LOST_AT):
             return  # already suspect; keep the FIRST loss, it's the culprit
-        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        stamp = datetime.now(UTC).isoformat(timespec="seconds")
         try:
             await self.store_patron_session(
                 patron_npub, {**creds, _REFRESH_LOST_AT: stamp}, service=svc,
             )
-        except Exception:  # noqa: BLE001 — diagnosis is never worth an outage
+        except Exception:
+            # Diagnosis is never worth an outage — a suspicion we failed to
+            # write down must not take the refresh path down with it.
             logger.exception(
                 "Could not record the lost refresh for %s", patron_npub[:20],
             )
