@@ -57,10 +57,17 @@ from datetime import UTC
 
 from tollbooth.credential_meta import CredentialFieldDetail
 from tollbooth.identity_proof import require_proof
+from tollbooth.oauth_situation import OAuthSituation
 from tollbooth.tool_identity import capability_uuid
 from tollbooth.vault_backend import LedgerUnavailableError, LedgerWriteError
 
 logger = logging.getLogger(__name__)
+
+# Vault field marking a refresh whose answer never arrived, and when. Not a
+# credential — a note to our future selves, so a grant that dies of a spent
+# rotation token can say so instead of reporting an expiry that never happened.
+# Cleared on every successful refresh and on every fresh authorization.
+_REFRESH_LOST_AT = "refresh_lost_at"
 
 
 def resolve_npub(npub: str) -> str:
@@ -1886,7 +1893,7 @@ class OperatorRuntime:
     async def restore_oauth_session(
         self,
         patron_npub: str,
-    ) -> tuple[dict[str, str] | None, str]:
+    ) -> tuple[dict[str, str] | None, OAuthSituation | None]:
         """Restore OAuth tokens from vault, refreshing if expired.
 
         Uses the ``OAuthProviderConfig`` attached to this runtime to
@@ -1896,15 +1903,18 @@ class OperatorRuntime:
         cold starts find fresh credentials.
 
         Returns:
-            ``(creds, "")`` on success — *creds* contains at least
+            ``(creds, None)`` on success — *creds* contains at least
             ``access_token``, ``token_json``, and ``expires_at``.
 
-            ``(None, situation)`` on failure — *situation* is one of
-            ``"no_oauth_config"``, ``"no_credentials"``, ``"token_expired"``,
-            ``"refresh_unavailable"``, ``"operator_not_configured"``, or a
-            persistence situation from ``classify_persistence_failure``
-            (``"vault_bootstrapping"``, ``"persistence_quota_exceeded"``,
-            ``"persistence_misconfigured"``).
+            ``(None, situation)`` on failure — an :class:`OAuthSituation`
+            whose ``code`` is one of ``"no_oauth_config"``,
+            ``"no_credentials"``, ``"token_expired"``, ``"refresh_token_lost"``,
+            ``"no_refresh_token"``, ``"refresh_failed_unclassified"``,
+            ``"operator_app_credentials_rejected"``,
+            ``"refresh_request_malformed"``, ``"refresh_unavailable"``,
+            ``"operator_not_configured"``, or a persistence situation from
+            ``classify_persistence_failure`` (``"vault_bootstrapping"``,
+            ``"persistence_quota_exceeded"``, ``"persistence_misconfigured"``).
 
         Each situation is a different instruction to a different person, so none
         of them may stand in for another.  ``no_credentials`` sends the patron
@@ -1915,13 +1925,21 @@ class OperatorRuntime:
         vault read learned to say which one it meant.
 
         ``token_expired`` is the narrowest of them and is stated only when the
-        provider itself named the grant dead.  A refresh that merely failed to
-        complete is ``refresh_unavailable`` — retryable, and never a reason to
-        send anyone back through OAuth.
+        provider answered ``invalid_grant`` on a refresh token no earlier
+        timeout had put in doubt.  A refresh that merely failed to complete is
+        ``refresh_unavailable``; one that died because its answer was lost is
+        ``refresh_token_lost``; one the provider refused over the operator's own
+        app credentials is ``operator_app_credentials_rejected``.  None of those
+        three are the patron's doing, and only the last of them ends at a
+        reconnect.
+
+        The situation carries its evidence — the provider's status, its RFC 6749
+        error code, a redacted detail line.  Handing forward a bare verdict is
+        what let one word, "expired", stand in for five unrelated failures.
         """
         opc = self._oauth_provider
         if opc is None:
-            return None, "no_oauth_config"
+            return None, OAuthSituation("no_oauth_config")
 
         svc = opc.service_name
 
@@ -1929,10 +1947,12 @@ class OperatorRuntime:
         # patron who never authorized — propagate what actually happened.
         creds, situation = await self.load_patron_session(patron_npub, service=svc)
         if situation:
-            return None, situation
+            # A persistence situation, forwarded verbatim: the vault layer
+            # speaks in strings and this is where they enter the OAuth layer.
+            return None, OAuthSituation(situation)
 
         if not creds or not creds.get("access_token"):
-            return None, "no_credentials"
+            return None, OAuthSituation("no_credentials")
 
         # Stage 2: decide whether the cached access token still serves.
         #
@@ -1953,12 +1973,28 @@ class OperatorRuntime:
         can_refresh = opc.refresh_enabled and bool(refresh_token)
         leeway = opc.refresh_leeway_seconds if can_refresh else 0
         if _time.time() < expires_at - leeway:
-            return creds, ""  # cached token comfortably serves
+            return creds, None  # cached token comfortably serves
 
         # Stage 3: refresh if possible; otherwise the cached token has lapsed
         # (or is inside the leeway window with no way to renew it).
+        #
+        # Two different situations, and calling both "expired" hid the second
+        # one entirely. A grant with no refresh token was never going to renew
+        # — that is a scope problem (no offline access), not a clock problem,
+        # and the patron reconnecting without fixing the scope just repeats it.
         if not can_refresh:
-            return None, "token_expired"
+            if not refresh_token:
+                return None, OAuthSituation(
+                    "no_refresh_token",
+                    detail=(
+                        "The stored authorization has an access token but no "
+                        "refresh token, so it can never renew itself."
+                    ),
+                )
+            return None, OAuthSituation(
+                "token_expired",
+                detail="Automatic renewal is disabled for this provider.",
+            )
 
         # Stage 4: refresh, and do it ALONE.
         #
@@ -1997,7 +2033,7 @@ class OperatorRuntime:
             elif fresh and fresh.get("access_token"):
                 if _time.time() < _epoch_seconds(fresh.get("expires_at")) - leeway:
                     # Somebody else refreshed while we waited. Nothing to do.
-                    return fresh, ""
+                    return fresh, None
                 creds = fresh
                 refresh_token = fresh.get("refresh_token", "") or refresh_token
 
@@ -2069,11 +2105,15 @@ class OperatorRuntime:
         svc: str,
         creds: dict[str, str],
         refresh_token: str,
-    ) -> tuple[dict[str, str] | None, str]:
+    ) -> tuple[dict[str, str] | None, OAuthSituation | None]:
         """Exchange ``refresh_token`` for a new pair and persist it.
 
         Called only from ``restore_oauth_session``, and only while holding that
         patron's refresh lock.
+
+        Every failure exit carries the provider's own words out with it. This is
+        the only frame in the fleet that holds them, and it used to answer four
+        unrelated refusals with the single word "expired".
         """
         # The OPERATOR's app credentials, needed to perform the refresh. Read
         # through the situated primitive: an unreadable operator vault has
@@ -2083,7 +2123,7 @@ class OperatorRuntime:
             self.operator_credential_service,
         )
         if op_situation:
-            return None, op_situation
+            return None, OAuthSituation(op_situation)
 
         client_id = op_creds.get(opc.client_id_field, "")
         client_secret = op_creds.get(opc.client_secret_field, "")
@@ -2095,7 +2135,13 @@ class OperatorRuntime:
                 "Cannot refresh OAuth for %s: operator has not delivered %s/%s",
                 patron_npub[:20], opc.client_id_field, opc.client_secret_field,
             )
-            return None, "operator_not_configured"
+            return None, OAuthSituation(
+                "operator_not_configured",
+                detail=(
+                    f"The operator has not delivered {opc.client_id_field} / "
+                    f"{opc.client_secret_field}."
+                ),
+            )
 
         from tollbooth.oauth2_collector import (
             OAuthRefreshDenied,
@@ -2107,36 +2153,53 @@ class OperatorRuntime:
                 client_id, client_secret, refresh_token, opc.token_url,
             )
         except OAuthRefreshDenied as exc:
-            # The provider named the grant dead. This is the ONE case where
-            # sending the patron back through OAuth is the right advice.
             logger.warning(
-                "OAuth grant refused for %s: %s", patron_npub[:20], exc.detail,
+                "OAuth refresh refused for %s (fault=%s, oauth_error=%s): %s",
+                patron_npub[:20], exc.fault, exc.oauth_error, exc.detail,
             )
-            return None, "token_expired"
+            return None, await self._denied_situation(patron_npub, svc, creds, exc)
         except OAuthRefreshUnavailable as exc:
             # We never learned whether the grant is good. Saying "expired" here
             # is a guess, and the guess costs the patron a re-authorization.
             if exc.token_may_have_rotated:
+                # The request ARRIVED. On a provider that rotates single-use
+                # refresh tokens, ours may already be spent — and if it is,
+                # every later attempt draws `invalid_grant` and the grant reads
+                # as though it aged out. Write the suspicion down now, while we
+                # know it, so the attempt that finally fails can name this
+                # moment instead of blaming the clock.
                 logger.warning(
                     "OAuth refresh for %s reached the provider but did not "
                     "answer (%s). If it rotates single-use refresh tokens, the "
-                    "stored one may now be spent — the next attempt will say so "
-                    "plainly.", patron_npub[:20], exc.detail,
+                    "stored one may now be spent — recording the moment so a "
+                    "later refusal can cite it.", patron_npub[:20], exc.detail,
                 )
+                await self._mark_refresh_lost(patron_npub, svc, creds)
             else:
                 logger.warning(
                     "OAuth refresh for %s could not be completed: %s",
                     patron_npub[:20], exc.detail,
                 )
-            return None, "refresh_unavailable"
-        except Exception as exc:  # noqa: BLE001
-            # An unclassified failure. Kept terminal deliberately: an unknown
-            # cause reported as retryable would hold a post silently forever,
-            # and never tell anyone what to do about it.
-            logger.warning(
-                "OAuth token refresh failed for %s: %s", patron_npub[:20], exc,
+            return None, OAuthSituation(
+                "refresh_unavailable", detail=exc.detail,
+                status_code=exc.status_code,
             )
-            return None, "token_expired"
+        except Exception as exc:
+            # An unclassified failure. It used to be reported as `token_expired`
+            # on the reasoning that an unknown cause must not look retryable —
+            # but that traded a silent hold for a wrong instruction, and the
+            # wrong instruction (re-authorize) can destroy a working grant on a
+            # rotating provider. Name it as unclassified instead: retryable, and
+            # carrying the exception type so it can be diagnosed rather than
+            # guessed at.
+            logger.exception(
+                "OAuth token refresh failed for %s with an unclassified error",
+                patron_npub[:20],
+            )
+            return None, OAuthSituation(
+                "refresh_failed_unclassified",
+                detail=f"{type(exc).__name__}: {exc}".strip().rstrip(":"),
+            )
 
         # A response carrying no access token is a refusal wearing a 200. Writing
         # it back would store `access_token: ""` over the working credentials and
@@ -2151,7 +2214,13 @@ class OperatorRuntime:
                 "OAuth refresh for %s returned no access_token; leaving the "
                 "vaulted credentials untouched", patron_npub[:20],
             )
-            return None, "refresh_unavailable"
+            return None, OAuthSituation(
+                "refresh_unavailable",
+                detail=(
+                    "The provider answered the refresh with no access token. "
+                    "Nothing was written; your authorization is untouched."
+                ),
+            )
 
         # Build vault data from refreshed token
         import json as _json
@@ -2163,9 +2232,13 @@ class OperatorRuntime:
             "token_type": new_token.get("token_type", "Bearer"),
         }
 
-        # Carry forward non-token fields from original creds (e.g., account_hash)
+        # Carry forward non-token fields from original creds (e.g., account_hash).
+        # `_REFRESH_LOST_AT` is deliberately NOT among them: this refresh
+        # succeeded, so whatever earlier answer went missing did not cost us the
+        # grant after all, and a stale marker would misattribute the next
+        # genuine expiry to it months later.
         for key, val in creds.items():
-            if key not in vault_data:
+            if key not in vault_data and key != _REFRESH_LOST_AT:
                 vault_data[key] = val
 
         # Operator callback (e.g., Schwab fetches account_hash on refresh too)
@@ -2181,7 +2254,85 @@ class OperatorRuntime:
         await self.store_patron_session(patron_npub, vault_data, service=svc)
         logger.info("Refreshed and persisted OAuth token for %s.", patron_npub[:20])
 
-        return vault_data, ""
+        return vault_data, None
+
+    async def _mark_refresh_lost(
+        self, patron_npub: str, svc: str, creds: dict[str, str],
+    ) -> None:
+        """Record that a refresh answer went missing, and when.
+
+        The stored refresh token may now be spent: a rotating provider issues
+        the replacement when the request arrives, not when we read the reply.
+        We cannot know, and we must not guess — but we can write down the
+        moment, so that if the token *was* spent, the ``invalid_grant`` it
+        eventually draws can be reported as the lost answer it is rather than
+        as an expiry that never happened.
+
+        Amends the blob in place, exactly as ``invalidate_oauth_access_token``
+        does, leaving every credential untouched. Best-effort: failing to record
+        a suspicion must never turn into failing the refresh path itself.
+        """
+        from datetime import datetime
+
+        if creds.get(_REFRESH_LOST_AT):
+            return  # already suspect; keep the FIRST loss, it's the culprit
+        stamp = datetime.now(UTC).isoformat(timespec="seconds")
+        try:
+            await self.store_patron_session(
+                patron_npub, {**creds, _REFRESH_LOST_AT: stamp}, service=svc,
+            )
+        except Exception:
+            # Diagnosis is never worth an outage — a suspicion we failed to
+            # write down must not take the refresh path down with it.
+            logger.exception(
+                "Could not record the lost refresh for %s", patron_npub[:20],
+            )
+
+    async def _denied_situation(
+        self,
+        patron_npub: str,
+        svc: str,
+        creds: dict[str, str],
+        exc: Any,
+    ) -> OAuthSituation:
+        """Turn a provider refusal into the situation that names its culprit.
+
+        ``OAuthRefreshDenied.fault`` already says whose problem it is. The one
+        case needing more than a lookup is a dead grant on a token an earlier
+        timeout put in doubt: that is not an expiry, it is the delayed bill for
+        a lost answer, and saying so is the difference between an operator who
+        reconnects once knowing why and one who reconnects every day guessing.
+        """
+        detail, status, oauth_error = exc.detail, exc.status_code, exc.oauth_error
+
+        if exc.fault == "client":
+            return OAuthSituation(
+                "operator_app_credentials_rejected", detail=detail,
+                status_code=status, oauth_error=oauth_error,
+            )
+        if exc.fault == "request":
+            return OAuthSituation(
+                "refresh_request_malformed", detail=detail,
+                status_code=status, oauth_error=oauth_error,
+            )
+
+        lost_at = str(creds.get(_REFRESH_LOST_AT, "") or "")
+        if lost_at:
+            return OAuthSituation(
+                "refresh_token_lost",
+                detail=(
+                    f"A token renewal at {lost_at} reached the provider but its "
+                    "answer never arrived. The provider issues a replacement "
+                    "refresh token the moment a renewal arrives and retires the "
+                    "old one, so the token we still hold was already spent — "
+                    f"which is why it is now refused ({detail})."
+                ),
+                status_code=status, oauth_error=oauth_error, observed_at=lost_at,
+            )
+        return OAuthSituation(
+            "token_expired", detail=detail,
+            status_code=status, oauth_error=oauth_error,
+        )
 
     # ------------------------------------------------------------------
     # Identity-parameter validation helpers
@@ -2265,24 +2416,43 @@ class OperatorRuntime:
     # OAuth situation → structured patron-facing error
     # ------------------------------------------------------------------
 
-    def oauth_situation_response(self, situation: str) -> dict[str, Any]:
+    def oauth_situation_response(self, situation: OAuthSituation) -> dict[str, Any]:
         """Build a structured patron-facing error for a session-restoration situation.
 
-        Maps the ``situation`` string returned by ``restore_oauth_session``
-        to a canonical ``error_code`` + ``next_steps`` recipe.  The
-        mapping is **1:1** — situations with the same recovery flow
-        still get distinct ``error_code`` values, because a calling
+        Maps the :class:`OAuthSituation` returned by ``restore_oauth_session``
+        to a canonical ``error_code`` + ``next_steps`` recipe, keyed on its
+        ``code``.  The mapping is **1:1** — situations with the same recovery
+        flow still get distinct ``error_code`` values, because a calling
         agent needs to distinguish "your existing session aged out"
         from "you've never authorized" even though both end at
         ``begin_oauth``.
+
+        The situation's evidence rides along: ``detail`` is appended to the
+        prose and echoed as its own field, and the provider's status and RFC
+        6749 error code appear when known.  The recipe says what to do; the
+        evidence says why, and without it five unrelated failures were
+        indistinguishable to everyone downstream.
 
         Tool names in ``next_steps`` are qualified with this operator's
         slug so the response is directly invocable.
 
         Standard situations:
 
-        - ``token_expired`` → ``oauth_token_expired`` (returning patron,
-          refresh token revoked or aged out — the provider said so)
+        - ``token_expired`` → ``oauth_token_expired`` (the provider answered
+          ``invalid_grant`` on a token nothing had put in doubt)
+        - ``refresh_token_lost`` → ``oauth_refresh_token_lost`` (the grant died
+          because a renewal's answer was lost, not because it aged out; the
+          reconnect is real but the cause is worth knowing)
+        - ``no_refresh_token`` → ``oauth_no_refresh_token`` (nothing to renew
+          with — usually a grant issued without offline access)
+        - ``refresh_failed_unclassified`` → ``oauth_refresh_failed_unclassified``
+          (an unclassified error; retryable, and NOT a reason to re-authorize)
+        - ``operator_app_credentials_rejected`` →
+          ``operator_app_credentials_rejected`` (the provider refused the
+          OPERATOR's app credentials — the patron can do nothing, and must not
+          be sent to begin_oauth)
+        - ``refresh_request_malformed`` → ``oauth_refresh_request_malformed``
+          (we sent a bad request — a deployment bug)
         - ``refresh_unavailable`` → ``oauth_refresh_unavailable`` (the refresh
           never completed; the session is probably fine, so this one does NOT
           route to begin_oauth)
@@ -2324,6 +2494,94 @@ class OperatorRuntime:
                     "Reconnect to continue."
                 ),
                 "next_steps": oauth_recovery,
+            },
+            # A reconnect IS needed here — but the operator has earned an
+            # explanation. This grant did not age out; it was retired the
+            # moment a renewal reached the provider and its answer did not come
+            # back, because the provider rotates single-use refresh tokens on
+            # arrival. Reported as an expiry, it looks like a session that keeps
+            # aging out in hours, and the only available response is to
+            # reconnect again and wait for it to happen again.
+            "refresh_token_lost": {
+                "error_code": ErrorCode.OAUTH_REFRESH_TOKEN_LOST,
+                "error": (
+                    "This authorization was invalidated by a token renewal "
+                    "whose answer never arrived — not by expiry. The provider "
+                    "issued a replacement refresh token we never received and "
+                    "retired the one we still hold, so it can no longer be "
+                    "used. Reconnecting once fixes it."
+                ),
+                "next_steps": [
+                    *oauth_recovery,
+                    ("If this recurs often, the connection to the provider's "
+                     "token endpoint is dropping answers — that is worth "
+                     "investigating, not re-authorizing around."),
+                ],
+            },
+            # Nothing expired and nothing was refused: there is no refresh
+            # token to spend. Reconnecting works only if the new grant asks for
+            # offline access, so say that rather than just "try again".
+            "no_refresh_token": {
+                "error_code": ErrorCode.OAUTH_NO_REFRESH_TOKEN,
+                "error": (
+                    "The stored authorization cannot renew itself — it has no "
+                    "refresh token. This is usually a grant that was issued "
+                    "without offline access, so it lapses when its access "
+                    "token does and cannot recover on its own."
+                ),
+                "next_steps": [
+                    *oauth_recovery,
+                    ("If it recurs, the operator's requested scopes are "
+                     "missing offline access — reconnecting cannot fix that."),
+                ],
+            },
+            # Unknown cause. Retryable ON PURPOSE: this used to be reported as
+            # token_expired on the theory that an unknown failure shouldn't look
+            # harmless, but that sent patrons to re-authorize on a guess — and
+            # on a rotating provider, re-authorizing to chase a guess is how a
+            # working grant gets thrown away.
+            "refresh_failed_unclassified": {
+                "error_code": ErrorCode.OAUTH_REFRESH_FAILED_UNCLASSIFIED,
+                "error": (
+                    "The token renewal failed for a reason we could not "
+                    "classify, so nothing is known about your authorization — "
+                    "in particular, nothing says it expired."
+                ),
+                "next_steps": [
+                    "Repeat your request shortly — no re-authentication needed.",
+                    ("If it persists, this is a defect worth reporting with the "
+                     "detail below; do not re-authorize to work around it."),
+                ],
+            },
+            # The provider refused the OPERATOR's app credentials. The patron's
+            # grant is untouched and they can do nothing — least of all
+            # reconnect, which would re-authorize a live account against an app
+            # the provider is currently rejecting.
+            "operator_app_credentials_rejected": {
+                "error_code": ErrorCode.OPERATOR_APP_CREDENTIALS_REJECTED,
+                "error": (
+                    "The upstream provider rejected the operator's own "
+                    "application credentials. Your authorization is unaffected, "
+                    "and reconnecting would not help — the operator must repair "
+                    "or re-deliver the app's client credentials."
+                ),
+                "next_steps": [
+                    ("Notify the operator — this is an operator-side repair, "
+                     "not a patron-actionable error"),
+                ],
+            },
+            # Our own request was malformed. Nobody's account is at fault.
+            "refresh_request_malformed": {
+                "error_code": ErrorCode.OAUTH_REFRESH_REQUEST_MALFORMED,
+                "error": (
+                    "The upstream provider called our token-renewal request "
+                    "malformed. That is a defect in this service, not a problem "
+                    "with your authorization — reconnecting cannot fix it."
+                ),
+                "next_steps": [
+                    ("Notify the operator — this is a deployment-side defect, "
+                     "not a patron-actionable error"),
+                ],
             },
             # The refresh attempt never got an answer. Its whole reason for
             # existing is to NOT be token_expired: the recovery steps below
@@ -2437,16 +2695,29 @@ class OperatorRuntime:
             },
         }
 
-        spec = table.get(situation, {
+        spec = table.get(situation.code, {
             "error_code": ErrorCode.OAUTH_SITUATION_UNKNOWN,
             "error": (
                 f"OAuth session unavailable for an unrecognized reason "
-                f"({situation!r}). Reconnecting may help; if it persists, "
+                f"({situation.code!r}). Reconnecting may help; if it persists, "
                 "this likely warrants a closer look at operator logs."
             ),
             "next_steps": oauth_recovery,
         })
-        return {"success": False, **spec}
+        response = {"success": False, **spec, **situation.as_dict()}
+        # `as_dict` carries the routing code; the table's own `error_code` is the
+        # canonical one and must win. (They agree for every mapped situation and
+        # differ only on the unrecognized fallthrough, where the table's generic
+        # code is what a caller can actually branch on — the raw situation is
+        # already quoted in the prose above.)
+        response["error_code"] = spec["error_code"]
+        if situation.detail:
+            # Appended, never substituted: the recipe tells the reader what to
+            # do, and the evidence tells them why. Losing the second is what
+            # made every one of these look like the same tired story about a
+            # token aging out.
+            response["error"] = f"{spec['error']} Details: {situation.detail}"
+        return response
 
     # ------------------------------------------------------------------
     # BTCPay client (from operator credential vault)
@@ -4240,12 +4511,13 @@ def register_standard_tools(
                 return result
             opc = rt._oauth_provider
             if opc is not None:
+                situation = ""
                 try:
-                    creds, _situation = await rt.load_patron_session(
+                    creds, situation = await rt.load_patron_session(
                         resolved, service=opc.service_name,
                     )
-                except Exception:  # noqa: BLE001
-                    creds = None
+                except Exception as exc:  # noqa: BLE001
+                    creds, situation = None, f"unreadable: {type(exc).__name__}"
                 import time as _t
 
                 from tollbooth.tools.status import build_upstream_oauth_block
@@ -4257,6 +4529,13 @@ def register_standard_tools(
                 )
                 if block is not None:
                     result["upstream_oauth"] = block
+                elif situation:
+                    # The block is absent because the vault could not ANSWER,
+                    # which is a different fact from "this patron never
+                    # authorized" — and the absence alone cannot tell them
+                    # apart. A reader who assumes the second when the first is
+                    # true concludes the connection is gone and reconnects.
+                    result["upstream_oauth_unreadable"] = situation
         return result
 
     @tool

@@ -16,6 +16,8 @@ import json
 import logging
 from typing import Any
 
+from tollbooth.oauth_situation import OAuthSituation
+
 logger = logging.getLogger(__name__)
 
 _CREDS_NOT_DELIVERED = (
@@ -134,7 +136,7 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
     if pending_situation:
         # Mid-dance: the patron has already clicked Allow. Telling them to start
         # over because the vault was cold would discard a completed grant.
-        return rt.oauth_situation_response(pending_situation)
+        return rt.oauth_situation_response(OAuthSituation(pending_situation))
     if not pending or "redirect_uri" not in pending:
         return {
             "success": False,
@@ -157,7 +159,7 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
         # and waiting. Exchanging it with blank client credentials would burn a
         # single-use code and fail at the provider with a message that names
         # nothing. Say what actually happened instead.
-        return rt.oauth_situation_response(op_situation)
+        return rt.oauth_situation_response(OAuthSituation(op_situation))
 
     client_id = creds.get(_cid_field, "")
     client_secret = creds.get(_csec_field, "")
@@ -200,6 +202,13 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
     # Build vault data from token.
     # Store both the raw token_json (for operators that expect the
     # full blob) and individual fields (for direct access).
+    #
+    # Built from scratch, not merged over the prior blob — and the vault write
+    # REPLACES rather than merges, so a fresh authorization silently drops
+    # `refresh_lost_at` (see OperatorRuntime._mark_refresh_lost). That is
+    # exactly right: this grant is new, so no earlier lost renewal can be
+    # blamed for its death. If this is ever changed to merge, clear that field
+    # explicitly, or a stale marker will misattribute a future expiry.
     vault_data = {
         "token_json": json.dumps(token),
         "access_token": token.get("access_token", ""),

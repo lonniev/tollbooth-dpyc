@@ -9,7 +9,7 @@ three are told ``invalid_grant``, and three owners are advised to reconnect an
 account that was never disconnected. A strict provider goes further and revokes
 the grant it saw replayed, which turns the advice into a self-fulfilling one.
 
-Three properties are asserted here, and they are the whole fix:
+Five properties are asserted here, and they are the whole fix:
 
 1. **Concurrency collapses to one refresh.** N callers, one HTTP exchange, and
    the waiters read the winner's token rather than spending a retired one.
@@ -20,6 +20,16 @@ Three properties are asserted here, and they are the whole fix:
    about the short-lived half of the grant; retiring the cached expiry lets the
    next call spend the refresh token instead of stranding the patron behind a
    cache that keeps insisting the dead token is good.
+4. **A refusal names its culprit.** RFC 6749 §5.2 has four refusals and they do
+   not share one. ``invalid_client`` is the operator's app credentials;
+   ``invalid_request`` is our own bug; only ``invalid_grant`` is the patron's
+   authorization. Reported as one code, an operator rotating an app secret
+   watched every patron get told their session expired.
+5. **A lost renewal is remembered, and named.** On a rotating provider a renewal
+   whose answer never arrives leaves the provider holding a replacement we never
+   saw and us holding a spent token. Every later attempt draws ``invalid_grant``,
+   so the grant reads as though it aged out — which is how eXcalibur's operator
+   came to reconnect X daily on advice that never mentioned the real cause.
 """
 
 from __future__ import annotations
@@ -33,6 +43,7 @@ import httpx
 import pytest
 
 from tollbooth.oauth_config import OAuthProviderConfig
+from tollbooth.oauth_situation import OAuthSituation
 from tollbooth.runtime import OperatorRuntime
 
 _TEST_NSEC = "nsec1test000000000000000000000000000000000000000000000000000000"
@@ -156,7 +167,7 @@ class TestConcurrentRefresh:
         assert len(provider.calls) == 1, (
             f"one token, one refresh — got {provider.calls}"
         )
-        assert [situation for _, situation in results] == [""] * 4
+        assert [situation for _, situation in results] == [None] * 4
         assert {creds["access_token"] for creds, _ in results} == {"access-1"}
         assert vault.sessions[NPUB_A]["refresh_token"] == "r2"  # rotation persisted
         assert vault.writes == 1
@@ -182,7 +193,7 @@ class TestConcurrentRefresh:
 
         assert provider.serial == 1
         assert first[0]["access_token"] == second[0]["access_token"] == "access-1"
-        assert first[1] == second[1] == ""
+        assert first[1] is second[1] is None
 
     @pytest.mark.asyncio
     async def test_two_patrons_refresh_in_parallel(self, monkeypatch):
@@ -217,7 +228,7 @@ class TestConcurrentRefresh:
         )
 
         assert peak == 2, "distinct patrons must refresh concurrently"
-        assert [s for _, s in results] == ["", ""]
+        assert [s for _, s in results] == [None, None]
 
     @pytest.mark.asyncio
     async def test_a_grant_the_provider_refuses_is_still_reported_expired(self, monkeypatch):
@@ -232,7 +243,7 @@ class TestConcurrentRefresh:
         creds, situation = await rt.restore_oauth_session(NPUB_A)
 
         assert creds is None
-        assert situation == "token_expired"
+        assert situation.code == "token_expired"
         assert vault.writes == 0
 
 
@@ -264,7 +275,7 @@ class TestTransientRefreshFailures:
         creds, situation = await rt.restore_oauth_session(NPUB_A)
 
         assert creds is None
-        assert situation == "refresh_unavailable"
+        assert situation.code == "refresh_unavailable"
         assert vault.writes == 0, "a failed refresh must not touch the vault"
 
     def test_the_transient_situation_never_advises_reconnecting(self):
@@ -272,7 +283,7 @@ class TestTransientRefreshFailures:
         from tollbooth.constants import ErrorCode
 
         rt = _runtime()
-        response = rt.oauth_situation_response("refresh_unavailable")
+        response = rt.oauth_situation_response(OAuthSituation("refresh_unavailable"))
 
         assert response["error_code"] == ErrorCode.OAUTH_REFRESH_UNAVAILABLE
         assert response["success"] is False
@@ -283,7 +294,9 @@ class TestTransientRefreshFailures:
     def test_a_refused_grant_still_advises_reconnecting(self):
         """The distinction is only worth drawing if the other side still works."""
         rt = _runtime()
-        steps = " ".join(rt.oauth_situation_response("token_expired")["next_steps"])
+        steps = " ".join(
+            rt.oauth_situation_response(OAuthSituation("token_expired"))["next_steps"]
+        )
         assert "begin_oauth" in steps
 
     @pytest.mark.asyncio
@@ -301,7 +314,7 @@ class TestTransientRefreshFailures:
 
         creds, situation = await rt.restore_oauth_session(NPUB_A)
 
-        assert situation == ""
+        assert situation is None
         assert creds["access_token"] == "access-1"
 
 
@@ -343,13 +356,13 @@ class TestRejectedAccessToken:
 
         # Precondition — without invalidation the cache serves and nobody calls out.
         creds, situation = await rt.restore_oauth_session(NPUB_A)
-        assert (creds["access_token"], situation) == ("access-0", "")
+        assert (creds["access_token"], situation) == ("access-0", None)
         assert provider.calls == [], "a fresh cached token must not be refreshed"
 
         assert await rt.invalidate_oauth_access_token(NPUB_A) is True
 
         creds, situation = await rt.restore_oauth_session(NPUB_A)
-        assert situation == ""
+        assert situation is None
         assert creds["access_token"] == "access-1", "the rejected token was renewed"
         assert provider.calls == ["r1"], "exactly one refresh, spending the live token"
         assert vault.sessions[NPUB_A]["refresh_token"] == "r2"
@@ -385,7 +398,7 @@ class TestRejectedAccessToken:
         creds, situation = await rt.restore_oauth_session(NPUB_A)
 
         assert creds is None
-        assert situation == "token_expired"
+        assert situation.code == "token_expired"
 
     @pytest.mark.asyncio
     async def test_nothing_to_invalidate_is_not_a_failure(self):
@@ -401,7 +414,7 @@ class TestRejectedAccessToken:
         from tollbooth.constants import ErrorCode
 
         rt = _runtime()
-        response = rt.oauth_situation_response("token_rejected")
+        response = rt.oauth_situation_response(OAuthSituation("token_rejected"))
 
         assert response["error_code"] == ErrorCode.OAUTH_TOKEN_REJECTED
         assert response["success"] is False
@@ -588,3 +601,242 @@ class TestTokenEndpointClassification:
         before = time.time()
         token, _ = await _refresh(monkeypatch, _handler)
         assert before + 7200 <= token["expires_at"] <= time.time() + 7200
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("oauth_error", "fault"), [
+        ("invalid_grant", "grant"),
+        ("invalid_client", "client"),
+        ("unauthorized_client", "client"),
+        ("invalid_request", "request"),
+    ])
+    async def test_a_refusal_names_whose_fault_it_is(
+        self, monkeypatch, oauth_error, fault,
+    ):
+        """All four are terminal; only one of them is the patron's to fix."""
+        from tollbooth.oauth2_collector import OAuthRefreshDenied
+
+        async def _handler(url, **kwargs):
+            return _token_response(400, {"error": oauth_error})
+
+        with pytest.raises(OAuthRefreshDenied) as caught:
+            await _refresh(monkeypatch, _handler)
+        assert caught.value.fault == fault
+
+
+# ---------------------------------------------------------------------------
+# 5. A refusal reaches the right person, and a lost renewal is named
+# ---------------------------------------------------------------------------
+
+
+class _Refusing:
+    """A provider that always refuses, with the error code it was given."""
+
+    def __init__(self, oauth_error: str, fault: str) -> None:
+        self.oauth_error = oauth_error
+        self.fault = fault
+
+    async def __call__(self, client_id, client_secret, refresh_token, token_url):
+        from tollbooth.oauth2_collector import OAuthRefreshDenied
+
+        raise OAuthRefreshDenied(
+            f"400 {self.oauth_error}: refused",
+            status_code=400, oauth_error=self.oauth_error, fault=self.fault,
+        )
+
+
+class TestRefusalIsAttributed:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("oauth_error", "fault", "expected"), [
+        ("invalid_client", "client", "operator_app_credentials_rejected"),
+        ("unauthorized_client", "client", "operator_app_credentials_rejected"),
+        ("invalid_request", "request", "refresh_request_malformed"),
+        ("invalid_grant", "grant", "token_expired"),
+    ])
+    async def test_the_situation_follows_the_fault(
+        self, monkeypatch, oauth_error, fault, expected,
+    ):
+        import tollbooth.oauth2_collector as collector
+
+        rt = _runtime()
+        _FakeVault(rt, {NPUB_A: _stale_session()})
+        monkeypatch.setattr(
+            collector, "refresh_access_token", _Refusing(oauth_error, fault),
+        )
+
+        creds, situation = await rt.restore_oauth_session(NPUB_A)
+
+        assert creds is None
+        assert situation.code == expected
+        assert situation.oauth_error == oauth_error
+        assert situation.status_code == 400
+
+    @pytest.mark.parametrize("code", [
+        "operator_app_credentials_rejected",
+        "refresh_request_malformed",
+        "refresh_failed_unclassified",
+    ])
+    def test_a_fault_that_is_not_the_patrons_never_advises_reconnecting(self, code):
+        """The failure this section exists to prevent. Re-authorizing against a
+        provider that is refusing the operator's app can only burn a live grant."""
+        rt = _runtime()
+        steps = " ".join(
+            rt.oauth_situation_response(OAuthSituation(code))["next_steps"]
+        ).lower()
+        assert "begin_oauth" not in steps
+
+    @pytest.mark.asyncio
+    async def test_an_unclassified_failure_is_not_reported_as_expired(
+        self, monkeypatch,
+    ):
+        """It used to be. An unknown cause dressed as a dead grant is an
+        instruction to throw away a working authorization on a guess."""
+        import tollbooth.oauth2_collector as collector
+
+        rt = _runtime()
+        vault = _FakeVault(rt, {NPUB_A: _stale_session()})
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("something nobody anticipated")
+
+        monkeypatch.setattr(collector, "refresh_access_token", _boom)
+
+        creds, situation = await rt.restore_oauth_session(NPUB_A)
+
+        assert creds is None
+        assert situation.code == "refresh_failed_unclassified"
+        assert "RuntimeError" in situation.detail
+        assert vault.sessions[NPUB_A]["refresh_token"] == "r1", "vault untouched"
+
+    @pytest.mark.asyncio
+    async def test_a_session_with_no_refresh_token_says_so(self):
+        """No refresh token is a scope problem, not a clock problem. Called an
+        expiry, it sends the patron to reconnect into the identical grant."""
+        rt = _runtime()
+        _FakeVault(rt, {NPUB_A: {
+            "access_token": "access-0", "expires_at": str(time.time() - 10),
+        }})
+
+        creds, situation = await rt.restore_oauth_session(NPUB_A)
+
+        assert creds is None
+        assert situation.code == "no_refresh_token"
+
+
+class TestLostRenewal:
+    """The one-way door: a renewal that arrives but whose answer does not."""
+
+    @staticmethod
+    def _timing_out():
+        async def _handler(*args, **kwargs):
+            from tollbooth.oauth2_collector import OAuthRefreshUnavailable
+
+            raise OAuthRefreshUnavailable(
+                "token endpoint did not answer: ReadTimeout",
+                token_may_have_rotated=True,
+            )
+        return _handler
+
+    @pytest.mark.asyncio
+    async def test_a_lost_answer_is_written_down(self, monkeypatch):
+        """We cannot know whether the token was spent — but we can record the
+        moment, which is the only way a later refusal can cite it."""
+        import tollbooth.oauth2_collector as collector
+
+        rt = _runtime()
+        vault = _FakeVault(rt, {NPUB_A: _stale_session()})
+        monkeypatch.setattr(collector, "refresh_access_token", self._timing_out())
+
+        creds, situation = await rt.restore_oauth_session(NPUB_A)
+
+        assert creds is None
+        assert situation.code == "refresh_unavailable", "still not a dead grant"
+        assert vault.sessions[NPUB_A]["refresh_lost_at"], "the moment was recorded"
+        assert vault.sessions[NPUB_A]["refresh_token"] == "r1", "credential untouched"
+
+    @pytest.mark.asyncio
+    async def test_a_connect_failure_is_not_written_down(self, monkeypatch):
+        """A connection that never opened provably never reached the provider,
+        so nothing was rotated and there is no suspicion to record."""
+        import tollbooth.oauth2_collector as collector
+
+        rt = _runtime()
+        vault = _FakeVault(rt, {NPUB_A: _stale_session()})
+
+        async def _unreachable(*args, **kwargs):
+            raise collector.OAuthRefreshUnavailable("unreachable: ConnectTimeout")
+
+        monkeypatch.setattr(collector, "refresh_access_token", _unreachable)
+
+        await rt.restore_oauth_session(NPUB_A)
+
+        assert "refresh_lost_at" not in vault.sessions[NPUB_A]
+
+    @pytest.mark.asyncio
+    async def test_the_later_refusal_blames_the_lost_answer_not_the_clock(
+        self, monkeypatch,
+    ):
+        """The whole point, end to end: timeout, then `invalid_grant`, and the
+        report names the timeout instead of inventing an expiry."""
+        import tollbooth.oauth2_collector as collector
+
+        rt = _runtime()
+        vault = _FakeVault(rt, {NPUB_A: _stale_session()})
+
+        monkeypatch.setattr(collector, "refresh_access_token", self._timing_out())
+        await rt.restore_oauth_session(NPUB_A)
+        lost_at = vault.sessions[NPUB_A]["refresh_lost_at"]
+
+        monkeypatch.setattr(
+            collector, "refresh_access_token",
+            _Refusing("invalid_grant", "grant"),
+        )
+        creds, situation = await rt.restore_oauth_session(NPUB_A)
+
+        assert creds is None
+        assert situation.code == "refresh_token_lost"
+        assert situation.observed_at == lost_at
+        assert lost_at in situation.detail
+
+        response = rt.oauth_situation_response(situation)
+        assert response["error_code"] == "oauth_refresh_token_lost"
+        # A reconnect IS the fix here — what changes is that it comes with a
+        # reason, so an operator living through it daily can see the pattern.
+        assert "begin_oauth" in " ".join(response["next_steps"])
+        assert lost_at in response["error"]
+
+    @pytest.mark.asyncio
+    async def test_the_first_loss_is_the_one_remembered(self, monkeypatch):
+        """A second timeout must not overwrite the moment the token was spent —
+        the first loss is the culprit; later ones are its symptoms."""
+        import tollbooth.oauth2_collector as collector
+
+        rt = _runtime()
+        vault = _FakeVault(rt, {NPUB_A: _stale_session()})
+        monkeypatch.setattr(collector, "refresh_access_token", self._timing_out())
+
+        await rt.restore_oauth_session(NPUB_A)
+        first = vault.sessions[NPUB_A]["refresh_lost_at"]
+        await rt.restore_oauth_session(NPUB_A)
+
+        assert vault.sessions[NPUB_A]["refresh_lost_at"] == first
+
+    @pytest.mark.asyncio
+    async def test_a_successful_refresh_forgets_the_suspicion(self, monkeypatch):
+        """The renewal went through after all, so the earlier lost answer did
+        not cost us the grant. Leaving the marker would misattribute a genuine
+        expiry months later to a timeout that turned out to be harmless."""
+        import tollbooth.oauth2_collector as collector
+
+        rt = _runtime()
+        vault = _FakeVault(rt, {NPUB_A: _stale_session()})
+
+        monkeypatch.setattr(collector, "refresh_access_token", self._timing_out())
+        await rt.restore_oauth_session(NPUB_A)
+        assert vault.sessions[NPUB_A]["refresh_lost_at"]
+
+        monkeypatch.setattr(collector, "refresh_access_token", _RotatingProvider())
+        creds, situation = await rt.restore_oauth_session(NPUB_A)
+
+        assert situation is None
+        assert creds["access_token"] == "access-1"
+        assert "refresh_lost_at" not in vault.sessions[NPUB_A]

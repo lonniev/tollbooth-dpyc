@@ -38,18 +38,38 @@ class OAuthCollectorError(Exception):
 
 
 class OAuthRefreshDenied(OAuthCollectorError):
-    """The provider REFUSED the grant: this refresh token will never work again.
+    """The provider REFUSED the request outright: no retry will ever help.
 
-    The only situation in this module that a human must act on. Raised for the
-    OAuth2 error codes that name a dead grant (``invalid_grant``,
-    ``invalid_request``, ``unauthorized_client``, ``invalid_client``) — the
-    patron has to re-authorize.
+    The only situation in this module that a human must act on — but *which*
+    human depends on ``fault``, and that distinction is the whole point of the
+    field. RFC 6749 §5.2 names four refusals and they do not share a culprit:
+
+    * ``fault="grant"`` (``invalid_grant``) — the patron's authorization is
+      genuinely dead. This is the ONE case where re-authorizing is the answer.
+    * ``fault="client"`` (``invalid_client``, ``unauthorized_client``) — the
+      OPERATOR's app credentials are wrong, revoked, or not entitled to this
+      grant type. The patron's authorization is untouched, and sending them
+      through OAuth again re-authorizes a live account against a broken app.
+    * ``fault="request"`` (``invalid_request``) — we sent a malformed request.
+      That is our bug, and no human outside the deployment can fix it.
+
+    All four used to raise this exception undifferentiated, so all four reached
+    the patron as "your session expired". An operator who rotated an app secret
+    watched every patron get told to reconnect.
     """
 
-    def __init__(self, detail: str, *, status_code: int = 0, oauth_error: str = ""):
+    def __init__(
+        self,
+        detail: str,
+        *,
+        status_code: int = 0,
+        oauth_error: str = "",
+        fault: str = "grant",
+    ):
         self.detail = detail
         self.status_code = status_code
         self.oauth_error = oauth_error
+        self.fault = fault
         super().__init__(detail)
 
 
@@ -97,11 +117,20 @@ TOKEN_ENDPOINT_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool
 _TOKEN_CONNECT_ATTEMPTS = 3
 _TOKEN_CONNECT_BACKOFF_S = 1.0
 
-# OAuth2 error codes (RFC 6749 §5.2) that mean the grant itself is gone.
-# Everything else is treated as "we don't know yet".
-_GRANT_IS_DEAD = frozenset({
-    "invalid_grant", "invalid_request", "unauthorized_client", "invalid_client",
-})
+# OAuth2 error codes (RFC 6749 §5.2), sorted by who has to fix them. All three
+# sets are terminal — no retry helps — but they are three different errands, and
+# only the first belongs to the patron. Everything not listed here is treated as
+# "we don't know yet" and reported as unavailable.
+_GRANT_IS_DEAD = frozenset({"invalid_grant"})
+_CLIENT_IS_AT_FAULT = frozenset({"invalid_client", "unauthorized_client"})
+_REQUEST_IS_MALFORMED = frozenset({"invalid_request"})
+
+# oauth_error → the `fault` attributed to OAuthRefreshDenied.
+_FAULT_BY_OAUTH_ERROR: dict[str, str] = {
+    **{e: "grant" for e in _GRANT_IS_DEAD},
+    **{e: "client" for e in _CLIENT_IS_AT_FAULT},
+    **{e: "request" for e in _REQUEST_IS_MALFORMED},
+}
 
 
 async def _post_token_endpoint(
@@ -316,8 +345,9 @@ async def refresh_access_token(
         optionally a rotated ``refresh_token``.
 
     Raises:
-        OAuthRefreshDenied: The provider named the grant dead. A human must
-            re-authorize; no retry will ever help.
+        OAuthRefreshDenied: The provider refused outright; no retry will ever
+            help. Read its ``fault`` to learn whose problem it is — only
+            ``"grant"`` means the patron must re-authorize.
         OAuthRefreshUnavailable: The refresh didn't complete (timeout, connect
             failure, 429, 5xx, unparseable body). The grant may be perfectly
             fine — retry, and do NOT send the patron back through OAuth.
@@ -354,9 +384,10 @@ async def refresh_access_token(
         # back in its error body would otherwise write a live credential into
         # the operator's logs — so the token never survives the trip out.
         detail = _redact(detail, refresh_token)
-        if oauth_error in _GRANT_IS_DEAD:
+        if fault := _FAULT_BY_OAUTH_ERROR.get(oauth_error):
             raise OAuthRefreshDenied(
                 detail, status_code=resp.status_code, oauth_error=oauth_error,
+                fault=fault,
             )
         # A 429 or 5xx is the provider asking for patience, not revoking
         # anything. A 4xx we can't name is likelier a transport or gateway
