@@ -5,6 +5,83 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## 0.77.0 — 2026-07-31
+
+0.76.0 told three OAuth situations apart. There were five more hiding inside the
+one that was left, and the operator paying for that lived it daily: eXcalibur's
+scheduler reported `oauth_token_expired`, the operator reconnected X, and the
+grant was dead again within hours. X refresh tokens carrying `offline.access` do
+not age out in hours. The label was describing a corpse, not a cause.
+
+### Added — `OAuthSituation`, a situation that carries its evidence
+
+**BREAKING.** `restore_oauth_session` now returns
+`(creds, OAuthSituation | None)` instead of `(creds, str)`, and
+`oauth_situation_response` takes one. Success is `(creds, None)`; the
+`(None, "")` and `if situation:` idioms are gone. Consumers holding a bare
+situation string wrap it: `oauth_situation_response(OAuthSituation(code))`.
+
+`refresh_access_token` is the only frame in the fleet that sees the provider's
+HTTP status and error body, and it was handing forward six characters of
+verdict. `OAuthSituation` carries `code`, `detail` (redacted), `status_code`,
+`oauth_error`, and `observed_at` the whole way out, and
+`oauth_situation_response` appends the evidence to the prose instead of
+discarding it.
+
+### Fixed — a refusal now names whose fault it is
+
+RFC 6749 §5.2 has four refusals and they do not share a culprit. `_GRANT_IS_DEAD`
+held all four, so an operator who rotated an app secret watched every patron get
+told their session had expired. `OAuthRefreshDenied` grows a `fault`:
+
+| `oauth_error` | `fault` | situation | who acts |
+|---|---|---|---|
+| `invalid_grant` | `grant` | `token_expired` | the patron reconnects |
+| `invalid_client`, `unauthorized_client` | `client` | `operator_app_credentials_rejected` | the **operator** |
+| `invalid_request` | `request` | `refresh_request_malformed` | whoever deployed us |
+
+The two new situations deliberately omit `begin_oauth` from their `next_steps`.
+Re-authorizing against a provider that is refusing the operator's own app cannot
+help, and on a rotating provider it destroys a live grant to do it.
+
+### Fixed — a lost renewal is remembered, and named
+
+The one the operator was actually living. A provider that rotates single-use
+refresh tokens rotates on request **arrival**, not on reply. So a renewal whose
+answer is lost leaves the provider holding a replacement we never saw and us
+holding a spent token; every later attempt draws `invalid_grant`, and the grant
+reads as though it aged out. Nothing recorded that the two events were connected,
+so the advice was always "reconnect", and the cause was never once named.
+
+`_perform_oauth_refresh` now writes a `refresh_lost_at` stamp into the vault blob
+when a refresh fails with `token_may_have_rotated` — credentials untouched, first
+loss wins, cleared on any successful refresh or fresh authorization. A later
+`invalid_grant` against a stamped session reports `refresh_token_lost` and cites
+the moment. The reconnect is still the fix; what changed is that it now comes
+with a reason, and the frequency is finally measurable.
+
+### Fixed — an unclassified refresh failure is no longer called an expiry
+
+The catch-all in `_perform_oauth_refresh` returned `token_expired` on the theory
+that an unknown cause must not look harmless. That traded a silent hold for a
+wrong instruction, and the wrong instruction can throw away a working grant. It
+is now `refresh_failed_unclassified` — retryable, carrying the exception type.
+
+### Fixed — a vaulted session with no refresh token says so
+
+`restore_oauth_session` answered `token_expired` when the vault held an access
+token and no refresh token. Nothing expired; there was nothing to renew with,
+usually a grant issued without offline access. Now `no_refresh_token`, whose
+`next_steps` say that reconnecting helps only if the scopes change.
+
+### Fixed — `session_status` says when it could not read the vault
+
+The `upstream_oauth` block was omitted both when a patron had never authorized
+and when the vault could not answer, with the situation discarded at
+`runtime.py`. The absence alone cannot tell those apart, and reading it as the
+first when it was the second says a live connection is gone. A read that failed
+now reports `upstream_oauth_unreadable`.
+
 ## 0.76.0 — 2026-07-30
 
 Three OAuth situations that all reached patrons as "your access expired" are now

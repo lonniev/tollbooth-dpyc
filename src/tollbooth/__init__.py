@@ -28,6 +28,7 @@ from tollbooth.ledger import InvoiceRecord, ToolUsage, Tranche, UserLedger
 from tollbooth.ledger_cache import LedgerCache
 from tollbooth.nostr_certificate import NOSTR_CERT_KIND, verify_nostr_certificate
 from tollbooth.oauth_config import OAuthProviderConfig
+from tollbooth.oauth_situation import OAuthSituation
 from tollbooth.operator_protocol import (
     OPERATOR_BASE_CATALOG,
     OPERATOR_OBSOLETE_PRACTICES,
@@ -323,6 +324,7 @@ __all__ = [
     "NotificationManager",
     "NotificationPreferences",
     "OAuthProviderConfig",
+    "OAuthSituation",
     "OTSCalendarClient",
     "ObsoletePractice",
     "OperatorConformanceError",

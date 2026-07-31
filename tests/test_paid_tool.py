@@ -6,6 +6,7 @@ import pytest
 from pynostr.key import PrivateKey as _PK
 
 from tollbooth import identity_proof as _id_proof
+from tollbooth.oauth_situation import OAuthSituation
 from tollbooth.runtime import OperatorRuntime
 from tollbooth.tool_identity import ToolIdentity, capability_uuid
 
@@ -503,7 +504,7 @@ class TestOAuthSituationResponse:
         rt = _make_runtime()
         rt._slug = "schwab"
 
-        result = rt.oauth_situation_response("token_expired")
+        result = rt.oauth_situation_response(OAuthSituation("token_expired"))
 
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.OAUTH_TOKEN_EXPIRED
@@ -517,7 +518,7 @@ class TestOAuthSituationResponse:
         rt = _make_runtime()
         rt._slug = "excalibur"
 
-        result = rt.oauth_situation_response("no_credentials")
+        result = rt.oauth_situation_response(OAuthSituation("no_credentials"))
 
         assert result["error_code"] == ErrorCode.OAUTH_NOT_YET_AUTHORIZED
         assert "excalibur_begin_oauth" in result["next_steps"][0]
@@ -529,8 +530,8 @@ class TestOAuthSituationResponse:
         rt = _make_runtime()
         rt._slug = "schwab"
 
-        a = rt.oauth_situation_response("token_expired")
-        b = rt.oauth_situation_response("no_credentials")
+        a = rt.oauth_situation_response(OAuthSituation("token_expired"))
+        b = rt.oauth_situation_response(OAuthSituation("no_credentials"))
         assert a["error_code"] == ErrorCode.OAUTH_TOKEN_EXPIRED
         assert b["error_code"] == ErrorCode.OAUTH_NOT_YET_AUTHORIZED
         assert a["error_code"] != b["error_code"]
@@ -541,7 +542,7 @@ class TestOAuthSituationResponse:
         rt = _make_runtime()
         rt._slug = "schwab"
 
-        result = rt.oauth_situation_response("vault_bootstrapping")
+        result = rt.oauth_situation_response(OAuthSituation("vault_bootstrapping"))
 
         assert result["error_code"] == ErrorCode.WARMING_UP
         assert "Repeat" in result["next_steps"][0]
@@ -552,7 +553,7 @@ class TestOAuthSituationResponse:
         rt = _make_runtime()
         rt._slug = "schwab"
 
-        result = rt.oauth_situation_response("operator_not_configured")
+        result = rt.oauth_situation_response(OAuthSituation("operator_not_configured"))
         assert result["error_code"] == ErrorCode.OPERATOR_CREDENTIALS_MISSING
 
     @pytest.mark.asyncio
@@ -562,8 +563,8 @@ class TestOAuthSituationResponse:
         rt = _make_runtime()
         rt._slug = "schwab"
 
-        a = rt.oauth_situation_response("no_oauth_config")
-        b = rt.oauth_situation_response("operator_not_configured")
+        a = rt.oauth_situation_response(OAuthSituation("no_oauth_config"))
+        b = rt.oauth_situation_response(OAuthSituation("operator_not_configured"))
         assert a["error_code"] == ErrorCode.OAUTH_NOT_WIRED
         assert b["error_code"] == ErrorCode.OPERATOR_CREDENTIALS_MISSING
         assert a["error_code"] != b["error_code"]
@@ -575,7 +576,7 @@ class TestOAuthSituationResponse:
         rt = _make_runtime()
         rt._slug = "schwab"
 
-        result = rt.oauth_situation_response("some_brand_new_situation")
+        result = rt.oauth_situation_response(OAuthSituation("some_brand_new_situation"))
         # Distinct code preserves the diagnostic signal — situation echoed for debugging
         assert result["error_code"] == ErrorCode.OAUTH_SITUATION_UNKNOWN
         assert "some_brand_new_situation" in result["error"]
@@ -589,7 +590,7 @@ class TestOAuthSituationResponse:
         rt = _make_runtime()
         rt._slug = ""
 
-        result = rt.oauth_situation_response("token_expired")
+        result = rt.oauth_situation_response(OAuthSituation("token_expired"))
         # Steps should reference begin_oauth without a slug prefix
         assert "begin_oauth(" in result["next_steps"][0]
         assert result["error_code"] == ErrorCode.OAUTH_TOKEN_EXPIRED
@@ -703,7 +704,15 @@ class TestRestoreOAuthSessionProactiveRefresh:
             return {"app_key": "cid", "app_secret": "csec"}, ""
 
         async def _dead_refresh(*args, **kwargs):
-            raise RuntimeError("invalid_grant: refresh token expired")
+            # The real shape of a dead grant. This stub used to raise a bare
+            # RuntimeError and still assert "token_expired" — which passed only
+            # because every unclassified exception was reported as an expiry.
+            # Now that an unclassified failure says so honestly, the stub has to
+            # be the thing it was always standing in for.
+            raise collector.OAuthRefreshDenied(
+                "400 invalid_grant: refresh token expired",
+                status_code=400, oauth_error="invalid_grant", fault="grant",
+            )
 
         monkeypatch.setattr(rt, "load_patron_session", _load_patron_session)
         monkeypatch.setattr(rt, "_load_vault_creds", _load_vault_creds)
@@ -711,7 +720,7 @@ class TestRestoreOAuthSessionProactiveRefresh:
 
         result, situation = await rt.restore_oauth_session(VALID_NPUB)
         assert result is None
-        assert situation == "token_expired"
+        assert situation.code == "token_expired"
 
     @pytest.mark.asyncio
     async def test_near_expiry_refresh_success_rotates_and_persists(self, monkeypatch):
@@ -754,7 +763,7 @@ class TestRestoreOAuthSessionProactiveRefresh:
         monkeypatch.setattr(collector, "refresh_access_token", _ok_refresh)
 
         result, situation = await rt.restore_oauth_session(VALID_NPUB)
-        assert situation == ""
+        assert situation is None
         assert result["access_token"] == "new"
         assert result["refresh_token"] == "r2"
         assert result["account_hash"] == "keep-me"  # non-token field carried forward
@@ -786,7 +795,7 @@ class TestRestoreOAuthSessionProactiveRefresh:
         monkeypatch.setattr(collector, "refresh_access_token", _boom)
 
         result, situation = await rt.restore_oauth_session(VALID_NPUB)
-        assert situation == ""
+        assert situation is None
         assert result["access_token"] == "fresh"
         assert refreshed["called"] is False
 
@@ -811,5 +820,5 @@ class TestRestoreOAuthSessionProactiveRefresh:
         monkeypatch.setattr(rt, "load_patron_session", _load_patron_session)
 
         result, situation = await rt.restore_oauth_session(VALID_NPUB)
-        assert situation == ""
+        assert situation is None
         assert result["access_token"] == "fresh"

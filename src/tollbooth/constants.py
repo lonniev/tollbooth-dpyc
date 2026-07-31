@@ -122,7 +122,40 @@ class ErrorCode:
     # 1:1 with the situation strings — same recovery flow may be shared
     # via next_steps, but the error_code preserves the diagnostic
     # specificity the calling agent needs to phrase patron-facing output.
+    # Stated ONLY when the provider answered `invalid_grant` and no earlier
+    # lost refresh is on record. Four other situations used to borrow this code
+    # and each sent someone to re-authorize a session that was fine — they are
+    # the five codes that follow.
     OAUTH_TOKEN_EXPIRED = "oauth_token_expired"          # returning patron, refresh token aged out / revoked
+    # The grant died because a refresh answer was LOST, not because it aged out.
+    # A provider that rotates single-use refresh tokens (X does) rotates on
+    # request ARRIVAL, so a read timeout can leave the provider holding a
+    # replacement we never received and our vault holding a spent token. Every
+    # later attempt replays the spent one and draws `invalid_grant` — which read
+    # as "expired" and sent the operator to reconnect, over and over, with no
+    # hint that a specific timeout hours earlier was the cause. Carries the
+    # instant of that timeout in `observed_at`. A reconnect IS required; what
+    # changes is that the operator learns why, and can see how often it happens.
+    OAUTH_REFRESH_TOKEN_LOST = "oauth_refresh_token_lost"
+    # The vault holds an access token but no refresh token, so there is nothing
+    # to spend when it lapses. Usually a grant issued without offline access.
+    # Nothing expired and nothing was refused — reporting this as "expired" hid
+    # a scope problem behind a story about time.
+    OAUTH_NO_REFRESH_TOKEN = "oauth_no_refresh_token"
+    # The refresh raised something we could not classify. Kept RETRYABLE and
+    # named as unclassified: an unknown cause reported as a dead grant costs a
+    # re-authorization on a guess, and the guess was wrong often enough to be
+    # the reason this code exists. The exception type travels in `detail`.
+    OAUTH_REFRESH_FAILED_UNCLASSIFIED = "oauth_refresh_failed_unclassified"
+    # The provider refused the OPERATOR's app credentials (`invalid_client` /
+    # `unauthorized_client`). The patron's authorization is untouched and they
+    # can do nothing about this — least of all reconnect, which re-authorizes a
+    # live account against a broken app.
+    OPERATOR_APP_CREDENTIALS_REJECTED = "operator_app_credentials_rejected"
+    # The provider called our refresh request malformed (`invalid_request`).
+    # That is a deployment/SDK bug: no patron and no operator can fix it by
+    # doing anything to their account.
+    OAUTH_REFRESH_REQUEST_MALFORMED = "oauth_refresh_request_malformed"
     # The refresh could not be COMPLETED — timeout, connect failure, 429, 5xx, a
     # body that wasn't JSON. Deliberately distinct from OAUTH_TOKEN_EXPIRED:
     # nothing here says the grant is bad, so this must never send a patron

@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from tollbooth.oauth_config import OAuthProviderConfig
+from tollbooth.oauth_situation import OAuthSituation
 from tollbooth.persistence_errors import classify_persistence_failure
 from tollbooth.runtime import OperatorRuntime
 from tollbooth.tools.onboarding import load_vault_credentials
@@ -171,8 +172,8 @@ class TestRestoreOAuthSessionSituations:
 
         creds, situation = await rt.restore_oauth_session(VALID_NPUB)
         assert creds is None
-        assert situation == vault_situation
-        assert situation != "no_credentials"
+        assert situation.code == vault_situation
+        assert situation.code != "no_credentials"
 
     @pytest.mark.asyncio
     async def test_vault_answered_empty_still_means_no_credentials(
@@ -188,7 +189,7 @@ class TestRestoreOAuthSessionSituations:
 
         creds, situation = await rt.restore_oauth_session(VALID_NPUB)
         assert creds is None
-        assert situation == "no_credentials"
+        assert situation.code == "no_credentials"
 
     @pytest.mark.asyncio
     async def test_undelivered_operator_secrets_blame_the_operator(
@@ -216,7 +217,7 @@ class TestRestoreOAuthSessionSituations:
 
         creds, situation = await rt.restore_oauth_session(VALID_NPUB)
         assert creds is None
-        assert situation == "operator_not_configured"
+        assert situation.code == "operator_not_configured"
 
     @pytest.mark.asyncio
     async def test_refresh_without_access_token_preserves_the_vault(
@@ -258,7 +259,7 @@ class TestRestoreOAuthSessionSituations:
 
         creds, situation = await rt.restore_oauth_session(VALID_NPUB)
         assert creds is None
-        assert situation == "refresh_unavailable"
+        assert situation.code == "refresh_unavailable"
         assert stored == [], "a hollow refresh must not touch the vault"
 
 
@@ -331,7 +332,7 @@ class TestSituationsAreAllRendered:
         self, situation: str, expected_code: str,
     ) -> None:
         rt = _oauth_runtime()
-        response = rt.oauth_situation_response(situation)
+        response = rt.oauth_situation_response(OAuthSituation(situation))
         assert response["error_code"] == expected_code
         assert response["error_code"] != "oauth_situation_unknown"
 
@@ -340,7 +341,9 @@ class TestSituationsAreAllRendered:
         telling someone to retry sends them to wait out an endless outage."""
         rt = _oauth_runtime()
         for situation in ("persistence_quota_exceeded", "persistence_misconfigured"):
-            steps = " ".join(rt.oauth_situation_response(situation)["next_steps"]).lower()
+            steps = " ".join(
+                rt.oauth_situation_response(OAuthSituation(situation))["next_steps"]
+            ).lower()
             assert "retrying will not help" in steps or "not by retrying" in steps or (
                 "notify the operator" in steps
             )
