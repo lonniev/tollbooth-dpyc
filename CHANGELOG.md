@@ -56,7 +56,7 @@ lines now name the exception type and message.
 ### Changed — the OAuth refresh lock claims less, because it delivers less
 
 0.76.0's per-patron refresh lock was documented as sufficient on the assumption that a
-deployment is one server. eXcalibur's logs show one FastMCP Cloud deployment running **two**
+deployment is one server. eXcalibur's logs show one Horizon deployment running **two**
 Uvicorn worker processes, each with its own lock map. The lock still collapses the fan-out
 that caused the original incident — N jobs inside one worker become one refresh — but two
 workers can still spend a rotating refresh token concurrently.

@@ -2025,7 +2025,7 @@ class OperatorRuntime:
         #
         # NARROWER THAN IT FIRST READ. This is an in-process asyncio.Lock, and it
         # was documented as sufficient on the assumption that a deployment is one
-        # server. It is not: eXcalibur's own logs show a single FastMCP Cloud
+        # server. It is not: eXcalibur's own logs show a single Horizon
         # deployment running TWO Uvicorn worker processes (`Started server
         # process [11]` and `[12]`), each with its own lock map. So this collapses
         # the fan-out — N jobs inside one worker become one refresh — but two
