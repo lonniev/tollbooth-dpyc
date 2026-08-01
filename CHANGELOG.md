@@ -3,6 +3,41 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.79.0 — 2026-08-01
+
+### Fixed — delivering a credential did nothing until the container was replaced
+
+`_ensure_async_executor` states the design plainly: durable execution is *"purely opt-in by
+credential delivery, with no per-server bootstrap code."* It wasn't. Delivery happens to a
+server that is **already running**, and two caches ignored it — the resolution was stored
+once as a definitive answer, and the executor it built carried the API key **baked in at
+construction**. Neither was ever invalidated. `_async_executor_resolved` was set `True` in
+two places and never set back.
+
+Observed live: eXcalibur's workers came up holding an expired Prefect key. A working key was
+delivered by Secure Courier at 21:51. At 22:00 the scheduler launched three publishers,
+**Prefect recorded zero flow runs**, and all three ran in-process on a front that recycles —
+so each vanished mid-flight, leaving its post claimed with `status: sending` and
+`last_attempt_reason: null`. No hold, no error, nothing for a human to read. Two of those
+posts had been cycling that way for days.
+
+Three failures combined to hide it, and all three are addressed:
+
+- **The caches now expire.** `invalidate_async_executor()` drops the resolution *and* the
+  executor built from stale credentials; `receive_credentials` calls it on any successful
+  operator receive, beside the existing cashier reset. An explicitly installed executor
+  (`set_async_executor`) is never overridden — the operator chose it.
+- **A degraded dispatch says so in its result.** The fallback logged a warning and returned
+  an ordinary `claim_check`, so callers recorded "launched" for jobs already doomed. It now
+  returns `degraded: "in_process_fallback"` with the reason.
+- **`service_status` distinguishes installed from working.** `detached_executor_active`
+  answers "is one installed?" — true and useless while nothing reached Prefect for hours.
+  New `dispatching` and `last_dispatch_error` answer the question an operator actually has.
+
+With more than one worker process the old behavior also split: whichever process resolved
+after delivery reported healthy while the other kept failing, so `service_status` and reality
+disagreed depending on which container answered.
+
 ## 0.78.0 — 2026-08-01
 
 ### Fixed — the token exchange threw away the one sentence that explained it

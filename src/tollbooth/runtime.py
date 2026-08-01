@@ -272,6 +272,12 @@ class OperatorRuntime:
         self._async_executor_explicit: bool = False  # True once set explicitly
         self._async_executor_resolved: bool = False  # True after one auto-probe
         self._async_executor_error: str | None = None  # why detached is off, if so
+        # Why the LAST dispatch degraded, if it did. Distinct from the line
+        # above: that one says why a detached executor was never installed;
+        # this one says an installed executor could not actually dispatch —
+        # the state that read as healthy while every job silently ran
+        # in-process on a recycling front.
+        self._async_dispatch_error: str | None = None
         self._async_jobs_purge_last: float = 0.0  # monotonic, rate-limits purges
         # Shutdown state
         self._shutdown_triggered: bool = False
@@ -3065,6 +3071,39 @@ class OperatorRuntime:
         self._async_executor_explicit = True
         self._async_executor_resolved = True
 
+    def invalidate_async_executor(self) -> None:
+        """Forget the cached executor resolution so the next job re-probes.
+
+        The resolution caches a DEFINITIVE answer — creds present or absent —
+        and the executor it builds carries the API key baked in at construction.
+        Both are correct until the credentials change underneath them, which is
+        the ordinary case: ``_ensure_async_executor`` documents durable execution
+        as "purely opt-in by credential delivery", and delivery happens to a
+        server that is already running.
+
+        Without this, delivering (or rotating) the long-runner secrets had no
+        effect until the container was replaced. A process that resolved before
+        delivery stayed in-process for life; a process holding an EXPIRED key
+        kept presenting it, failed every dispatch, and fell back in-process
+        while ``service_status`` still reported the executor active. With two
+        workers the two halves disagreed, which is exactly how it presented.
+
+        An explicitly installed executor (``set_async_executor``) is left alone —
+        the operator chose it, and no credential delivery should override that.
+        """
+        if self._async_executor_explicit:
+            return
+        from tollbooth.async_executor import InProcessExecutor
+
+        self._async_executor = InProcessExecutor(self)
+        self._async_executor_resolved = False
+        self._async_executor_error = None
+        self._async_dispatch_error = None
+        logger.info(
+            "Long-runner credentials changed — the next async job will re-probe "
+            "for a detached executor.",
+        )
+
     def uses_async_jobs(self) -> bool:
         """True when this server has opted into the claim-check async-job path.
 
@@ -3288,6 +3327,13 @@ class OperatorRuntime:
             # unreachable). Never strand a fee-charged job: fall back to an
             # in-process runner if one exists, else refund and report.
             logger.warning("async job %s dispatch failed: %s", claim, exc, exc_info=True)
+            # Remember it. A dispatch failure used to leave no trace outside this
+            # log line: the fallback returned an ordinary claim_check, callers
+            # recorded "launched", and service_status went on reporting the
+            # executor active. The job then ran in-process on a front that
+            # recycles, so a publisher could simply vanish — leaving work claimed
+            # with no outcome and no reason for anyone to read.
+            self._async_dispatch_error = f"{type(exc).__name__}: {exc}"
             if kind in self._job_runners:
                 import asyncio
 
@@ -3304,12 +3350,19 @@ class OperatorRuntime:
                 }
         from tollbooth.async_jobs import poll_backoff_seconds
 
-        return {
+        result: dict[str, Any] = {
             "success": True,
             "claim_check": claim,
             "status": "pending",
             "poll_after_seconds": poll_backoff_seconds(0, max_runtime_seconds, expected_seconds),
         }
+        if self._async_dispatch_error:
+            # Say it in the RESULT, not only the log. A caller that records
+            # "launched" and moves on has no other way to learn that this job is
+            # running somewhere that may not outlive the next container recycle.
+            result["degraded"] = "in_process_fallback"
+            result["degraded_reason"] = self._async_dispatch_error
+        return result
 
     async def _run_job(self, claim: str) -> None:
         """Claim and execute a job; persist its outcome.
@@ -4402,6 +4455,16 @@ def register_standard_tools(
                 ),
                 "detached_executor_resolved": rt._async_executor_resolved,
                 "detached_executor_error": rt._async_executor_error,
+                # `detached_executor_active` says an executor is INSTALLED, not
+                # that it works. An installed executor holding a dead credential
+                # reports active while every dispatch falls back in-process —
+                # which is indistinguishable from healthy unless the last
+                # dispatch outcome is published too.
+                "last_dispatch_error": rt._async_dispatch_error,
+                "dispatching": (
+                    not isinstance(rt._async_executor, InProcessExecutor)
+                    and rt._async_dispatch_error is None
+                ),
             }
         return status
 

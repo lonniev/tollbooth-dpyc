@@ -169,6 +169,19 @@ async def receive_credentials_tool(
                     "message": "A rejection DM has been sent. Please correct and resend.",
                 }
             rt._cashier = None
+        # Operator secrets just changed, so anything built FROM them is stale.
+        # The cashier is dropped above; the async executor needs the same
+        # treatment and did not get it — it caches both its resolution and the
+        # API key it was constructed with, so a delivered or rotated
+        # long-runner credential had no effect until the container was
+        # replaced. Runs on every successful operator receive, not only the
+        # validated path, because a partial delivery of just the long-runner
+        # secrets is exactly the case that needs it.
+        if result.get("success") and service == rt.operator_credential_service:
+            try:
+                rt.invalidate_async_executor()
+            except Exception:  # never fail a receive over this
+                logger.debug("async-executor invalidation failed", exc_info=True)
         return result
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": str(e)}
