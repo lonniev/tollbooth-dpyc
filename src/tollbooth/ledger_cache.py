@@ -291,7 +291,7 @@ class LedgerCache:
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Failed to load ledger from vault for %s — returning uncached empty ledger. Underlying error: %s: %s",
-                user_id, type(exc).__name__, exc,
+                user_id[:20], type(exc).__name__, exc,
             )
             return UserLedger(), False
 
@@ -325,7 +325,7 @@ class LedgerCache:
             await self._flush_entry(user_id, entry)
         except Exception:  # noqa: BLE001
             logger.warning(
-                "Background flush failed for %s (swallowed).", user_id,
+                "Background flush failed for %s (swallowed).", user_id[:20],
             )
 
     async def _evict_lru(self) -> None:
@@ -397,7 +397,7 @@ class LedgerCache:
                 if attempt < max_attempts - 1:
                     logger.warning(
                         "Flush attempt %d/%d failed for %s (%s: %s), retrying in %.1fs...",
-                        attempt + 1, max_attempts, user_id,
+                        attempt + 1, max_attempts, user_id[:20],
                         type(exc).__name__, exc, self._flush_retry_delay,
                     )
                     await asyncio.sleep(self._flush_retry_delay)
@@ -405,7 +405,7 @@ class LedgerCache:
                     logger.warning(
                         "Failed to flush ledger to vault for %s after %d attempt(s) "
                         "(%s: %s).",
-                        user_id, max_attempts, type(exc).__name__, exc,
+                        user_id[:20], max_attempts, type(exc).__name__, exc,
                     )
         return False
 
