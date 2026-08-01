@@ -2485,6 +2485,12 @@ class OperatorRuntime:
           refused the access token; raised by callers after a 401/403, paired
           with ``invalidate_oauth_access_token`` so the next call renews — also
           does NOT route to begin_oauth)
+        - ``exchange_grant_rejected`` → ``oauth_exchange_grant_rejected``
+          (``invalid_grant`` on the authorization code during check_oauth_status)
+        - ``exchange_request_malformed`` → ``oauth_exchange_request_malformed``
+        - ``exchange_unavailable`` → ``oauth_exchange_unavailable`` (exchange
+          never completed; does NOT force a new browser dance yet)
+        - ``exchange_failed_unclassified`` → ``oauth_exchange_failed_unclassified``
         - ``no_credentials`` → ``oauth_not_yet_authorized`` (first-time
           patron with no vault entry)
         - ``vault_bootstrapping`` → ``warming_up``
@@ -2646,6 +2652,60 @@ class OperatorRuntime:
                     ("If it persists across several attempts, THEN reconnect — "
                      "a genuinely dead authorization reports itself as "
                      "oauth_token_expired, not this."),
+                ],
+            },
+            # Code→token exchange (check_oauth_status). Same fault split as
+            # refresh, but the grant case is not token_expired — no session
+            # ever landed. operator_app_credentials_rejected is shared with
+            # refresh: the operator's app is wrong either way.
+            "exchange_grant_rejected": {
+                "error_code": ErrorCode.OAUTH_EXCHANGE_GRANT_REJECTED,
+                "error": (
+                    "The upstream provider refused the authorization code "
+                    "from the browser dance. The code may have been spent, "
+                    "expired, or revoked — start the authorization again."
+                ),
+                "next_steps": oauth_recovery,
+            },
+            "exchange_request_malformed": {
+                "error_code": ErrorCode.OAUTH_EXCHANGE_REQUEST_MALFORMED,
+                "error": (
+                    "The upstream provider called our token-exchange request "
+                    "malformed. That is a defect in this service, not a problem "
+                    "with the authorization you just completed — reconnecting "
+                    "cannot fix it."
+                ),
+                "next_steps": [
+                    ("Notify the operator — this is a deployment-side defect, "
+                     "not a patron-actionable error"),
+                ],
+            },
+            "exchange_unavailable": {
+                "error_code": ErrorCode.OAUTH_EXCHANGE_UNAVAILABLE,
+                "error": (
+                    "The upstream provider didn't complete the token exchange, "
+                    "so we don't yet know whether the authorization code was "
+                    "accepted. This is a network or provider hiccup, not a "
+                    "refusal of your Allow click."
+                ),
+                "next_steps": [
+                    ("Call check_oauth_status again shortly — no new browser "
+                     "dance yet. If the code was single-use and already spent "
+                     "server-side, a later attempt will report "
+                     "oauth_exchange_grant_rejected and you can restart then."),
+                ],
+            },
+            "exchange_failed_unclassified": {
+                "error_code": ErrorCode.OAUTH_EXCHANGE_FAILED_UNCLASSIFIED,
+                "error": (
+                    "The token exchange failed for a reason we could not "
+                    "classify. Nothing yet says the authorization code is bad."
+                ),
+                "next_steps": [
+                    "Call check_oauth_status again shortly.",
+                    ("If it persists, this is a defect worth reporting with the "
+                     "detail below; do not re-authorize to work around it until "
+                     "the provider itself refuses the code."),
                 ],
             },
             "no_credentials": {

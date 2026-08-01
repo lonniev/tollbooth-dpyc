@@ -595,6 +595,41 @@ class TestOAuthSituationResponse:
         assert "begin_oauth(" in result["next_steps"][0]
         assert result["error_code"] == ErrorCode.OAUTH_TOKEN_EXPIRED
 
+    @pytest.mark.asyncio
+    async def test_exchange_grant_rejected_routes_to_restart_with_evidence(self):
+        """Code exchange invalid_grant is not token_expired — no session existed."""
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        rt._slug = "excalibur"
+
+        result = rt.oauth_situation_response(OAuthSituation(
+            "exchange_grant_rejected",
+            detail="400 invalid_grant: code has already been used",
+            status_code=400,
+            oauth_error="invalid_grant",
+        ))
+
+        assert result["error_code"] == ErrorCode.OAUTH_EXCHANGE_GRANT_REJECTED
+        assert result["upstream_oauth_error"] == "invalid_grant"
+        assert "code has already been used" in result["detail"]
+        assert "excalibur_begin_oauth" in result["next_steps"][0]
+
+    @pytest.mark.asyncio
+    async def test_exchange_unavailable_does_not_force_new_dance(self):
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        rt._slug = "excalibur"
+
+        result = rt.oauth_situation_response(OAuthSituation(
+            "exchange_unavailable",
+            detail="502 unspecified: Bad Gateway",
+            status_code=502,
+        ))
+
+        assert result["error_code"] == ErrorCode.OAUTH_EXCHANGE_UNAVAILABLE
+        steps = " ".join(result["next_steps"]).lower()
+        assert "begin_oauth" not in steps
+
 
 class TestNpubAndProofValidationHelpers:
     """The DRY helpers that every wheel-side and consumer-side tool uses
