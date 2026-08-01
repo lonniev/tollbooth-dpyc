@@ -3,7 +3,33 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## 0.78.0 — 2026-08-01
+
+### Fixed — the token exchange threw away the one sentence that explained it
+
+`check_oauth_status` could not complete a reconnect, and said so uselessly: *"Token exchange
+failed. Check operator logs."* The logs were no better — `exchange_code_for_token` called
+`raise_for_status()`, which raises on the status alone, so X's response body was never read.
+A live 400 was undiagnosable **from either side of the wire**: the patron was told to check
+logs they cannot read, and the operator found only an `HTTPStatusError` stack trace.
+
+The refresh path had already learned this in #170. The exchange was the last token call on
+bare `raise_for_status()` — and the one a patron hits while actively trying to recover, so
+the worst possible place to stay silent. Both grant types now share one
+`_token_endpoint_response()` classifier, and the auth `code` joins the refresh token as a
+value redacted out of error details before they reach a log.
+
+Its situations are deliberately **not** the refresh ones. No session exists yet during a code
+exchange, so "your existing session aged out" would be a lie; the recovery is to start the
+browser dance again, with the provider's own words attached:
+
+- `oauth_exchange_grant_rejected` — the code itself was refused (`invalid_grant`)
+- `oauth_exchange_request_malformed` — `invalid_request`; a deployment defect, not a patron one
+- `oauth_exchange_unavailable` — timeout / 429 / 5xx / unnamed 4xx; retryable
+- `oauth_exchange_failed_unclassified` — kept terminal, so an unknown cause never loops silently
+
+An `invalid_client` refusal routes to the existing `operator_app_credentials_rejected`, because
+a rejected app credential is the operator's problem no matter which grant type exposed it.
 
 ### Fixed — a settlement could be refused persistence forever, and call it a Neon outage
 
