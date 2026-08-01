@@ -177,7 +177,9 @@ async def test_check_status_completes_and_persists_tokens():
 
 
 @pytest.mark.asyncio
-async def test_check_status_exchange_failure():
+async def test_check_status_exchange_failure_unclassified():
+    """An unexpected exception still surfaces as a structured situation, not
+    the old blind "Token exchange failed. Check operator logs." """
     rt = _runtime()
     rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
     tools = _register(rt)
@@ -188,7 +190,69 @@ async def test_check_status_exchange_failure():
          patch("tollbooth.oauth2_collector.exchange_code_for_token",
                new=AsyncMock(side_effect=RuntimeError("boom"))):
         r = await tools["check_oauth_status"](npub=PATRON, dpop_token="ok")
-    assert r["success"] is False and "Token exchange failed" in r["error"]
+    assert r["success"] is False
+    assert r["error_code"] == "oauth_exchange_failed_unclassified"
+    assert "RuntimeError" in r["error"]
+    assert "boom" in r["detail"]
+
+
+@pytest.mark.asyncio
+async def test_check_status_exchange_surfaces_provider_refusal():
+    """A classified exchange 400 carries fault/oauth_error/X's words — the
+    defect that left both patron and operator blind behind raise_for_status."""
+    from tollbooth.oauth2_collector import OAuthRefreshDenied
+
+    rt = _runtime()
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
+    tools = _register(rt)
+    denied = OAuthRefreshDenied(
+        "400 invalid_client: Client authentication failed due to unknown client",
+        status_code=400,
+        oauth_error="invalid_client",
+        fault="client",
+    )
+    with patch("tollbooth.registry.resolve_service_by_name",
+               new=AsyncMock(return_value={"url": "https://collector.example"})), \
+         patch("tollbooth.oauth2_collector.retrieve_code_from_collector",
+               new=AsyncMock(return_value="AUTHCODE")), \
+         patch("tollbooth.oauth2_collector.exchange_code_for_token",
+               new=AsyncMock(side_effect=denied)):
+        r = await tools["check_oauth_status"](npub=PATRON, dpop_token="ok")
+
+    assert r["success"] is False
+    assert r["error_code"] == "operator_app_credentials_rejected"
+    assert r["upstream_oauth_error"] == "invalid_client"
+    assert r["upstream_status"] == 400
+    assert "unknown client" in r["detail"]
+    assert "begin_oauth" not in " ".join(r["next_steps"]).lower()
+
+
+@pytest.mark.asyncio
+async def test_check_status_exchange_invalid_grant_routes_to_restart():
+    from tollbooth.oauth2_collector import OAuthRefreshDenied
+
+    rt = _runtime()
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
+    tools = _register(rt)
+    denied = OAuthRefreshDenied(
+        "400 invalid_grant: code has already been used",
+        status_code=400,
+        oauth_error="invalid_grant",
+        fault="grant",
+    )
+    with patch("tollbooth.registry.resolve_service_by_name",
+               new=AsyncMock(return_value={"url": "https://collector.example"})), \
+         patch("tollbooth.oauth2_collector.retrieve_code_from_collector",
+               new=AsyncMock(return_value="AUTHCODE")), \
+         patch("tollbooth.oauth2_collector.exchange_code_for_token",
+               new=AsyncMock(side_effect=denied)):
+        r = await tools["check_oauth_status"](npub=PATRON, dpop_token="ok")
+
+    assert r["success"] is False
+    assert r["error_code"] == "oauth_exchange_grant_rejected"
+    assert r["upstream_oauth_error"] == "invalid_grant"
+    assert "code has already been used" in r["detail"]
+    assert "begin_oauth" in " ".join(r["next_steps"]).lower()
 
 
 @pytest.mark.asyncio

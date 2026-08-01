@@ -304,9 +304,14 @@ async def exchange_code_for_token(
         Token dict with ``access_token``, ``refresh_token``, ``expires_at``, etc.
 
     Raises:
-        httpx.HTTPStatusError: If the token endpoint returns an error status.
-        httpx.TransportError: If the endpoint could not be reached at all (the
-            connect phase is retried first — see ``_post_token_endpoint``).
+        OAuthRefreshDenied: The provider refused the exchange outright. Read
+            ``fault`` / ``oauth_error`` / ``detail`` — the same evidence the
+            refresh path surfaces — so a 400 is never a blind
+            ``HTTPStatusError``. Only ``fault="grant"`` means the patron must
+            start the browser dance again.
+        OAuthRefreshUnavailable: The exchange didn't complete (timeout,
+            connect failure, 429, 5xx, unparseable body). Retry; the code may
+            still be spendable, or the provider may simply have been busy.
     """
     credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
 
@@ -318,9 +323,16 @@ async def exchange_code_for_token(
     if code_verifier:
         body["code_verifier"] = code_verifier
 
-    resp = await _post_token_endpoint(token_endpoint, credentials, body)
-    resp.raise_for_status()
-    token = resp.json()
+    resp = await _token_endpoint_response(
+        token_endpoint, credentials, body, secret_to_redact=code,
+    )
+    try:
+        token = resp.json()
+    except Exception as exc:  # a 200 that isn't JSON is not a refusal
+        raise OAuthRefreshUnavailable(
+            f"token endpoint returned non-JSON on {resp.status_code}: {exc}",
+            status_code=resp.status_code,
+        ) from exc
 
     token["expires_at"] = time.time() + token.get("expires_in", 1800)
     return token
@@ -360,40 +372,15 @@ async def refresh_access_token(
     """
     credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
 
-    try:
-        resp = await _post_token_endpoint(token_endpoint, credentials, {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        })
-    except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
-        # Every attempt failed to open a connection, so the provider never saw
-        # the request and the stored refresh token is untouched.
-        raise OAuthRefreshUnavailable(
-            f"token endpoint unreachable: {exc}",
-        ) from exc
-    except httpx.HTTPError as exc:
+    resp = await _token_endpoint_response(
+        token_endpoint,
+        credentials,
+        {"grant_type": "refresh_token", "refresh_token": refresh_token},
+        secret_to_redact=refresh_token,
         # A read/write timeout means the request DID arrive. If this provider
         # rotates single-use refresh tokens, ours may already be spent.
-        raise OAuthRefreshUnavailable(
-            f"token endpoint did not answer: {exc}", token_may_have_rotated=True,
-        ) from exc
-
-    if resp.status_code >= 400:
-        oauth_error, detail = _token_error_fields(resp)
-        # These details are logged. A provider that echoes the rejected grant
-        # back in its error body would otherwise write a live credential into
-        # the operator's logs — so the token never survives the trip out.
-        detail = _redact(detail, refresh_token)
-        if fault := _FAULT_BY_OAUTH_ERROR.get(oauth_error):
-            raise OAuthRefreshDenied(
-                detail, status_code=resp.status_code, oauth_error=oauth_error,
-                fault=fault,
-            )
-        # A 429 or 5xx is the provider asking for patience, not revoking
-        # anything. A 4xx we can't name is likelier a transport or gateway
-        # artifact than a considered refusal — treat it as unknown rather than
-        # sending the patron to re-authorize on a guess.
-        raise OAuthRefreshUnavailable(detail, status_code=resp.status_code)
+        read_timeout_may_rotate=True,
+    )
 
     try:
         token = resp.json()
@@ -406,6 +393,58 @@ async def refresh_access_token(
 
     token["expires_at"] = time.time() + token.get("expires_in", 1800)
     return token
+
+
+async def _token_endpoint_response(
+    token_endpoint: str,
+    credentials: str,
+    body: dict[str, str],
+    *,
+    secret_to_redact: str = "",
+    read_timeout_may_rotate: bool = False,
+) -> httpx.Response:
+    """POST to the token endpoint and classify any refusal the way refresh does.
+
+    Shared by :func:`exchange_code_for_token` and :func:`refresh_access_token`
+    so a 400 never escapes as a bare ``HTTPStatusError`` that threw away the
+    provider's body. On success returns the response; on failure raises
+    :class:`OAuthRefreshDenied` or :class:`OAuthRefreshUnavailable` with
+    ``fault`` / ``oauth_error`` / ``detail`` filled in from the RFC 6749 §5.2
+    body (when the provider sent one).
+    """
+    try:
+        resp = await _post_token_endpoint(token_endpoint, credentials, body)
+    except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+        # Every attempt failed to open a connection, so the provider never saw
+        # the request and any single-use secret we hold is untouched.
+        raise OAuthRefreshUnavailable(
+            f"token endpoint unreachable: {exc}",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise OAuthRefreshUnavailable(
+            f"token endpoint did not answer: {exc}",
+            token_may_have_rotated=read_timeout_may_rotate,
+        ) from exc
+
+    if resp.status_code >= 400:
+        oauth_error, detail = _token_error_fields(resp)
+        # These details are logged and returned. A provider that echoes the
+        # rejected grant or auth code back in its error body would otherwise
+        # write a live credential into the operator's logs — so the secret
+        # never survives the trip out.
+        detail = _redact(detail, secret_to_redact)
+        if fault := _FAULT_BY_OAUTH_ERROR.get(oauth_error):
+            raise OAuthRefreshDenied(
+                detail, status_code=resp.status_code, oauth_error=oauth_error,
+                fault=fault,
+            )
+        # A 429 or 5xx is the provider asking for patience, not revoking
+        # anything. A 4xx we can't name is likelier a transport or gateway
+        # artifact than a considered refusal — treat it as unknown rather than
+        # sending the patron to re-authorize on a guess.
+        raise OAuthRefreshUnavailable(detail, status_code=resp.status_code)
+
+    return resp
 
 
 def _redact(text: str, secret: str) -> str:

@@ -28,6 +28,31 @@ _CREDS_NOT_DELIVERED = (
 )
 
 
+def _exchange_denied_situation(exc: Any) -> OAuthSituation:
+    """Map a classified exchange refusal to the situation that names its culprit.
+
+    Mirrors ``OperatorRuntime._denied_situation`` for the refresh path, but the
+    grant case is not ``token_expired`` — no session ever existed. Only the
+    code was refused, so the recovery is "start the browser dance again" with
+    the provider's words attached, not "your existing session aged out".
+    """
+    detail, status, oauth_error = exc.detail, exc.status_code, exc.oauth_error
+    if exc.fault == "client":
+        return OAuthSituation(
+            "operator_app_credentials_rejected",
+            detail=detail, status_code=status, oauth_error=oauth_error,
+        )
+    if exc.fault == "request":
+        return OAuthSituation(
+            "exchange_request_malformed",
+            detail=detail, status_code=status, oauth_error=oauth_error,
+        )
+    return OAuthSituation(
+        "exchange_grant_rejected",
+        detail=detail, status_code=status, oauth_error=oauth_error,
+    )
+
+
 async def begin_oauth_tool(rt: Any, npub: str, dpop_token: str) -> dict[str, Any]:
     """Start the OAuth2 authorization flow; return an authorize URL."""
     opc = rt._oauth_provider
@@ -173,6 +198,8 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
         return {"success": False, "error": f"OAuth2 collector: {e}"}
 
     from tollbooth.oauth2_collector import (
+        OAuthRefreshDenied,
+        OAuthRefreshUnavailable,
         exchange_code_for_token,
         retrieve_code_from_collector,
     )
@@ -188,16 +215,39 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
             ),
         }
 
-    # Exchange code for tokens
+    # Exchange code for tokens. The exchange path classifies the same way the
+    # refresh path does (#170): a 400 carries fault/oauth_error/the provider's
+    # words. A bare Exception used to swallow all of that into "Token exchange
+    # failed. Check operator logs." — leaving both patron and operator blind
+    # while X's reason sat only in a raise_for_status stack trace.
     try:
         token = await exchange_code_for_token(
             code, client_id, client_secret, redirect_uri,
             opc.token_url,
             code_verifier=verifier,
         )
-    except Exception:
+    except OAuthRefreshDenied as exc:
+        logger.warning(
+            "Token exchange refused for %s (fault=%s, oauth_error=%s): %s",
+            resolved[:16], exc.fault, exc.oauth_error, exc.detail,
+        )
+        return rt.oauth_situation_response(_exchange_denied_situation(exc))
+    except OAuthRefreshUnavailable as exc:
+        logger.warning(
+            "Token exchange unavailable for %s (status=%s): %s",
+            resolved[:16], exc.status_code, exc.detail,
+        )
+        return rt.oauth_situation_response(OAuthSituation(
+            "exchange_unavailable",
+            detail=exc.detail,
+            status_code=exc.status_code,
+        ))
+    except Exception as exc:
         logger.exception("Token exchange failed for %s", resolved[:16])
-        return {"success": False, "error": "Token exchange failed. Check operator logs."}
+        return rt.oauth_situation_response(OAuthSituation(
+            "exchange_failed_unclassified",
+            detail=f"{type(exc).__name__}: {exc}",
+        ))
 
     # Build vault data from token.
     # Store both the raw token_json (for operators that expect the

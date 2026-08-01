@@ -127,13 +127,13 @@ class TestExchangeCodeForToken:
     @pytest.mark.asyncio
     async def test_exchanges_code(self):
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {
             "access_token": "at-123",
             "refresh_token": "rt-456",
             "expires_in": 1800,
             "token_type": "Bearer",
         }
-        mock_response.raise_for_status = MagicMock()
 
         mock_http = AsyncMock()
         mock_http.post.return_value = mock_response
@@ -167,8 +167,8 @@ class TestExchangeCodeForToken:
     @pytest.mark.asyncio
     async def test_default_expires_at_when_missing(self):
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {"access_token": "at"}
-        mock_response.raise_for_status = MagicMock()
 
         mock_http = AsyncMock()
         mock_http.post.return_value = mock_response
@@ -185,6 +185,125 @@ class TestExchangeCodeForToken:
 
         # Default expires_in is 1800
         assert token["expires_at"] >= before + 1800
+
+    @pytest.mark.asyncio
+    async def test_provider_400_keeps_body_and_names_fault(self):
+        """The defect in #172: a 400 used to escape as HTTPStatusError with the
+        body unread. Exchange must classify like refresh and keep X's words."""
+        import httpx
+
+        from tollbooth.oauth2_collector import OAuthRefreshDenied
+
+        req = httpx.Request("POST", _TEST_TOKEN)
+        mock_response = httpx.Response(
+            400,
+            json={
+                "error": "invalid_client",
+                "error_description": "Client authentication failed due to unknown client",
+            },
+            request=req,
+        )
+
+        mock_http = AsyncMock()
+        mock_http.post.return_value = mock_response
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "tollbooth.oauth2_collector.httpx.AsyncClient", return_value=mock_http
+        ), pytest.raises(OAuthRefreshDenied) as caught:
+            await exchange_code_for_token(
+                "auth-code-xyz", "app-key", "app-secret",
+                "https://example.com/cb", _TEST_TOKEN,
+            )
+
+        assert caught.value.oauth_error == "invalid_client"
+        assert caught.value.fault == "client"
+        assert caught.value.status_code == 400
+        assert "unknown client" in caught.value.detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("oauth_error", "fault"), [
+        ("invalid_grant", "grant"),
+        ("invalid_client", "client"),
+        ("unauthorized_client", "client"),
+        ("invalid_request", "request"),
+    ])
+    async def test_exchange_refusal_names_whose_fault_it_is(self, oauth_error, fault):
+        import httpx
+
+        from tollbooth.oauth2_collector import OAuthRefreshDenied
+
+        req = httpx.Request("POST", _TEST_TOKEN)
+        mock_response = httpx.Response(
+            400, json={"error": oauth_error}, request=req,
+        )
+        mock_http = AsyncMock()
+        mock_http.post.return_value = mock_response
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "tollbooth.oauth2_collector.httpx.AsyncClient", return_value=mock_http
+        ), pytest.raises(OAuthRefreshDenied) as caught:
+            await exchange_code_for_token(
+                "code", "id", "secret", "https://cb", _TEST_TOKEN,
+            )
+        assert caught.value.fault == fault
+        assert caught.value.oauth_error == oauth_error
+
+    @pytest.mark.asyncio
+    async def test_exchange_unnamed_4xx_is_unavailable_not_fatal(self):
+        import httpx
+
+        from tollbooth.oauth2_collector import OAuthRefreshUnavailable
+
+        req = httpx.Request("POST", _TEST_TOKEN)
+        mock_response = httpx.Response(
+            403, text="<html>Forbidden</html>", request=req,
+        )
+        mock_http = AsyncMock()
+        mock_http.post.return_value = mock_response
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "tollbooth.oauth2_collector.httpx.AsyncClient", return_value=mock_http
+        ), pytest.raises(OAuthRefreshUnavailable) as caught:
+            await exchange_code_for_token(
+                "code", "id", "secret", "https://cb", _TEST_TOKEN,
+            )
+        assert caught.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_exchange_redacts_auth_code_from_provider_echo(self):
+        import httpx
+
+        from tollbooth.oauth2_collector import OAuthRefreshDenied
+
+        secret_code = "auth-code-secret-value"
+        req = httpx.Request("POST", _TEST_TOKEN)
+        mock_response = httpx.Response(
+            400,
+            json={
+                "error": "invalid_grant",
+                "error_description": f"code {secret_code} is invalid",
+            },
+            request=req,
+        )
+        mock_http = AsyncMock()
+        mock_http.post.return_value = mock_response
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "tollbooth.oauth2_collector.httpx.AsyncClient", return_value=mock_http
+        ), pytest.raises(OAuthRefreshDenied) as caught:
+            await exchange_code_for_token(
+                secret_code, "id", "secret", "https://cb", _TEST_TOKEN,
+            )
+        assert secret_code not in caught.value.detail
+        assert "<redacted>" in caught.value.detail
 
 
 # ---------------------------------------------------------------------------

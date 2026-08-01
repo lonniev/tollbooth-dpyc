@@ -168,6 +168,14 @@ class ErrorCode:
     # token. Reported after the cached expiry has been invalidated, so the very
     # next call renews — retryable, like OAUTH_REFRESH_UNAVAILABLE.
     OAUTH_TOKEN_REJECTED = "oauth_token_rejected"
+    # Code→token exchange situations (check_oauth_status). Parallel to the
+    # refresh family above, but no session exists yet — the authorization code
+    # was refused or the exchange never completed. Kept distinct so a calling
+    # agent never phrases a brand-new dance as "your existing session aged out".
+    OAUTH_EXCHANGE_GRANT_REJECTED = "oauth_exchange_grant_rejected"  # invalid_grant on the code
+    OAUTH_EXCHANGE_REQUEST_MALFORMED = "oauth_exchange_request_malformed"  # invalid_request
+    OAUTH_EXCHANGE_UNAVAILABLE = "oauth_exchange_unavailable"  # timeout / 429 / 5xx / unnamed 4xx
+    OAUTH_EXCHANGE_FAILED_UNCLASSIFIED = "oauth_exchange_failed_unclassified"
     OAUTH_NOT_YET_AUTHORIZED = "oauth_not_yet_authorized"  # first-time patron, no token in vault
     OAUTH_NOT_WIRED = "oauth_not_wired"                  # operator MCP has no OAuthProviderConfig
     OPERATOR_CREDENTIALS_MISSING = "operator_credentials_missing"  # vault load failed
