@@ -171,7 +171,8 @@ class TestPurchaseCredits:
             "checkoutLink": "https://pay.example.com/inv-42",
             "expirationTime": "2026-02-16T01:00:00Z",
         })
-        cache = _mock_cache()
+        ledger = UserLedger()
+        cache = _mock_cache(ledger)
         result = await purchase_credits_tool(
             btcpay, cache, "user1", 1000,
             certificate=_test_certificate(net_sats=1000),
@@ -183,7 +184,11 @@ class TestPurchaseCredits:
         assert "checkout_link" in result
         assert "certificate_jti" in result
         btcpay.create_invoice.assert_called_once()
-        cache.mark_dirty.assert_called_once_with("user1")
+        # The pending invoice is recorded write-through, so assert the EFFECT on
+        # the definitive ledger rather than that a cache flag was set.
+        cache.mutate.assert_awaited_once()
+        assert "inv-42" in ledger.pending_invoices
+        assert "inv-42" in ledger.invoices
 
     @pytest.mark.asyncio
     async def test_invoice_metadata_includes_orderId(self) -> None:
@@ -834,7 +839,8 @@ class TestReconcilePendingInvoices:
         assert result["actions"][0]["api_sats"] == 500
         assert ledger.balance_api_sats == 500
         assert "inv-1" in ledger.credited_invoices
-        cache.flush_user.assert_called_once_with("user1")
+        # One atomic write-through for the whole reconciliation, not a flush.
+        cache.mutate.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_removes_expired_invoice(self) -> None:
@@ -849,7 +855,7 @@ class TestReconcilePendingInvoices:
         assert result["actions"][0]["action"] == "removed"
         assert result["actions"][0]["reason"] == "Expired"
         assert "inv-1" not in ledger.pending_invoices
-        cache.flush_user.assert_called_once()
+        cache.mutate.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_noop_on_empty_pending(self) -> None:
@@ -862,7 +868,7 @@ class TestReconcilePendingInvoices:
 
         assert result["reconciled"] == 0
         assert result["actions"] == []
-        cache.flush_user.assert_not_called()
+        cache.mutate.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_skips_btcpay_errors(self) -> None:
@@ -878,7 +884,8 @@ class TestReconcilePendingInvoices:
         assert result["reconciled"] == 0
         # Invoice stays pending since we couldn't check it
         assert "inv-1" in ledger.pending_invoices
-        cache.flush_user.assert_not_called()
+        # Nothing was learned from BTCPay, so nothing may be written.
+        cache.mutate.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_idempotent_already_credited(self) -> None:

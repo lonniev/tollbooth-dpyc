@@ -1193,6 +1193,14 @@ class OperatorRuntime:
                 cache = await self.ledger_cache()
                 ledger = await cache.get(npub)
                 ledger.debit(name, 0)
+                # Deliberately the cached (dirty) path, not write-through: this
+                # records a usage counter for a FREE call, and free calls are the
+                # common case. Routing it through mutate() would put a Postgres
+                # round-trip in front of every check_balance and status poll to
+                # persist a statistic. Money never travels this path — every
+                # charge, credit, settlement and restore uses mutate(), which
+                # re-applies against fresh state — so a counter lost to a CAS
+                # conflict costs a statistic, not a sat.
                 cache.mark_dirty(npub)
             await _burn_consumed_coupons()
             return 0
@@ -2013,10 +2021,22 @@ class OperatorRuntime:
         #
         # The lock serializes them, and the re-read behind it means the waiters
         # collect the winner's fresh token instead of racing the provider for
-        # another one. In-process only, which matches where the contention comes
-        # from — a fan-out of jobs inside one server. Two containers refreshing
-        # the same patron in the same second remains possible and remains rare,
-        # and now degrades to a retryable situation rather than a dead grant.
+        # another one.
+        #
+        # NARROWER THAN IT FIRST READ. This is an in-process asyncio.Lock, and it
+        # was documented as sufficient on the assumption that a deployment is one
+        # server. It is not: eXcalibur's own logs show a single FastMCP Cloud
+        # deployment running TWO Uvicorn worker processes (`Started server
+        # process [11]` and `[12]`), each with its own lock map. So this collapses
+        # the fan-out — N jobs inside one worker become one refresh — but two
+        # workers can still refresh the same patron concurrently and spend a
+        # rotating token twice.
+        #
+        # Left in place rather than replaced by a cross-process lock: the
+        # remaining window is two racers instead of N, the failure now degrades to
+        # a retryable situation rather than a dead grant, and a Postgres advisory
+        # lock on every refresh buys a round-trip and a new failure mode. Stated
+        # here so nobody plans against a guarantee this does not give.
         async with self._oauth_refresh_lock(svc, patron_npub):
             fresh, fresh_situation = await self.load_patron_session(
                 patron_npub, service=svc,
@@ -2090,6 +2110,11 @@ class OperatorRuntime:
         Created on demand and keyed per patron, so refreshing one patron's token
         never blocks another's. Only reached by a caller that already holds a
         vaulted session, so the map cannot be grown by unknown npubs.
+
+        Scope is **this process**. A deployment running multiple worker processes
+        holds one of these maps per worker, so the lock bounds concurrent
+        refreshes to one-per-worker, not one-per-patron. See the caller for why
+        that trade was accepted.
         """
         key = f"{service}:{patron_npub}"
         lock = self._oauth_refresh_locks.get(key)

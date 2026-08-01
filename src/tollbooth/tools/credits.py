@@ -95,32 +95,36 @@ async def _create_purchase_invoice(
     checkout_link = invoice.get("checkoutLink", "")
     expiry = invoice.get("expirationTime", "")
 
-    # Record pending invoice — flush immediately so the invoice survives cache loss.
-    # If the cache returned an uncached ledger because Neon was cold, mark_dirty
-    # silently no-ops and flush_user returns True for "nothing to flush." The
-    # invoice would then exist only at BTCPay with no record in the patron's
-    # ledger — recovery requires restore_credits, which the patron may not know
-    # to call. Log loudly so this shows up in traces even when the API call
-    # itself succeeds.
-    ledger = await cache.get_fresh(user_id)
-    ledger.pending_invoices.append(invoice_id)
-    ledger.record_invoice_created(
-        invoice_id=invoice_id,
-        amount_sats=amount_sats,
-        multiplier=1,
-        created_at=datetime.now(UTC).isoformat(),
-    )
-    if getattr(ledger, "_vault_unavailable", False):
+    # Record the pending invoice write-through, so it survives cache loss AND a
+    # concurrent writer. The invoice already exists at BTCPay by this point, so a
+    # persistence failure here is never a reason to fail the call — but it does
+    # mean the patron has an invoice with no ledger record, and recovery is a
+    # `restore_credits` they may not know to call. Log loudly either way.
+    def _record_pending(led: UserLedger) -> None:
+        led.pending_invoices.append(invoice_id)
+        led.record_invoice_created(
+            invoice_id=invoice_id,
+            amount_sats=amount_sats,
+            multiplier=1,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+
+    try:
+        await cache.mutate(user_id, _record_pending)
+    except LedgerUnavailableError:
         logger.error(
             "Vault unavailable during purchase_credits — pending invoice %s "
             "NOT persisted to ledger for %s. Patron will need restore_credits "
             "to recover credits after paying.",
             invoice_id, user_id,
         )
-    else:
-        cache.mark_dirty(user_id)
-        if not await cache.flush_user(user_id):
-            logger.warning("Failed to flush pending invoice %s for %s.", invoice_id, user_id)
+    except LedgerWriteError:
+        logger.error(
+            "Lost every CAS race writing pending invoice %s for %s — the invoice "
+            "exists at BTCPay with no ledger record. Patron will need "
+            "restore_credits to recover credits after paying.",
+            invoice_id, user_id,
+        )
 
     # Fetch BOLT11 Lightning invoice string for direct wallet payment
     bolt11: str | None = None
@@ -304,6 +308,28 @@ async def check_payment_tool(
     if additional:
         result["additional_status"] = additional
 
+    async def _retire_invoice(terminal: str) -> None:
+        """Drop a dead invoice from the pending list and record how it ended.
+
+        Write-through like every other ledger mutation: the pending list is
+        shared state, so retiring an invoice against a stale in-memory copy
+        would resurrect invoices another replica had already retired.
+        """
+        def _apply(led: UserLedger) -> None:
+            if invoice_id in led.pending_invoices:
+                led.pending_invoices.remove(invoice_id)
+            led.record_invoice_terminal(invoice_id, terminal, status)
+
+        try:
+            await cache.mutate(user_id, _apply)
+        except (LedgerUnavailableError, LedgerWriteError) as exc:
+            # Bookkeeping, not money: the invoice is dead at BTCPay either way,
+            # and a later check_payment retires it again idempotently.
+            logger.warning(
+                "Could not retire %s invoice %s for %s: %s: %s",
+                terminal, invoice_id, user_id, type(exc).__name__, exc,
+            )
+
     if status == "New":
         result["message"] = "Invoice created, awaiting payment."
 
@@ -383,19 +409,13 @@ async def check_payment_tool(
         )
 
     elif status == "Expired":
-        if invoice_id in ledger.pending_invoices:
-            ledger.pending_invoices.remove(invoice_id)
-        ledger.record_invoice_terminal(invoice_id, "Expired", status)
-        cache.mark_dirty(user_id)
-        await cache.flush_user(user_id)
+        await _retire_invoice("Expired")
+        ledger = await cache.get(user_id)
         result["message"] = "Invoice expired. Create a new one with purchase_credits."
 
     elif status == "Invalid":
-        if invoice_id in ledger.pending_invoices:
-            ledger.pending_invoices.remove(invoice_id)
-        ledger.record_invoice_terminal(invoice_id, "Invalid", status)
-        cache.mark_dirty(user_id)
-        await cache.flush_user(user_id)
+        await _retire_invoice("Invalid")
+        ledger = await cache.get(user_id)
         result["message"] = "Payment invalid."
 
     else:
@@ -540,23 +560,53 @@ async def restore_credits_tool(
     if vault_record and vault_record.status == "Settled" and vault_record.api_sats_credited > 0:
         # Restore from vault record — no BTCPay call needed
         credited = vault_record.api_sats_credited
-        ledger.credit_deposit(credited, invoice_id, ttl_seconds=tranche_lifetime_seconds)
-        cache.mark_dirty(user_id)
-        flush_ok = await cache.flush_user(user_id)
-        if not flush_ok:
+
+        def _restore_from_record(led: UserLedger) -> int:
+            # Runs against FRESH state and is re-applied on every CAS retry, so
+            # it must be idempotent — `credit_deposit` is not, and a re-applied
+            # restore would mint a second tranche. A tranche already carrying
+            # this invoice_id IS the restore having landed, which is also the
+            # precise question this tool exists to ask: is the tranche missing?
+            if any(t.invoice_id == invoice_id for t in led.tranches):
+                return 0
+            led.credit_deposit(credited, invoice_id, ttl_seconds=tranche_lifetime_seconds)
+            return credited
+
+        try:
+            granted = await cache.mutate(user_id, _restore_from_record)
+        except (LedgerUnavailableError, LedgerWriteError) as exc:
             logger.error(
-                "CRITICAL: Failed to flush vault-restored %d credits for %s (invoice %s).",
-                credited, user_id, invoice_id,
+                "CRITICAL: vault-restored %d credits for %s (invoice %s) did NOT "
+                "persist: %s: %s", credited, user_id, invoice_id,
+                type(exc).__name__, exc,
             )
+            return {
+                "success": False,
+                "invoice_id": invoice_id,
+                "source": "vault_record",
+                "persisted": False,
+                "credits_granted": 0,
+                "error_code": "vault_unavailable",
+                "error": (
+                    "Credits were NOT restored — the ledger could not be written. "
+                    "Nothing was credited, so retrying restore_credits is safe."
+                ),
+            }
+
+        ledger = await cache.get(user_id)
         return {
-            "success": flush_ok,
+            "success": True,
             "invoice_id": invoice_id,
             "source": "vault_record",
-            "persisted": flush_ok,
+            "persisted": True,
             "amount_sats": vault_record.amount_sats,
-            "credits_granted": credited,
+            "credits_granted": granted,
             "balance_api_sats": ledger.balance_api_sats,
-            "message": f"Restored {credited:,} credits from vault invoice record.",
+            "message": (
+                f"Restored {granted:,} credits from vault invoice record."
+                if granted
+                else "Already restored — a tranche for this invoice is present."
+            ),
         }
 
     # Fall back to BTCPay verification
@@ -594,40 +644,57 @@ async def restore_credits_tool(
     amount_sats = int(float(amount_str))
     credited = amount_sats
 
-    ledger.credit_deposit(credited, invoice_id, ttl_seconds=tranche_lifetime_seconds)
-    ledger.record_invoice_settled(
-        invoice_id=invoice_id,
-        api_sats_credited=credited,
-        settled_at=datetime.now(UTC).isoformat(),
-        btcpay_status=status,
-    )
-    cache.mark_dirty(user_id)
-    if not await cache.flush_user(user_id):
+    # Hoisted out of the mutation: a CAS retry re-applies the function, and a
+    # settled_at computed inside would drift on each attempt.
+    settled_at = datetime.now(UTC).isoformat()
+
+    def _restore_from_btcpay(led: UserLedger) -> int:
+        # Idempotent for the same reason as the vault-record path above: this
+        # runs again on every conflict retry, and `credit_deposit` would happily
+        # mint a second tranche for an invoice already restored.
+        if any(t.invoice_id == invoice_id for t in led.tranches):
+            return 0
+        led.credit_deposit(credited, invoice_id, ttl_seconds=tranche_lifetime_seconds)
+        led.record_invoice_settled(
+            invoice_id=invoice_id,
+            api_sats_credited=credited,
+            settled_at=settled_at,
+            btcpay_status=status,
+        )
+        return credited
+
+    try:
+        granted = await cache.mutate(user_id, _restore_from_btcpay)
+    except (LedgerUnavailableError, LedgerWriteError) as exc:
         logger.error(
-            "CRITICAL: Failed to flush restored %d credits for %s (invoice %s).",
-            credited, user_id, invoice_id,
+            "CRITICAL: restored %d credits for %s (invoice %s) did NOT persist: "
+            "%s: %s", credited, user_id, invoice_id, type(exc).__name__, exc,
         )
         return {
             "success": False,
             "error": (
-                f"Credits restored in memory but failed to persist to vault. "
-                f"The {credited:,} credits will be lost on next restart. "
-                f"Retry restore_credits to attempt the vault write again."
+                "Credits were NOT restored — the ledger could not be written. "
+                "Nothing was credited, so retrying restore_credits is safe."
             ),
             "invoice_id": invoice_id,
-            "credits_granted": credited,
+            "credits_granted": 0,
             "persisted": False,
         }
 
+    ledger = await cache.get(user_id)
     return {
         "success": True,
         "invoice_id": invoice_id,
         "source": "btcpay",
         "amount_sats": amount_sats,
-        "credits_granted": credited,
+        "credits_granted": granted,
         "balance_api_sats": ledger.balance_api_sats,
         "persisted": True,
-        "message": f"Restored {credited:,} credits from invoice {invoice_id}.",
+        "message": (
+            f"Restored {granted:,} credits from invoice {invoice_id}."
+            if granted
+            else "Already restored — a tranche for this invoice is present."
+        ),
     }
 
 
@@ -643,8 +710,12 @@ async def reconcile_pending_invoices(
     if not pending_copy:
         return {"reconciled": 0, "actions": []}
 
-    actions: list[dict[str, Any]] = []
-    changed = False
+    # Ask BTCPay what happened to each invoice FIRST. The mutation below is
+    # synchronous and re-runs on every CAS retry, so no network call may live
+    # inside it — and re-polling BTCPay once per lost race would be wasteful
+    # besides. Decide here; apply once, atomically.
+    to_settle: list[tuple[str, int, str]] = []
+    to_retire: list[tuple[str, str]] = []
 
     for invoice_id in pending_copy:
         try:
@@ -654,39 +725,53 @@ async def reconcile_pending_invoices(
             continue
 
         status = invoice.get("status", "Unknown")
+        if status == "Settled":
+            to_settle.append((invoice_id, int(float(invoice.get("amount", "0"))), status))
+        elif status in ("Expired", "Invalid"):
+            to_retire.append((invoice_id, status))
 
-        if status == "Settled" and invoice_id not in ledger.credited_invoices:
-            amount_str = invoice.get("amount", "0")
-            amount_sats = int(float(amount_str))
-            credited = amount_sats
-            ledger.credit_deposit(credited, invoice_id, ttl_seconds=tranche_lifetime_seconds)
-            ledger.record_invoice_settled(
+    if not to_settle and not to_retire:
+        return {"reconciled": 0, "actions": []}
+
+    settled_at = datetime.now(UTC).isoformat()
+
+    def _reconcile(led: UserLedger) -> list[dict[str, Any]]:
+        # The already-credited check moved in here deliberately: against fresh
+        # state it is the definitive answer, where the old check read a cache
+        # another replica may already have advanced past.
+        applied: list[dict[str, Any]] = []
+        for invoice_id, sats, status in to_settle:
+            if invoice_id in led.credited_invoices:
+                continue
+            led.credit_deposit(sats, invoice_id, ttl_seconds=tranche_lifetime_seconds)
+            led.record_invoice_settled(
                 invoice_id=invoice_id,
-                api_sats_credited=credited,
-                settled_at=datetime.now(UTC).isoformat(),
+                api_sats_credited=sats,
+                settled_at=settled_at,
                 btcpay_status=status,
             )
-            changed = True
-            actions.append({
-                "invoice_id": invoice_id,
-                "action": "credited",
-                "api_sats": credited,
+            applied.append({
+                "invoice_id": invoice_id, "action": "credited", "api_sats": sats,
             })
-
-        elif status in ("Expired", "Invalid"):
-            if invoice_id in ledger.pending_invoices:
-                ledger.pending_invoices.remove(invoice_id)
-            ledger.record_invoice_terminal(invoice_id, status, status)
-            changed = True
-            actions.append({
-                "invoice_id": invoice_id,
-                "action": "removed",
-                "reason": status,
+        for invoice_id, status in to_retire:
+            if invoice_id in led.pending_invoices:
+                led.pending_invoices.remove(invoice_id)
+            led.record_invoice_terminal(invoice_id, status, status)
+            applied.append({
+                "invoice_id": invoice_id, "action": "removed", "reason": status,
             })
+        return applied
 
-    if changed:
-        cache.mark_dirty(user_id)
-        await cache.flush_user(user_id)
+    try:
+        actions = await cache.mutate(user_id, _reconcile)
+    except (LedgerUnavailableError, LedgerWriteError) as exc:
+        # Nothing was written, so nothing is half-done — the next reconcile
+        # re-polls BTCPay and applies the same conclusions.
+        logger.error(
+            "Reconciliation for %s did not persist: %s: %s",
+            user_id, type(exc).__name__, exc,
+        )
+        return {"reconciled": 0, "actions": [], "persisted": False}
 
     return {"reconciled": len(actions), "actions": actions}
 
