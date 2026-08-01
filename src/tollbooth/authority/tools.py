@@ -63,6 +63,7 @@ from tollbooth.tool_identity import (
     ToolIdentity,
     capability_uuid,
 )
+from tollbooth.vault_backend import LedgerUnavailableError, LedgerWriteError
 
 logger = logging.getLogger(__name__)
 
@@ -695,9 +696,20 @@ async def _provision_operator(
     here.
     """
     cache = await runtime.ledger_cache()
+    # Materialize the operator's ledger row. Nothing is being changed — the
+    # WRITE is the point, so a later credit has a row to CAS against. Routed
+    # through the write-through path so provisioning can't be left holding a
+    # dirty cache entry that never lands.
+    try:
+        await cache.mutate(npub, lambda _ledger: True)
+    except (LedgerUnavailableError, LedgerWriteError) as exc:
+        # Not fatal: the row is created on first credit anyway. Provisioning
+        # continues so the Neon tenant and registry entry still get made.
+        logger.warning(
+            "Could not materialize ledger row for %s during provisioning: %s: %s",
+            npub[:20], type(exc).__name__, exc,
+        )
     ledger = await cache.get(npub)
-    cache.mark_dirty(npub)
-    await cache.flush_user(npub)
 
     # Provision isolated Neon schema with per-operator role
     neon_url = ""
@@ -1121,10 +1133,12 @@ def register_authority_tools(
             expiration=expiration,
         )
 
-        # Flush immediately (credit-critical)
-        cache = await runtime.ledger_cache()
-        if not await cache.flush_user(npub):
-            logger.error("Failed to persist fee debit for %s", npub)
+        # The fee debit is ALREADY durable: a non-zero charge goes through
+        # `LedgerCache.mutate()`, which CAS-writes to Postgres before this tool
+        # body ever runs. The explicit flush that used to sit here was a leftover
+        # from the pre-write-through ledger, and it did harm — losing a CAS race
+        # made it log "Failed to persist fee debit" about a fee that was, in
+        # fact, persisted.
 
         # Opportunistic bootstrap DM refresh (the OTS pattern): relays
         # purge kind-4 events, so keep this operator's bootstrap config

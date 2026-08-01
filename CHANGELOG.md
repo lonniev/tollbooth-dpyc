@@ -5,6 +5,67 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a settlement could be refused persistence forever, and call it a Neon outage
+
+eXcalibur's logs on 2026-08-01 carried an unbroken stream of `Failed to flush ledger to
+vault for npub1d999… after 2 attempt(s)`, for two npubs, from startup to shutdown. It read
+as a database outage. **Neon was healthy** — a snippet write and a server-side regex read-back
+through the same database succeeded during the same window.
+
+It was contention. `store_ledger` guards every write with an optimistic version CAS and
+refuses to blind-overwrite, which is correct; its docstring states the other half of the
+contract — *"the caller re-fetches and re-applies"*. `_flush_entry` did not. It retried the
+**same stale snapshot**, which can never satisfy a guard comparing against a version this
+process will never hold again, then gave up. The entry stayed dirty, its cached version
+stayed stale, and it was unflushable for the life of the process. Two Uvicorn workers per
+deployment made that the normal case rather than the rare one.
+
+The money that rode that path is the serious part. `mutate()` — load fresh, apply,
+CAS-write, retry on conflict — already protected `debit`/`credit` since 0.62.0, but the
+write-through migration stopped there. **These were still on the stranded path, and now
+aren't:**
+
+- `purchase_credits` recording a pending invoice — its loss leaves an invoice at BTCPay
+  with no ledger record, recoverable only by a `restore_credits` the patron won't know to call.
+- `check_payment` retiring an Expired or Invalid invoice.
+- `restore_credits`, both the vault-record and BTCPay paths.
+- `reconcile_pending_invoices`, which crediting *and* retiring in one atomic write.
+- `_provision_operator` materializing a new operator's ledger row.
+
+**`credit_deposit` is not idempotent** — it appends a tranche on every call — and `mutate()`
+re-applies its function on each conflict retry. Every migrated credit path therefore guards
+on the tranche for that invoice already existing, which is also the precise question
+`restore_credits` exists to ask: *is the tranche missing?* Without that guard a lost race
+mints a second tranche for one payment; there is a test that fails exactly that way when the
+guard is removed.
+
+`certify_credits` lost an explicit `flush_user` entirely. A non-zero fee is CAS-written by
+`mutate()` before that tool body runs, so the flush was vestigial — and under contention it
+logged `Failed to persist fee debit` about a fee that was, in fact, persisted.
+
+What remains on the cached path is usage counting for **free** calls, deliberately: routing
+a statistic through a Postgres round-trip would put one in front of every `check_balance`.
+Now that money has left that path, a conflicted flush adopts the newer stored state instead
+of looping — losing a counter, not a sat — and stops burning a 2-second retry on a write
+that cannot succeed.
+
+The swallowed exception is what disguised all of this. `except Exception` logged "failed"
+and discarded the cause, so contention and outage were indistinguishable. Both flush log
+lines now name the exception type and message.
+
+### Changed — the OAuth refresh lock claims less, because it delivers less
+
+0.76.0's per-patron refresh lock was documented as sufficient on the assumption that a
+deployment is one server. eXcalibur's logs show one Horizon deployment running **two**
+Uvicorn worker processes, each with its own lock map. The lock still collapses the fan-out
+that caused the original incident — N jobs inside one worker become one refresh — but two
+workers can still spend a rotating refresh token concurrently.
+
+No behavior change; the docstrings now say what the lock actually guarantees. A cross-process
+advisory lock was considered and declined: the remaining window is two racers rather than N,
+the failure degrades to a retryable situation rather than a dead grant, and the fix would put
+a Postgres round-trip and a new failure mode on every refresh.
+
 ## 0.77.0 — 2026-07-31
 
 0.76.0 told three OAuth situations apart. There were five more hiding inside the

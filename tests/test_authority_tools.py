@@ -118,6 +118,10 @@ def _fake_runtime(fee=20):
         health=MagicMock(return_value="ok"),
     )
     cache.mark_dirty = MagicMock()
+    # Provisioning materializes the operator's ledger row write-through, so the
+    # fake must answer mutate(); run the fn against the stand-in ledger the way
+    # the real cache runs it against fresh vault state.
+    cache.mutate = AsyncMock(side_effect=lambda npub, fn: fn(ledger))
     return SimpleNamespace(
         _last_debit_cost=fee,
         rollback_debit=AsyncMock(),
@@ -167,9 +171,10 @@ async def test_certify_credits_signs_a_verifiable_certificate():
     assert event.verify() is True and event.pubkey == signer.pubkey_hex
     claims = json.loads(event.content)
     assert claims["amount_sats"] == 1000 and claims["fee_sats"] == 20 and claims["net_sats"] == 980
-    # jti recorded for replay protection; fee debit flushed
+    # jti recorded for replay protection. The fee debit needs no assertion here:
+    # a non-zero charge is CAS-written by LedgerCache.mutate() before this tool
+    # body runs, so there is no flush left for certify_credits to perform.
     assert replay.size == 1
-    rt.ledger_cache.return_value.flush_user.assert_awaited_once()
 
 
 @pytest.mark.asyncio

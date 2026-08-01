@@ -267,14 +267,20 @@ class TestPurchaseCreditsInvoiceRecord:
         assert rec.btcpay_status == "New"
 
     @pytest.mark.asyncio
-    async def test_invoice_record_flushed_to_vault(self) -> None:
+    async def test_invoice_record_written_through_to_vault(self) -> None:
+        """The pending-invoice record is CAS-written, not left dirty in cache.
+
+        It used to be mark_dirty + flush_user, which a concurrent writer could
+        strand: the flush lost the CAS race, retried the same stale version, and
+        gave up — leaving an invoice at BTCPay with no ledger record."""
         ledger = UserLedger()
         btcpay = _mock_btcpay({"id": "inv-flush", "checkoutLink": "https://pay"})
         cache = _mock_cache(ledger)
 
         await direct_purchase_tool(btcpay, cache, "user-1", 1000)
-        cache.mark_dirty.assert_called_with("user-1")
-        cache.flush_user.assert_called_with("user-1")
+        cache.mutate.assert_awaited_once()
+        assert "inv-flush" in ledger.pending_invoices
+        assert "inv-flush" in ledger.invoices
 
 
 # ---------------------------------------------------------------------------

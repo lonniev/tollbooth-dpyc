@@ -291,7 +291,7 @@ class LedgerCache:
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Failed to load ledger from vault for %s — returning uncached empty ledger. Underlying error: %s: %s",
-                user_id, type(exc).__name__, exc,
+                user_id[:20], type(exc).__name__, exc,
             )
             return UserLedger(), False
 
@@ -325,7 +325,7 @@ class LedgerCache:
             await self._flush_entry(user_id, entry)
         except Exception:  # noqa: BLE001
             logger.warning(
-                "Background flush failed for %s (swallowed).", user_id,
+                "Background flush failed for %s (swallowed).", user_id[:20],
             )
 
     async def _evict_lru(self) -> None:
@@ -361,17 +361,51 @@ class LedgerCache:
                 self._last_flush_at = datetime.now(UTC).isoformat()
                 self._total_flushes += 1
                 return True
-            except Exception:  # noqa: BLE001
+            except LedgerVersionConflict:
+                # Another writer advanced the row past the version this process
+                # last read. Retrying the SAME snapshot cannot succeed — the CAS
+                # guard compares against a version we will never hold again — so
+                # the old code burned its retries and then left the entry dirty
+                # forever, unflushable for the life of the process.
+                #
+                # Surrender ours and adopt the newer stored state. That is only
+                # acceptable because money no longer travels this path: charges,
+                # credits, settlements and restores all go through `mutate()`,
+                # which re-applies against fresh state on conflict. What remains
+                # here is usage accounting, where losing a counter costs a
+                # statistic, not a sat.
+                fresh, from_vault = await self._load_from_vault(user_id)
+                if from_vault:
+                    self._entries[user_id] = _CacheEntry(ledger=fresh)
+                    self._entries.move_to_end(user_id)
+                    logger.info(
+                        "Ledger CAS conflict for %s — adopted the newer stored "
+                        "state; this replica's unflushed usage counters were "
+                        "dropped.", user_id[:20],
+                    )
+                else:
+                    # Can't even re-read. Leave the entry alone; a later flush
+                    # or a cold reload will resolve it.
+                    logger.warning(
+                        "Ledger CAS conflict for %s and the store could not be "
+                        "re-read; leaving the cached entry in place.", user_id[:20],
+                    )
+                return False
+            except Exception as exc:  # noqa: BLE001
+                # The reason used to be discarded, which is how a fleet-wide
+                # "Failed to flush" read as a Neon outage when it was contention.
                 if attempt < max_attempts - 1:
                     logger.warning(
-                        "Flush attempt %d/%d failed for %s, retrying in %.1fs...",
-                        attempt + 1, max_attempts, user_id, self._flush_retry_delay,
+                        "Flush attempt %d/%d failed for %s (%s: %s), retrying in %.1fs...",
+                        attempt + 1, max_attempts, user_id[:20],
+                        type(exc).__name__, exc, self._flush_retry_delay,
                     )
                     await asyncio.sleep(self._flush_retry_delay)
                 else:
                     logger.warning(
-                        "Failed to flush ledger to vault for %s after %d attempt(s).",
-                        user_id, max_attempts,
+                        "Failed to flush ledger to vault for %s after %d attempt(s) "
+                        "(%s: %s).",
+                        user_id[:20], max_attempts, type(exc).__name__, exc,
                     )
         return False
 
