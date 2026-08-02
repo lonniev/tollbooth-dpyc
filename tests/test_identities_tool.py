@@ -244,3 +244,67 @@ def test_without_live_surface_unregistered_is_empty_not_omitted() -> None:
     )
     assert "unregistered" in r
     assert r["unregistered"] == []
+
+
+# ---------------------------------------------------------------------------
+# Both drift detectors at once (#174 + #175)
+# ---------------------------------------------------------------------------
+#
+# The two passes overlap: a handler decorated with @paid_tool but never seeded
+# is BOTH in the paid-tool map and on the wire. Reporting it from each pass
+# would name one broken tool twice — and the bare-wire row is the poorer of the
+# two, since it carries no tool_id. These pin the union and the precedence.
+
+
+def test_a_tool_seen_by_both_detectors_is_reported_once_at_richer_detail() -> None:
+    registry = {"uuid-seeded": _identity("read", "Seeded", "seeded_tool")}
+    drifted = capability_uuid("post_performance")
+
+    def mcp_name_for(tid: str) -> str:
+        return {"uuid-seeded": "svc_seeded_tool", drifted: "svc_post_performance"}[tid]
+
+    r = build_canonical_identities(
+        registry,
+        mcp_name_for,
+        "op",
+        paid_tool_names={"uuid-seeded": "seeded_tool", drifted: "post_performance"},
+        live_mcp_names=["svc_seeded_tool", "svc_post_performance"],
+    )
+
+    hits = [u for u in r["unregistered"] if u["mcp_name"] == "svc_post_performance"]
+    assert len(hits) == 1, "one broken tool, one row"
+    # The UUID pass wins: a row that can name the tool_id beats a bare wire name.
+    assert hits[0]["reason"] == "decorated_but_absent_from_registry"
+    assert hits[0]["tool_id"] == drifted
+    assert r["unregistered_count"] == 1
+
+
+def test_each_detector_still_catches_what_the_other_cannot() -> None:
+    """The whole reason both passes exist.
+
+    A @paid_tool UUID never reaches the wire list under a registry name, and a
+    plain FastMCP tool never appears in the paid-tool map. Dropping either pass
+    silently loses one of these.
+    """
+    registry = {"uuid-seeded": _identity("read", "Seeded", "seeded_tool")}
+    decorated = capability_uuid("post_performance")
+
+    def mcp_name_for(tid: str) -> str:
+        return {
+            "uuid-seeded": "svc_seeded_tool",
+            decorated: "svc_post_performance",
+        }[tid]
+
+    r = build_canonical_identities(
+        registry,
+        mcp_name_for,
+        "op",
+        paid_tool_names={decorated: "post_performance"},
+        live_mcp_names=["svc_seeded_tool", "svc_post_performance", "svc_hand_rolled"],
+    )
+
+    by_name = {u["mcp_name"]: u for u in r["unregistered"]}
+    assert by_name["svc_post_performance"]["reason"] == "decorated_but_absent_from_registry"
+    assert by_name["svc_hand_rolled"]["reason"] == "exposed_on_wire_but_absent_from_registry"
+    assert "svc_seeded_tool" not in by_name, "a properly seeded tool is not drift"
+    assert r["unregistered_count"] == 2
