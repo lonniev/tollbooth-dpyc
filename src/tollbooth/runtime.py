@@ -5529,14 +5529,35 @@ def register_standard_tools(
         mcp_name in this output changes but tool_id stays. That's the
         whole point of the canonical-UUID design.
 
+        Also diffs the live FastMCP wire surface against the registry.
+        Tools exposed on the wire but absent from the registry appear in
+        ``unregistered`` so Reconcile can flag deploy drift instead of
+        silently under-reporting (issue #175).
+
         Free, no side effects.
         """
         from tollbooth.tools.identities import build_canonical_identities
+
+        live_mcp_names: list[str] | None = None
+        if rt._mcp is not None:
+            try:
+                live_tools = await rt._mcp.list_tools()
+                live_mcp_names = [
+                    getattr(t, "name", "") for t in (live_tools or [])
+                ]
+            except Exception:
+                # Best-effort drift signal — never fail the free inventory call.
+                logger.debug(
+                    "list_canonical_identities: live tool surface unavailable",
+                    exc_info=True,
+                )
+                live_mcp_names = None
         return build_canonical_identities(
             rt._tool_registry,
             rt.mcp_name_for,
             rt.operator_npub(),
             paid_tool_names=rt._tool_func_names,
+            live_mcp_names=live_mcp_names,
         )
 
     # -- Nostr profile (kind-0) tools ----------------------------------

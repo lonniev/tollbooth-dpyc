@@ -5,30 +5,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
-### Fixed — `list_canonical_identities` hid tools the dispatcher already knew (#174)
+### Fixed — `list_canonical_identities` hid tools the dispatcher already knew (#174, #175)
 
-A domain handler decorated with `@paid_tool(capability_uuid("X"))` but missing
-from the operator's `ToolIdentity` table was reachable on the wire
-(`tools/list` exposed it) and refused at debit time (`tool_not_registered`),
-yet **absent** from `list_canonical_identities`. Pricing Studio Reconcile
-UUID-joins against that listing, so it reported clean and never flagged the
-drift — the first real signal was a patron-facing denial.
+A handler reachable on the wire but missing from the operator's `ToolIdentity`
+table was exposed by `tools/list`, refused at debit time
+(`tool_not_registered`), and yet **absent** from `list_canonical_identities`.
+Pricing Studio Reconcile UUID-joins against that listing, so it reported clean
+and never flagged the drift — the first real signal was a patron-facing denial.
 
-`build_canonical_identities` now also walks the runtime's `_tool_func_names`
-map (recorded by `@paid_tool` at decoration). UUIDs present there but missing
-from `_tool_registry` appear in `tools[]` with `registered: false`, and again
-in a top-level `unregistered` array (`unregistered_count`).
-`mcp_name_for` resolves a slug-prefixed name for those UUIDs so the drift row
-is human-readable.
+`build_canonical_identities` now checks the live surface from **two sides**,
+because neither alone is complete:
+
+- the runtime's `_tool_func_names` map (recorded by `@paid_tool` at
+  decoration). UUIDs present there but missing from `_tool_registry` appear in
+  `tools[]` with `registered: false` — reported with their `tool_id` and
+  capability, which a wire name alone cannot supply.
+- the live FastMCP tool names, which catch anything on the wire regardless of
+  how it got there (a plain FastMCP tool, a runtime-synthesized one) — none of
+  which appear in the paid-tool map.
+
+Both feed a top-level `unregistered` array (`unregistered_count`); every entry
+carries `mcp_name` and `reason`. The wire pass reports only what the UUID pass
+did not already explain, so one drifting tool is named once, at the richest
+detail available.
+
+Also seeds `STANDARD_IDENTITIES` for three live standard tools that were already
+on the wire without registry rows: `restore_neon_schema`, `get_nostr_profile`,
+`publish_nostr_profile`.
 
 ### Changed — `LIST_CANONICAL_IDENTITIES_UUID` is now the capability v5
 
 The tool's own id was the only hand-written v4 in the standard catalog
 (`e7a9c2f6-1d4b-4c3e-8f7a-5b9d2c1e8f3a`). It is now
 `capability_uuid("list_canonical_identities")` =
-`cc0d5da7-aeb8-5aae-8e33-d998858ff722`. Operators with a pricing-model row
-keyed on the old v4 must re-price under the new id (free tool; no economic
-impact beyond the row key).
+`cc0d5da7-aeb8-5aae-8e33-d998858ff722`, matching every other standard tool.
+
+Stored pricing-model rows keyed on the old value are rewritten on load via
+`LEGACY_TOOL_ID_ALIASES`, so **operators do not need to `reset_pricing_model`
+or re-price**. Without that alias the stale row matches no live tool and
+Reconcile shows one spurious removal plus one spurious addition — noise in the
+very surface these fixes exist to make trustworthy.
 
 ## 0.79.0 — 2026-08-01
 

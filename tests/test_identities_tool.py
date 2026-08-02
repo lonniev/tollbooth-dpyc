@@ -1,10 +1,21 @@
-"""Unit tests for tollbooth.tools.identities.build_canonical_identities (M2.1c)."""
+"""Unit tests for tollbooth.tools.identities.build_canonical_identities (M2.1c).
+
+Issue #175 — list_canonical_identities must:
+  1. use a v5 capability_uuid for its own tool_id (no hand-written v4 literal)
+  2. surface live MCP tools missing from the registry as ``unregistered`` so
+     Reconcile can detect drift instead of silently under-reporting
+"""
 
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 
-from tollbooth.tool_identity import capability_uuid
+from tollbooth.tool_identity import (
+    LIST_CANONICAL_IDENTITIES_UUID,
+    STANDARD_IDENTITIES,
+    capability_uuid,
+)
 from tollbooth.tools.identities import build_canonical_identities
 
 
@@ -19,8 +30,8 @@ def test_empty_registry():
         "operator_npub": "npub1op",
         "count": 0,
         "unregistered_count": 0,
-        "unregistered": [],
         "tools": [],
+        "unregistered": [],
     }
 
 
@@ -164,3 +175,136 @@ async def test_runtime_list_surfaces_paid_tool_not_in_registry():
     assert by_id[paid_only_id]["registered"] is False
     assert by_id[paid_only_id]["mcp_name"] == "excalibur_post_performance"
     assert r["unregistered_count"] == 1
+# ---------------------------------------------------------------------------
+# Issue #175 — v4 hygiene + Reconcile blind spot
+# ---------------------------------------------------------------------------
+
+
+def test_list_canonical_identities_uuid_is_v5_capability_uuid() -> None:
+    """Its own tool_id must be capability_uuid('list_canonical_identities'), not a v4 literal.
+
+    A hand-written v4 was the sole outlier across the network catalog and proved
+    the identity was curated rather than derived. Correcting it is a deliberate
+    migration (pricing rows keyed on the old value must rewrite on load).
+    """
+    expected = capability_uuid("list_canonical_identities")
+    assert LIST_CANONICAL_IDENTITIES_UUID == expected
+    assert uuid.UUID(LIST_CANONICAL_IDENTITIES_UUID).version == 5
+    identity = STANDARD_IDENTITIES[LIST_CANONICAL_IDENTITIES_UUID]
+    assert identity.capability == "list_canonical_identities"
+
+
+def test_live_tool_absent_from_registry_appears_as_unregistered() -> None:
+    """A tool on the live MCP surface but missing from the registry is drift.
+
+    Reconcile joins against this output. Omitting the live name made Reconcile
+    report clean while dispatch still knew the tool (tool_not_registered at call
+    time). Surface it explicitly so Studio can flag the gap.
+    """
+    registry = {
+        "uuid-a": _identity("read", "Get a quote", "get_quote"),
+    }
+    live = ["svc_get_quote", "svc_post_performance"]
+    r = build_canonical_identities(
+        registry,
+        lambda tid: "svc_get_quote" if tid == "uuid-a" else tid,
+        "npub1op",
+        live_mcp_names=live,
+    )
+    assert r["count"] == 1
+    assert {t["tool_id"] for t in r["tools"]} == {"uuid-a"}
+    assert r["unregistered"] == [
+        {
+            "mcp_name": "svc_post_performance",
+            "reason": "exposed_on_wire_but_absent_from_registry",
+        }
+    ]
+
+
+def test_live_names_fully_covered_yield_empty_unregistered() -> None:
+    registry = {
+        "uuid-a": _identity("read", "Get a quote", "get_quote"),
+        "uuid-b": _identity("write", "Post", "post_tweet"),
+    }
+    r = build_canonical_identities(
+        registry,
+        lambda tid: f"svc_{registry[tid].capability}",
+        "op",
+        live_mcp_names=["svc_get_quote", "svc_post_tweet"],
+    )
+    assert r["unregistered"] == []
+
+
+def test_without_live_surface_unregistered_is_empty_not_omitted() -> None:
+    """Contract: key is always present so clients don't special-case absence."""
+    r = build_canonical_identities(
+        {"u": _identity("free", "x", "c")},
+        lambda tid: "slug_c",
+        "op",
+    )
+    assert "unregistered" in r
+    assert r["unregistered"] == []
+
+
+# ---------------------------------------------------------------------------
+# Both drift detectors at once (#174 + #175)
+# ---------------------------------------------------------------------------
+#
+# The two passes overlap: a handler decorated with @paid_tool but never seeded
+# is BOTH in the paid-tool map and on the wire. Reporting it from each pass
+# would name one broken tool twice — and the bare-wire row is the poorer of the
+# two, since it carries no tool_id. These pin the union and the precedence.
+
+
+def test_a_tool_seen_by_both_detectors_is_reported_once_at_richer_detail() -> None:
+    registry = {"uuid-seeded": _identity("read", "Seeded", "seeded_tool")}
+    drifted = capability_uuid("post_performance")
+
+    def mcp_name_for(tid: str) -> str:
+        return {"uuid-seeded": "svc_seeded_tool", drifted: "svc_post_performance"}[tid]
+
+    r = build_canonical_identities(
+        registry,
+        mcp_name_for,
+        "op",
+        paid_tool_names={"uuid-seeded": "seeded_tool", drifted: "post_performance"},
+        live_mcp_names=["svc_seeded_tool", "svc_post_performance"],
+    )
+
+    hits = [u for u in r["unregistered"] if u["mcp_name"] == "svc_post_performance"]
+    assert len(hits) == 1, "one broken tool, one row"
+    # The UUID pass wins: a row that can name the tool_id beats a bare wire name.
+    assert hits[0]["reason"] == "decorated_but_absent_from_registry"
+    assert hits[0]["tool_id"] == drifted
+    assert r["unregistered_count"] == 1
+
+
+def test_each_detector_still_catches_what_the_other_cannot() -> None:
+    """The whole reason both passes exist.
+
+    A @paid_tool UUID never reaches the wire list under a registry name, and a
+    plain FastMCP tool never appears in the paid-tool map. Dropping either pass
+    silently loses one of these.
+    """
+    registry = {"uuid-seeded": _identity("read", "Seeded", "seeded_tool")}
+    decorated = capability_uuid("post_performance")
+
+    def mcp_name_for(tid: str) -> str:
+        return {
+            "uuid-seeded": "svc_seeded_tool",
+            decorated: "svc_post_performance",
+        }[tid]
+
+    r = build_canonical_identities(
+        registry,
+        mcp_name_for,
+        "op",
+        paid_tool_names={decorated: "post_performance"},
+        live_mcp_names=["svc_seeded_tool", "svc_post_performance", "svc_hand_rolled"],
+    )
+
+    by_name = {u["mcp_name"]: u for u in r["unregistered"]}
+    assert by_name["svc_post_performance"]["reason"] == "decorated_but_absent_from_registry"
+    assert by_name["svc_hand_rolled"]["reason"] == "exposed_on_wire_but_absent_from_registry"
+    assert "svc_seeded_tool" not in by_name, "a properly seeded tool is not drift"
+    assert r["unregistered_count"] == 2

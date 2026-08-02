@@ -79,6 +79,16 @@ class TestStandardIdentities:
         ids = list(STANDARD_IDENTITIES.keys())
         assert len(ids) == len(set(ids)), "Duplicate UUIDs in STANDARD_IDENTITIES"
 
+    def test_all_tool_ids_are_uuid_v5(self) -> None:
+        """No hand-written v4 literals in the standard catalog (issue #175)."""
+        import uuid
+
+        for key, identity in STANDARD_IDENTITIES.items():
+            ver = uuid.UUID(key).version
+            assert ver == 5, (
+                f"{identity.capability} tool_id is UUID v{ver}, expected v5: {key}"
+            )
+
     def test_key_capabilities_present(self) -> None:
         """Spot-check that critical capabilities are registered."""
         capabilities = {ti.capability for ti in STANDARD_IDENTITIES.values()}
@@ -86,5 +96,9 @@ class TestStandardIdentities:
             "check_balance", "purchase_credits", "check_payment",
             "service_status", "session_status", "get_pricing_model",
             "set_pricing_model", "check_price",
+            "list_canonical_identities",
+            "restore_neon_schema",
+            "get_nostr_profile",
+            "publish_nostr_profile",
         ):
             assert cap in capabilities, f"Missing capability: {cap}"
