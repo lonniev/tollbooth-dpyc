@@ -111,6 +111,12 @@ class ToolPrice:
                 f"tool_id is required for tool '{data.get('tool_name', '?')}'. "
                 "Run reset_pricing_model to re-seed from the tool registry."
             )
+        # Rewrite deliberately-retired tool_ids (e.g. the pre-0.80.0 v4
+        # list_canonical_identities literal) so Neon rows keep matching the
+        # running wheel after an identity correction. See LEGACY_TOOL_ID_ALIASES.
+        from tollbooth.tool_identity import LEGACY_TOOL_ID_ALIASES
+
+        tool_id = LEGACY_TOOL_ID_ALIASES.get(str(tool_id), str(tool_id))
         raw_mults = data.get("multipliers")
         mults: dict[str, dict[str, float]] | None = None
         if isinstance(raw_mults, dict):

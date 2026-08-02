@@ -48,6 +48,31 @@ class TestToolPrice:
         tp = ToolPrice.from_dict({"tool_id": explicit_id, "tool_name": "search", "price_sats": 5})
         assert tp.tool_id == explicit_id
 
+    def test_from_dict_rewrites_legacy_list_canonical_uuid(self) -> None:
+        """Issue #175: the pre-v5 list_canonical_identities tool_id migrates on load.
+
+        Neon rows keyed on the hand-written v4 literal must land on the current
+        v5 capability_uuid so Reconcile / debit_or_deny still match after the
+        wheel identity correction — without requiring every operator to reset.
+        """
+        from tollbooth.tool_identity import (
+            LEGACY_TOOL_ID_ALIASES,
+            LIST_CANONICAL_IDENTITIES_LEGACY_UUID,
+            LIST_CANONICAL_IDENTITIES_UUID,
+        )
+
+        assert LIST_CANONICAL_IDENTITIES_LEGACY_UUID in LEGACY_TOOL_ID_ALIASES
+        tp = ToolPrice.from_dict(
+            {
+                "tool_id": LIST_CANONICAL_IDENTITIES_LEGACY_UUID,
+                "tool_name": "weather_list_canonical_identities",
+                "price_sats": 0,
+                "category": "free",
+            }
+        )
+        assert tp.tool_id == LIST_CANONICAL_IDENTITIES_UUID
+        assert tp.tool_id == capability_uuid("list_canonical_identities")
+
     def test_to_tool_pricing_flat(self) -> None:
         tp = ToolPrice(tool_id=capability_uuid("search"), tool_name="search", price_sats=5, min_cost=1, max_cost=100)
         pricing = tp.to_tool_pricing()
@@ -180,6 +205,36 @@ class TestPricingModel:
         assert restored.tools[0].chain == []
         # No attribute leak — PricingModel has no .pipeline.
         assert not hasattr(restored, "pipeline")
+
+    def test_from_json_rewrites_legacy_tool_ids(self) -> None:
+        """Full model load rewrites every legacy tool_id alias (issue #175)."""
+        from tollbooth.tool_identity import (
+            LIST_CANONICAL_IDENTITIES_LEGACY_UUID,
+            LIST_CANONICAL_IDENTITIES_UUID,
+        )
+
+        raw = json.dumps({
+            "name": "fleet",
+            "tools": [
+                {
+                    "tool_id": LIST_CANONICAL_IDENTITIES_LEGACY_UUID,
+                    "tool_name": "excalibur_list_canonical_identities",
+                    "price_sats": 0,
+                    "category": "free",
+                },
+                {
+                    "tool_id": capability_uuid("check_balance"),
+                    "tool_name": "excalibur_check_balance",
+                    "price_sats": 0,
+                    "category": "free",
+                },
+            ],
+        })
+        restored = PricingModel.from_json(raw)
+        by_name = {t.tool_name: t.tool_id for t in restored.tools}
+        assert by_name["excalibur_list_canonical_identities"] == LIST_CANONICAL_IDENTITIES_UUID
+        assert by_name["excalibur_check_balance"] == capability_uuid("check_balance")
+        assert LIST_CANONICAL_IDENTITIES_LEGACY_UUID not in restored.tool_id_set()
 
     def test_from_row_with_string_model_json(self) -> None:
         row = {

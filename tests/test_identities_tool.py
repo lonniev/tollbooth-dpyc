@@ -1,10 +1,21 @@
-"""Unit tests for tollbooth.tools.identities.build_canonical_identities (M2.1c)."""
+"""Unit tests for tollbooth.tools.identities.build_canonical_identities (M2.1c).
+
+Issue #175 — list_canonical_identities must:
+  1. use a v5 capability_uuid for its own tool_id (no hand-written v4 literal)
+  2. surface live MCP tools missing from the registry as ``unregistered`` so
+     Reconcile can detect drift instead of silently under-reporting
+"""
 
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 
-from tollbooth.tool_identity import capability_uuid
+from tollbooth.tool_identity import (
+    LIST_CANONICAL_IDENTITIES_UUID,
+    STANDARD_IDENTITIES,
+    capability_uuid,
+)
 from tollbooth.tools.identities import build_canonical_identities
 
 
@@ -19,8 +30,8 @@ def test_empty_registry():
         "operator_npub": "npub1op",
         "count": 0,
         "unregistered_count": 0,
-        "unregistered": [],
         "tools": [],
+        "unregistered": [],
     }
 
 
@@ -164,3 +175,72 @@ async def test_runtime_list_surfaces_paid_tool_not_in_registry():
     assert by_id[paid_only_id]["registered"] is False
     assert by_id[paid_only_id]["mcp_name"] == "excalibur_post_performance"
     assert r["unregistered_count"] == 1
+# ---------------------------------------------------------------------------
+# Issue #175 — v4 hygiene + Reconcile blind spot
+# ---------------------------------------------------------------------------
+
+
+def test_list_canonical_identities_uuid_is_v5_capability_uuid() -> None:
+    """Its own tool_id must be capability_uuid('list_canonical_identities'), not a v4 literal.
+
+    A hand-written v4 was the sole outlier across the network catalog and proved
+    the identity was curated rather than derived. Correcting it is a deliberate
+    migration (pricing rows keyed on the old value must rewrite on load).
+    """
+    expected = capability_uuid("list_canonical_identities")
+    assert LIST_CANONICAL_IDENTITIES_UUID == expected
+    assert uuid.UUID(LIST_CANONICAL_IDENTITIES_UUID).version == 5
+    identity = STANDARD_IDENTITIES[LIST_CANONICAL_IDENTITIES_UUID]
+    assert identity.capability == "list_canonical_identities"
+
+
+def test_live_tool_absent_from_registry_appears_as_unregistered() -> None:
+    """A tool on the live MCP surface but missing from the registry is drift.
+
+    Reconcile joins against this output. Omitting the live name made Reconcile
+    report clean while dispatch still knew the tool (tool_not_registered at call
+    time). Surface it explicitly so Studio can flag the gap.
+    """
+    registry = {
+        "uuid-a": _identity("read", "Get a quote", "get_quote"),
+    }
+    live = ["svc_get_quote", "svc_post_performance"]
+    r = build_canonical_identities(
+        registry,
+        lambda tid: "svc_get_quote" if tid == "uuid-a" else tid,
+        "npub1op",
+        live_mcp_names=live,
+    )
+    assert r["count"] == 1
+    assert {t["tool_id"] for t in r["tools"]} == {"uuid-a"}
+    assert r["unregistered"] == [
+        {
+            "mcp_name": "svc_post_performance",
+            "reason": "exposed_on_wire_but_absent_from_registry",
+        }
+    ]
+
+
+def test_live_names_fully_covered_yield_empty_unregistered() -> None:
+    registry = {
+        "uuid-a": _identity("read", "Get a quote", "get_quote"),
+        "uuid-b": _identity("write", "Post", "post_tweet"),
+    }
+    r = build_canonical_identities(
+        registry,
+        lambda tid: f"svc_{registry[tid].capability}",
+        "op",
+        live_mcp_names=["svc_get_quote", "svc_post_tweet"],
+    )
+    assert r["unregistered"] == []
+
+
+def test_without_live_surface_unregistered_is_empty_not_omitted() -> None:
+    """Contract: key is always present so clients don't special-case absence."""
+    r = build_canonical_identities(
+        {"u": _identity("free", "x", "c")},
+        lambda tid: "slug_c",
+        "op",
+    )
+    assert "unregistered" in r
+    assert r["unregistered"] == []

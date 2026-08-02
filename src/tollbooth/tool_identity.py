@@ -156,11 +156,18 @@ RESET_PRICING_MODEL_UUID             = "4735520b-e1e3-5d47-bb71-c26c394f50c1"
 CHECK_PRICE_UUID                     = "f0e43654-5dd1-5a67-a8f7-59e2c168a9a2"
 LIST_CONSTRAINT_TYPES_UUID           = "9855b0a8-f458-5e79-a0ca-207f142d7800"
 
-# Canonical-identity introspection. Was a hand-written v4
-# (e7a9c2f6-1d4b-4c3e-8f7a-5b9d2c1e8f3a); migrated to the v5 scheme
-# every other standard tool uses so Reconcile/pricing rows key on
-# capability_uuid("list_canonical_identities"). Operators with a
-# pricing row on the old v4 must re-price under the new id (issue #174).
+# Introspection of canonical identities. Originally minted as a fresh v4
+# literal so it would not collide with any historical capability_uuid
+# derivation; that made it the sole v4 outlier in the network catalog
+# (issues #174, #175). Corrected to the v5 capability_uuid scheme every other
+# standard tool uses.
+#
+# The legacy value is KEPT and rewritten on pricing-model load via
+# LEGACY_TOOL_ID_ALIASES. Without that alias an operator's stored row keyed on
+# the old v4 stops matching any live tool, and Reconcile shows it as one
+# spurious removal plus one spurious addition — noise in the very surface
+# these issues exist to make trustworthy.
+LIST_CANONICAL_IDENTITIES_LEGACY_UUID = "e7a9c2f6-1d4b-4c3e-8f7a-5b9d2c1e8f3a"
 LIST_CANONICAL_IDENTITIES_UUID       = "cc0d5da7-aeb8-5aae-8e33-d998858ff722"
 
 # Patron credential CRUD
@@ -172,6 +179,18 @@ GET_PATRON_CREDENTIAL_FIELDS_UUID    = "16dac337-6482-5c55-9710-ca7aceaa02b6"
 NOTARIZE_LEDGER_UUID                 = "fa72cde0-35a6-5fb3-8a49-85041cf3fb6c"
 GET_NOTARIZATION_PROOF_UUID          = "144b6fd8-6409-5642-a72a-d0b14434de73"
 LIST_NOTARIZATIONS_UUID              = "6600a576-84a1-5952-bbb9-350b2ee73ef9"
+
+# Live standard tools that were on the wire without STANDARD_IDENTITIES rows
+# (same Reconcile blind spot as a missing domain declaration — issue #175).
+RESTORE_NEON_SCHEMA_UUID             = "dec2a287-e5f1-5b33-a4ca-2d04de4de0f1"
+GET_NOSTR_PROFILE_UUID               = "47c8d865-647e-5136-9364-c6b8afc5ba8c"
+PUBLISH_NOSTR_PROFILE_UUID           = "6a90b67e-5934-55aa-ab8a-ee594e01cfa0"
+
+# Old tool_id → current tool_id. Applied when deserializing pricing-model
+# rows so a deliberate identity correction does not orphan Neon economics.
+LEGACY_TOOL_ID_ALIASES: dict[str, str] = {
+    LIST_CANONICAL_IDENTITIES_LEGACY_UUID: LIST_CANONICAL_IDENTITIES_UUID,
+}
 
 # Coupon CRUD (wheel 0.41.0+)
 MINT_COUPON_UUID                     = "b2f6a56c-6641-52ec-9e83-934a011dca4e"
@@ -283,6 +302,12 @@ _STANDARD_LIST: list[ToolIdentity] = [
     ToolIdentity(tool_id=LIST_CANONICAL_IDENTITIES_UUID, capability="list_canonical_identities", category="free",
                  intent="Return the canonical (tool_id, mcp_name, category, intent) tuples for "
                         "every tool the running wheel exposes. Source of truth for Reconcile."),
+    ToolIdentity(tool_id=RESTORE_NEON_SCHEMA_UUID, capability="restore_neon_schema", category="restricted",
+                 intent="Operator-only: re-run ensure_schema on every NeonVault this operator uses."),
+    ToolIdentity(tool_id=GET_NOSTR_PROFILE_UUID, capability="get_nostr_profile", category="free",
+                 intent="Read an npub's public Nostr profile (NIP-01 kind-0 metadata)."),
+    ToolIdentity(tool_id=PUBLISH_NOSTR_PROFILE_UUID, capability="publish_nostr_profile", category="free",
+                 intent="Relay a client-signed kind-0 Nostr profile to public relays."),
 
     # -- Patron credential CRUD --
     ToolIdentity(tool_id=UPDATE_PATRON_CREDENTIAL_UUID, capability="update_patron_credential", category="free",
