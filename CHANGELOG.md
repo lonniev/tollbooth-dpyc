@@ -3,6 +3,33 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed — `list_canonical_identities` hid tools the dispatcher already knew (#174)
+
+A domain handler decorated with `@paid_tool(capability_uuid("X"))` but missing
+from the operator's `ToolIdentity` table was reachable on the wire
+(`tools/list` exposed it) and refused at debit time (`tool_not_registered`),
+yet **absent** from `list_canonical_identities`. Pricing Studio Reconcile
+UUID-joins against that listing, so it reported clean and never flagged the
+drift — the first real signal was a patron-facing denial.
+
+`build_canonical_identities` now also walks the runtime's `_tool_func_names`
+map (recorded by `@paid_tool` at decoration). UUIDs present there but missing
+from `_tool_registry` appear in `tools[]` with `registered: false`, and again
+in a top-level `unregistered` array (`unregistered_count`).
+`mcp_name_for` resolves a slug-prefixed name for those UUIDs so the drift row
+is human-readable.
+
+### Changed — `LIST_CANONICAL_IDENTITIES_UUID` is now the capability v5
+
+The tool's own id was the only hand-written v4 in the standard catalog
+(`e7a9c2f6-1d4b-4c3e-8f7a-5b9d2c1e8f3a`). It is now
+`capability_uuid("list_canonical_identities")` =
+`cc0d5da7-aeb8-5aae-8e33-d998858ff722`. Operators with a pricing-model row
+keyed on the old v4 must re-price under the new id (free tool; no economic
+impact beyond the row key).
+
 ## 0.79.0 — 2026-08-01
 
 ### Fixed — delivering a credential did nothing until the container was replaced

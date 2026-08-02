@@ -226,7 +226,7 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 | `set_pricing_model` | Free | Update the pricing model (operator-restricted, requires proof) |
 | `reset_pricing_model` | Free | Delete all pricing models and re-initialize (operator-restricted) |
 | `list_constraint_types` | Free | Available constraint types and their parameters |
-| `list_canonical_identities` | Free | Canonical `(tool_id, mcp_name, category, intent)` inventory — source of truth for Reconcile |
+| `list_canonical_identities` | Free | Canonical `(tool_id, mcp_name, category, intent, registered)` inventory — source of truth for Reconcile; `@paid_tool` UUIDs missing from the ToolIdentity table appear with `registered: false` / in `unregistered[]` |
 
 ### OpenTimestamps (when `ots_enabled=True`)
 
