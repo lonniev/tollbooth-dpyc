@@ -156,8 +156,12 @@ RESET_PRICING_MODEL_UUID             = "4735520b-e1e3-5d47-bb71-c26c394f50c1"
 CHECK_PRICE_UUID                     = "f0e43654-5dd1-5a67-a8f7-59e2c168a9a2"
 LIST_CONSTRAINT_TYPES_UUID           = "9855b0a8-f458-5e79-a0ca-207f142d7800"
 
-# New in this refactor: introspection of canonical identities.
-LIST_CANONICAL_IDENTITIES_UUID       = "e7a9c2f6-1d4b-4c3e-8f7a-5b9d2c1e8f3a"
+# Canonical-identity introspection. Was a hand-written v4
+# (e7a9c2f6-1d4b-4c3e-8f7a-5b9d2c1e8f3a); migrated to the v5 scheme
+# every other standard tool uses so Reconcile/pricing rows key on
+# capability_uuid("list_canonical_identities"). Operators with a
+# pricing row on the old v4 must re-price under the new id (issue #174).
+LIST_CANONICAL_IDENTITIES_UUID       = "cc0d5da7-aeb8-5aae-8e33-d998858ff722"
 
 # Patron credential CRUD
 UPDATE_PATRON_CREDENTIAL_UUID        = "e896e938-c9f1-5d76-9489-dc928ca907e5"

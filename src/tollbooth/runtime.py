@@ -789,22 +789,37 @@ class OperatorRuntime:
         to compute {slug}_{function_name}. Falls back to {slug}_{capability}
         for standard tools where function names match capabilities.
 
-        Results are cached after first resolution.
+        Results are cached after first resolution. A UUID known only via
+        ``_tool_func_names`` (decorated with ``@paid_tool`` but never seeded
+        into the ToolIdentity registry) still resolves to a slug-prefixed
+        name so ``list_canonical_identities`` can surface the drift (#174).
         """
         if tool_id in self._mcp_name_cache:
             return self._mcp_name_cache[tool_id]
 
         identity = self._tool_registry.get(tool_id)
+        func_name = self._tool_func_names.get(tool_id)
+
+        # Unregistered live tool (paid_tool recorded it; no ToolIdentity seed).
+        # Prefer function name so Reconcile/drift rows are human-readable.
         if identity is None:
-            return tool_id
+            if func_name and self._slug:
+                name = f"{self._slug}_{func_name}"
+            elif func_name:
+                name = func_name
+            else:
+                return tool_id
+            self._mcp_name_cache[tool_id] = name
+            return name
 
         # Explicit mcp_name on the identity takes precedence
         if identity.mcp_name:
             self._mcp_name_cache[tool_id] = identity.mcp_name
             return identity.mcp_name
 
-        # Resolve from function name recording (populated by paid_tool)
-        func_name = self._tool_func_names.get(tool_id)
+        # Registered tool — same resolution order as before #174 so proof
+        # u-tags and wire names stay stable when slug is unset (capability,
+        # not the Python function name, is the fallback).
         if func_name and self._slug:
             name = f"{self._slug}_{func_name}"
         elif self._slug:
@@ -5497,12 +5512,18 @@ def register_standard_tools(
 
     @tool
     async def list_canonical_identities() -> dict[str, Any]:
-        """Return canonical (tool_id, mcp_name, …) for every registered tool.
+        """Return canonical (tool_id, mcp_name, …) for every tool the wheel exposes.
 
         The authoritative source for any client (Studio, agents, FE)
         that needs to know how this MCP identifies its tools.
         Reconcile uses this output to UUID-join against the stored
         pricing model — no name-based UUID derivation, no guessing.
+
+        Includes both ToolIdentity-seeded tools and any UUID recorded by
+        ``@paid_tool`` that is missing from the registry. The latter appear
+        with ``registered: false`` (and in the top-level ``unregistered``
+        array) so Reconcile can flag deploy drift instead of silently
+        reporting clean when a live tool was never seeded (#174).
 
         If the operator renames a function or rebrands a slug, the
         mcp_name in this output changes but tool_id stays. That's the
@@ -5512,7 +5533,10 @@ def register_standard_tools(
         """
         from tollbooth.tools.identities import build_canonical_identities
         return build_canonical_identities(
-            rt._tool_registry, rt.mcp_name_for, rt.operator_npub(),
+            rt._tool_registry,
+            rt.mcp_name_for,
+            rt.operator_npub(),
+            paid_tool_names=rt._tool_func_names,
         )
 
     # -- Nostr profile (kind-0) tools ----------------------------------
