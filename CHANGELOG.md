@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.80.0 — 2026-08-03
 
 ### Fixed — `list_canonical_identities` hid tools the dispatcher already knew (#174, #175)
 
