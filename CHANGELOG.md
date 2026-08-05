@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.81.0 — 2026-08-05
 
 ### Added — durable multi-stage job plans (`plan/v1`) with all-or-none fare (#181)
 
