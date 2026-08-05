@@ -3318,16 +3318,46 @@ class OperatorRuntime:
         )
         from tollbooth.async_situation import AsyncJobSituation
         try:
-            closure_b64: str | None = None
             if self._uses_closure_path(kind):
                 import inspect
 
                 built = self._job_specs[kind]["build"](**params)
                 spec = await built if inspect.isawaitable(built) else built
+                # A non-dict (including None) must not reach seal/submit — sealing
+                # ``None`` would produce a ciphertext of the JSON null, and a
+                # missing seal used to ship ``closure_b64=None`` straight to
+                # Prefect, which 409s on the parameter schema (#178).
+                if not isinstance(spec, dict):
+                    raise RuntimeError(
+                        f"build_closure for kind {kind!r} must return a dict "
+                        f"job spec, got {type(spec).__name__}"
+                    )
                 closure_b64 = await self._seal_closure(spec)
-            handle = await self._async_executor.submit(claim, closure_b64)
-            if handle:
-                await store.set_run_handle(claim, handle)
+                handle = await self._async_executor.submit(claim, closure_b64)
+                if handle:
+                    await store.set_run_handle(claim, handle)
+            else:
+                # Not the sealed-closure path. If the installed executor is
+                # in-process, hand it the claim as before. If a *detached*
+                # executor is installed but this kind has no job_spec, do NOT
+                # call submit(claim, None) — Prefect rejects null closure_b64
+                # with 409 and the dispatch-failure handler silently fell back
+                # in-process after a wasted hop (#178). Run the registered
+                # runner locally instead; that is the legitimate path for a
+                # runner-only kind even when long-runner creds are present.
+                from tollbooth.async_executor import InProcessExecutor
+
+                if isinstance(self._async_executor, InProcessExecutor):
+                    await self._async_executor.submit(claim, None)
+                elif kind in self._job_runners:
+                    import asyncio
+
+                    asyncio.create_task(self._run_job(claim))
+                else:
+                    raise RuntimeError(
+                        f"Kind {kind!r} has no job_spec for detached dispatch "
+                        "and no in-process runner"
+                    )
         except AsyncJobSituation as sit:
             # build_closure classified a pre-flight failure (a not-found entry,
             # an unfunded provider caught by a probe) into a curated, refundable

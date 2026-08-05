@@ -3,6 +3,28 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed — detached submit never sends `closure_b64=None` (#178)
+
+Every scheduler tick that dispatched a resolve under a detached
+`PrefectClosureExecutor` was 409'ing with
+`Validation failed for field 'closure_b64'. Failure reason: None is not of type 'string'`,
+then silently falling back in-process. Detached execution never actually ran
+(excalibur-mcp#341).
+
+Root cause: `start_async_job` always called
+`self._async_executor.submit(claim, closure_b64)` even when the kind had no
+job_spec (so `_uses_closure_path` was false and `closure_b64` stayed `None`).
+A detached executor then shipped that null to Prefect.
+
+- Runner-only kinds under a detached executor now run the registered in-process
+  runner directly — they never call Prefect with a null closure.
+- `PrefectClosureExecutor.submit` fails fast on a missing/empty seal instead of
+  round-tripping a remote 409.
+- `build_closure` must return a `dict`; a `None`/non-dict result raises locally
+  and takes the existing dispatch-failure fallback (in-process runner or refund).
+
 ## 0.80.0 — 2026-08-03
 
 ### Fixed — `list_canonical_identities` hid tools the dispatcher already knew (#174, #175)
