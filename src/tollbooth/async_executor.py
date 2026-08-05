@@ -110,6 +110,19 @@ class PrefectClosureExecutor:
         )
 
     async def submit(self, claim: str, closure_b64: str | None) -> str:
+        # Fail fast on a missing seal. Prefect's deployment schema requires
+        # ``closure_b64: string``; sending None costs a network hop and comes
+        # back as a remote 409 ("None is not of type 'string'"), which
+        # ``start_async_job`` then logs as a generic dispatch failure and
+        # silently falls back in-process — the exact shape that made detached
+        # resolve appear healthy while never dispatching (#178 / excalibur#341).
+        if not isinstance(closure_b64, str) or not closure_b64:
+            raise ValueError(
+                "PrefectClosureExecutor.submit requires a non-empty sealed "
+                f"closure_b64 string; got {closure_b64!r}. Register a job_spec "
+                "and seal before submit, or run this kind in-process."
+            )
+
         from prefect.deployments import run_deployment
 
         # timeout=0 ⇒ fire-and-return: create + schedule the run, do NOT wait.

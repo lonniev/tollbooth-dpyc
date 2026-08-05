@@ -493,6 +493,137 @@ async def test_dispatch_failure_without_runner_refunds(vault_and_rt):
 
 
 # ---------------------------------------------------------------------------
+# #178 — never send closure_b64=None to Prefect (409 Conflict)
+# ---------------------------------------------------------------------------
+
+async def test_runner_only_kind_does_not_submit_null_closure_to_detached(
+    vault_and_rt, monkeypatch
+):
+    """Detached executor installed + kind with ONLY a runner (no job_spec).
+
+    Live shape of #178 / excalibur-mcp#341: PrefectClosureExecutor is wired
+    (long-runner creds present) but the job kind never took the closure path,
+    so start_async_job used to call submit(claim, None). Prefect's parameter
+    schema requires closure_b64: string → every tick 409'd and silently fell
+    back in-process. Detached execution never actually ran.
+
+    The runner-only kind must run in-process without ever calling Prefect.
+    """
+    vault, rt = vault_and_rt
+    captured: dict = {}
+    _stub_prefect(monkeypatch, captured)
+
+    # Detached executor is installed (the live posture after long-runner creds).
+    rt.set_async_executor(
+        PrefectClosureExecutor(
+            deployment="dpyc-job-flow/dpyc-jobs",
+            api_url="https://standalone",
+            api_key="pnu_real",
+            key_id="op16hex",
+        )
+    )
+
+    ran = {"n": 0}
+
+    async def runner(**params):
+        ran["n"] += 1
+        return {"ok": True, "prompt": params.get("prompt")}
+
+    # Runner only — NO register_job_spec. _uses_closure_path is False.
+    rt.register_job_runner("resolve", runner)
+    assert rt._uses_closure_path("resolve") is False
+
+    out = await rt.start_async_job(
+        "resolve", NPUB, {"prompt": "hi"},
+        tool_id=TOOL_ID, max_runtime_seconds=210, result_ttl_seconds=900,
+    )
+
+    # Job accepted; Prefect was never contacted with a null closure.
+    assert out["status"] == "pending"
+    assert "claim_check" in out
+    assert "parameters" not in captured, (
+        "PrefectClosureExecutor.submit must not be called for a runner-only kind "
+        f"(would have sent closure_b64={captured.get('parameters', {}).get('closure_b64')!r})"
+    )
+    # Not a degraded dispatch — runner-only under a detached executor is the
+    # legitimate in-process path for that kind, not a failed Prefect hop.
+    assert out.get("degraded") is None
+    assert vault.rows[out["claim_check"]]["run_handle"] in (None, "")
+
+
+async def test_prefect_submit_rejects_null_closure(monkeypatch):
+    """Defense in depth: even a direct submit(None) must not reach Prefect.
+
+    The schema on the deployment requires closure_b64: string; sending None
+    costs a network hop and buries the real cause under a remote 409. Fail
+    fast locally with a clear error instead.
+    """
+    captured: dict = {}
+    _stub_prefect(monkeypatch, captured)
+
+    exe = PrefectClosureExecutor(
+        deployment="dpyc-job-flow/dpyc-jobs",
+        api_url="https://standalone",
+        api_key="pnu_real",
+        key_id="op16hex",
+    )
+    with pytest.raises(ValueError, match="closure_b64"):
+        await exe.submit("claim-x", None)
+    with pytest.raises(ValueError, match="closure_b64"):
+        await exe.submit("claim-x", "")
+    assert "parameters" not in captured, "null/empty closure must not call run_deployment"
+
+
+async def test_build_closure_returning_none_does_not_submit_null(vault_and_rt, monkeypatch):
+    """Issue #178 candidate 2: build_closure yields nothing → no Prefect hop.
+
+    Sealing/submitting a null spec used to either encrypt JSON null or send
+    closure_b64=None. Now build must return a dict; otherwise dispatch fails
+    locally (and falls back to the in-process runner when one exists) without
+    a remote 409.
+    """
+    vault, rt = vault_and_rt
+    captured: dict = {}
+    _stub_prefect(monkeypatch, captured)
+
+    async def build_closure(**params):
+        return None  # nothing to seal
+
+    def shape_result(raw, params):
+        return raw
+
+    rt.register_job_spec("resolve", build_closure, shape_result)
+
+    ran = {"n": 0}
+
+    async def runner(**params):
+        ran["n"] += 1
+        return {"ok": True}
+
+    rt.register_job_runner("resolve", runner)
+    rt.set_async_executor(
+        PrefectClosureExecutor(
+            deployment="dpyc-job-flow/dpyc-jobs",
+            api_url="https://standalone",
+            api_key="pnu_real",
+            key_id="op16hex",
+        )
+    )
+
+    out = await rt.start_async_job(
+        "resolve", NPUB, {"prompt": "hi"},
+        tool_id=TOOL_ID, max_runtime_seconds=210, result_ttl_seconds=900,
+    )
+    assert out["status"] == "pending"
+    assert out.get("degraded") == "in_process_fallback"
+    assert "dict" in (out.get("degraded_reason") or "").lower() or "build_closure" in (
+        out.get("degraded_reason") or ""
+    )
+    assert "parameters" not in captured, "null build must not reach Prefect"
+    assert vault.rows[out["claim_check"]]["run_handle"] in (None, "")
+
+
+# ---------------------------------------------------------------------------
 # PrefectClosureExecutor.submit — only ciphertext crosses (stubbed prefect)
 # ---------------------------------------------------------------------------
 
