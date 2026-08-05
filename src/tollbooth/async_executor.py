@@ -138,7 +138,6 @@ class PrefectClosureExecutor:
         return str(flow_run.id)
 
     async def poll(self, handle: str) -> dict[str, Any] | None:
-        import json
         import uuid as _uuid
 
         from prefect.client.orchestration import get_client
@@ -154,23 +153,98 @@ class PrefectClosureExecutor:
             async with get_client() as client:
                 run = await client.read_flow_run(run_id)
                 state = run.state
+                # Read ALL artifacts for this run (plan/v1 emits one per stage
+                # plus a final aggregate). limit was 1 before #181, which hid
+                # partial progress and multi-stage harvest.
+                arts = await client.read_artifacts(
+                    artifact_filter=ArtifactFilter(
+                        flow_run_id=ArtifactFilterFlowRunId(any_=[run_id])
+                    ),
+                    limit=100,
+                )
+                harvested = _harvest_artifacts(arts)
+
                 if state is None or not state.is_final():
+                    # Still running — surface partial plan progress when any
+                    # stage artifacts have landed so the wheel can report
+                    # "k of n" without waiting for the final aggregate (#181).
+                    if harvested is not None and harvested.get("op") == "plan/v1":
+                        return {
+                            "status": "working",
+                            "result": harvested,
+                            "error": None,
+                        }
                     return None
                 if state.is_completed():
-                    # The flow publishes its result as a Prefect Artifact (Prefect
-                    # result storage defaults to the worker's local disk, which
-                    # the MCP cannot read). Read it back by flow-run id.
-                    arts = await client.read_artifacts(
-                        artifact_filter=ArtifactFilter(
-                            flow_run_id=ArtifactFilterFlowRunId(any_=[run_id])
-                        ),
-                        limit=1,
-                    )
-                    result: Any = None
-                    if arts:
-                        data = arts[0].data
-                        result = json.loads(data) if isinstance(data, str) else data
-                    return {"status": "completed", "result": result, "error": None}
+                    return {
+                        "status": "completed",
+                        "result": harvested,
+                        "error": None,
+                    }
                 # failed / crashed / cancelled — report only the state type, never
-                # the upstream body (it could echo a sealed value).
-                return {"status": "failed", "result": None, "error": str(state.type)}
+                # the upstream body (it could echo a sealed value). Attach any
+                # partial plan harvest so the operator can console/fallback from
+                # stages that did land (consolation ≠ fulfilment; fare is separate).
+                return {
+                    "status": "failed",
+                    "result": harvested,
+                    "error": str(state.type),
+                }
+
+
+def _harvest_artifacts(arts: list[Any]) -> Any:
+    """Collapse Prefect artifacts for a flow run into a single result payload.
+
+    ``plan/v1`` publishes one artifact per stage (key ``stage-<id>``) plus a
+    final aggregate (key ``result``). Prefer the aggregate when present; else
+    rebuild a plan-shaped payload from stage artifacts so a still-running or
+    crashed plan still yields partial progress. A single-op ``http_request``
+    run publishes one unkeyed/result artifact — return its body as before.
+    """
+    import json
+
+    if not arts:
+        return None
+
+    def _parse(data: Any) -> Any:
+        if isinstance(data, str):
+            try:
+                return json.loads(data)
+            except (ValueError, TypeError):
+                return data
+        return data
+
+    final: Any = None
+    stages: list[dict[str, Any]] = []
+    singles: list[Any] = []
+
+    for art in arts:
+        key = getattr(art, "key", None) or ""
+        body = _parse(getattr(art, "data", None))
+        if key == "result" or (
+            isinstance(body, dict) and body.get("op") == "plan/v1" and "stages" in body
+        ):
+            # Prefer an explicit final aggregate; a plan-shaped body also wins.
+            if key == "result" or final is None:
+                final = body
+            continue
+        if isinstance(key, str) and key.startswith("stage-"):
+            stage_id = key[len("stage-") :]
+            stages.append({"id": stage_id, "result": body})
+            continue
+        singles.append(body)
+
+    if isinstance(final, dict) and final.get("op") == "plan/v1":
+        return final
+    if stages:
+        return {
+            "op": "plan/v1",
+            "stages": stages,
+            "completed": len(stages),
+            "total": len(stages),  # unknown full total while still running
+        }
+    if final is not None:
+        return final
+    if singles:
+        return singles[0]
+    return _parse(arts[0].data) if arts else None

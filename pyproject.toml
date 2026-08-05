@@ -83,6 +83,14 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# `flows/` is the Prefect flow source. It is deliberately NOT in the wheel
+# (`packages = ["src/tollbooth"]`) because Managed clones it from git at run
+# time — but tests must still import it to prove `plan/v1` is a known op.
+# CI runs with `--import-mode=importlib`, which does not put the rootdir on
+# sys.path the way the default `prepend` mode does, so the tests passed locally
+# and failed in CI with ModuleNotFoundError. This puts the repo root on the path
+# under every import mode.
+pythonpath = ["."]
 
 [tool.coverage.run]
 source = ["tollbooth"]
