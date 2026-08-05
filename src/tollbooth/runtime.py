@@ -263,6 +263,9 @@ class OperatorRuntime:
         # Spec-driven (closure) path: kind -> {"build", "shape"} — see
         # register_job_spec and tollbooth/async_executor.py.
         self._job_specs: dict[str, dict[str, Callable[..., Any]]] = {}
+        # Multi-stage plan path (#181): kind -> {"build", "shape_stage"}.
+        # Plans NEVER fall back in-process; they require a detached executor.
+        self._job_plans: dict[str, dict[str, Callable[..., Any]]] = {}
         from tollbooth.async_executor import InProcessExecutor
         # Default executor preserves today's in-process behavior. Operators get
         # detached execution automatically when the long-runner operator secrets
@@ -3130,7 +3133,10 @@ class OperatorRuntime:
         "there is a job subsystem here" and invites invented denial reasons.
         """
         return bool(
-            self._job_runners or self._job_specs or self._async_executor_explicit
+            self._job_runners
+            or self._job_specs
+            or self._job_plans
+            or self._async_executor_explicit
         )
 
     def durable_key_id(self) -> str:
@@ -3239,12 +3245,89 @@ class OperatorRuntime:
         """
         self._job_specs[kind] = {"build": build_closure, "shape": shape_result}
 
+    def register_job_plan(
+        self,
+        kind: str,
+        build_plan: Callable[..., Any],
+        shape_stage: Callable[..., Any],
+    ) -> None:
+        """Register a multi-stage durable plan for a job kind (#181).
+
+        A plan is the wheel-owned long-running execution capability. The operator
+        declares the work; the wheel owns sealing, submit, harvest, persistence,
+        the single debit/refund, and fault classification.
+
+        ``build_plan(**params)`` runs in-process in the MCP with full vault access
+        and returns a ``plan/v1`` job spec::
+
+            {
+                "op": "plan/v1",
+                "stages": [
+                    {"id": "render", "request": {..http_request fields..}},
+                    ...
+                ],
+                "budget_seconds": 960,  # optional whole-run budget
+            }
+
+        ``shape_stage(stage_id, raw, params)`` turns one stage's raw HTTP result
+        into a domain result (or raises :class:`AsyncJobSituation`). Stages are
+        an internal reliability mechanism — never a billing boundary. The fare
+        for the firing is one debit / one refund regardless of how many stages
+        landed.
+
+        **Invariant — never silently fall back in-process.** A plan without a
+        detached executor refuses loudly with a curated Situation
+        (``plan_requires_detached_executor``) rather than quietly running on a
+        recycling serverless front. That silent-fallback shape hid the
+        ``closure_b64=None`` 409 for days (#178). Dispatch failures for plans
+        also refund rather than degrade to an in-process runner.
+        """
+        self._job_plans[kind] = {"build": build_plan, "shape_stage": shape_stage}
+
     def _uses_closure_path(self, kind: str) -> bool:
-        """Closure path iff a spec is registered AND a detached executor is set."""
+        """Closure path iff a spec/plan is registered AND a detached executor is set."""
         from tollbooth.async_executor import InProcessExecutor
-        return kind in self._job_specs and not isinstance(
-            self._async_executor, InProcessExecutor
-        )
+        return (
+            kind in self._job_specs or kind in self._job_plans
+        ) and not isinstance(self._async_executor, InProcessExecutor)
+
+    def _is_plan_kind(self, kind: str) -> bool:
+        return kind in self._job_plans
+
+    async def _shape_plan_result(
+        self,
+        kind: str,
+        raw: Any,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Shape every stage of a completed plan/v1 result via shape_stage.
+
+        All-or-none fare: if any stage raises :class:`AsyncJobSituation`, the
+        exception propagates so the caller refunds the *whole* firing once.
+        Partial domain results that already shaped successfully are not a
+        billing event — consolation publication is the operator's concern,
+        outside this settle step.
+        """
+        import inspect
+
+        plan = raw if isinstance(raw, dict) else {}
+        stages_in = plan.get("stages") or []
+        shape = self._job_plans[kind]["shape_stage"]
+        shaped_stages: dict[str, Any] = {}
+        for entry in stages_in:
+            if not isinstance(entry, dict):
+                continue
+            stage_id = str(entry.get("id") or "")
+            stage_raw = entry.get("result")
+            shaped = shape(stage_id, stage_raw, params)
+            shaped = await shaped if inspect.isawaitable(shaped) else shaped
+            shaped_stages[stage_id] = shaped
+        return {
+            "op": "plan/v1",
+            "stages": shaped_stages,
+            "completed": int(plan.get("completed") or len(shaped_stages)),
+            "total": int(plan.get("total") or len(shaped_stages)),
+        }
 
     async def _closure_key_hex(self) -> str:
         """Load the 32-byte (64-hex) closure seal key from the operator vault.
@@ -3300,8 +3383,14 @@ class OperatorRuntime:
         then tighten) instead of polling through the middle. Leave 0 for the
         steady-ceiling cadence.
         """
-        if kind not in self._job_runners and kind not in self._job_specs:
-            raise RuntimeError(f"No job runner or spec registered for kind {kind!r}")
+        if (
+            kind not in self._job_runners
+            and kind not in self._job_specs
+            and kind not in self._job_plans
+        ):
+            raise RuntimeError(
+                f"No job runner, spec, or plan registered for kind {kind!r}"
+            )
         # Opportunistically enable detached execution if the operator has
         # couriered the long-runner creds (one-time probe; no-op thereafter).
         await self._ensure_async_executor()
@@ -3317,20 +3406,57 @@ class OperatorRuntime:
             expected_seconds=expected_seconds,
         )
         from tollbooth.async_situation import AsyncJobSituation
+
+        # Plans must NEVER silently fall back in-process (#181). A 5+ minute
+        # render on a recycling serverless front is a guaranteed loss that also
+        # burns a firing attempt. Refuse loudly when no detached executor is
+        # installed — before seal/submit, before any runner path.
+        if self._is_plan_kind(kind) and not self._uses_closure_path(kind):
+            sit = AsyncJobSituation(
+                error_code="plan_requires_detached_executor",
+                message=(
+                    "This long-running plan needs a detached executor, which is "
+                    "not configured. No fare was charged."
+                ),
+                next_steps=(
+                    "The operator must courier long-runner credentials "
+                    "(prefect_api_url, prefect_api_key, closure_seal_key) and "
+                    "install the [prefect] extra. Then retry."
+                ),
+                transient=False,
+            )
+            logger.info(
+                "async job %s plan refused: no detached executor (kind=%s)",
+                claim,
+                kind,
+            )
+            await store.fail(claim, sit.to_row())
+            await self.rollback_debit(tool_id, npub, tool_kwargs=params)
+            return sit.to_response()
+
         try:
             if self._uses_closure_path(kind):
                 import inspect
 
-                built = self._job_specs[kind]["build"](**params)
+                if self._is_plan_kind(kind):
+                    built = self._job_plans[kind]["build"](**params)
+                else:
+                    built = self._job_specs[kind]["build"](**params)
                 spec = await built if inspect.isawaitable(built) else built
                 # A non-dict (including None) must not reach seal/submit — sealing
                 # ``None`` would produce a ciphertext of the JSON null, and a
                 # missing seal used to ship ``closure_b64=None`` straight to
                 # Prefect, which 409s on the parameter schema (#178).
                 if not isinstance(spec, dict):
+                    builder = "build_plan" if self._is_plan_kind(kind) else "build_closure"
                     raise RuntimeError(
-                        f"build_closure for kind {kind!r} must return a dict "
+                        f"{builder} for kind {kind!r} must return a dict "
                         f"job spec, got {type(spec).__name__}"
+                    )
+                if self._is_plan_kind(kind) and spec.get("op") != "plan/v1":
+                    raise RuntimeError(
+                        f"build_plan for kind {kind!r} must return op='plan/v1', "
+                        f"got op={spec.get('op')!r}"
                     )
                 closure_b64 = await self._seal_closure(spec)
                 handle = await self._async_executor.submit(claim, closure_b64)
@@ -3359,18 +3485,25 @@ class OperatorRuntime:
                         "and no in-process runner"
                     )
         except AsyncJobSituation as sit:
-            # build_closure classified a pre-flight failure (a not-found entry,
-            # an unfunded provider caught by a probe) into a curated, refundable
-            # situation. Terminal — same posture as a runner raising one: persist
-            # it structured, refund, and return it. Never a dispatch-failure retry.
+            # build_closure/build_plan classified a pre-flight failure (a
+            # not-found entry, an unfunded provider caught by a probe) into a
+            # curated, refundable situation. Terminal — same posture as a runner
+            # raising one: persist it structured, refund, and return it. Never a
+            # dispatch-failure retry.
             logger.info("async job %s build situation: %s", claim, sit.error_code)
             await store.fail(claim, sit.to_row())
             await self.rollback_debit(tool_id, npub, tool_kwargs=params)
             return sit.to_response()
         except Exception as exc:
             # Dispatch failed after the row was persisted (e.g. Prefect
-            # unreachable). Never strand a fee-charged job: fall back to an
-            # in-process runner if one exists, else refund and report.
+            # unreachable). Never strand a fee-charged job.
+            #
+            # Plans (#181): NEVER fall back in-process — refund and report.
+            # A silent in-process fallback is the exact shape that hid the
+            # closure_b64=None 409 for days.
+            #
+            # Specs/runners: fall back to an in-process runner if one exists,
+            # else refund and report (legacy path).
             logger.warning("async job %s dispatch failed: %s", claim, exc, exc_info=True)
             # Remember it. A dispatch failure used to leave no trace outside this
             # log line: the fallback returned an ordinary claim_check, callers
@@ -3379,6 +3512,16 @@ class OperatorRuntime:
             # recycles, so a publisher could simply vanish — leaving work claimed
             # with no outcome and no reason for anyone to read.
             self._async_dispatch_error = f"{type(exc).__name__}: {exc}"
+            if self._is_plan_kind(kind):
+                await store.fail(claim, "Job dispatch failed. Check operator logs.")
+                await self.rollback_debit(tool_id, npub, tool_kwargs=params)
+                return {
+                    "success": True,
+                    "status": "error",
+                    "error": "Job dispatch failed.",
+                    "refunded": True,
+                    "next_steps": "Start a new request to retry.",
+                }
             if kind in self._job_runners:
                 import asyncio
 
@@ -3569,20 +3712,42 @@ class OperatorRuntime:
                         job["elapsed_seconds"], job["max_runtime_seconds"], job["expected_seconds"]
                     ),
                 }
+            # Partial plan progress while the detached run is still open (#181).
+            # Stages are internal reliability only — never a billing event.
+            if outcome.get("status") == "working":
+                raw = outcome.get("result") or {}
+                return {
+                    "success": True,
+                    "status": "working",
+                    "completed": int(raw.get("completed") or 0),
+                    "total": int(raw.get("total") or 0),
+                    "poll_after_seconds": poll_backoff_seconds(
+                        job["elapsed_seconds"],
+                        job["max_runtime_seconds"],
+                        job["expected_seconds"],
+                    ),
+                }
             if outcome.get("status") == "completed":
                 import inspect
 
                 from tollbooth.async_situation import AsyncJobSituation
 
                 try:
-                    shaped = self._job_specs[kind]["shape"](
-                        outcome.get("result"), job["params"]
-                    )
-                    shaped = await shaped if inspect.isawaitable(shaped) else shaped
+                    if self._is_plan_kind(kind):
+                        shaped = await self._shape_plan_result(
+                            kind, outcome.get("result"), job["params"]
+                        )
+                    else:
+                        shaped = self._job_specs[kind]["shape"](
+                            outcome.get("result"), job["params"]
+                        )
+                        shaped = await shaped if inspect.isawaitable(shaped) else shaped
                 except AsyncJobSituation as sit:
-                    # shape_result classified the upstream outcome into a curated,
-                    # frontend-facing situation. Persist it structured + refund;
-                    # the raw upstream body stays operator-side (Prefect logs).
+                    # shape_result / shape_stage classified the upstream outcome
+                    # into a curated, frontend-facing situation. Persist it
+                    # structured + ONE refund for the whole firing (#181
+                    # all-or-none fare); the raw upstream body stays
+                    # operator-side (Prefect logs).
                     logger.info("async job %s situation: %s", claim, sit.error_code)
                     await store.fail(claim, sit.to_row())
                     await self.rollback_debit(
@@ -3602,7 +3767,8 @@ class OperatorRuntime:
                     return {"success": True, "status": "done", "result": shaped}
             # failed / crashed / unshapeable — refund with a GENERIC message. The
             # detached run's state detail (outcome["error"], e.g. the state type)
-            # is operator-side only; never surfaced to the patron.
+            # is operator-side only; never surfaced to the patron. One refund for
+            # the firing regardless of how many stages landed (#181).
             if outcome.get("status") == "failed" and outcome.get("error"):
                 logger.info("async job %s detached run failed: %s", claim, outcome["error"])
             await store.fail(claim, "Job execution failed.")

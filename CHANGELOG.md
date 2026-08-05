@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added — durable multi-stage job plans (`plan/v1`) with all-or-none fare (#181)
+
+Long-running multi-stage work is now a wheel-owned service capability. An operator
+declares the work; the wheel owns sealing, submit, harvest, persistence, the single
+debit/refund, and fault classification.
+
+- **`OperatorRuntime.register_job_plan(kind, build_plan, shape_stage)`** — the
+  operator surface. `build_plan(**params)` returns a `plan/v1` job spec (stages +
+  optional `budget_seconds`); `shape_stage(stage_id, raw, params)` turns each
+  stage's raw HTTP result into a domain result (or raises `AsyncJobSituation`).
+- **`plan/v1` op in `flows/dpyc_job_flow`** — runs stages sequentially, emits
+  **one Prefect artifact per stage** (keyed `stage-<id>`) plus a final aggregate,
+  so the wheel can harvest partial progress while the run is still open. Per-stage
+  `request.timeout` overrides the 210s default.
+- **`PrefectClosureExecutor.poll` harvests multi-stage artifacts** — returns
+  `status: "working"` with `k of n` while the run is open; prefers the final
+  aggregate on completion.
+- **All-or-none fare per firing.** Stages are internal reliability only — never a
+  billing boundary. One debit at start, one refund on operator fault (any stage
+  situation / dispatch failure / crash), regardless of how many stages landed.
+  A fallback publication is consolation, not fulfilment; the money decision is
+  independent of what ends up on the timeline.
+- **Invariant: a plan must never silently fall back in-process.** Without a
+  detached executor, `start_async_job` refuses loudly with curated Situation
+  `plan_requires_detached_executor` and refunds. Dispatch failures for plans also
+  refund — they never degrade to an in-process runner (the silent-fallback shape
+  that hid `#178` / `excalibur-mcp#341`).
+
+Rollout note: deploy the updated `dpyc-job-flow` (with `plan/v1`) *before* any
+operator emits the op — ops are versioned here and cloned at run time.
+
 ## 0.80.1 — 2026-08-05
 
 ### Fixed — detached submit never sends `closure_b64=None` (#178)
