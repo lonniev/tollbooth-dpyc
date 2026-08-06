@@ -3,6 +3,57 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Changed — detached execution runs the operator's own code on Modal (#181)
+
+`PrefectClosureExecutor` and the entire apparatus around it are **deleted**, not
+deprecated. Replaced by `ModalExecutor`, which spawns the operator's already-registered
+`register_job_runner` function onto Modal. The runner is unchanged; only where it runs
+differs.
+
+The apparatus existed for one reason — a generic Prefect flow cannot execute operator
+code — so a wire format and an interpreter had to be invented. Gone with it:
+
+- the sealed AES-256-GCM closure, `_seal_closure`, `_closure_key_hex`, `_CLOSURE_AAD`
+- `durable_key_id` and the hand-created per-operator `dpyc-closure-key-<key_id>`
+  Prefect Secret block it selected
+- `register_job_spec` / `register_job_plan`, the `_job_specs` / `_job_plans` registries,
+  and result **shaping** (`shape_result` / `shape_stage`) — a runner returns a domain
+  result directly, so there is nothing to interpret
+- the op vocabulary (`http_request`, `plan/v1`) and `flows/dpyc_job_flow.py`
+- Prefect *artifacts* as a result channel, and the `[prefect]` extra
+
+`register_job_runner` is now the only registration an operator needs.
+
+**Protocol.** `JobExecutor.submit(claim, closure_b64)` → `submit(claim)`. The argument is
+removed rather than accepted-and-ignored: a vestigial parameter invites the return of the
+thing it served.
+
+**Credentials.** `LONGRUNNER_CREDENTIAL_FIELDS` becomes `modal_token_id` /
+`modal_token_secret` / `modal_app_name`. The token is read from the **vault**, never
+ambient env — a host carrying its own Modal identity must not silently receive another
+operator's work, which is precisely how Prefect once targeted the wrong account and fell
+back in-process while reporting healthy.
+
+**No silent fallback, anywhere.** A dispatch failure refunds and says so; it never quietly
+runs the work on the front instead. Recovery of a stalled job re-submits through the
+*executor*, so a Modal-configured operator recovers detached rather than running the retry
+locally. Both are mutation-verified.
+
+`InProcessExecutor` remains the default and is unchanged — it is what runs inside the MCP
+session on FastMCP Cloud, correct for a long-lived host and fatal only on one that
+recycles. Prefect was the old path; in-process is not.
+
+Proven live before the cut (workspace `lonniev`): a 200.2s three-block job spawned in
+0.22s, ran detached (`ran_in_pid: 2`), and was claimed by id from a process that had never
+seen the spawning one; a cancelled run surfaced as a distinguishable terminal error.
+
+**Operator migration.** Deploy a Modal app exposing `run_job(claim)` that boots your own
+package and calls `runtime._run_job(claim)`, then courier the three Modal fields. Until
+you do, jobs run in-process exactly as before. Remove `[prefect]` from your pin; add
+`[modal]`.
+
 ## 0.81.0 — 2026-08-05
 
 ### Added — durable multi-stage job plans (`plan/v1`) with all-or-none fare (#181)

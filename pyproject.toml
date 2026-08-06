@@ -53,11 +53,12 @@ x402 = [
     "eth-account>=0.13.0",
 ]
 constraints = []  # No external deps — stdlib only (datetime, zoneinfo, re)
-# Durable, detached async-job execution via PrefectClosureExecutor
-# (tollbooth/async_executor.py). Only operators who opt into detached
-# execution install this — prefect is imported lazily, never at module load.
-prefect = [
-    "prefect>=3.0",
+# tollbooth.async_executor.ModalExecutor — detached execution that runs the
+# operator's OWN registered runner, so no sealed closure, op vocabulary or
+# generic interpreter flow is involved. `modal` is imported lazily, never at
+# module load, so operators who never opt in do not need it installed.
+modal = [
+    "modal>=1.5",
 ]
 dev = [
     "pytest>=9.0",

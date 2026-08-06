@@ -4,20 +4,27 @@
 an executor to actually run. Two executors ship:
 
 - :class:`InProcessExecutor` (default) runs the job as a concurrent ``asyncio``
-  task in the operator's own process — correct for genuinely long-lived hosts,
-  but a job started this way dies if the host is a serverless front that
-  freezes/recycles mid-run.
-- :class:`PrefectClosureExecutor` dispatches the job to detached
-  Prefect-managed compute. The runtime seals a self-describing *closure* (a job
-  spec — see :meth:`OperatorRuntime.register_job_spec`) and triggers a generic
-  Prefect flow that opens it, performs the work, and returns the result to
-  Prefect. The runtime retrieves that result on the patron's next
-  ``fetch_async_job`` poll. Only ciphertext crosses to Prefect; no Neon access,
-  no domain logic, and no executable code travel to the flow.
+  task in the operator's own process. Correct for a genuinely long-lived host —
+  it is what runs inside the MCP session on FastMCP Cloud — but a job started
+  this way dies if that front freezes or recycles mid-run.
+- :class:`ModalExecutor` spawns the SAME registered runner onto Modal, detached
+  compute that outlives the request. Nothing is translated on the way: Modal
+  runs the operator's own code, so there is no wire format, no interpreter and
+  nothing to seal.
 
-``prefect`` is an OPTIONAL dependency (the ``[prefect]`` extra). It is imported
-lazily inside :class:`PrefectClosureExecutor` so operators who never opt in do
-not need it installed even though this module is always importable.
+A sealed-closure executor (Prefect) preceded this and was deleted in 0.82.0.
+It existed because a generic remote flow could not execute operator code, which
+forced an entire apparatus into being: an AES-256-GCM closure, a non-secret
+``key_id`` selector, a hand-created per-operator Secret block, an op vocabulary
+(``http_request`` / ``plan/v1``), a generic interpreter flow cloned from git at
+run time, and results smuggled back through Prefect *artifacts* because its
+result storage is worker-local disk. Seven concepts to move one function call
+off-box. Running the operator's own code deletes all seven rather than
+replacing them.
+
+``modal`` is an OPTIONAL dependency (the ``[modal]`` extra), imported lazily
+inside :class:`ModalExecutor` so operators who never opt in do not need it
+installed even though this module is always importable.
 """
 
 from __future__ import annotations
@@ -34,11 +41,15 @@ class JobExecutor(Protocol):
 
     ``submit`` returns an opaque handle. The in-process executor returns ``""``
     (the Neon row stays the single source of truth and ``poll`` is a no-op). A
-    detached executor returns a handle (e.g. a Prefect flow-run id) that
-    ``poll`` resolves to a terminal outcome.
+    detached executor returns a handle (e.g. a Modal call id) that ``poll``
+    resolves to a terminal outcome.
+
+    ``submit`` took a ``closure_b64`` argument until 0.82.0. Nothing seals any
+    more, so the parameter is gone rather than accepted-and-ignored — a vestigial
+    argument is an invitation to reintroduce the thing it served.
     """
 
-    async def submit(self, claim: str, closure_b64: str | None) -> str:
+    async def submit(self, claim: str) -> str:
         """Dispatch the work for ``claim``. Return a handle ("" if none)."""
         ...
 
@@ -54,11 +65,11 @@ class InProcessExecutor:
     def __init__(self, runtime: OperatorRuntime) -> None:
         self._runtime = runtime
 
-    async def submit(self, claim: str, closure_b64: str | None) -> str:
+    async def submit(self, claim: str) -> str:
         import asyncio
 
-        # closure_b64 is unused in-process: the registered runner does the work
-        # directly against the operator's own vault and Neon.
+        # The registered runner does the work directly against the operator's
+        # own vault and Neon — the same runner ModalExecutor spawns remotely.
         asyncio.create_task(self._runtime._run_job(claim))
         return ""  # no detached handle — the Neon row is the source of truth
 
@@ -66,185 +77,79 @@ class InProcessExecutor:
         return None  # fetch_async_job reads the Neon row directly
 
 
-class PrefectClosureExecutor:
-    """Dispatch a sealed closure to a generic Prefect-managed flow.
+class ModalExecutor:
+    """Dispatch a job to Modal — the operator's OWN runner, on detached compute.
 
-    Constructed from credentials the operator holds in its OWN Neon vault (the
-    Prefect API URL/key for the standalone account). nsec never reaches Prefect.
+    The whole point, and why it is three lines of real work: Modal runs *your
+    code*, so there is nothing to translate. ``submit`` is
+    :class:`InProcessExecutor` with ``spawn`` where ``asyncio.create_task`` was,
+    and the registered ``register_job_runner`` function is unchanged.
+
+    That deletes an apparatus rather than replacing it. The sealed closure, the
+    ``key_id`` selector, the per-operator ``dpyc-closure-key-<key_id>`` Secret
+    block, the op vocabulary (``http_request`` / ``plan/v1``), the generic
+    interpreter flow and the artifact result channel all exist for one reason —
+    the Prefect flow cannot execute operator code, so a wire format and an
+    interpreter had to be invented. None of it is needed here.
+
+    **Trust boundary, stated plainly.** The operator's Modal app runs the
+    operator's own package with the operator's own secrets, so Modal holds what
+    the MCP host already holds. That is a second host of the same class, not a
+    new class of exposure — and it is why no seal is required: each operator
+    deploys its own app, so nothing crosses a tenant boundary.
+
+    ``modal`` is an OPTIONAL dependency (the ``[modal]`` extra), imported lazily
+    so this module stays importable for operators who never opt in.
     """
 
-    def __init__(
-        self, *, deployment: str, api_url: str, api_key: str, key_id: str
-    ) -> None:
-        # deployment e.g. "dpyc-job-flow/dpyc-jobs". api_url/api_key target the
-        # standalone Prefect Cloud account; held in memory only. key_id is the
-        # non-secret selector for this operator's closure key — it names the
-        # ``dpyc-closure-key-<key_id>`` Prefect Secret block and rides in the
-        # cleartext envelope so the shared flow loads the right key.
-        self._deployment = deployment
-        self._api_url = api_url
-        self._api_key = api_key
-        self._key_id = key_id
+    def __init__(self, *, app_name: str, function_name: str = "run_job") -> None:
+        self._app_name = app_name
+        self._function_name = function_name
+        self._fn: Any = None
 
-    def _settings_ctx(self) -> Any:
-        # Force THIS operator's standalone-account API URL/key for the duration
-        # of one call, overriding any ambient PREFECT_* the host sets for its
-        # OWN workspace. The MCP runs on a platform (e.g. Prefect Horizon) that
-        # populates PREFECT_API_URL/KEY for its own account, so a plain
-        # ``os.environ.setdefault`` is a no-op and the client would target the
-        # wrong account (401, or deployment-not-found) — which would silently
-        # drop us onto the in-process fallback. ``temporary_settings`` re-derives
-        # the settings instead, and is contextvar-scoped so concurrent operators
-        # don't clobber each other.
-        from prefect.settings import (
-            PREFECT_API_KEY,
-            PREFECT_API_URL,
-            temporary_settings,
-        )
+    def _function(self) -> Any:
+        # Resolved once per process. `from_name` is a lookup against the
+        # operator's deployed app; credentials come from the ambient Modal token
+        # the runtime installed before constructing this executor.
+        if self._fn is None:
+            import modal
 
-        return temporary_settings(
-            updates={
-                PREFECT_API_URL: self._api_url,
-                PREFECT_API_KEY: self._api_key,
-            }
-        )
+            self._fn = modal.Function.from_name(self._app_name, self._function_name)
+        return self._fn
 
-    async def submit(self, claim: str, closure_b64: str | None) -> str:
-        # Fail fast on a missing seal. Prefect's deployment schema requires
-        # ``closure_b64: string``; sending None costs a network hop and comes
-        # back as a remote 409 ("None is not of type 'string'"), which
-        # ``start_async_job`` then logs as a generic dispatch failure and
-        # silently falls back in-process — the exact shape that made detached
-        # resolve appear healthy while never dispatching (#178 / excalibur#341).
-        if not isinstance(closure_b64, str) or not closure_b64:
-            raise ValueError(
-                "PrefectClosureExecutor.submit requires a non-empty sealed "
-                f"closure_b64 string; got {closure_b64!r}. Register a job_spec "
-                "and seal before submit, or run this kind in-process."
-            )
+    async def submit(self, claim: str) -> str:
+        """Spawn the job and return Modal's call id as the durable handle.
 
-        from prefect.deployments import run_deployment
+        Fire-and-return: ``spawn`` does not wait, so the tool response is not
+        bound to the work. Measured at 0.22–0.34s against a 200s job.
+        """
+        import asyncio
 
-        # timeout=0 ⇒ fire-and-return: create + schedule the run, do NOT wait.
-        # Only the ciphertext closure + the non-secret key_id selector cross —
-        # no secrets, no params, no code. The settings ctx points run_deployment
-        # at the standalone account (NOT the host platform's own workspace).
-        with self._settings_ctx():
-            flow_run = await run_deployment(
-                name=self._deployment,
-                parameters={"closure_b64": closure_b64, "key_id": self._key_id},
-                timeout=0,
-            )
-        return str(flow_run.id)
+        # `spawn` is sync and does network I/O; keep it off the event loop so a
+        # slow control-plane call cannot stall the tool response it precedes.
+        call = await asyncio.to_thread(self._function().spawn, claim)
+        return str(call.object_id)
 
     async def poll(self, handle: str) -> dict[str, Any] | None:
-        import uuid as _uuid
+        """Resolve a call id. ``None`` while still running.
 
-        from prefect.client.orchestration import get_client
-        from prefect.client.schemas.filters import (
-            ArtifactFilter,
-            ArtifactFilterFlowRunId,
-        )
+        A cancelled or crashed run surfaces as a distinguishable terminal state
+        rather than silence — Modal raises on ``get`` for both, and the message
+        is the operator's, never a patron's.
+        """
+        import asyncio
 
-        run_id = _uuid.UUID(handle)
-        # Sync settings override wraps the async client (run_deployment/get_client
-        # both read the current settings); temporary_settings is a sync CM.
-        with self._settings_ctx():
-            async with get_client() as client:
-                run = await client.read_flow_run(run_id)
-                state = run.state
-                # Read ALL artifacts for this run (plan/v1 emits one per stage
-                # plus a final aggregate). limit was 1 before #181, which hid
-                # partial progress and multi-stage harvest.
-                arts = await client.read_artifacts(
-                    artifact_filter=ArtifactFilter(
-                        flow_run_id=ArtifactFilterFlowRunId(any_=[run_id])
-                    ),
-                    limit=100,
-                )
-                harvested = _harvest_artifacts(arts)
+        import modal
 
-                if state is None or not state.is_final():
-                    # Still running — surface partial plan progress when any
-                    # stage artifacts have landed so the wheel can report
-                    # "k of n" without waiting for the final aggregate (#181).
-                    if harvested is not None and harvested.get("op") == "plan/v1":
-                        return {
-                            "status": "working",
-                            "result": harvested,
-                            "error": None,
-                        }
-                    return None
-                if state.is_completed():
-                    return {
-                        "status": "completed",
-                        "result": harvested,
-                        "error": None,
-                    }
-                # failed / crashed / cancelled — report only the state type, never
-                # the upstream body (it could echo a sealed value). Attach any
-                # partial plan harvest so the operator can console/fallback from
-                # stages that did land (consolation ≠ fulfilment; fare is separate).
-                return {
-                    "status": "failed",
-                    "result": harvested,
-                    "error": str(state.type),
-                }
-
-
-def _harvest_artifacts(arts: list[Any]) -> Any:
-    """Collapse Prefect artifacts for a flow run into a single result payload.
-
-    ``plan/v1`` publishes one artifact per stage (key ``stage-<id>``) plus a
-    final aggregate (key ``result``). Prefer the aggregate when present; else
-    rebuild a plan-shaped payload from stage artifacts so a still-running or
-    crashed plan still yields partial progress. A single-op ``http_request``
-    run publishes one unkeyed/result artifact — return its body as before.
-    """
-    import json
-
-    if not arts:
-        return None
-
-    def _parse(data: Any) -> Any:
-        if isinstance(data, str):
+        def _resolve() -> dict[str, Any] | None:
+            call = modal.FunctionCall.from_id(handle)
             try:
-                return json.loads(data)
-            except (ValueError, TypeError):
-                return data
-        return data
+                # timeout=0 polls: return immediately if not yet finished.
+                return {"status": "completed", "result": call.get(timeout=0), "error": None}
+            except TimeoutError:
+                return None
+            except Exception as exc:  # noqa: BLE001 — cancelled / crashed / expired
+                return {"status": "failed", "result": None,
+                        "error": f"{type(exc).__name__}: {exc}"}
 
-    final: Any = None
-    stages: list[dict[str, Any]] = []
-    singles: list[Any] = []
-
-    for art in arts:
-        key = getattr(art, "key", None) or ""
-        body = _parse(getattr(art, "data", None))
-        if key == "result" or (
-            isinstance(body, dict) and body.get("op") == "plan/v1" and "stages" in body
-        ):
-            # Prefer an explicit final aggregate; a plan-shaped body also wins.
-            if key == "result" or final is None:
-                final = body
-            continue
-        if isinstance(key, str) and key.startswith("stage-"):
-            stage_id = key[len("stage-") :]
-            stages.append({"id": stage_id, "result": body})
-            continue
-        singles.append(body)
-
-    if isinstance(final, dict) and final.get("op") == "plan/v1":
-        return final
-    if stages:
-        return {
-            "op": "plan/v1",
-            "stages": stages,
-            "completed": len(stages),
-            "total": len(stages),  # unknown full total while still running
-        }
-    if final is not None:
-        return final
-    if singles:
-        return singles[0]
-    return _parse(arts[0].data) if arts else None
+        return await asyncio.to_thread(_resolve)

@@ -37,26 +37,33 @@ class CredentialTemplate:
 
 
 # Canonical field specs for the durable long-runner capability. The wheel owns
-# these definitions (the field NAMES are read by OperatorRuntime — closure_seal_key
-# by the sealer, prefect_api_url/key by the executor wiring — and closure_seal_key
-# is coupled to the dpyc-closure-key-<key_id> Prefect Secret block). Operators that
-# register a long-running job spec spread these into their OWN
-# operator_credential_template, e.g. ``fields={**mine, **LONGRUNNER_CREDENTIAL_FIELDS}``.
-# They are NORMAL operator secrets — same service, same onboarding/Studio surface,
-# same Secure Courier path. They are optional (required=False): without them the
-# job falls back to in-process execution.
+# these definitions — the field NAMES are read by ``OperatorRuntime`` when it
+# probes for a detached executor. Operators that register a long-running job
+# runner spread these into their OWN operator_credential_template, e.g.
+# ``fields={**mine, **LONGRUNNER_CREDENTIAL_FIELDS}``.
+#
+# They are NORMAL operator secrets — same service, same onboarding/Studio
+# surface, same Secure Courier path — and optional (required=False): without
+# them the job runs in-process, which is correct for a long-lived host and fatal
+# only on one that recycles.
+#
+# These were Prefect's (``prefect_api_url``/``prefect_api_key``/
+# ``closure_seal_key``) until 0.82.0. The seal key existed to encrypt a job spec
+# for a flow that could not run operator code, and had to be mirrored by hand
+# into a ``dpyc-closure-key-<key_id>`` Prefect Secret block. Modal runs the
+# operator's own app, so there is nothing to seal and nothing to mirror.
 LONGRUNNER_CREDENTIAL_FIELDS: dict[str, FieldSpec] = {
-    "prefect_api_url": FieldSpec(
+    "modal_token_id": FieldSpec(
         required=False, sensitive=False,
-        description="Durable long-runner: standalone Prefect Cloud workspace API URL",
+        description="Durable long-runner: Modal token id (ak-…) for the operator's workspace",
     ),
-    "prefect_api_key": FieldSpec(
+    "modal_token_secret": FieldSpec(
         required=False, sensitive=True,
-        description="Durable long-runner: Prefect Cloud API key for the standalone account",
+        description="Durable long-runner: Modal token secret (as-…)",
     ),
-    "closure_seal_key": FieldSpec(
-        required=False, sensitive=True,
-        description="Durable long-runner: 64-hex AES-256 key; mirror in the dpyc-closure-key-<key_id> Prefect Secret block",
+    "modal_app_name": FieldSpec(
+        required=False, sensitive=False,
+        description="Durable long-runner: the operator's deployed Modal app exposing run_job(claim)",
     ),
 }
 

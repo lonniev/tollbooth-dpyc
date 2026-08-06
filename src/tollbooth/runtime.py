@@ -260,12 +260,6 @@ class OperatorRuntime:
         self._last_debit_cost: int = 0
         # Claim-check async jobs (see tollbooth/async_jobs.py)
         self._job_runners: dict[str, Callable[..., Any]] = {}
-        # Spec-driven (closure) path: kind -> {"build", "shape"} — see
-        # register_job_spec and tollbooth/async_executor.py.
-        self._job_specs: dict[str, dict[str, Callable[..., Any]]] = {}
-        # Multi-stage plan path (#181): kind -> {"build", "shape_stage"}.
-        # Plans NEVER fall back in-process; they require a detached executor.
-        self._job_plans: dict[str, dict[str, Callable[..., Any]]] = {}
         from tollbooth.async_executor import InProcessExecutor
         # Default executor preserves today's in-process behavior. Operators get
         # detached execution automatically when the long-runner operator secrets
@@ -3058,12 +3052,6 @@ class OperatorRuntime:
 
     _ASYNC_JOB_MAX_ATTEMPTS = 3
     _ASYNC_JOBS_PURGE_INTERVAL_SECONDS = 300
-    # Binds a sealed closure to its context so a vault entry can never be
-    # replayed as a closure (and vice-versa). See _seal_closure.
-    _CLOSURE_AAD = "dpyc-closure/v1"
-    # The single shared detached flow that serves all operators. Per-operator
-    # key isolation is by closure key (dpyc-closure-key-<key_id>), not by deployment.
-    _DURABLE_DEPLOYMENT = "dpyc-job-flow/dpyc-jobs"
 
     def register_job_runner(self, kind: str, runner: Callable[..., Any]) -> None:
         """Map a job kind to the async callable that performs the work.
@@ -3125,31 +3113,14 @@ class OperatorRuntime:
     def uses_async_jobs(self) -> bool:
         """True when this server has opted into the claim-check async-job path.
 
-        A server opts in by registering at least one job runner or spec, or by
+        A server opts in by registering at least one job runner, or by
         installing a custom executor explicitly. Servers that never do so run no
         background work at all, so ``service_status`` omits the ``async_jobs`` /
         ``durable_jobs`` diagnostics entirely rather than advertising an inert
         background-job subsystem — a present-but-idle block reads to an agent as
         "there is a job subsystem here" and invites invented denial reasons.
         """
-        return bool(
-            self._job_runners
-            or self._job_specs
-            or self._job_plans
-            or self._async_executor_explicit
-        )
-
-    def durable_key_id(self) -> str:
-        """Stable, non-secret per-operator selector for the closure key.
-
-        Names the operator's Prefect Secret block ``dpyc-closure-key-<key_id>``
-        and rides in the *cleartext* envelope so the shared flow can pick the
-        right key before decrypting. Derived from the operator npub (public), so
-        two operators never collide and the value leaks nothing.
-        """
-        import hashlib
-
-        return hashlib.sha256(self.operator_npub().encode()).hexdigest()[:16]
+        return bool(self._job_runners or self._async_executor_explicit)
 
     async def _ensure_async_executor(self) -> None:
         """Auto-install a detached executor when long-runner creds are vaulted.
@@ -3157,7 +3128,7 @@ class OperatorRuntime:
         Cached once a DEFINITIVE answer is known. If the operator never set one
         explicitly and the long-runner operator secrets (LONGRUNNER_CREDENTIAL_FIELDS,
         in the operator's own credential template) are present, build a
-        ``PrefectClosureExecutor`` bound to this operator's key_id. Otherwise
+        ``ModalExecutor`` bound to the operator's own Modal app. Otherwise
         leave the in-process default — durable execution is purely opt-in by
         credential delivery, with no per-server bootstrap code.
 
@@ -3173,7 +3144,7 @@ class OperatorRuntime:
             # Long-runner creds are normal operator secrets in the operator's own
             # credential template (LONGRUNNER_CREDENTIAL_FIELDS) — default service.
             creds = await self.load_credentials(
-                ["prefect_api_url", "prefect_api_key"],
+                ["modal_token_id", "modal_token_secret", "modal_app_name"],
             )
         except Exception as exc:  # noqa: BLE001
             # Transient — leave unresolved so the next job retries the probe.
@@ -3181,175 +3152,50 @@ class OperatorRuntime:
             return
         # Definitive answer (creds present or absent) — cache the resolution.
         self._async_executor_resolved = True
-        api_url = (creds.get("prefect_api_url") or "").strip()
-        api_key = (creds.get("prefect_api_key") or "").strip()
-        if not (api_url and api_key):
+        token_id = (creds.get("modal_token_id") or "").strip()
+        token_secret = (creds.get("modal_token_secret") or "").strip()
+        app_name = (creds.get("modal_app_name") or "").strip()
+        if not (token_id and token_secret and app_name):
             self._async_executor_error = "long-runner creds vaulted but empty"
             return
-        # The ``prefect`` runtime is the ``[prefect]`` extra. If an operator
-        # vaults the long-runner creds but forgets the extra, constructing the
-        # executor raises ImportError — degrade to in-process with a loud,
-        # actionable warning instead of crashing this (and every first) drill.
-        try:
-            from tollbooth.async_executor import PrefectClosureExecutor
+        # Modal reads its credentials from the environment (modal/config.py).
+        # Set them from the VAULT, never from ambient env: the host may carry its
+        # own Modal identity, and silently dispatching to the wrong workspace is
+        # the same failure shape that made Prefect target the wrong account and
+        # fall back in-process while reporting healthy.
+        import os
 
-            self._async_executor = PrefectClosureExecutor(
-                deployment=self._DURABLE_DEPLOYMENT,
-                api_url=api_url,
-                api_key=api_key,
-                key_id=self.durable_key_id(),
-            )
+        os.environ["MODAL_TOKEN_ID"] = token_id
+        os.environ["MODAL_TOKEN_SECRET"] = token_secret
+        # ``modal`` is the ``[modal]`` extra. If an operator vaults the creds but
+        # forgets the extra, constructing the executor raises ImportError —
+        # degrade to in-process with a loud, actionable warning rather than
+        # crashing this (and every subsequent) job.
+        try:
+            # Import `modal` HERE, not just the executor class. ModalExecutor
+            # defers its own import to first use, so constructing it can never
+            # raise — the guard below would be dead code and a missing extra
+            # would surface much later as a refunded job with an unhelpful
+            # reason, instead of one actionable line at probe time.
+            import modal  # noqa: F401
+
+            from tollbooth.async_executor import ModalExecutor
+
+            self._async_executor = ModalExecutor(app_name=app_name)
         except ImportError as exc:
             self._async_executor_error = (
-                "long-runner creds vaulted but the 'prefect' runtime is missing "
-                "— pin tollbooth-dpyc[...,prefect]; running in-process"
+                "long-runner creds vaulted but the 'modal' runtime is missing "
+                "— pin tollbooth-dpyc[...,modal]; running in-process"
             )
             logger.warning(
-                "Detached execution requested but prefect is not installed "
-                "(%s). Add the [prefect] extra to enable durable jobs; "
+                "Detached execution requested but modal is not installed "
+                "(%s). Add the [modal] extra to enable durable jobs; "
                 "falling back to in-process.",
                 exc,
             )
             return
         self._async_executor_error = None
-        logger.info(
-            "Durable async executor enabled (deployment=%s, key_id=%s)",
-            self._DURABLE_DEPLOYMENT,
-            self.durable_key_id(),
-        )
-
-    def register_job_spec(
-        self,
-        kind: str,
-        build_closure: Callable[..., Any],
-        shape_result: Callable[..., Any],
-    ) -> None:
-        """Register the spec-driven (closure) path for a job kind.
-
-        ``build_closure(**params)`` runs in-process in the MCP with full vault
-        access — it loads any operator secrets locally and bakes them into a
-        self-describing job spec (e.g. a fully-formed HTTP request). The spec is
-        sealed (AES-256-GCM) before it leaves the process, so secrets reach the
-        detached executor only as ciphertext. ``shape_result(raw, params)`` turns
-        the flow's raw return into the dict stored on the Neon job row; ``params``
-        is the job's persisted params (the same kwargs ``build_closure`` received),
-        so a stateful job can perform its param-dependent side effects (open a
-        journal entry, record an evaluation) here — the detached flow only issues
-        the sealed request, and this runs back in the MCP on the settling fetch,
-        exactly once per job. Either may be sync or async.
-
-        A kind may register both a runner (in-process fallback) and a spec; the
-        spec is used only while a non-in-process executor is installed. The
-        in-process runner never calls ``shape_result`` (it returns its own dict),
-        so a stateful job's side effects fire once on whichever path runs it.
-        """
-        self._job_specs[kind] = {"build": build_closure, "shape": shape_result}
-
-    def register_job_plan(
-        self,
-        kind: str,
-        build_plan: Callable[..., Any],
-        shape_stage: Callable[..., Any],
-    ) -> None:
-        """Register a multi-stage durable plan for a job kind (#181).
-
-        A plan is the wheel-owned long-running execution capability. The operator
-        declares the work; the wheel owns sealing, submit, harvest, persistence,
-        the single debit/refund, and fault classification.
-
-        ``build_plan(**params)`` runs in-process in the MCP with full vault access
-        and returns a ``plan/v1`` job spec::
-
-            {
-                "op": "plan/v1",
-                "stages": [
-                    {"id": "render", "request": {..http_request fields..}},
-                    ...
-                ],
-                "budget_seconds": 960,  # optional whole-run budget
-            }
-
-        ``shape_stage(stage_id, raw, params)`` turns one stage's raw HTTP result
-        into a domain result (or raises :class:`AsyncJobSituation`). Stages are
-        an internal reliability mechanism — never a billing boundary. The fare
-        for the firing is one debit / one refund regardless of how many stages
-        landed.
-
-        **Invariant — never silently fall back in-process.** A plan without a
-        detached executor refuses loudly with a curated Situation
-        (``plan_requires_detached_executor``) rather than quietly running on a
-        recycling serverless front. That silent-fallback shape hid the
-        ``closure_b64=None`` 409 for days (#178). Dispatch failures for plans
-        also refund rather than degrade to an in-process runner.
-        """
-        self._job_plans[kind] = {"build": build_plan, "shape_stage": shape_stage}
-
-    def _uses_closure_path(self, kind: str) -> bool:
-        """Closure path iff a spec/plan is registered AND a detached executor is set."""
-        from tollbooth.async_executor import InProcessExecutor
-        return (
-            kind in self._job_specs or kind in self._job_plans
-        ) and not isinstance(self._async_executor, InProcessExecutor)
-
-    def _is_plan_kind(self, kind: str) -> bool:
-        return kind in self._job_plans
-
-    async def _shape_plan_result(
-        self,
-        kind: str,
-        raw: Any,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Shape every stage of a completed plan/v1 result via shape_stage.
-
-        All-or-none fare: if any stage raises :class:`AsyncJobSituation`, the
-        exception propagates so the caller refunds the *whole* firing once.
-        Partial domain results that already shaped successfully are not a
-        billing event — consolation publication is the operator's concern,
-        outside this settle step.
-        """
-        import inspect
-
-        plan = raw if isinstance(raw, dict) else {}
-        stages_in = plan.get("stages") or []
-        shape = self._job_plans[kind]["shape_stage"]
-        shaped_stages: dict[str, Any] = {}
-        for entry in stages_in:
-            if not isinstance(entry, dict):
-                continue
-            stage_id = str(entry.get("id") or "")
-            stage_raw = entry.get("result")
-            shaped = shape(stage_id, stage_raw, params)
-            shaped = await shaped if inspect.isawaitable(shaped) else shaped
-            shaped_stages[stage_id] = shaped
-        return {
-            "op": "plan/v1",
-            "stages": shaped_stages,
-            "completed": int(plan.get("completed") or len(shaped_stages)),
-            "total": int(plan.get("total") or len(shaped_stages)),
-        }
-
-    async def _closure_key_hex(self) -> str:
-        """Load the 32-byte (64-hex) closure seal key from the operator vault.
-
-        Never from env. This symmetric key is shared only with the generic
-        detached flow (held there as a Prefect Secret block); it never appears
-        in a run parameter.
-        """
-        creds = await self.load_credentials(["closure_seal_key"])
-        key_hex = (creds.get("closure_seal_key") or "").strip()
-        if len(key_hex) != 64:
-            raise RuntimeError("closure_seal_key missing or not 32-byte hex")
-        return key_hex
-
-    async def _seal_closure(self, spec: dict[str, Any]) -> str:
-        """AES-256-GCM seal a job spec for transit as a detached run parameter."""
-        import json
-
-        from tollbooth.vault_encryption import VaultCipher
-
-        cipher = VaultCipher(await self._closure_key_hex())
-        return cipher.encrypt(json.dumps(spec), aad=self._CLOSURE_AAD)
+        logger.info("Durable async executor enabled (modal app=%s)", app_name)
 
     async def async_job_store(self) -> Any:
         """Build an AsyncJobStore over the operator's vault."""
@@ -3383,14 +3229,8 @@ class OperatorRuntime:
         then tighten) instead of polling through the middle. Leave 0 for the
         steady-ceiling cadence.
         """
-        if (
-            kind not in self._job_runners
-            and kind not in self._job_specs
-            and kind not in self._job_plans
-        ):
-            raise RuntimeError(
-                f"No job runner, spec, or plan registered for kind {kind!r}"
-            )
+        if kind not in self._job_runners:
+            raise RuntimeError(f"No job runner registered for kind {kind!r}")
         # Opportunistically enable detached execution if the operator has
         # couriered the long-runner creds (one-time probe; no-op thereafter).
         await self._ensure_async_executor()
@@ -3407,135 +3247,46 @@ class OperatorRuntime:
         )
         from tollbooth.async_situation import AsyncJobSituation
 
-        # Plans must NEVER silently fall back in-process (#181). A 5+ minute
-        # render on a recycling serverless front is a guaranteed loss that also
-        # burns a firing attempt. Refuse loudly when no detached executor is
-        # installed — before seal/submit, before any runner path.
-        if self._is_plan_kind(kind) and not self._uses_closure_path(kind):
-            sit = AsyncJobSituation(
-                error_code="plan_requires_detached_executor",
-                message=(
-                    "This long-running plan needs a detached executor, which is "
-                    "not configured. No fare was charged."
-                ),
-                next_steps=(
-                    "The operator must courier long-runner credentials "
-                    "(prefect_api_url, prefect_api_key, closure_seal_key) and "
-                    "install the [prefect] extra. Then retry."
-                ),
-                transient=False,
-            )
-            logger.info(
-                "async job %s plan refused: no detached executor (kind=%s)",
-                claim,
-                kind,
-            )
-            await store.fail(claim, sit.to_row())
-            await self.rollback_debit(tool_id, npub, tool_kwargs=params)
-            return sit.to_response()
-
         try:
-            if self._uses_closure_path(kind):
-                import inspect
-
-                if self._is_plan_kind(kind):
-                    built = self._job_plans[kind]["build"](**params)
-                else:
-                    built = self._job_specs[kind]["build"](**params)
-                spec = await built if inspect.isawaitable(built) else built
-                # A non-dict (including None) must not reach seal/submit — sealing
-                # ``None`` would produce a ciphertext of the JSON null, and a
-                # missing seal used to ship ``closure_b64=None`` straight to
-                # Prefect, which 409s on the parameter schema (#178).
-                if not isinstance(spec, dict):
-                    builder = "build_plan" if self._is_plan_kind(kind) else "build_closure"
-                    raise RuntimeError(
-                        f"{builder} for kind {kind!r} must return a dict "
-                        f"job spec, got {type(spec).__name__}"
-                    )
-                if self._is_plan_kind(kind) and spec.get("op") != "plan/v1":
-                    raise RuntimeError(
-                        f"build_plan for kind {kind!r} must return op='plan/v1', "
-                        f"got op={spec.get('op')!r}"
-                    )
-                closure_b64 = await self._seal_closure(spec)
-                handle = await self._async_executor.submit(claim, closure_b64)
-                if handle:
-                    await store.set_run_handle(claim, handle)
-            else:
-                # Not the sealed-closure path. If the installed executor is
-                # in-process, hand it the claim as before. If a *detached*
-                # executor is installed but this kind has no job_spec, do NOT
-                # call submit(claim, None) — Prefect rejects null closure_b64
-                # with 409 and the dispatch-failure handler silently fell back
-                # in-process after a wasted hop (#178). Run the registered
-                # runner locally instead; that is the legitimate path for a
-                # runner-only kind even when long-runner creds are present.
-                from tollbooth.async_executor import InProcessExecutor
-
-                if isinstance(self._async_executor, InProcessExecutor):
-                    await self._async_executor.submit(claim, None)
-                elif kind in self._job_runners:
-                    import asyncio
-
-                    asyncio.create_task(self._run_job(claim))
-                else:
-                    raise RuntimeError(
-                        f"Kind {kind!r} has no job_spec for detached dispatch "
-                        "and no in-process runner"
-                    )
+            # One line, one path. The executor decides WHERE the registered
+            # runner runs — in this process, or on Modal — and the runner itself
+            # is identical either way. Everything that used to stand here (build
+            # the spec, validate its op, seal it, choose a branch per kind) existed
+            # only because a generic remote flow could not execute operator code.
+            handle = await self._async_executor.submit(claim)
+            if handle:
+                await store.set_run_handle(claim, handle)
         except AsyncJobSituation as sit:
-            # build_closure/build_plan classified a pre-flight failure (a
-            # not-found entry, an unfunded provider caught by a probe) into a
-            # curated, refundable situation. Terminal — same posture as a runner
-            # raising one: persist it structured, refund, and return it. Never a
+            # A pre-flight failure classified into a curated, refundable
+            # situation. Terminal — same posture as a runner raising one:
+            # persist it structured, refund, and return it. Never a
             # dispatch-failure retry.
-            logger.info("async job %s build situation: %s", claim, sit.error_code)
+            logger.info("async job %s dispatch situation: %s", claim, sit.error_code)
             await store.fail(claim, sit.to_row())
             await self.rollback_debit(tool_id, npub, tool_kwargs=params)
             return sit.to_response()
         except Exception as exc:
-            # Dispatch failed after the row was persisted (e.g. Prefect
-            # unreachable). Never strand a fee-charged job.
+            # Dispatch failed after the row was persisted. Never strand a
+            # fee-charged job — and NEVER quietly run it here instead.
             #
-            # Plans (#181): NEVER fall back in-process — refund and report.
-            # A silent in-process fallback is the exact shape that hid the
-            # closure_b64=None 409 for days.
-            #
-            # Specs/runners: fall back to an in-process runner if one exists,
-            # else refund and report (legacy path).
+            # The old handler fell back to an in-process task and returned an
+            # ordinary claim check. That is the exact shape that hid the
+            # `closure_b64=None` 409 for days: callers recorded a launch,
+            # service_status went on reporting the executor active, and the work
+            # ran on a front that recycles — so a job could simply vanish, with
+            # no outcome and no reason for anyone to read. A refusal that says
+            # so is worth more than a success that is not one.
             logger.warning("async job %s dispatch failed: %s", claim, exc, exc_info=True)
-            # Remember it. A dispatch failure used to leave no trace outside this
-            # log line: the fallback returned an ordinary claim_check, callers
-            # recorded "launched", and service_status went on reporting the
-            # executor active. The job then ran in-process on a front that
-            # recycles, so a publisher could simply vanish — leaving work claimed
-            # with no outcome and no reason for anyone to read.
             self._async_dispatch_error = f"{type(exc).__name__}: {exc}"
-            if self._is_plan_kind(kind):
-                await store.fail(claim, "Job dispatch failed. Check operator logs.")
-                await self.rollback_debit(tool_id, npub, tool_kwargs=params)
-                return {
-                    "success": True,
-                    "status": "error",
-                    "error": "Job dispatch failed.",
-                    "refunded": True,
-                    "next_steps": "Start a new request to retry.",
-                }
-            if kind in self._job_runners:
-                import asyncio
-
-                asyncio.create_task(self._run_job(claim))
-            else:
-                await store.fail(claim, "Job dispatch failed. Check operator logs.")
-                await self.rollback_debit(tool_id, npub, tool_kwargs=params)
-                return {
-                    "success": True,
-                    "status": "error",
-                    "error": "Job dispatch failed.",
-                    "refunded": True,
-                    "next_steps": "Start a new request to retry.",
-                }
+            await store.fail(claim, "Job dispatch failed. Check operator logs.")
+            await self.rollback_debit(tool_id, npub, tool_kwargs=params)
+            return {
+                "success": True,
+                "status": "error",
+                "error": "Job dispatch failed.",
+                "refunded": True,
+                "next_steps": "Start a new request to retry.",
+            }
         from tollbooth.async_jobs import poll_backoff_seconds
 
         result: dict[str, Any] = {
@@ -3544,12 +3295,6 @@ class OperatorRuntime:
             "status": "pending",
             "poll_after_seconds": poll_backoff_seconds(0, max_runtime_seconds, expected_seconds),
         }
-        if self._async_dispatch_error:
-            # Say it in the RESULT, not only the log. A caller that records
-            # "launched" and moves on has no other way to learn that this job is
-            # running somewhere that may not outlive the next container recycle.
-            result["degraded"] = "in_process_fallback"
-            result["degraded_reason"] = self._async_dispatch_error
         return result
 
     async def _run_job(self, claim: str) -> None:
@@ -3699,97 +3444,47 @@ class OperatorRuntime:
             from tollbooth.async_situation import situation_response_from_row
 
             return situation_response_from_row(job["error"])
-        # Still open. Closure path: poll the detached executor and settle here.
-        kind = job["kind"]
+        # Still open. The remote runner writes its OWN outcome to the job row —
+        # it is the operator's code with the operator's Neon — so the row above is
+        # the source of truth for success and for a classified failure. Polling the
+        # detached handle catches only what could never reach the row: a run that
+        # was cancelled or crashed outright.
+        #
+        # This used to also SHAPE a raw remote result (the flow returned an opaque
+        # HTTP response that shape_result had to interpret). Nothing to shape now:
+        # the runner produced a domain result directly.
         handle = job["run_handle"]
-        if self._uses_closure_path(kind) and handle:
+        if handle:
             outcome = await self._async_executor.poll(handle)
-            if outcome is None:
+            if outcome is not None and outcome.get("status") == "failed":
+                # Never surface the remote error text to the patron — it can carry
+                # anything. Operator sees it in the log.
+                logger.info(
+                    "async job %s detached run failed: %s", claim, outcome.get("error")
+                )
+                await store.fail(claim, "Job execution failed.")
+                await self.rollback_debit(
+                    job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                )
                 return {
                     "success": True,
-                    "status": "running",
-                    "poll_after_seconds": poll_backoff_seconds(
-                        job["elapsed_seconds"], job["max_runtime_seconds"], job["expected_seconds"]
-                    ),
+                    "status": "error",
+                    "error": "Job execution failed.",
+                    "refunded": True,
+                    "transient": True,
+                    "next_steps": "The fee was refunded. Start a new request to retry.",
                 }
-            # Partial plan progress while the detached run is still open (#181).
-            # Stages are internal reliability only — never a billing event.
-            if outcome.get("status") == "working":
-                raw = outcome.get("result") or {}
-                return {
-                    "success": True,
-                    "status": "working",
-                    "completed": int(raw.get("completed") or 0),
-                    "total": int(raw.get("total") or 0),
-                    "poll_after_seconds": poll_backoff_seconds(
-                        job["elapsed_seconds"],
-                        job["max_runtime_seconds"],
-                        job["expected_seconds"],
-                    ),
-                }
-            if outcome.get("status") == "completed":
-                import inspect
-
-                from tollbooth.async_situation import AsyncJobSituation
-
-                try:
-                    if self._is_plan_kind(kind):
-                        shaped = await self._shape_plan_result(
-                            kind, outcome.get("result"), job["params"]
-                        )
-                    else:
-                        shaped = self._job_specs[kind]["shape"](
-                            outcome.get("result"), job["params"]
-                        )
-                        shaped = await shaped if inspect.isawaitable(shaped) else shaped
-                except AsyncJobSituation as sit:
-                    # shape_result / shape_stage classified the upstream outcome
-                    # into a curated, frontend-facing situation. Persist it
-                    # structured + ONE refund for the whole firing (#181
-                    # all-or-none fare); the raw upstream body stays
-                    # operator-side (Prefect logs).
-                    logger.info("async job %s situation: %s", claim, sit.error_code)
-                    await store.fail(claim, sit.to_row())
-                    await self.rollback_debit(
-                        job["tool_id"], job["npub"], tool_kwargs=job["params"],
-                    )
-                    return sit.to_response()
-                except Exception as exc:
-                    # The detached run finished, but shaping its raw result failed
-                    # in an unclassified way. Refund with a GENERIC message — never
-                    # the exception text (it can carry anything). Operator sees the
-                    # detail in logs.
-                    logger.warning(
-                        "async job %s result shaping failed: %s", claim, exc, exc_info=True
-                    )
-                else:
-                    await store.complete(claim, shaped)
-                    return {"success": True, "status": "done", "result": shaped}
-            # failed / crashed / unshapeable — refund with a GENERIC message. The
-            # detached run's state detail (outcome["error"], e.g. the state type)
-            # is operator-side only; never surfaced to the patron. One refund for
-            # the firing regardless of how many stages landed (#181).
-            if outcome.get("status") == "failed" and outcome.get("error"):
-                logger.info("async job %s detached run failed: %s", claim, outcome["error"])
-            await store.fail(claim, "Job execution failed.")
-            await self.rollback_debit(
-                job["tool_id"], job["npub"], tool_kwargs=job["params"],
-            )
-            return {
-                "success": True,
-                "status": "error",
-                "error": "Job execution failed.",
-                "refunded": True,
-                "transient": True,
-                "next_steps": "The fee was refunded. Start a new request to retry.",
-            }
-        # In-process path: re-kick an orphaned pending/stalled job (atomic) —
-        # the only recovery for a host with no detached executor.
+            # Completed or still running: either way the row settles it, and a
+            # completed run whose row write has not landed yet simply reports
+            # running once more.
+        # Re-kick an orphaned pending/stalled job through the EXECUTOR, so a
+        # Modal-configured operator recovers detached rather than silently
+        # running the retry in this process.
         recovered = False
         if job["status"] == "pending" or job["stalled"]:
-            import asyncio
-
-            asyncio.create_task(self._run_job(claim))
+            new_handle = await self._async_executor.submit(claim)
+            if new_handle:
+                await store.set_run_handle(claim, new_handle)
             recovered = job["stalled"]
         response: dict[str, Any] = {
             "success": True,
@@ -4658,9 +4353,7 @@ def register_standard_tools(
             from tollbooth.async_executor import InProcessExecutor
 
             status["durable_jobs"] = {
-                "key_id": rt.durable_key_id(),
-                "closure_key_block": f"dpyc-closure-key-{rt.durable_key_id()}",
-                "deployment": rt._DURABLE_DEPLOYMENT,
+                "modal_app": getattr(rt._async_executor, "_app_name", None),
                 "detached_executor_active": not isinstance(
                     rt._async_executor, InProcessExecutor
                 ),
