@@ -5,7 +5,7 @@ an executor to actually run. Two executors ship:
 
 - :class:`InProcessExecutor` (default) runs the job as a concurrent ``asyncio``
   task in the operator's own process. Correct for a genuinely long-lived host —
-  it is what runs inside the MCP session on FastMCP Cloud — but a job started
+  it is what runs inside the MCP session on Horizon — but a job started
   this way dies if that front freezes or recycles mid-run.
 - :class:`ModalExecutor` spawns the SAME registered runner onto Modal, detached
   compute that outlives the request. Nothing is translated on the way: Modal

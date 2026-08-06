@@ -42,7 +42,7 @@ runs the work on the front instead. Recovery of a stalled job re-submits through
 locally. Both are mutation-verified.
 
 `InProcessExecutor` remains the default and is unchanged — it is what runs inside the MCP
-session on FastMCP Cloud, correct for a long-lived host and fatal only on one that
+session on Horizon, correct for a long-lived host and fatal only on one that
 recycles. Prefect was the old path; in-process is not.
 
 Proven live before the cut (workspace `lonniev`): a 200.2s three-block job spawned in
