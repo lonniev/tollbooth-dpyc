@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.82.0 — 2026-08-06
 
 ### Changed — detached execution runs the operator's own code on Modal (#181)
 
