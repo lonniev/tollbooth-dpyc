@@ -17,14 +17,16 @@ def test_longrunner_fields_are_optional_operator_secrets():
     """The durable long-runner fields are normal optional operator secrets that
     an operator spreads into its OWN credential template (no separate service)."""
     assert set(LONGRUNNER_CREDENTIAL_FIELDS) == {
-        "prefect_api_url", "prefect_api_key", "closure_seal_key"
+        "modal_token_id", "modal_token_secret", "modal_app_name"
     }
     # all optional — without them the job falls back to in-process execution
     assert all(not f.required for f in LONGRUNNER_CREDENTIAL_FIELDS.values())
     # the two keys are sensitive; the URL is not
-    assert LONGRUNNER_CREDENTIAL_FIELDS["prefect_api_key"].sensitive
-    assert LONGRUNNER_CREDENTIAL_FIELDS["closure_seal_key"].sensitive
-    assert not LONGRUNNER_CREDENTIAL_FIELDS["prefect_api_url"].sensitive
+    # Only the secret half is sensitive: a token id and an app name are public
+    # selectors, and marking them secret would hide them from onboarding/Studio.
+    assert LONGRUNNER_CREDENTIAL_FIELDS["modal_token_secret"].sensitive
+    assert not LONGRUNNER_CREDENTIAL_FIELDS["modal_token_id"].sensitive
+    assert not LONGRUNNER_CREDENTIAL_FIELDS["modal_app_name"].sensitive
 
 
 def test_longrunner_fields_merge_into_an_operator_template():
@@ -37,14 +39,14 @@ def test_longrunner_fields_merge_into_an_operator_template():
     )
     # partial delivery of just the long-runner fields validates (merge-on-receive)
     cleaned = validate_payload(
-        {"closure_seal_key": "ab" * 32, "prefect_api_url": "u", "prefect_api_key": "k"},
+        {"modal_token_id": "ak-x", "modal_token_secret": "as-x", "modal_app_name": "app"},
         tmpl,
         partial=True,
     )
-    assert set(cleaned) == {"closure_seal_key", "prefect_api_url", "prefect_api_key"}
+    assert set(cleaned) == {"modal_token_id", "modal_token_secret", "modal_app_name"}
     # they render in the welcome DM alongside the operator's own secrets
     text = render_delimited_instructions(tmpl)
-    assert "closure_seal_key = @@@" in text and "anthropic_api_key = @@@" in text
+    assert "modal_token_secret = @@@" in text and "anthropic_api_key = @@@" in text
 
 
 def _x_api_template() -> CredentialTemplate:
