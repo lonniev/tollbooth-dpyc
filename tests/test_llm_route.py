@@ -144,6 +144,25 @@ def test_timeout_is_clamped(given, expected):
     assert clamp_timeout(given) == expected
 
 
+@pytest.mark.parametrize(("given", "maximum", "expected"), [
+    # The caller's ceiling governs ABOVE the built-in fallback. This is the case the
+    # module used to make impossible: an operator configured a 1800s block budget and
+    # got 900s anyway, with nothing anywhere saying it had been cut in half.
+    (1800, 1800, 1800.0),
+    (5000, 1800, 1800.0),
+    # ...and BELOW it, so a caller can also be stricter than the fallback.
+    (600, 300, 300.0),
+    # The floor still wins over an absurdly small ceiling: a sub-30s LLM request is a
+    # misconfiguration, not an instruction.
+    (600, 5, 30.0),
+    # A missing or meaningless ceiling falls back rather than disabling the guard.
+    (5000, None, 900.0),
+    (5000, 0, 900.0),
+])
+def test_caller_supplied_maximum_governs(given, maximum, expected):
+    assert clamp_timeout(given, maximum=maximum) == expected
+
+
 # --------------------------------------------------------------------------
 # Provider-failure classification
 # --------------------------------------------------------------------------
