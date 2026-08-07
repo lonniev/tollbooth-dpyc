@@ -68,9 +68,15 @@ ANTHROPIC_VERSION = "2023-06-01"
 WEB_SEARCH_TYPE = "web_search_20260209"
 WEB_FETCH_TYPE = "web_fetch_20260209"
 
-# Request-timeout bounds, lifted verbatim from the two operators that had grown the same
-# numbers independently. The caller's async-job budget is the real bound; this only keeps
-# a stalled provider from riding a client library's multi-minute default.
+# Request-timeout FALLBACKS, not policy. A ceiling on how long one generation may take is
+# a judgement only the caller can make — a one-line rewrite and a catalogue sweep with a
+# dozen web fetches are not the same request — so callers pass their own via ``maximum``
+# and these apply only when nobody did. What they defend against is narrow: a stalled
+# provider riding a client library's multi-minute default.
+#
+# Read as policy, ``_TIMEOUT_MAX`` silently capped an operator whose own configured budget
+# was higher, and the shortfall surfaced as an unexplained truncation rather than as a
+# refusal. Anything that wants a real ceiling should own it.
 _TIMEOUT_MIN = 30
 _TIMEOUT_MAX = 900
 _TIMEOUT_DEFAULT = 210.0
@@ -170,11 +176,18 @@ def web_fetch_tool(max_uses: int, allowed_domains: list[str] | None = None) -> d
     return tool
 
 
-def clamp_timeout(seconds: float | None) -> float:
-    """Bound an LLM request timeout to a sane range."""
+def clamp_timeout(seconds: float | None, *, maximum: float | None = None) -> float:
+    """Bound an LLM request timeout to a sane range.
+
+    ``maximum`` is the CALLER's ceiling, and it wins. An operator that has configured a
+    thirty-minute budget for one block means it; clamping that to this module's fallback
+    would enforce a policy no operator chose. Omit it and :data:`_TIMEOUT_MAX` applies as a
+    stalled-provider guard.
+    """
     if not seconds or seconds <= 0:
         return _TIMEOUT_DEFAULT
-    return float(max(_TIMEOUT_MIN, min(int(seconds), _TIMEOUT_MAX)))
+    ceiling = maximum if maximum and maximum > 0 else _TIMEOUT_MAX
+    return float(max(_TIMEOUT_MIN, min(int(seconds), int(ceiling))))
 
 
 def build_messages_request(
@@ -185,14 +198,17 @@ def build_messages_request(
     max_tokens: int,
     tools: list[dict[str, Any]] | None = None,
     timeout_seconds: float | None = None,
+    timeout_max_seconds: float | None = None,
 ) -> dict[str, Any]:
     """A declarative, JSON-serializable request envelope for one generation.
 
-    Returns ``{method, url, headers, json, timeout}`` — the shape the durable
-    long-runner's generic ``http_request`` op executes, so the same envelope serves the
-    in-process path and a detached job without being built twice. The key appears only
-    inside ``headers``, where the caller can seal it into a closure before the spec
-    leaves the process.
+    Returns ``{method, url, headers, json, timeout}``. Building the envelope separately
+    from sending it keeps one description of a generation usable by whoever runs it —
+    in this process or on detached compute.
+
+    ``timeout_max_seconds`` is the caller's ceiling, forwarded to :func:`clamp_timeout`.
+    Without it an operator's configured budget would be silently cut back to this
+    module's stalled-provider fallback.
     """
     body: dict[str, Any] = {
         "model": route.model,
@@ -207,7 +223,7 @@ def build_messages_request(
         "url": route.endpoint,
         "headers": route.headers(),
         "json": body,
-        "timeout": clamp_timeout(timeout_seconds),
+        "timeout": clamp_timeout(timeout_seconds, maximum=timeout_max_seconds),
     }
 
 

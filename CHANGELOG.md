@@ -3,6 +3,23 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.83.0 — 2026-08-07
+
+### Changed — a request-timeout ceiling is the caller's policy, not this module's
+
+`clamp_timeout` and `build_messages_request` accept the caller's own maximum
+(`maximum=` / `timeout_max_seconds=`). `_TIMEOUT_MAX` remains as the fallback when
+nobody supplies one.
+
+It was being read as policy. An operator whose configured block budget exceeded 900s
+got 900s regardless, and the shortfall surfaced as an unexplained truncation rather than
+as a refusal — the ceiling was enforced by a module that could not see the job budget it
+was overriding. How long one generation may legitimately take is a judgement only the
+caller can make: a one-line rewrite and a catalogue sweep with a dozen web fetches are
+not the same request.
+
+Purely additive; existing callers are unaffected.
+
 ## 0.82.0 — 2026-08-06
 
 ### Changed — detached execution runs the operator's own code on Modal (#181)
