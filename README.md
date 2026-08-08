@@ -247,6 +247,12 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 | `update_patron_credential` | `patron_credential_template` set | Add or update a single patron credential field |
 | `delete_patron_credential` | `patron_credential_template` set | Remove a single patron credential field |
 | `get_patron_credential_fields` | `patron_credential_template` set | List stored patron credential field names and delivery timestamps |
+| `update_operator_credential` | `operator_credential_template` set | Operator-only: add or update one operator secret, preserving the rest of the bundle |
+
+Operator fields are `set_once`, so before `update_operator_credential` the only way to
+apply a reissued secret was to re-deliver the entire bundle over Secure Courier — where
+any field left out of the reply is a field destroyed. Prefer the field-level tool when
+rotating one credential; reserve the full courier flow for first delivery.
 
 ---
 

@@ -1813,20 +1813,58 @@ class OperatorRuntime:
         svc = self._patron_storage_service(service)
         if not svc:
             return False
-        existing, situation = await self.load_patron_session(patron_npub, service=svc)
+        return await self.update_credential_field(
+            patron_npub, field, value, service=svc,
+        )
+
+    async def update_credential_field(
+        self,
+        npub: str,
+        field: str,
+        value: str,
+        *,
+        service: str,
+    ) -> bool:
+        """Merge one field into the vault blob for ``(service, npub)``.
+
+        The vault is keyed by ``(service, npub)`` whether the blob holds a
+        patron's session or an operator's secrets, so this single
+        read-merge-write serves both.  Callers resolve *service*; this never
+        guesses one.
+
+        Records a fresh ``delivered_at`` for *field* (re-delivery of the same
+        value still rewinds the age).
+        """
+        existing, situation = await self.load_patron_session(npub, service=service)
         if situation:
             # Read-merge-WRITE: merging into an unread blob and storing it would
-            # overwrite every field we failed to read — silently destroying the
-            # patron's access_token and refresh_token. Refuse the write instead.
+            # overwrite every field we failed to read — silently destroying a
+            # patron's refresh_token or an operator's neon_api_key. Refuse the
+            # write instead.
             logger.warning(
                 "Refusing credential merge for %s (service=%s): vault unreadable (%s)",
-                patron_npub[:20], svc, situation,
+                npub[:20], service, situation,
             )
             return False
         merged = dict(existing or {})
         merged[field] = value
         return await self.store_patron_session(
-            patron_npub, merged, service=svc, just_delivered=[field],
+            npub, merged, service=service, just_delivered=[field],
+        )
+
+    async def update_operator_credential(self, field: str, value: str) -> bool:
+        """Add or update a single operator secret, preserving all others.
+
+        The operator's counterpart to ``update_patron_credential``.  Rotating
+        one secret — a reissued ``btcpay_api_key``, say — no longer means
+        re-delivering the whole bundle over Secure Courier, where every field
+        omitted from the reply is a field destroyed.
+        """
+        svc = self.operator_credential_service
+        if not svc:
+            return False
+        return await self.update_credential_field(
+            self.operator_npub(), field, value, service=svc,
         )
 
     async def delete_patron_credential(
@@ -4770,6 +4808,61 @@ def register_standard_tools(
             return {"success": False, "error": "No credential service configured."}
         except Exception as e:  # noqa: BLE001
             return {"success": False, "error": str(e)}
+
+    @tool
+    async def update_operator_credential(
+        field: str, value: str, dpop_token: str,
+    ) -> dict[str, Any]:
+        """Add or update a single operator secret field.
+
+        Merges into the operator's stored credentials without touching the
+        others — the field-level counterpart to re-delivering the whole
+        bundle over Secure Courier. Use it to rotate one secret (a reissued
+        ``btcpay_api_key``, say) without restating the six you did not
+        change, where any field omitted from a courier reply is destroyed.
+
+        The value is never echoed back. RESTRICTED to the operator —
+        requires proof (nsec-signed kind-27235 or a cached dpop_token
+        phrase); patron proofs are rejected.
+
+        Args:
+            field: The operator credential field to set. Must be declared
+                in the operator's credential template.
+            value: The value to store.
+            dpop_token: Operator proof for this tool.
+        """
+        npub = rt.operator_npub()
+        if not npub:
+            return {"success": False, "error": "No operator identity configured."}
+        if err := await rt.require_caller_proof(
+            npub, dpop_token, "update_operator_credential",
+        ):
+            return err
+        if not field:
+            return {"success": False, "error": "field is required."}
+        if not value:
+            return {"success": False, "error": "value is required."}
+        template = rt._courier_operator_template()
+        known = set(getattr(template, "fields", {}) or {})
+        if known and field not in known:
+            # A typo would otherwise write an orphan key into the vault that
+            # nothing reads and onboarding never reports as missing.
+            return {
+                "success": False,
+                "error": f"Unknown operator credential field '{field}'.",
+                "known_fields": sorted(known),
+            }
+        try:
+            ok = await rt.update_operator_credential(field, value)
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": str(e)}
+        if ok:
+            return {"success": True, "message": f"Operator field '{field}' updated."}
+        return {
+            "success": False,
+            "error": "Operator credential service unconfigured, or the vault "
+                     "could not be read — refusing to merge into an unread blob.",
+        }
 
     @tool
     async def delete_patron_credential(
