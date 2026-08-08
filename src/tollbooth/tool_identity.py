@@ -174,6 +174,7 @@ LIST_CANONICAL_IDENTITIES_UUID       = "cc0d5da7-aeb8-5aae-8e33-d998858ff722"
 UPDATE_PATRON_CREDENTIAL_UUID        = "e896e938-c9f1-5d76-9489-dc928ca907e5"
 DELETE_PATRON_CREDENTIAL_UUID        = "daf3ffe7-f5a6-5e38-bf4f-b68580a66e45"
 GET_PATRON_CREDENTIAL_FIELDS_UUID    = "16dac337-6482-5c55-9710-ca7aceaa02b6"
+UPDATE_OPERATOR_CREDENTIAL_UUID      = "2e4d6f1b-5a89-527a-8324-4f7b7344e7e9"
 
 # OTS notarization
 NOTARIZE_LEDGER_UUID                 = "fa72cde0-35a6-5fb3-8a49-85041cf3fb6c"
@@ -316,6 +317,12 @@ _STANDARD_LIST: list[ToolIdentity] = [
                  intent="Remove a single patron credential field."),
     ToolIdentity(tool_id=GET_PATRON_CREDENTIAL_FIELDS_UUID, capability="get_patron_credential_fields", category="free",
                  intent="List stored patron credential field names."),
+
+    # -- Operator credential CRUD (field-level) --
+    ToolIdentity(tool_id=UPDATE_OPERATOR_CREDENTIAL_UUID, capability="update_operator_credential",
+                 category="restricted",
+                 intent="Operator-only: add or update one operator secret field, "
+                        "preserving the rest of the bundle."),
 
     # -- OTS notarization --
     ToolIdentity(tool_id=NOTARIZE_LEDGER_UUID, capability="notarize_ledger", category="restricted",

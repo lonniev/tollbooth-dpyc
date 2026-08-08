@@ -3,6 +3,31 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.84.0 — 2026-08-08
+
+### Added — rotate one operator secret without restating the bundle
+
+`update_operator_credential(field, value, dpop_token)` — the operator's counterpart to
+`update_patron_credential`. Restricted to the operator, proof-gated, and validated
+against the declared credential template so a typo cannot write an orphan key that the
+vault keeps and onboarding never reports as missing. The value is never echoed back.
+
+Until now a single reissued secret had to be applied by re-delivering the *whole*
+bundle over Secure Courier, because operator fields are `set_once`. That is a loaded
+gun: the welcome DM asks for every field, and any field left out of the reply is a
+field destroyed. An operator rotating a BTCPay key could take out its own
+`neon_api_key` in the same message and discover it only when the database went away.
+
+Internally this is one extraction, not two implementations. The read-merge-write behind
+`update_patron_credential` was already service-agnostic — the vault is keyed by
+`(service, npub)` whether the blob holds a patron's session or an operator's secrets —
+so it moves to `update_credential_field(npub, field, value, *, service)` and both entry
+points delegate to it. The patron path keeps its behaviour and its guard.
+
+That guard is the load-bearing part, and it now covers operators too: a vault that could
+not be *read* is never merged into. Writing back only the fields we happened to see
+would erase the rest — precisely the failure the whole-bundle path invited.
+
 ## 0.83.0 — 2026-08-07
 
 ### Changed — a request-timeout ceiling is the caller's policy, not this module's
