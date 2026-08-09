@@ -317,6 +317,53 @@ async def test_certify_unexpected_format():
 
 
 # ---------------------------------------------------------------------------
+# check_balance() — wire-name proof binding (#188)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_check_balance_signs_for_wire_tool_name():
+    """check_balance must sign the proof for the exact wire tool name it calls.
+
+    Regression for #188 / cypher-mcp#70: historically authenticate("check_balance")
+    while calling "authority_check_balance", so the Authority rejected every
+    proof with tool_mismatch. Mirror certify_credits: sign for the wire name.
+    """
+    balance_response = {
+        "success": True,
+        "balance_sats": 500,
+        "npub": "npub1operator",
+    }
+
+    mock_client = AsyncMock()
+    mock_client.call_tool = AsyncMock(return_value=[_text_block(balance_response)])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    mock_signer = MagicMock()
+    mock_signer.authenticate.return_value = {
+        "npub": "npub1operator",
+        "dpop_token": "",
+    }
+
+    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+        certifier = AuthorityCertifier(
+            authority_url="https://authority.example.com/mcp",
+            operator_npub="npub1operator",
+        )
+        certifier._signer = mock_signer
+        result = await certifier.check_balance()
+
+    assert result["success"] is True
+    assert result["balance_sats"] == 500
+    mock_client.call_tool.assert_awaited_once_with(
+        "authority_check_balance",
+        {"npub": "npub1operator", "dpop_token": ""},
+    )
+    mock_signer.authenticate.assert_called_once_with("authority_check_balance")
+
+
+# ---------------------------------------------------------------------------
 # resolve_authority_service — registry integration
 # ---------------------------------------------------------------------------
 
