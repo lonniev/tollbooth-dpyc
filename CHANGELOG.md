@@ -3,6 +3,36 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.85.0 — 2026-08-09
+
+### Added — `apply_param_defaults`, so every caller keeps the same promise
+
+A `default` in a param schema is a promise: omit this and the declared value is used.
+`validate_params` cannot keep that promise — it accepts the omission, returns no error, and
+whatever binds the params afterwards sees nothing. A backend that interpolates every declared
+name then fails on the one nothing bound, and the caller gets an opaque execution error for a
+param they were told was optional.
+
+`build_dynamic_handler` already filled defaults, inline. Anything reaching a query by another
+route did not. cypher-mcp declares `as_at_ms` as `{required: False, default: 0}`: calling the
+audit queries through their **named tools** worked, while the identical query via
+`execute_query_by_key` failed with *"Tool execution failed. Check operator logs."* Two routes
+to one query disagreeing about the contract — and the failure named nothing a caller could act
+on.
+
+This class has bitten before. `tests/test_dynamic_tools.py` still documents an earlier
+four-day outage where `list_capabilities` declared `since_ms` optional while its Cypher
+referenced `$since_ms` unconditionally; every no-argument call failed and refunded. That was
+fixed for the handler path only, which is why it came back somewhere else.
+
+The rule now lives in one function both callers share, so a route cannot quietly opt out of
+it. Behaviour of the handler path is unchanged — a regression test asserts it still fills
+defaults after the extraction. Undeclared keys are dropped rather than bound, keeping the
+surface as tight as `validate_params` intends; an optional param with no declared default
+stays absent, since some backends legitimately branch on absence; and `None` is treated as
+omitted, because a keyword handler cannot tell "omitted" from "passed null" — a param that
+wants null declares `default: None` and still gets it.
+
 ## 0.84.1 — 2026-08-09
 
 ### Fixed — an operator could never read its own balance at the Authority
