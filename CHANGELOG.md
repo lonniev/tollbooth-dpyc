@@ -3,6 +3,43 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.84.1 — 2026-08-09
+
+### Fixed — an operator could never read its own balance at the Authority
+
+`AuthorityCertifier.check_balance` sent one tool name on the wire and signed the proof for
+a different one: it called `authority_check_balance` while calling
+`self._signer.authenticate("check_balance")`. The Authority binds a proof's `u` tag to the
+resolved tool name, so it expected `authority_check_balance`, saw `check_balance`, and
+rejected every request with `proof_invalid / tool_mismatch`. The tool takes no arguments,
+so there was nothing a caller could vary: it failed 100% of the time, on every operator.
+
+The mismatch was known and deferred — the code carried a note calling it a follow-up from
+the `PatronSigner` refactor and describing it as preserved as-is. It was not latent. It was
+dead, and had been for as long as the note had been there.
+
+What that cost is not an error message. `check_authority_balance` is an operator's only
+instrument for seeing its own certification balance, and the failure is silent from the
+patron's side until the money runs out. Observed the day this was fixed: optionality-mcp's
+balance at its Authority was exhausted, and nothing surfaced it until a patron's
+`purchase_credits` was refused with `authority_insufficient_balance`. The operator could not
+have looked ahead, because the tool that answers that question did not work.
+
+The name is now bound once and used for both the call and the signature, the way
+`certify_credits` already did it, so the two cannot drift apart again. A regression test
+asserts that the value passed to `call_tool` is the same value passed to `authenticate`.
+
+### Fixed — published release notes were always empty
+
+`release.yml` extracted its notes with an `awk` that matched only the bracketed heading
+`## [1.2.3]`. This CHANGELOG uses `## 1.2.3 — date`. The pattern matched nothing, the
+workflow fell back to `NOTES="Release $VERSION"`, and every GitHub Release published a
+16-byte body while the prose describing the change stayed here and never travelled.
+
+Extraction now accepts either heading style, escapes the dots in the version so `1.2.3`
+cannot match `1x2x3`, and uses bracket-expression syntax that behaves the same under mawk,
+gawk and BSD awk.
+
 ## 0.84.0 — 2026-08-08
 
 ### Added — rotate one operator secret without restating the bundle
