@@ -175,12 +175,13 @@ class AuthorityCertifier:
 
         try:
             async with Client(self._authority_url, auth="oauth") as client:
-                # NOTE: historically signs for "check_balance" (not the wire name
-                # "authority_check_balance"); preserved as-is by this refactor. See the
-                # tool-name-mismatch follow-up.
+                # The Authority's verify_proof gate binds the proof to the runtime
+                # mcp_name (`<slug>_<func>`, e.g. "authority_check_balance") — so we
+                # sign for the exact wire name we invoke (same rule as certify_credits).
+                tool = "authority_check_balance"
                 result = await client.call_tool(
-                    "authority_check_balance",
-                    self._signer.authenticate("check_balance"),
+                    tool,
+                    self._signer.authenticate(tool),
                 )
         except Exception as e:
             raise AuthorityCertifyError(
