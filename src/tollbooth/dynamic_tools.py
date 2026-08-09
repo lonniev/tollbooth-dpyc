@@ -131,6 +131,45 @@ def validate_params(
     return errors
 
 
+def apply_param_defaults(
+    param_schema: dict[str, Any], supplied: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Materialize a schema's declared defaults into the params actually bound.
+
+    A ``default`` in a param schema is a promise to the caller: omit this and the
+    declared value is used. Validation alone cannot keep that promise — it accepts
+    the omission and returns no error, and whatever binds the params afterwards
+    sees nothing. A backend that interpolates every declared name then fails on the
+    one that was never bound, and the caller gets an opaque execution error for a
+    param they were told was optional.
+
+    That is not hypothetical. cypher-mcp declares ``as_at_ms`` as
+    ``{required: False, default: 0}``; calling the query through the named tool
+    worked, while the same query by key failed with "Tool execution failed. Check
+    operator logs." — because only the named-tool path filled the default. Two
+    routes to one query disagreed about the contract.
+
+    Only declared params survive: an unexpected key is dropped rather than bound,
+    which keeps the surface tight the way ``validate_params`` intends. An optional
+    param with no declared default stays absent, since some backends legitimately
+    branch on absence.
+
+    ``None`` counts as not supplied — a keyword-argument handler cannot distinguish
+    "omitted" from "passed as null", and a declared default is the better answer for
+    both. A param meant to accept null declares ``default: None`` and gets it.
+    """
+    schema = param_schema or {}
+    given = supplied or {}
+    params: dict[str, Any] = {}
+    for name, spec in schema.items():
+        value = given.get(name)
+        if value is not None:
+            params[name] = value
+        elif "default" in spec:
+            params[name] = spec["default"]
+    return params
+
+
 def build_dynamic_handler(
     name: str,
     param_schema: dict[str, Any],
@@ -161,15 +200,10 @@ def build_dynamic_handler(
     schema = param_schema or {}
 
     async def handler(**kwargs: Any) -> dict[str, Any]:
-        params: dict[str, Any] = {}
-        for pname, spec in schema.items():
-            supplied = kwargs.get(pname)
-            if supplied is not None:
-                params[pname] = supplied
-            elif "default" in spec:
-                params[pname] = spec["default"]
         return await runner(
-            params, kwargs.get("npub") or "", kwargs.get("dpop_token") or ""
+            apply_param_defaults(schema, kwargs),
+            kwargs.get("npub") or "",
+            kwargs.get("dpop_token") or "",
         )
 
     sig_params: list[inspect.Parameter] = []

@@ -14,6 +14,7 @@ from typing import Any, get_type_hints
 import pytest
 
 from tollbooth.dynamic_tools import (
+    apply_param_defaults,
     build_dynamic_handler,
     validate_param_schema,
     validate_params,
@@ -406,3 +407,67 @@ def test_fastmcp_generates_typed_schema() -> None:
     assert props["from_city"]["type"] == "string"
     assert props["max_stops"]["type"] == "integer"
     assert set(t.parameters["required"]) == {"from_city", "to_city"}
+
+
+# ---------------------------------------------------------------------------
+# apply_param_defaults — validation accepts an omission; something must still bind it
+# ---------------------------------------------------------------------------
+
+
+_AS_AT = {
+    "name": {"type": "string", "required": True},
+    "as_at_ms": {"type": "int", "required": False, "default": 0},
+}
+
+
+def test_an_omitted_optional_param_binds_its_declared_default() -> None:
+    """The cypher-mcp regression: validation passes, then the bind has no value.
+
+    `validate_params` returns no error for an omitted optional param, so a backend
+    that interpolates every declared name fails on the one nothing bound — and the
+    caller sees an opaque execution error for a param they were told was optional.
+    """
+    assert validate_params(_AS_AT, {"name": "cap"}) == [], "omission must be legal"
+    assert apply_param_defaults(_AS_AT, {"name": "cap"}) == {"name": "cap", "as_at_ms": 0}
+
+
+def test_a_supplied_value_beats_the_default() -> None:
+    assert apply_param_defaults(_AS_AT, {"name": "c", "as_at_ms": 42})["as_at_ms"] == 42
+
+
+def test_an_optional_param_with_no_default_stays_absent() -> None:
+    """Some backends branch on absence; inventing a value would change behaviour."""
+    schema = {"q": {"type": "string", "required": False}}
+    assert apply_param_defaults(schema, {}) == {}
+
+
+def test_undeclared_params_are_dropped_not_bound() -> None:
+    """Keeps the surface as tight as validate_params intends."""
+    assert apply_param_defaults(_AS_AT, {"name": "c", "sneaky": "x"}) == {
+        "name": "c",
+        "as_at_ms": 0,
+    }
+
+
+def test_null_is_treated_as_omitted_and_takes_the_default() -> None:
+    """A kwargs handler cannot tell 'omitted' from 'passed None'."""
+    assert apply_param_defaults(_AS_AT, {"name": "c", "as_at_ms": None})["as_at_ms"] == 0
+
+
+def test_a_param_declaring_a_none_default_still_binds_none() -> None:
+    schema = {"cursor": {"type": "string", "required": False, "default": None}}
+    assert apply_param_defaults(schema, {}) == {"cursor": None}
+
+
+@pytest.mark.asyncio
+async def test_the_named_tool_path_still_fills_defaults_after_the_extraction() -> None:
+    """Behaviour-preserving: build_dynamic_handler delegates now, same result."""
+    seen: dict[str, Any] = {}
+
+    async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+        seen.update(params)
+        return {"ok": True}
+
+    handler = build_dynamic_handler("t", _AS_AT, runner)
+    await handler(name="cap", npub="npub1", dpop_token="tok")
+    assert seen == {"name": "cap", "as_at_ms": 0}
