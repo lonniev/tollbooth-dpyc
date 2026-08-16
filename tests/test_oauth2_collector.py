@@ -586,3 +586,25 @@ class TestRetrieveCodeFromCollector:
             )
 
         assert result is None
+
+
+# --- OAuth state packing: operator npub round-trips via the state -------------
+def test_pack_oauth_state_joins_patron_and_operator():
+    from tollbooth.oauth2_collector import pack_oauth_state
+
+    assert pack_oauth_state("npub1patron", "npub1operator") == "npub1patron.npub1operator"
+
+
+def test_unpack_oauth_state_roundtrips():
+    from tollbooth.oauth2_collector import pack_oauth_state, unpack_oauth_state
+
+    patron, operator = "npub1patron", "npub1operator"
+    assert unpack_oauth_state(pack_oauth_state(patron, operator)) == (patron, operator)
+
+
+def test_unpack_legacy_patron_only_state_yields_empty_operator():
+    # A pre-cutover state (patron npub only) has no operator half — the collector
+    # keys on that to refuse it rather than seal to the wrong (public) key.
+    from tollbooth.oauth2_collector import unpack_oauth_state
+
+    assert unpack_oauth_state("npub1patrononly") == ("npub1patrononly", "")

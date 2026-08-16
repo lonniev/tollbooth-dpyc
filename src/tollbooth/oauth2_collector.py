@@ -496,6 +496,30 @@ def _token_error_fields(resp: httpx.Response) -> tuple[str, str]:
 
 _COLLECTOR_CODE_VERSION = 2
 
+_STATE_SEP = "."
+
+
+def pack_oauth_state(patron_npub: str, operator_npub: str) -> str:
+    """Encode (patron npub, operator npub) into a single OAuth ``state`` string.
+
+    The OAuth ``state`` is the only value that round-trips through the provider
+    back to the collector, so it must carry the operator npub the collector
+    seals TO (a public key — safe to route through the browser) alongside the
+    patron npub the operator retrieves BY. Both are bech32 (no '.' in bech32),
+    so a dot separates them unambiguously.
+    """
+    return f"{patron_npub}{_STATE_SEP}{operator_npub}"
+
+
+def unpack_oauth_state(state: str) -> tuple[str, str]:
+    """Split an OAuth ``state`` into (patron npub, operator npub).
+
+    Returns ``(patron, "")`` for a legacy patron-only state so the collector can
+    refuse it rather than seal to the wrong (public) key.
+    """
+    patron, _, operator = (state or "").partition(_STATE_SEP)
+    return patron, operator
+
 
 def _npub_to_hex(npub_or_hex: str) -> str:
     """Accept npub bech32 or 64-char hex; return 32-byte x-only pubkey hex."""

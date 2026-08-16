@@ -3,7 +3,25 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## [0.85.1] - 2026-08-16
+
+### Fixed — complete the collector seal-to-operator wiring (finishes #228/#229)
+
+#229 changed the collector code cipher from `AES-256-GCM` keyed by `SHA-256(state)`
+(broken by design — `state` is the public patron npub) to a NIP-44 seal to the
+**operator's public key**, so only the operator nsec can open a stored auth code.
+But nothing delivered the operator pubkey to the shared collector — `begin_oauth`
+still emitted `state = patron npub` only, so the seal had no correct recipient.
+
+This threads it through: `begin_oauth` now packs `state = "<patron_npub>.<operator_npub>"`
+(both public, safe in a URL). New `pack_oauth_state` / `unpack_oauth_state` helpers.
+The collector seals to the operator half and keys the Neon row by the patron half, so
+retrieval (`check_oauth_status`, keyed by patron npub) and the vault session are
+unchanged. Old v1 rows remain unreadable by design — OAuth codes are single-use and
+short-lived, so a mid-cutover flow simply re-authorizes.
+
+Consumers using the standard `begin_oauth` / `check_oauth_status` tools (schwab,
+excalibur) need only the version bump — no code change; the collector needs 0.85.1.
 
 ### Added — retire one operator secret without wiping the rest of the blob
 
