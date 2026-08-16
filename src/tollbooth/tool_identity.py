@@ -175,6 +175,7 @@ UPDATE_PATRON_CREDENTIAL_UUID        = "e896e938-c9f1-5d76-9489-dc928ca907e5"
 DELETE_PATRON_CREDENTIAL_UUID        = "daf3ffe7-f5a6-5e38-bf4f-b68580a66e45"
 GET_PATRON_CREDENTIAL_FIELDS_UUID    = "16dac337-6482-5c55-9710-ca7aceaa02b6"
 UPDATE_OPERATOR_CREDENTIAL_UUID      = "2e4d6f1b-5a89-527a-8324-4f7b7344e7e9"
+DELETE_OPERATOR_CREDENTIAL_UUID      = "a752e8c2-314c-59f6-85ab-7995f2b1df13"
 
 # OTS notarization
 NOTARIZE_LEDGER_UUID                 = "fa72cde0-35a6-5fb3-8a49-85041cf3fb6c"
@@ -323,6 +324,11 @@ _STANDARD_LIST: list[ToolIdentity] = [
                  category="restricted",
                  intent="Operator-only: add or update one operator secret field, "
                         "preserving the rest of the bundle."),
+    ToolIdentity(tool_id=DELETE_OPERATOR_CREDENTIAL_UUID, capability="delete_operator_credential",
+                 category="restricted",
+                 intent="Operator-only: remove one operator secret field, "
+                        "including stored-but-untemplated leftovers, without "
+                        "wiping the rest of the bundle."),
 
     # -- OTS notarization --
     ToolIdentity(tool_id=NOTARIZE_LEDGER_UUID, capability="notarize_ledger", category="restricted",
