@@ -1867,6 +1867,56 @@ class OperatorRuntime:
             self.operator_npub(), field, value, service=svc,
         )
 
+    async def delete_credential_field(
+        self,
+        npub: str,
+        field: str,
+        *,
+        service: str,
+    ) -> tuple[bool, bool]:
+        """Remove one field from the vault blob for ``(service, npub)``.
+
+        The vault is keyed by ``(service, npub)`` whether the blob holds a
+        patron's session or an operator's secrets, so this single
+        read-delete-write serves both.  Callers resolve *service*; this never
+        guesses one.
+
+        Returns ``(ok, removed)``:
+
+        * ``(True, True)`` — field was present and the write landed.
+        * ``(True, False)`` — field was already absent (idempotent no-op;
+          the vault is not rewritten).
+        * ``(False, False)`` — service missing, vault unreadable, or store
+          failed.  A vault that could not be *read* is never written into:
+          building a remaining-blob from an unread load would erase every
+          field we failed to see.
+        """
+        if not service or not field:
+            return False, False
+        from tollbooth.credential_meta import is_meta_key
+
+        if is_meta_key(field):
+            logger.warning(
+                "Refusing credential delete for reserved meta key %r (service=%s)",
+                field, service,
+            )
+            return False, False
+        existing, situation = await self.load_patron_session(npub, service=service)
+        if situation:
+            # Same hazard as update: a write built on an unread blob erases the
+            # fields we could not see. "Absent" is not knowable right now.
+            logger.warning(
+                "Refusing credential delete for %s (service=%s): vault unreadable (%s)",
+                npub[:20], service, situation,
+            )
+            return False, False
+        remaining = dict(existing or {})
+        if field not in remaining:
+            return True, False  # already absent — no write
+        del remaining[field]
+        ok = await self.store_patron_session(npub, remaining, service=service)
+        return (ok, True) if ok else (False, False)
+
     async def delete_patron_credential(
         self,
         patron_npub: str,
@@ -1878,20 +1928,29 @@ class OperatorRuntime:
         svc = self._patron_storage_service(service)
         if not svc:
             return False
-        existing, situation = await self.load_patron_session(patron_npub, service=svc)
-        if situation:
-            # Same hazard as update: a write built on an unread blob erases the
-            # fields we could not see. "Absent" is not knowable right now.
-            logger.warning(
-                "Refusing credential delete for %s (service=%s): vault unreadable (%s)",
-                patron_npub[:20], svc, situation,
-            )
-            return False
-        remaining = dict(existing or {})
-        if field not in remaining:
-            return True  # already absent
-        del remaining[field]
-        return await self.store_patron_session(patron_npub, remaining, service=svc)
+        ok, _removed = await self.delete_credential_field(
+            patron_npub, field, service=svc,
+        )
+        return ok
+
+    async def delete_operator_credential(self, field: str) -> tuple[bool, bool]:
+        """Remove one operator secret, preserving all others.
+
+        The operator's counterpart to ``delete_patron_credential``.  Retiring
+        a leftover key after an SDK cutover (Prefect → Modal, or a stored-but-
+        untemplated orphan like ``anthropic_api_key``) no longer means wiping
+        the whole row with ``forget_credentials``.
+
+        Untemplated fields are first-class: the delete is keyed on what is
+        *stored*, not on what the current template declares.  Returns
+        ``(ok, removed)`` — see ``delete_credential_field``.
+        """
+        svc = self.operator_credential_service
+        if not svc:
+            return False, False
+        return await self.delete_credential_field(
+            self.operator_npub(), field, service=svc,
+        )
 
     async def get_patron_credential(
         self,
@@ -4897,6 +4956,64 @@ def register_standard_tools(
             return {"success": False, "error": "No credential service configured."}
         except Exception as e:  # noqa: BLE001
             return {"success": False, "error": str(e)}
+
+    @tool
+    async def delete_operator_credential(
+        field: str, dpop_token: str,
+    ) -> dict[str, Any]:
+        """Remove a single operator secret field.
+
+        Deletes one key from the operator's encrypted credential blob without
+        touching the others — the field-level counterpart to
+        ``forget_credentials``, which wipes the whole row. Use it to retire a
+        leftover after an SDK cutover (a Prefect key after Modal, or a stored
+        but untemplated orphan like ``anthropic_api_key``) without taking the
+        operator down for a full re-delivery.
+
+        Stored-but-untemplated fields are first-class: the delete is keyed on
+        what is vaulted, not on what the current template declares. Idempotent
+        — already-absent fields report ``removed: false`` without rewriting
+        the vault. RESTRICTED to the operator — requires proof (nsec-signed
+        kind-27235 or a cached dpop_token phrase); patron proofs are rejected.
+        A deletion is as destructive as a write.
+
+        Args:
+            field: The operator credential field to remove (templated or not).
+            dpop_token: Operator proof for this tool.
+        """
+        npub = rt.operator_npub()
+        if not npub:
+            return {"success": False, "error": "No operator identity configured."}
+        if err := await rt.require_caller_proof(
+            npub, dpop_token, "delete_operator_credential",
+        ):
+            return err
+        if not field:
+            return {"success": False, "error": "field is required."}
+        try:
+            ok, removed = await rt.delete_operator_credential(field)
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": str(e)}
+        if ok:
+            return {
+                "success": True,
+                "field": field,
+                "removed": removed,
+                "removed_fields": [field] if removed else [],
+                "message": (
+                    f"Operator field '{field}' removed."
+                    if removed
+                    else f"Operator field '{field}' was already absent."
+                ),
+            }
+        return {
+            "success": False,
+            "field": field,
+            "removed": False,
+            "removed_fields": [],
+            "error": "Operator credential service unconfigured, or the vault "
+                     "could not be read — refusing to rewrite an unread blob.",
+        }
 
     @tool
     async def get_patron_credential_fields(

@@ -184,3 +184,172 @@ class TestSharedCredentialMerge:
         ) is True
         assert seen["service"] == "patronsvc"
         assert seen["field"] == "account_hash"
+
+
+class TestDeleteOperatorCredential:
+    """Retire one operator secret without wiping the rest of the blob.
+
+    Before this path existed, retiring a leftover Prefect key after the
+    Modal cutover meant ``forget_credentials`` on the whole row — taking
+    every live secret with it. The operator side held the more dangerous
+    secrets and had the blunter instrument.
+    """
+
+    @pytest.mark.asyncio
+    async def test_removes_one_field_and_preserves_the_rest(self, monkeypatch) -> None:
+        rt = _operator_runtime()
+        captured: dict = {}
+
+        async def _load(npub, *, service=None):
+            return {
+                "btcpay_host": "https://btcpay.example",
+                "btcpay_api_key": "LIVE",
+                "prefect_api_key": "DEAD",  # leftover from a prior SDK
+                "neon_api_key": "NEON",
+            }, ""
+
+        async def _store(npub, data, *, service=None, just_delivered=None):
+            captured.update(npub=npub, data=data, service=service)
+            return True
+
+        monkeypatch.setattr(rt, "load_patron_session", _load)
+        monkeypatch.setattr(rt, "store_patron_session", _store)
+
+        ok, removed = await rt.delete_operator_credential("prefect_api_key")
+
+        assert ok is True
+        assert removed is True
+        assert "prefect_api_key" not in captured["data"]
+        assert captured["data"]["btcpay_host"] == "https://btcpay.example"
+        assert captured["data"]["btcpay_api_key"] == "LIVE"
+        assert captured["data"]["neon_api_key"] == "NEON"
+        assert captured["service"] == OPERATOR_SERVICE
+        assert captured["npub"] == rt.operator_npub()
+
+    @pytest.mark.asyncio
+    async def test_idempotent_when_field_already_absent(self, monkeypatch) -> None:
+        rt = _operator_runtime()
+        stores: list[dict] = []
+
+        async def _load(npub, *, service=None):
+            return {"btcpay_api_key": "LIVE"}, ""
+
+        async def _store(npub, data, *, service=None, just_delivered=None):
+            stores.append(data)
+            return True
+
+        monkeypatch.setattr(rt, "load_patron_session", _load)
+        monkeypatch.setattr(rt, "store_patron_session", _store)
+
+        ok, removed = await rt.delete_operator_credential("prefect_api_key")
+
+        assert ok is True
+        assert removed is False
+        # No write for a no-op — do not churn the vault for an absent key.
+        assert stores == []
+
+    @pytest.mark.asyncio
+    async def test_removes_stored_but_untemplated_fields(self, monkeypatch) -> None:
+        """SDK upgrades leave fields the current template no longer declares.
+
+        ``anthropic_api_key`` on a live operator is the measured case: stored,
+        not in the template, and must still be retirable without a full wipe.
+        """
+        rt = _operator_runtime()
+        captured: dict = {}
+
+        async def _load(npub, *, service=None):
+            return {
+                "btcpay_api_key": "LIVE",
+                "anthropic_api_key": "ORPHAN",
+            }, ""
+
+        async def _store(npub, data, *, service=None, just_delivered=None):
+            captured["data"] = data
+            return True
+
+        monkeypatch.setattr(rt, "load_patron_session", _load)
+        monkeypatch.setattr(rt, "store_patron_session", _store)
+
+        # Not in the operator template — delete must still accept it.
+        assert "anthropic_api_key" not in rt._operator_credential_template.fields
+        ok, removed = await rt.delete_operator_credential("anthropic_api_key")
+
+        assert ok is True
+        assert removed is True
+        assert captured["data"] == {"btcpay_api_key": "LIVE"}
+
+    @pytest.mark.asyncio
+    async def test_refuses_to_delete_from_an_unread_blob(self, monkeypatch) -> None:
+        rt = _operator_runtime()
+        stored: list[dict] = []
+
+        async def _cold(npub, *, service=None):
+            return None, "vault_bootstrapping"
+
+        async def _store(npub, data, *, service=None, just_delivered=None):
+            stored.append(data)
+            return True
+
+        monkeypatch.setattr(rt, "load_patron_session", _cold)
+        monkeypatch.setattr(rt, "store_patron_session", _store)
+
+        ok, removed = await rt.delete_operator_credential("btcpay_api_key")
+        assert ok is False
+        assert removed is False
+        assert stored == []
+
+    @pytest.mark.asyncio
+    async def test_returns_false_without_an_operator_template(self) -> None:
+        rt = OperatorRuntime(tool_registry={}, service_name="No Template")
+        rt.operator_npub = lambda: OPERATOR_NPUB  # type: ignore[method-assign]
+        ok, removed = await rt.delete_operator_credential("btcpay_api_key")
+        assert ok is False
+        assert removed is False
+
+    @pytest.mark.asyncio
+    async def test_shared_delete_honours_the_named_service(self, monkeypatch) -> None:
+        rt = _operator_runtime()
+        captured: dict = {}
+
+        async def _load(npub, *, service=None):
+            captured["load_service"] = service
+            return {"drop_me": "x", "keep_me": "y"}, ""
+
+        async def _store(npub, data, *, service=None, just_delivered=None):
+            captured["store_service"] = service
+            captured["data"] = data
+            return True
+
+        monkeypatch.setattr(rt, "load_patron_session", _load)
+        monkeypatch.setattr(rt, "store_patron_session", _store)
+
+        ok, removed = await rt.delete_credential_field(
+            "npub1" + "a" * 58, "drop_me", service="some-other-service",
+        )
+
+        assert ok is True
+        assert removed is True
+        assert captured["load_service"] == "some-other-service"
+        assert captured["store_service"] == "some-other-service"
+        assert captured["data"] == {"keep_me": "y"}
+
+    @pytest.mark.asyncio
+    async def test_patron_delete_delegates_to_the_shared_helper(
+        self, monkeypatch,
+    ) -> None:
+        rt = _operator_runtime()
+        seen: dict = {}
+
+        async def _shared(npub, field, *, service):
+            seen.update(npub=npub, field=field, service=service)
+            return True, True
+
+        monkeypatch.setattr(rt, "delete_credential_field", _shared)
+        monkeypatch.setattr(rt, "_patron_storage_service", lambda s: "patronsvc")
+
+        assert await rt.delete_patron_credential(
+            "npub1" + "b" * 58, "account_hash",
+        ) is True
+        assert seen["service"] == "patronsvc"
+        assert seen["field"] == "account_hash"

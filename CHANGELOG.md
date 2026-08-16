@@ -3,6 +3,29 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added — retire one operator secret without wiping the rest of the blob
+
+`delete_operator_credential(field, dpop_token)` — the operator's counterpart to
+`delete_patron_credential`. Restricted to the operator, proof-gated, and keyed on
+what is *stored*, not on what the current template declares. Stored-but-untemplated
+leftovers (the normal residue of an SDK upgrade — Prefect keys after Modal, or an
+`anthropic_api_key` never listed in the template) are first-class delete targets.
+Idempotent: an already-absent field reports `removed: false` / `removed_fields: []`
+without rewriting the vault. A vault that could not be read is never rewritten into.
+
+Until now the only answer to "retire one credential" was `forget_credentials` on the
+whole `(service, npub)` row — taking every live secret with it, then a full
+re-delivery. On a real operator that meant deleting fifteen fields to drop three
+dead ones, and a wipe-and-redeliver would silently lose any untemplated secret the
+welcome DM no longer prompts for.
+
+Internally this is one extraction, not two implementations. The read-delete-write
+behind `delete_patron_credential` moves to
+`delete_credential_field(npub, field, *, service) -> (ok, removed)` and both entry
+points delegate to it, matching the earlier `update_credential_field` split.
+
 ## 0.85.0 — 2026-08-09
 
 ### Security
