@@ -93,6 +93,7 @@ async def begin_oauth_tool(rt: Any, npub: str, dpop_token: str) -> dict[str, Any
     from tollbooth.oauth2_collector import (
         build_authorize_url,
         generate_pkce_pair,
+        pack_oauth_state,
     )
 
     extra_params: dict[str, str] = {}
@@ -102,11 +103,15 @@ async def begin_oauth_tool(rt: Any, npub: str, dpop_token: str) -> dict[str, Any
         extra_params["code_challenge"] = challenge
         extra_params["code_challenge_method"] = "S256"
 
+    # State carries BOTH npubs: the patron half is the collector's lookup key
+    # (and the retrieve key, unchanged); the operator half is the PUBLIC key the
+    # collector seals the code to, so only this operator's nsec can open it
+    # (check_oauth_status passes rt._get_nsec()). Both are public — safe in a URL.
     authorize_url = build_authorize_url(
         opc.authorize_url,
         client_id,
         redirect_uri,
-        resolved,  # state = patron npub
+        pack_oauth_state(resolved, rt.operator_npub()),
         scope=opc.scopes or None,
         extra_params=extra_params or None,
     )

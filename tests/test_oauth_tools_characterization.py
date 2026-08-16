@@ -28,6 +28,8 @@ os.environ.setdefault(
 
 # A real npub so resolve_npub accepts it.
 PATRON = "npub1y20qa7d3ddmh6730hdr0u0r08zys4p7pyk30uhur9edx4d88q4zqnr3q2h"
+# The operator npub the collector seals TO — begin_oauth packs it into the state.
+OPERATOR = "npub1ymgfh46ace33zgld5zdc7gyhc5keyu42v36td0q7c44ks45d79eslwe2q2"
 
 OPC = OAuthProviderConfig(
     service_name="testoauth",
@@ -56,6 +58,8 @@ def _runtime(*, opc=OPC, on_token=None):
     )
     rt.store_patron_session = AsyncMock(return_value=True)
     rt.load_patron_session = AsyncMock(return_value=(None, ""))
+    # begin_oauth seals to the operator: it packs rt.operator_npub() into the state.
+    rt.operator_npub = MagicMock(return_value=OPERATOR)
     return rt
 
 
@@ -96,8 +100,10 @@ async def test_begin_oauth_happy_builds_url_and_stores_verifier():
     stored = rt.store_patron_session.await_args.args[1]
     assert stored["pkce_verifier"] == "VERIFIER"
     assert stored["redirect_uri"] == "https://collector.example"  # trailing / stripped
-    # client_id from operator creds + state = patron npub
+    # client_id from operator creds; state packs patron npub (lookup key) plus the
+    # operator npub the collector seals the code to.
     assert mk_url.call_args.args[1] == "CID"
+    assert mk_url.call_args.args[3] == f"{PATRON}.{OPERATOR}"
 
 
 @pytest.mark.asyncio
