@@ -204,7 +204,10 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
         retrieve_code_from_collector,
     )
 
-    code = await retrieve_code_from_collector(collector_url, resolved)
+    # NIP-44 seal opens only with the operator nsec — state is lookup only (#228).
+    code = await retrieve_code_from_collector(
+        collector_url, resolved, rt._get_nsec(),
+    )
     if code is None:
         return {
             "success": True,

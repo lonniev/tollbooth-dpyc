@@ -3,8 +3,11 @@
 Builds authorization URLs, exchanges codes for tokens, and retrieves
 encrypted codes from an external OAuth2 collector. Uses the patron's
 npub as the OAuth state parameter — no server-side pending-state storage
-needed. The collector encrypts the auth code with SHA-256(state) and this
-module decrypts it on retrieval.
+needed. The collector encrypts the auth code with NIP-44 to the
+operator's public key (ephemeral sender); only the operator's nsec can
+decrypt it on retrieval. The state token is a lookup key only — never a
+cipher key — so a Neon-row holder who sees the public npub cannot recover
+the code (THREAT-MODEL 7#4 / E-6).
 
 Provider-agnostic: callers supply authorize_endpoint, token_endpoint,
 scope, etc. MCP services build thin wrappers that bind provider-specific
@@ -22,7 +25,6 @@ import base64
 import hashlib
 import json
 import logging
-import os
 import time
 import urllib.parse
 
@@ -238,9 +240,9 @@ def begin_oauth_flow(
 ) -> dict:
     """Start a new OAuth flow. Returns the authorization URL and status dict.
 
-    Uses the patron's npub as the OAuth state parameter — the collector
-    encrypts the auth code with SHA-256(npub) and the MCP server decrypts
-    it on retrieval.
+    Uses the patron's npub as the OAuth state parameter (lookup key only).
+    The collector seals the auth code with NIP-44 to the operator pubkey;
+    the MCP server opens the seal with the operator nsec on retrieval.
 
     Args:
         patron_npub: Patron Nostr public key (``npub1...``).
@@ -476,76 +478,172 @@ def _token_error_fields(resp: httpx.Response) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Collector retrieval + decryption
 # ---------------------------------------------------------------------------
+#
+# Wire format (v2 NIP-44 sealed envelope) — JSON object, UTF-8:
+#   {"v": 2, "epk": "<32-byte-hex ephemeral pubkey>", "ct": "<nip44-b64>"}
+#
+# The collector encrypts TO the operator's public key with a fresh ephemeral
+# sender keypair per code (same sealed-sender pattern Secure Courier uses for
+# gift-wrap outer layer). Only the operator nsec can open the seal. The OAuth
+# ``state`` (patron npub) is a Neon lookup key only — never material for the
+# cipher. THREAT-MODEL 7#4 / E-6: vault cipher key must not be derived from a
+# public value.
+#
+# v1 (AES-256-GCM keyed by SHA-256(state)) is deliberately not readable here.
+# That scheme was broken by design (state = public npub); any leftover Neon
+# rows from before the cutover are unrecoverable noise and must re-auth.
 
 
-def encrypt_collector_code(code: str, state: str) -> str:
-    """Encrypt an authorization code for handoff via the collector.
+_COLLECTOR_CODE_VERSION = 2
+
+
+def _npub_to_hex(npub_or_hex: str) -> str:
+    """Accept npub bech32 or 64-char hex; return 32-byte x-only pubkey hex."""
+    value = (npub_or_hex or "").strip()
+    if value.startswith("npub1"):
+        from pynostr.key import PublicKey  # type: ignore[import-untyped]
+
+        return PublicKey.from_npub(value).hex()
+    if len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value):
+        return value.lower()
+    raise OAuthCollectorError(
+        "operator_pubkey must be an npub1... bech32 or 64-char hex pubkey."
+    )
+
+
+def _nsec_to_hex(nsec_or_hex: str) -> str:
+    """Accept nsec bech32 or 64-char hex; return 32-byte private key hex."""
+    value = (nsec_or_hex or "").strip()
+    if value.startswith("nsec1"):
+        from pynostr.key import PrivateKey  # type: ignore[import-untyped]
+
+        return PrivateKey.from_nsec(value).hex()
+    if len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value):
+        return value.lower()
+    raise OAuthCollectorError(
+        "operator_nsec must be an nsec1... bech32 or 64-char hex private key."
+    )
+
+
+def encrypt_collector_code(code: str, operator_pubkey: str) -> str:
+    """Seal an authorization code to the operator's public key (NIP-44).
 
     The canonical peer of :func:`decrypt_collector_code`: both halves of the
     contract live here so the collector service and the retrieving MCP server
-    can't drift. AES-256-GCM with key = SHA-256(state), a random 12-byte IV
-    prepended to the ciphertext, URL-safe base64 encoded.
+    can't drift. Uses a fresh ephemeral sender keypair and NIP-44v2 so only
+    the holder of the matching operator nsec can open the seal. The OAuth
+    state token is intentionally NOT an argument — it must never be a key.
 
     Args:
-        code: The plaintext OAuth2 authorization code.
-        state: The state token used during authorization (the npub).
+        code: The plaintext OAuth2 authorization code (non-empty).
+        operator_pubkey: Operator npub (``npub1...``) or 64-char hex pubkey.
 
     Returns:
-        URL-safe base64 string of (IV + ciphertext + tag).
+        JSON envelope string: ``{"v":2,"epk":"<hex>","ct":"<nip44-b64>"}``.
+
+    Raises:
+        OAuthCollectorError: If the pubkey is invalid or encryption fails.
+        ValueError: If ``code`` is empty (NIP-44 rejects empty plaintexts).
     """
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
-    key = hashlib.sha256(state.encode()).digest()
-    iv = os.urandom(12)
-    aes = AESGCM(key)
-    ct = aes.encrypt(iv, code.encode(), None)
-    return base64.urlsafe_b64encode(iv + ct).decode()
+    from tollbooth.nip44 import encrypt as nip44_encrypt
+
+    if not code:
+        # NIP-44v2 forbids empty plaintexts; surface that before key work so
+        # the collector never stores an unopenable envelope for a blank code.
+        raise ValueError("authorization code must be non-empty")
+
+    try:
+        recipient_hex = _npub_to_hex(operator_pubkey)
+    except OAuthCollectorError:
+        raise
+    except Exception as exc:
+        raise OAuthCollectorError(f"Invalid operator pubkey: {exc}") from exc
+
+    ephemeral = PrivateKey()
+    try:
+        ciphertext = nip44_encrypt(code, ephemeral.hex(), recipient_hex)
+    except Exception as exc:
+        raise OAuthCollectorError(f"NIP-44 encryption failed: {exc}") from exc
+
+    envelope = {
+        "v": _COLLECTOR_CODE_VERSION,
+        "epk": ephemeral.public_key.hex(),
+        "ct": ciphertext,
+    }
+    return json.dumps(envelope, separators=(",", ":"))
 
 
-def decrypt_collector_code(encrypted_b64: str, state: str) -> str:
-    """Decrypt an authorization code encrypted by the collector.
-
-    AES-256-GCM with key = SHA-256(state), IV prepended to ciphertext.
+def decrypt_collector_code(encrypted: str, operator_nsec: str) -> str:
+    """Open a NIP-44 sealed authorization code with the operator's nsec.
 
     Args:
-        encrypted_b64: URL-safe base64-encoded (IV + ciphertext + tag).
-        state: The same state token used during authorization (the npub).
+        encrypted: JSON envelope from :func:`encrypt_collector_code`.
+        operator_nsec: Operator nsec (``nsec1...``) or 64-char hex private key.
 
     Returns:
         Plaintext authorization code.
 
     Raises:
-        OAuthCollectorError: If decryption fails.
+        OAuthCollectorError: If the envelope is malformed, the nsec is wrong,
+            or decryption/HMAC fails. Never returns a guess.
     """
-    key = hashlib.sha256(state.encode()).digest()
-    payload = base64.urlsafe_b64decode(encrypted_b64)
-    if len(payload) < 28:  # 12 IV + 16 tag minimum
-        raise OAuthCollectorError("Encrypted code too short.")
+    from tollbooth.nip44 import decrypt as nip44_decrypt
+
     try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        iv = payload[:12]
-        ct = payload[12:]
-        aes = AESGCM(key)
-        plaintext = aes.decrypt(iv, ct, None)
-        return plaintext.decode()
+        envelope = json.loads(encrypted)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise OAuthCollectorError(
+            "Encrypted code is not a NIP-44 collector envelope."
+        ) from exc
+
+    if not isinstance(envelope, dict):
+        raise OAuthCollectorError("Encrypted code envelope must be a JSON object.")
+
+    version = envelope.get("v")
+    epk = envelope.get("epk")
+    ct = envelope.get("ct")
+    if version != _COLLECTOR_CODE_VERSION:
+        raise OAuthCollectorError(
+            f"Unsupported collector code envelope version: {version!r}."
+        )
+    if not isinstance(epk, str) or len(epk) != 64:
+        raise OAuthCollectorError("Collector envelope missing ephemeral pubkey.")
+    if not isinstance(ct, str) or not ct:
+        raise OAuthCollectorError("Collector envelope missing ciphertext.")
+
+    try:
+        priv_hex = _nsec_to_hex(operator_nsec)
+    except OAuthCollectorError:
+        raise
+    except Exception as exc:
+        raise OAuthCollectorError(f"Invalid operator nsec: {exc}") from exc
+
+    try:
+        return nip44_decrypt(ct, priv_hex, epk.lower())
     except Exception as exc:
         raise OAuthCollectorError(
-            "Decryption failed — state token may be wrong or code tampered."
+            "Decryption failed — operator nsec may be wrong or code tampered."
         ) from exc
 
 
 async def retrieve_code_from_collector(
     collector_url: str,
     state_token: str,
+    operator_nsec: str,
 ) -> str | None:
     """Fetch an authorization code from the external OAuth2 collector.
 
-    The collector stores codes encrypted with SHA-256(state). This function
-    retrieves the encrypted code and decrypts it.
+    The collector stores codes sealed with NIP-44 to the operator pubkey.
+    This function retrieves the envelope (keyed by ``state_token``) and
+    opens it with ``operator_nsec``.
 
     Args:
         collector_url: Base URL of the collector service.
-        state_token: The state token (patron npub) used during authorization.
+        state_token: The state token (patron npub) used during authorization —
+            lookup key only, never a cipher key.
+        operator_nsec: Operator nsec (``nsec1...``) or 64-char hex private key.
 
     Returns:
         Plaintext code string, or ``None`` if not yet available.
@@ -584,7 +682,7 @@ async def retrieve_code_from_collector(
                 content = data.get("result", {}).get("structuredContent", {})
                 if not content.get("found"):
                     return None
-                return decrypt_collector_code(content["code"], state_token)
+                return decrypt_collector_code(content["code"], operator_nsec)
 
         # Plain JSON response (Content-Type: application/json, no SSE framing).
         try:
@@ -594,4 +692,4 @@ async def retrieve_code_from_collector(
         content = data.get("result", {}).get("structuredContent", {})
         if not content.get("found"):
             return None
-        return decrypt_collector_code(content["code"], state_token)
+        return decrypt_collector_code(content["code"], operator_nsec)
