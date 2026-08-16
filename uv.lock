@@ -2642,7 +2642,7 @@ x402 = [
 requires-dist = [
     { name = "cryptography", specifier = ">=46.0.5" },
     { name = "eth-account", marker = "extra == 'x402'", specifier = ">=0.13.0" },
-    { name = "fastmcp", marker = "extra == 'keyring'", specifier = ">=3.0" },
+    { name = "fastmcp", marker = "extra == 'keyring'", specifier = ">=3.2.0" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
