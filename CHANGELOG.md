@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## 0.85.0 — 2026-08-09
 
+### Security
+
+- **`fastmcp` keyring extra floor raised to `>=3.2.0`.** OSV reports GHSA-m8x7-r2rg-vh5g (command injection), GHSA-rww4-4w9c-7733 (OAuth confused deputy), and GHSA-vv7q-7jx5-f767 (OpenAPI SSRF/path traversal) against every fastmcp release through 3.1.1; all three are fixed in 3.2.0. The previous `>=3.0` floor let a fresh `pip install "tollbooth-dpyc[keyring]"` resolve a vulnerable 3.1.x. The committed `uv.lock` already resolved 3.4.4; this change publishes the safe floor so consumers and Renovate cannot drift back. Closes #230.
+
 ### Added — `apply_param_defaults`, so every caller keeps the same promise
 
 A `default` in a param schema is a promise: omit this and the declared value is used.
