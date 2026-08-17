@@ -1,11 +1,36 @@
 """Tests for tollbooth.infographic — SVG account statement rendering (M3.6)."""
 
+import ast
 from html import escape
+from pathlib import Path
 
 from tollbooth.infographic import (
     THEME_BITCOIN_ORANGE,
     render_account_infographic,
 )
+
+
+def test_infographic_module_does_not_import_native_xml():
+    """Semgrep B410 / use-defused-xml: never pull in the vulnerable stdlib xml stack.
+
+    This module only needs character escaping for SVG text nodes. Prefer
+    ``html.escape`` (stdlib, no XXE surface) over ``xml.sax.saxutils.escape``.
+    """
+    src_path = Path(__file__).resolve().parents[1] / "src" / "tollbooth" / "infographic.py"
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+    native_xml: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "xml" or alias.name.startswith("xml."):
+                    native_xml.append(alias.name)
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module
+            and (node.module == "xml" or node.module.startswith("xml."))
+        ):
+            native_xml.append(node.module)
+    assert native_xml == [], f"native xml imports forbidden: {native_xml}"
 
 MINIMAL = {
     "account_summary": {

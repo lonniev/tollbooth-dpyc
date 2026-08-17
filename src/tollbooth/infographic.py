@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from html import escape
 from typing import Any
-from xml.sax.saxutils import escape
 
 # ---------------------------------------------------------------------------
 # Theme & section configuration
