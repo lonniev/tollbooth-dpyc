@@ -82,10 +82,14 @@ async def begin_oauth_tool(rt: Any, npub: str, dpop_token: str) -> dict[str, Any
             "error": _CREDS_NOT_DELIVERED.format(field=_id_field),
         }
 
-    # Resolve collector redirect URI
+    # Resolve collector redirect URI via the Oracle (operators never read GitHub).
     try:
-        from tollbooth.registry import resolve_service_by_name
-        svc = await resolve_service_by_name("tollbooth-oauth2-callback")
+        from tollbooth.oracle_client import default_oracle_client
+        svc = await default_oracle_client().resolve_service(
+            name="tollbooth-oauth2-callback"
+        )
+        if not svc or not svc.get("url"):
+            return {"success": False, "error": "OAuth2 collector not found in registry"}
         redirect_uri = svc["url"].rstrip("/")
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"OAuth2 collector not found: {e}"}
@@ -194,10 +198,14 @@ async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[s
     client_id = creds.get(_cid_field, "")
     client_secret = creds.get(_csec_field, "")
 
-    # Poll collector for the authorization code
+    # Poll collector for the authorization code — URL via the Oracle, not GitHub.
     try:
-        from tollbooth.registry import resolve_service_by_name
-        svc = await resolve_service_by_name("tollbooth-oauth2-collector")
+        from tollbooth.oracle_client import default_oracle_client
+        svc = await default_oracle_client().resolve_service(
+            name="tollbooth-oauth2-collector"
+        )
+        if not svc or not svc.get("url"):
+            return {"success": False, "error": "OAuth2 collector not found in registry"}
         collector_url = svc["url"]
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"OAuth2 collector: {e}"}

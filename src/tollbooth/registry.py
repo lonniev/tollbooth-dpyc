@@ -48,21 +48,6 @@ class DPYCRegistry:
 
         raise RegistryError(f"npub {npub} not found in DPYC registry.")
 
-    async def resolve_authority_npub(self, operator_npub: str) -> str:
-        """Look up *operator_npub* and return its ``upstream_authority_npub``.
-
-        Raises ``RegistryError`` if the operator is not found, not active,
-        or has no upstream authority configured (i.e. is a Prime Authority).
-        """
-        member = await self.check_membership(operator_npub)
-        upstream = member.get("upstream_authority_npub")
-        if not upstream:
-            raise RegistryError(
-                f"Member {operator_npub} has no upstream authority "
-                f"(role={member.get('role')})."
-            )
-        return upstream
-
     async def resolve_oracle_service(self, operator_npub: str) -> dict[str, str]:
         """Walk *operator_npub*'s authority chain to Prime Authority and return Oracle service.
 
@@ -94,54 +79,6 @@ class DPYCRegistry:
             current_npub = upstream
 
         raise RegistryError("Authority chain too deep (possible cycle).")
-
-    async def resolve_authority_service(self, operator_npub: str) -> dict[str, str]:
-        """Look up *operator_npub*'s upstream authority and return its service URL.
-
-        Returns ``{"npub": authority_npub, "url": service_url, "name": service_name}``.
-        Raises ``RegistryError`` if the authority has no services registered.
-        """
-        authority_npub = await self.resolve_authority_npub(operator_npub)
-        authority_member = await self.check_membership(authority_npub)
-
-        services = authority_member.get("services") or []
-        if not services:
-            raise RegistryError(
-                f"Authority {authority_npub} has no services registered in the registry."
-            )
-
-        svc = services[0]
-        return {
-            "npub": authority_npub,
-            "url": svc["url"],
-            "name": svc.get("name", "unknown"),
-        }
-
-    async def resolve_service_by_name(self, service_name: str) -> dict[str, str]:
-        """Find a service by name across ALL members (any role).
-
-        Scans the full registry for a member whose ``services[]`` contains
-        a service with the given name. Returns the first active match.
-
-        Returns ``{"npub": member_npub, "url": service_url, "name": service_name}``.
-        Raises ``RegistryError`` if not found.
-        """
-        members = await self._fetch()
-
-        for member in members:
-            if member.get("status") != "active":
-                continue
-            for svc in member.get("services") or []:
-                if svc.get("name") == service_name:
-                    return {
-                        "npub": member["npub"],
-                        "url": svc["url"],
-                        "name": svc["name"],
-                    }
-
-        raise RegistryError(
-            f"No active member with service '{service_name}' found in DPYC registry."
-        )
 
     async def _fetch(self) -> list[dict[str, Any]]:
         """Return the cached member list, refreshing if stale."""
@@ -183,41 +120,6 @@ class DPYCRegistry:
         await self._client.aclose()
 
 
-async def resolve_authority_npub(
-    operator_npub: str,
-    registry_url: str = DEFAULT_REGISTRY_URL,
-    cache_ttl_seconds: int = 300,
-) -> str:
-    """Convenience function: resolve an operator's upstream authority npub.
-
-    Creates a one-shot ``DPYCRegistry``, performs the lookup, and closes.
-    For repeated lookups, prefer creating a ``DPYCRegistry`` instance and
-    reusing it.
-    """
-    registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
-    try:
-        return await registry.resolve_authority_npub(operator_npub)
-    finally:
-        await registry.close()
-
-
-async def resolve_authority_service(
-    operator_npub: str,
-    registry_url: str = DEFAULT_REGISTRY_URL,
-    cache_ttl_seconds: int = 300,
-) -> dict[str, str]:
-    """Convenience function: resolve an operator's upstream authority service.
-
-    Returns ``{"npub": authority_npub, "url": service_url, "name": service_name}``.
-    Creates a one-shot ``DPYCRegistry``, performs the lookup, and closes.
-    """
-    registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
-    try:
-        return await registry.resolve_authority_service(operator_npub)
-    finally:
-        await registry.close()
-
-
 async def resolve_oracle_service(
     operator_npub: str,
     registry_url: str = DEFAULT_REGISTRY_URL,
@@ -231,23 +133,6 @@ async def resolve_oracle_service(
     registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
     try:
         return await registry.resolve_oracle_service(operator_npub)
-    finally:
-        await registry.close()
-
-
-async def resolve_service_by_name(
-    service_name: str,
-    registry_url: str = DEFAULT_REGISTRY_URL,
-    cache_ttl_seconds: int = 300,
-) -> dict[str, str]:
-    """Convenience function: find a service by name across all members.
-
-    Returns ``{"npub": member_npub, "url": service_url, "name": service_name}``.
-    Creates a one-shot ``DPYCRegistry``, performs the lookup, and closes.
-    """
-    registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
-    try:
-        return await registry.resolve_service_by_name(service_name)
     finally:
         await registry.close()
 
@@ -290,58 +175,5 @@ async def resolve_my_parent_npub(
             "Add members/authorities/{own_npub}.json with the desired "
             "upstream_authority_npub before initiating an onboarding claim."
         )
-    finally:
-        await registry.close()
-
-
-async def resolve_purchase_mode(
-    own_npub: str,
-    registry_url: str = DEFAULT_REGISTRY_URL,
-    cache_ttl_seconds: int = 300,
-) -> str:
-    """Derive an actor's purchase-certification mode from the registry chain.
-
-    Returns ``"certified"`` when the actor has an upstream Authority that runs
-    a certification MCP (so every purchase order must pay that parent), else
-    ``"direct"``. The rule, read from dpyc-community topology:
-
-    - No ``upstream_authority_npub`` (the actor is Prime / a trust root) →
-      ``"direct"``.
-    - The parent is Prime — the parent's own ``upstream_authority_npub`` is
-      empty → ``"direct"``. Prime is an npub anchor that runs no Authority
-      certify MCP, so a penultimate Authority self-funds.
-    - The parent is a non-Prime Authority that runs a certify MCP →
-      ``"certified"``.
-
-    This is the single source of truth for the certify-up cascade: an Operator
-    under any Authority, or a sub-Authority under a regional Authority (e.g.
-    NewEngland under NorthAmerica), resolves to ``"certified"`` and pays its
-    parent. Penultimate Authorities (NorthAmerica, Lonnie-Authority under
-    Prime) resolve to ``"direct"``.
-
-    Raises:
-        RegistryError: when the registry cannot be fetched.
-        ValueError: when ``own_npub`` is not in the registry.
-    """
-    registry = DPYCRegistry(url=registry_url, cache_ttl_seconds=cache_ttl_seconds)
-    try:
-        members = await registry._fetch()
-        by_npub = {m.get("npub"): m for m in members}
-        me = by_npub.get(own_npub)
-        if me is None:
-            raise ValueError(
-                f"{own_npub[:16]}… is not in the dpyc-community registry; "
-                "cannot derive purchase_mode."
-            )
-        parent_npub = me.get("upstream_authority_npub")
-        if not parent_npub:
-            # I am Prime / a trust root — nothing above to certify against.
-            return "direct"
-        parent = by_npub.get(parent_npub)
-        if parent is None or not parent.get("upstream_authority_npub"):
-            # Parent is Prime (runs no certify MCP) or is unknown — treat as a
-            # trust root and self-fund.
-            return "direct"
-        return "certified"
     finally:
         await registry.close()

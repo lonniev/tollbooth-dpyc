@@ -14,60 +14,16 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
-from tollbooth.registry import DPYCRegistry, resolve_purchase_mode
 from tollbooth.runtime import OperatorRuntime
 
-# Prime → {penultimate authority → sub-authority}, plus an operator under the
-# penultimate authority. Mirrors the live Prime → NorthAmerica → NewEngland chain.
-CHAIN_MEMBERS = [
-    {"npub": "npub1prime", "role": "prime_authority", "status": "active",
-     "upstream_authority_npub": None},
-    {"npub": "npub1penult", "role": "authority", "status": "active",
-     "upstream_authority_npub": "npub1prime"},
-    {"npub": "npub1subauth", "role": "authority", "status": "active",
-     "upstream_authority_npub": "npub1penult"},
-    {"npub": "npub1operator", "role": "operator", "status": "active",
-     "upstream_authority_npub": "npub1penult"},
-]
+# NOTE: the registry-topology rule (certified vs direct) now lives in the Oracle
+# (dpyc-oracle CommunityRegistry.purchase_mode / resolve_service). Operators are
+# nsec-only and never read GitHub, so these tests exercise the runtime's
+# consumption of the Oracle answer, not the rule itself.
 
 
 # --------------------------------------------------------------------------
-# resolve_purchase_mode — the registry rule
-# --------------------------------------------------------------------------
-
-@pytest.mark.parametrize(
-    "npub,expected",
-    [
-        ("npub1prime", "direct"),       # root: nothing above to certify against
-        ("npub1penult", "direct"),      # parent is Prime (runs no certify MCP) → self-fund
-        ("npub1subauth", "certified"),  # parent is a real Authority → certify up
-        ("npub1operator", "certified"), # operator under a real Authority → certify up
-    ],
-)
-@pytest.mark.asyncio
-async def test_resolve_purchase_mode_rule(npub, expected):
-    with patch.object(DPYCRegistry, "_fetch", AsyncMock(return_value=CHAIN_MEMBERS)):
-        assert await resolve_purchase_mode(npub) == expected
-
-
-@pytest.mark.asyncio
-async def test_resolve_purchase_mode_unknown_npub_raises():
-    with patch.object(DPYCRegistry, "_fetch", AsyncMock(return_value=CHAIN_MEMBERS)):  # noqa: SIM117
-        with pytest.raises(ValueError, match="not in the dpyc-community registry"):
-            await resolve_purchase_mode("npub1ghost")
-
-
-@pytest.mark.asyncio
-async def test_resolve_purchase_mode_unknown_parent_is_direct():
-    """A dangling parent reference fails toward trust-root (no upstream cert)."""
-    orphan = [{"npub": "npub1orphan", "role": "authority", "status": "active",
-               "upstream_authority_npub": "npub1missing"}]
-    with patch.object(DPYCRegistry, "_fetch", AsyncMock(return_value=orphan)):
-        assert await resolve_purchase_mode("npub1orphan") == "direct"
-
-
-# --------------------------------------------------------------------------
-# _effective_purchase_mode — auto resolution, caching, fail-safe
+# _effective_purchase_mode — auto resolution via the Oracle, caching, no fallback
 # --------------------------------------------------------------------------
 
 def _rt(purchase_mode: str, vault_source: str = "authority") -> OperatorRuntime:
@@ -77,33 +33,50 @@ def _rt(purchase_mode: str, vault_source: str = "authority") -> OperatorRuntime:
     return rt
 
 
+def _oracle_service(mode):
+    """Patch target for default_oracle_client → client.resolve_service→{purchase_mode}."""
+    client = MagicMock()
+    if isinstance(mode, Exception):
+        client.resolve_service = AsyncMock(side_effect=mode)
+    else:
+        client.resolve_service = AsyncMock(
+            return_value=None if mode is None else {"purchase_mode": mode}
+        )
+    factory = MagicMock(return_value=client)
+    factory.client = client
+    return factory
+
+
 @pytest.mark.asyncio
-async def test_effective_mode_explicit_passthrough_skips_registry():
-    with patch("tollbooth.registry.resolve_purchase_mode",
-               AsyncMock(side_effect=AssertionError("must not hit registry"))):
+async def test_effective_mode_explicit_passthrough_skips_oracle():
+    factory = _oracle_service(AssertionError("must not hit the Oracle"))
+    with patch("tollbooth.oracle_client.default_oracle_client", factory):
         assert await _rt("certified")._effective_purchase_mode() == "certified"
         assert await _rt("direct")._effective_purchase_mode() == "direct"
+    factory.client.resolve_service.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_effective_mode_auto_resolves_once_and_caches():
     rt = _rt("auto")
-    m = AsyncMock(return_value="certified")
-    with patch("tollbooth.registry.resolve_purchase_mode", m):
+    factory = _oracle_service("certified")
+    with patch("tollbooth.oracle_client.default_oracle_client", factory):
         assert await rt._effective_purchase_mode() == "certified"
         assert await rt._effective_purchase_mode() == "certified"
-    m.assert_called_once()  # second call served from cache
+    factory.client.resolve_service.assert_called_once()  # second call served from cache
 
 
 @pytest.mark.asyncio
-async def test_effective_mode_auto_failsafe_direct_and_not_cached():
-    """Registry outage falls back to direct for this call only — retried next time."""
+async def test_effective_mode_auto_raises_when_oracle_cannot_resolve():
+    """No silent 'direct' fallback: an unresolvable mode raises and is not cached."""
     rt = _rt("auto")
-    m = AsyncMock(side_effect=RuntimeError("registry unreachable"))
-    with patch("tollbooth.registry.resolve_purchase_mode", m):
-        assert await rt._effective_purchase_mode() == "direct"
-        assert await rt._effective_purchase_mode() == "direct"
-    assert m.call_count == 2  # fallback not cached
+    factory = _oracle_service(None)  # Oracle returns no service
+    with patch("tollbooth.oracle_client.default_oracle_client", factory):
+        with pytest.raises(RuntimeError, match="purchase_mode"):
+            await rt._effective_purchase_mode()
+        with pytest.raises(RuntimeError, match="purchase_mode"):
+            await rt._effective_purchase_mode()
+    assert factory.client.resolve_service.call_count == 2  # not cached
     assert rt._resolved_purchase_mode is None
 
 

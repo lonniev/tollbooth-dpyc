@@ -12,8 +12,7 @@ from tollbooth.registry import (
     DEFAULT_REGISTRY_URL,
     DPYCRegistry,
     RegistryError,
-    resolve_authority_npub,
-    resolve_service_by_name,
+    resolve_oracle_service,
 )
 
 SAMPLE_MEMBERS = [
@@ -80,65 +79,6 @@ def _mock_response(data, status_code=200):
             "error", request=MagicMock(), response=resp
         )
     return resp
-
-
-# --- resolve_authority_npub (instance method) ---
-
-
-@pytest.mark.asyncio
-async def test_resolve_authority_npub_success():
-    """resolve_authority_npub returns upstream npub for an active operator."""
-    registry = DPYCRegistry(url="https://example.com/members.json")
-    registry._client = AsyncMock()
-    registry._client.get = AsyncMock(
-        return_value=_mock_response({"members": SAMPLE_MEMBERS})
-    )
-
-    result = await registry.resolve_authority_npub("npub1operator")
-    assert result == "npub1authority"
-    await registry.close()
-
-
-@pytest.mark.asyncio
-async def test_resolve_authority_npub_no_upstream_raises():
-    """resolve_authority_npub raises for Prime Authority (no upstream)."""
-    registry = DPYCRegistry(url="https://example.com/members.json")
-    registry._client = AsyncMock()
-    registry._client.get = AsyncMock(
-        return_value=_mock_response({"members": SAMPLE_MEMBERS})
-    )
-
-    with pytest.raises(RegistryError, match="no upstream authority"):
-        await registry.resolve_authority_npub("npub1prime")
-    await registry.close()
-
-
-@pytest.mark.asyncio
-async def test_resolve_authority_npub_not_found_raises():
-    """resolve_authority_npub raises for unknown npub."""
-    registry = DPYCRegistry(url="https://example.com/members.json")
-    registry._client = AsyncMock()
-    registry._client.get = AsyncMock(
-        return_value=_mock_response({"members": SAMPLE_MEMBERS})
-    )
-
-    with pytest.raises(RegistryError, match="not found"):
-        await registry.resolve_authority_npub("npub1unknown")
-    await registry.close()
-
-
-@pytest.mark.asyncio
-async def test_resolve_authority_npub_inactive_raises():
-    """resolve_authority_npub raises for banned member."""
-    registry = DPYCRegistry(url="https://example.com/members.json")
-    registry._client = AsyncMock()
-    registry._client.get = AsyncMock(
-        return_value=_mock_response({"members": SAMPLE_MEMBERS})
-    )
-
-    with pytest.raises(RegistryError, match="not active"):
-        await registry.resolve_authority_npub("npub1banned")
-    await registry.close()
 
 
 # --- Cache TTL ---
@@ -231,7 +171,10 @@ async def test_invalidate_cache():
 
 @pytest.mark.asyncio
 async def test_convenience_function():
-    """Module-level resolve_authority_npub() creates a one-shot registry."""
+    """Module-level resolve_oracle_service() creates a one-shot registry.
+
+    Walks operator → authority → Prime and returns Prime's dpyc-oracle service.
+    """
     mock_resp = _mock_response({"members": SAMPLE_MEMBERS})
 
     with patch("tollbooth.registry.httpx.AsyncClient") as MockClient:
@@ -239,11 +182,12 @@ async def test_convenience_function():
         instance.get = AsyncMock(return_value=mock_resp)
         MockClient.return_value = instance
 
-        result = await resolve_authority_npub(
+        result = await resolve_oracle_service(
             "npub1operator",
             registry_url="https://example.com/members.json",
         )
-        assert result == "npub1authority"
+        assert result["npub"] == "npub1prime"
+        assert result["name"] == "dpyc-oracle"
         instance.aclose.assert_awaited_once()
 
 
@@ -254,98 +198,3 @@ def test_default_registry_url():
     """DEFAULT_REGISTRY_URL points to dpyc-community on GitHub."""
     assert "dpyc-community" in DEFAULT_REGISTRY_URL
     assert "read-only-lookup-cache.json" in DEFAULT_REGISTRY_URL
-
-
-# --- resolve_service_by_name (instance method) ---
-
-
-@pytest.mark.asyncio
-async def test_resolve_service_by_name_found():
-    """resolve_service_by_name returns correct dict for a matching service."""
-    registry = DPYCRegistry(url="https://example.com/members.json")
-    registry._client = AsyncMock()
-    registry._client.get = AsyncMock(
-        return_value=_mock_response({"members": SAMPLE_MEMBERS})
-    )
-
-    result = await registry.resolve_service_by_name("tollbooth-oauth2-collector")
-    assert result == {
-        "npub": "npub1advocate",
-        "url": "https://collector.example.com",
-        "name": "tollbooth-oauth2-collector",
-    }
-    await registry.close()
-
-
-@pytest.mark.asyncio
-async def test_resolve_service_by_name_not_found():
-    """resolve_service_by_name raises RegistryError when no match."""
-    registry = DPYCRegistry(url="https://example.com/members.json")
-    registry._client = AsyncMock()
-    registry._client.get = AsyncMock(
-        return_value=_mock_response({"members": SAMPLE_MEMBERS})
-    )
-
-    with pytest.raises(RegistryError, match="No active member with service"):
-        await registry.resolve_service_by_name("nonexistent-service")
-    await registry.close()
-
-
-@pytest.mark.asyncio
-async def test_resolve_service_by_name_skips_inactive():
-    """resolve_service_by_name skips banned members."""
-    registry = DPYCRegistry(url="https://example.com/members.json")
-    registry._client = AsyncMock()
-    registry._client.get = AsyncMock(
-        return_value=_mock_response({"members": SAMPLE_MEMBERS})
-    )
-
-    with pytest.raises(RegistryError, match="No active member with service"):
-        await registry.resolve_service_by_name("banned-svc")
-    await registry.close()
-
-
-@pytest.mark.asyncio
-async def test_resolve_service_by_name_works_across_roles():
-    """resolve_service_by_name finds services on any role (operator, authority, etc)."""
-    registry = DPYCRegistry(url="https://example.com/members.json")
-    registry._client = AsyncMock()
-    registry._client.get = AsyncMock(
-        return_value=_mock_response({"members": SAMPLE_MEMBERS})
-    )
-
-    # Operator service
-    result = await registry.resolve_service_by_name("my-mcp")
-    assert result["npub"] == "npub1operator"
-
-    # Authority service
-    result = await registry.resolve_service_by_name("tollbooth-authority")
-    assert result["npub"] == "npub1authority"
-
-    # Prime Authority service
-    result = await registry.resolve_service_by_name("dpyc-oracle")
-    assert result["npub"] == "npub1prime"
-
-    await registry.close()
-
-
-# --- resolve_service_by_name (convenience function) ---
-
-
-@pytest.mark.asyncio
-async def test_resolve_service_by_name_convenience():
-    """Module-level resolve_service_by_name() creates a one-shot registry."""
-    mock_resp = _mock_response({"members": SAMPLE_MEMBERS})
-
-    with patch("tollbooth.registry.httpx.AsyncClient") as MockClient:
-        instance = AsyncMock()
-        instance.get = AsyncMock(return_value=mock_resp)
-        MockClient.return_value = instance
-
-        result = await resolve_service_by_name(
-            "tollbooth-oauth2-collector",
-            registry_url="https://example.com/members.json",
-        )
-        assert result["npub"] == "npub1advocate"
-        assert result["url"] == "https://collector.example.com"
-        instance.aclose.assert_awaited_once()

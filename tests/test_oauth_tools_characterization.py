@@ -6,7 +6,7 @@ the code→token exchange and token vault storage. §2-sensitive. The underlying
 oauth2_collector functions are tested in test_oauth2_collector.py; this pins
 the tool-closure orchestration before the Phase 2 move to tools/oauth.py.
 
-Heavy patching: the tools import resolve_service_by_name / generate_pkce_pair /
+Heavy patching: the tools import default_oracle_client / generate_pkce_pair /
 build_authorize_url / create_shortlink / retrieve_code_from_collector /
 exchange_code_for_token at call time, so we patch them at their source module.
 """
@@ -83,8 +83,8 @@ def _register(rt):
 async def test_begin_oauth_happy_builds_url_and_stores_verifier():
     rt = _runtime()
     tools = _register(rt)
-    with patch("tollbooth.registry.resolve_service_by_name",
-               new=AsyncMock(return_value={"url": "https://collector.example/"})), \
+    with patch("tollbooth.oracle_client.default_oracle_client",
+               return_value=MagicMock(resolve_service=AsyncMock(return_value={"url": "https://collector.example/"}))), \
          patch("tollbooth.oauth2_collector.generate_pkce_pair",
                return_value=("VERIFIER", "CHALLENGE")), \
          patch("tollbooth.oauth2_collector.build_authorize_url",
@@ -128,8 +128,8 @@ async def test_begin_oauth_empty_client_id():
 async def test_begin_oauth_collector_not_found():
     rt = _runtime()
     tools = _register(rt)
-    with patch("tollbooth.registry.resolve_service_by_name",
-               new=AsyncMock(side_effect=RuntimeError("404"))):
+    with patch("tollbooth.oracle_client.default_oracle_client",
+               return_value=MagicMock(resolve_service=AsyncMock(side_effect=RuntimeError("404")))):
         r = await tools["begin_oauth"](npub=PATRON, dpop_token="ok")
     assert r["success"] is False and "OAuth2 collector not found" in r["error"]
 
@@ -150,8 +150,8 @@ async def test_check_status_code_pending():
     rt = _runtime()
     rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
     tools = _register(rt)
-    with patch("tollbooth.registry.resolve_service_by_name",
-               new=AsyncMock(return_value={"url": "https://collector.example"})), \
+    with patch("tollbooth.oracle_client.default_oracle_client",
+               return_value=MagicMock(resolve_service=AsyncMock(return_value={"url": "https://collector.example"}))), \
          patch("tollbooth.oauth2_collector.retrieve_code_from_collector",
                new=AsyncMock(return_value=None)):
         r = await tools["check_oauth_status"](npub=PATRON, dpop_token="ok")
@@ -164,8 +164,8 @@ async def test_check_status_completes_and_persists_tokens():
     rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
     tools = _register(rt)
     token = {"access_token": "AT", "token_type": "Bearer", "refresh_token": "RT", "expires_at": 1999}
-    with patch("tollbooth.registry.resolve_service_by_name",
-               new=AsyncMock(return_value={"url": "https://collector.example"})), \
+    with patch("tollbooth.oracle_client.default_oracle_client",
+               return_value=MagicMock(resolve_service=AsyncMock(return_value={"url": "https://collector.example"}))), \
          patch("tollbooth.oauth2_collector.retrieve_code_from_collector",
                new=AsyncMock(return_value="AUTHCODE")), \
          patch("tollbooth.oauth2_collector.exchange_code_for_token",
@@ -189,8 +189,8 @@ async def test_check_status_exchange_failure_unclassified():
     rt = _runtime()
     rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
     tools = _register(rt)
-    with patch("tollbooth.registry.resolve_service_by_name",
-               new=AsyncMock(return_value={"url": "https://collector.example"})), \
+    with patch("tollbooth.oracle_client.default_oracle_client",
+               return_value=MagicMock(resolve_service=AsyncMock(return_value={"url": "https://collector.example"}))), \
          patch("tollbooth.oauth2_collector.retrieve_code_from_collector",
                new=AsyncMock(return_value="AUTHCODE")), \
          patch("tollbooth.oauth2_collector.exchange_code_for_token",
@@ -217,8 +217,8 @@ async def test_check_status_exchange_surfaces_provider_refusal():
         oauth_error="invalid_client",
         fault="client",
     )
-    with patch("tollbooth.registry.resolve_service_by_name",
-               new=AsyncMock(return_value={"url": "https://collector.example"})), \
+    with patch("tollbooth.oracle_client.default_oracle_client",
+               return_value=MagicMock(resolve_service=AsyncMock(return_value={"url": "https://collector.example"}))), \
          patch("tollbooth.oauth2_collector.retrieve_code_from_collector",
                new=AsyncMock(return_value="AUTHCODE")), \
          patch("tollbooth.oauth2_collector.exchange_code_for_token",
@@ -246,8 +246,8 @@ async def test_check_status_exchange_invalid_grant_routes_to_restart():
         oauth_error="invalid_grant",
         fault="grant",
     )
-    with patch("tollbooth.registry.resolve_service_by_name",
-               new=AsyncMock(return_value={"url": "https://collector.example"})), \
+    with patch("tollbooth.oracle_client.default_oracle_client",
+               return_value=MagicMock(resolve_service=AsyncMock(return_value={"url": "https://collector.example"}))), \
          patch("tollbooth.oauth2_collector.retrieve_code_from_collector",
                new=AsyncMock(return_value="AUTHCODE")), \
          patch("tollbooth.oauth2_collector.exchange_code_for_token",
@@ -267,8 +267,8 @@ async def test_check_status_on_token_received_merges_extra():
     rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example"}, ""))
     tools = _register(rt)
     token = {"access_token": "AT", "token_type": "Bearer"}
-    with patch("tollbooth.registry.resolve_service_by_name",
-               new=AsyncMock(return_value={"url": "https://collector.example"})), \
+    with patch("tollbooth.oracle_client.default_oracle_client",
+               return_value=MagicMock(resolve_service=AsyncMock(return_value={"url": "https://collector.example"}))), \
          patch("tollbooth.oauth2_collector.retrieve_code_from_collector",
                new=AsyncMock(return_value="AUTHCODE")), \
          patch("tollbooth.oauth2_collector.exchange_code_for_token",

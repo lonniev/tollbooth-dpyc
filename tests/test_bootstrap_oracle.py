@@ -80,14 +80,14 @@ async def test_bootstrap_fails_clearly_when_oracle_unreachable_for_relays():
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_never_calls_the_github_registry():
-    """The whole point: no registry.resolve_authority_service on the boot path."""
+async def test_bootstrap_never_constructs_the_github_registry():
+    """The whole point: the boot path never touches the GitHub-reading registry."""
     client = BootstrapClient(nsec_hex=OP.bech32())
     oracle = _oracle(authority={"npub": AUTH.public_key.bech32(), "url": "u", "name": "n"})
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
         return_value=({"neon_database_url": "postgresql://z"}, AUTH.public_key.hex(), "d"),
-    ), patch("tollbooth.registry.resolve_authority_service") as reg:
+    ), patch("tollbooth.registry.DPYCRegistry") as reg:
         result = await client.bootstrap()
 
     assert result.success

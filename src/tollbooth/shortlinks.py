@@ -7,11 +7,7 @@ import logging
 
 import httpx
 
-from tollbooth.registry import resolve_service_by_name
-
 logger = logging.getLogger(__name__)
-
-_FALLBACK_URL = "https://tollbooth-shortlinks.fastmcp.app/mcp/"
 
 
 def _ensure_mcp_path(url: str) -> str:
@@ -22,19 +18,18 @@ def _ensure_mcp_path(url: str) -> str:
     return stripped + "/mcp/"
 
 
-async def _resolve_shortlinks_url() -> str:
-    """Resolve the shortlinks service URL from the DPYC registry, falling back to hardcoded."""
-    try:
-        svc = await resolve_service_by_name("tollbooth-shortlinks")
-        url = svc.get("url", "")
-        if url:
-            return _ensure_mcp_path(url)
-    except Exception:
-        logger.debug(
-            "shortlinks service registry lookup failed; using fallback URL",
-            exc_info=True,
-        )
-    return _FALLBACK_URL
+async def _resolve_shortlinks_url() -> str | None:
+    """Resolve the shortlinks service URL via the Oracle. ``None`` if unavailable.
+
+    Operators ask the Oracle for sibling-service URLs — never GitHub — and there
+    is no hardcoded fallback endpoint to rot: a missing answer means no
+    shortlink, and ``create_shortlink`` is best-effort.
+    """
+    from tollbooth.oracle_client import default_oracle_client
+
+    svc = await default_oracle_client().resolve_service(name="tollbooth-shortlinks")
+    url = (svc or {}).get("url", "")
+    return _ensure_mcp_path(url) if url else None
 
 
 async def create_shortlink(url: str, slug: str | None = None) -> str | None:
@@ -44,6 +39,8 @@ async def create_shortlink(url: str, slug: str | None = None) -> str | None:
     """
     try:
         service_url = await _resolve_shortlinks_url()
+        if not service_url:
+            return None
 
         arguments: dict[str, str] = {"url": url}
         if slug is not None:

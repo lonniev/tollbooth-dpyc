@@ -30,6 +30,27 @@ Closes the fleet-wide bootstrap SPOF where a `raw.githubusercontent.com` 429
 stranded cold-starting operators (schwab-mcp, 2026-08-17). Requires the Oracle's
 matching read tools to be deployed first.
 
+### Removed — the operator-side GitHub registry path (no fallback code)
+
+Everything an operator asked GitHub now goes through the Oracle via MCP. The
+GitHub path is deleted outright, not left as a fallback — fallback code becomes
+shipping code, attacked code, and forgotten code.
+
+- `runtime.py`: `_effective_purchase_mode` resolves via the Oracle
+  (`resolve_service.purchase_mode`) and **raises** instead of silently defaulting
+  to `"direct"` on failure (which would skip the certify-up tax); `_certifier`
+  and `_remote_authority_call` resolve their Authority URL via the Oracle;
+  `_call_oracle` uses the fixed `DPYC_ORACLE_MCP_URL` anchor (no registry lookup
+  to find the Oracle) and drops its unused `rt` param.
+- `shortlinks.py` / `tools/oauth.py`: resolve sibling-service URLs via the
+  Oracle; the hardcoded `_FALLBACK_URL` in shortlinks is gone.
+- `registry.py`: removed the operator-facing functions `resolve_authority_service`,
+  `resolve_authority_npub`, `resolve_service_by_name`, `resolve_purchase_mode`
+  (and their `__init__` exports). The Authority side keeps `DPYCRegistry`,
+  `check_membership`, `resolve_oracle_service`, `resolve_my_parent_npub`,
+  `DEFAULT_REGISTRY_URL` — Authorities and the Oracle remain permitted GitHub
+  readers.
+
 ## [0.85.1] - 2026-08-16
 
 ### Fixed — complete the collector seal-to-operator wiring (finishes #228/#229)
