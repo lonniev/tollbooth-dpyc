@@ -527,33 +527,31 @@ class OperatorRuntime:
         """Resolve the effective purchase mode, honoring ``purchase_mode="auto"``.
 
         Explicit ``"direct"``/``"certified"`` are returned as-is. ``"auto"`` is
-        derived once from the dpyc-community registry chain (an Operator or a
-        sub-Authority with a certifying parent → ``"certified"``; Prime and
+        derived once — via the Oracle — from the community chain (an Operator or
+        a sub-Authority with a certifying parent → ``"certified"``; Prime and
         penultimate trust roots → ``"direct"``) and cached for the process
-        lifetime.
-
-        On any registry failure it falls back to ``"direct"`` for this call
-        only (the historical trust-root behavior — purchases keep working and
-        the certify-up cascade resumes once the registry is reachable) and does
-        NOT cache the fallback, so a transient outage can't pin the actor.
+        lifetime. The operator asks the Oracle, never GitHub. There is no
+        degraded-mode default: if the Oracle can't answer, the purchase raises
+        rather than silently self-selecting ``"direct"`` and skipping the
+        certify-up tax.
         """
         if self._purchase_mode != "auto":
             return self._purchase_mode
         if self._resolved_purchase_mode is not None:
             return self._resolved_purchase_mode
-        from tollbooth.registry import resolve_purchase_mode
-        try:
-            mode = await resolve_purchase_mode(self.operator_npub())
-        except Exception:
-            logger.warning(
-                "Could not derive purchase_mode from the registry; using "
-                "'direct' for this purchase (no upstream certification). Will "
-                "retry resolution on the next purchase.",
-                exc_info=True,
+        from tollbooth.oracle_client import default_oracle_client
+
+        service = await default_oracle_client().resolve_service(
+            npub=self.operator_npub()
+        )
+        mode = (service or {}).get("purchase_mode")
+        if mode not in ("certified", "direct"):
+            raise RuntimeError(
+                "Oracle could not resolve purchase_mode for "
+                f"{self.operator_npub()[:16]}…"
             )
-            return "direct"
         self._resolved_purchase_mode = mode
-        logger.info("Resolved purchase_mode=%s from the registry chain.", mode)
+        logger.info("Resolved purchase_mode=%s via the Oracle.", mode)
         return mode
 
     async def _certifier(self) -> tuple[Any, dict[str, Any]]:
@@ -566,9 +564,16 @@ class OperatorRuntime:
         read (``check_authority_balance``).
         """
         from tollbooth.authority_client import AuthorityCertifier
-        from tollbooth.registry import resolve_authority_service
+        from tollbooth.oracle_client import default_oracle_client
 
-        auth_info = await resolve_authority_service(self.operator_npub())
+        auth_info = await default_oracle_client().resolve_authority_for(
+            self.operator_npub()
+        )
+        if not auth_info or not auth_info.get("url"):
+            raise RuntimeError(
+                "Oracle could not resolve the Authority service for "
+                f"{self.operator_npub()[:16]}…"
+            )
         certifier = AuthorityCertifier(
             auth_info["url"], self.operator_npub(), self._get_nsec(),
         )
@@ -5240,27 +5245,27 @@ def register_standard_tools(
     @oracle_tool
     async def how_to_join() -> dict[str, Any]:
         """Get DPYC onboarding instructions from the Oracle. Free."""
-        return await _call_oracle(rt, "how_to_join")
+        return await _call_oracle("how_to_join")
 
     @oracle_tool
     async def get_tax_rate() -> dict[str, Any]:
         """Get the current DPYC certification tax rate. Free."""
-        return await _call_oracle(rt, "get_tax_rate")
+        return await _call_oracle("get_tax_rate")
 
     @oracle_tool
     async def lookup_member(npub: str) -> dict[str, Any]:
         """Look up a DPYC community member by npub. Free."""
-        return await _call_oracle(rt, "lookup_member", {"npub": npub})
+        return await _call_oracle("lookup_member", {"npub": npub})
 
     @oracle_tool
     async def about() -> dict[str, Any]:
         """Describe the DPYC ecosystem via the Oracle. Free."""
-        return await _call_oracle(rt, "about")
+        return await _call_oracle("about")
 
     @oracle_tool
     async def network_advisory() -> dict[str, Any]:
         """Get active network advisories from the Oracle. Free."""
-        return await _call_oracle(rt, "network_advisory")
+        return await _call_oracle("network_advisory")
 
     # -- Authority delegation -------------------------------------------
 
@@ -5408,19 +5413,14 @@ def register_standard_tools(
         """
         from fastmcp import Client
 
-        from tollbooth.registry import DEFAULT_REGISTRY_URL, DPYCRegistry
+        from tollbooth.oracle_client import default_oracle_client
 
-        registry = DPYCRegistry(url=DEFAULT_REGISTRY_URL)
-        try:
-            member = await registry.check_membership(authority_npub)
-        finally:
-            await registry.close()
-        services = member.get("services") or []
-        if not services:
+        service = await default_oracle_client().resolve_service(npub=authority_npub)
+        if not service or not service.get("url"):
             raise RuntimeError(
                 f"Authority {authority_npub[:16]}... has no service URL in the registry."
             )
-        url = services[0]["url"]
+        url = service["url"]
 
         async with Client(url) as client:
             tools = await client.list_tools()
@@ -6187,24 +6187,17 @@ def register_standard_tools(
 
 
 async def _call_oracle(
-    rt: OperatorRuntime,
     tool_name: str,
     args: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Call an Oracle tool via MCP-to-MCP."""
+    """Call an Oracle tool via MCP-to-MCP against the SDK's fixed Oracle anchor.
+
+    No registry lookup to find the Oracle — its endpoint is the one coordinate
+    an operator knows a priori (``DPYC_ORACLE_MCP_URL``).
+    """
+    from tollbooth.oracle_client import OracleClientError, default_oracle_client
+
     try:
-        from tollbooth.registry import resolve_oracle_service
-        oracle_info = await resolve_oracle_service(rt.operator_npub())
-        from fastmcp import Client
-        async with Client(oracle_info["url"], auth="oauth") as client:
-            result = await client.call_tool(tool_name, args or {})
-            for block in getattr(result, "content", []):
-                if hasattr(block, "text"):
-                    import json as _json
-                    try:
-                        return _json.loads(block.text)
-                    except (ValueError, TypeError):
-                        return {"success": True, "result": block.text}
-        return {"success": True, "result": str(result)}
-    except Exception as e:  # noqa: BLE001
+        return await default_oracle_client().call_tool(tool_name, args or {})
+    except OracleClientError as e:
         return {"success": False, "error": f"Oracle delegation failed: {e}"}

@@ -15,10 +15,9 @@ Send side (Authority):
         config={"neon_database_url": "postgres://..."},
     )
 
-Receive side (Operator):
-    config = receive_bootstrap_config(
+Receive side (Operator) — nsec only, Authority discovered from the event:
+    config, authority_hex, diag = receive_bootstrap_config(
         operator_nsec="nsec1...",
-        authority_pubkey_hex="abc123...",
     )
     neon_url = config.get("neon_database_url")
 
@@ -84,10 +83,14 @@ def send_bootstrap_config(
     else:
         op_pubkey_hex = operator_npub
 
-    # Build payload
+    # Build payload. The Authority stamps its own npub inside the encrypted
+    # body so the operator learns — authoritatively — who signed its config
+    # without a prior registry lookup. (The event's own ``pubkey`` says the same
+    # thing in the clear; the operator cross-checks both against the Oracle.)
     payload = json.dumps({
         "type": BOOTSTRAP_CONFIG_TAG,
         "config": config,
+        "authority_npub": auth_pk.public_key.bech32(),
         "ts": int(time.time()),
     })
 
@@ -152,18 +155,28 @@ def send_bootstrap_config(
 def receive_bootstrap_config(
     *,
     operator_nsec: str,
-    authority_pubkey_hex: str,
     relays: list[str] | None = None,
-) -> tuple[dict[str, str] | None, str]:
-    """Read bootstrap config from Nostr relays.
+    expected_authority_hex: str | None = None,
+) -> tuple[dict[str, str] | None, str | None, str]:
+    """Read bootstrap config from Nostr relays using ONLY the operator nsec.
 
-    Called by the operator on cold start. Polls relays for the Authority's
-    NIP-33 parameterized-replaceable config event (kind 30078, scoped by the
-    per-operator ``d`` tag), decrypts the NIP-04 content, and returns the config
-    dict. No age window: a replaceable event is the current config regardless of
-    how long ago it was published.
+    Called by the operator on cold start. Polls relays for the config event
+    (kind 30078) scoped to this operator's own ``d`` tag — the operator does
+    NOT need to know its Authority in advance. Each candidate is decrypted with
+    the **event's own author** as the NIP-04 counterparty, so the Authority npub
+    is *discovered* from the event rather than supplied. No age window: a
+    replaceable event is the current config however old it is.
 
-    Returns the config dict or None if not found.
+    ``expected_authority_hex`` (optional): when the caller already knows the
+    trusted Authority (e.g. verified via the Oracle), only events from that
+    author are accepted — a spoofed event carrying this operator's ``d`` tag
+    from any other author is ignored. When ``None``, newest-``ts`` wins across
+    all authors and the caller is expected to verify the returned author
+    out-of-band (Oracle cross-check) before trusting the config.
+
+    Returns ``(config, authority_pubkey_hex, diag)`` — ``authority_pubkey_hex``
+    is the hex pubkey of the event that supplied the winning config, or ``None``
+    when no config was found.
     """
     from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
@@ -183,24 +196,26 @@ def receive_bootstrap_config(
     # Sanity check — ensure hex strings are valid
     try:
         bytes.fromhex(op_privkey_hex)
-        bytes.fromhex(authority_pubkey_hex)
+        if expected_authority_hex is not None:
+            bytes.fromhex(expected_authority_hex)
     except ValueError as e:
-        logger.error("Bootstrap key hex invalid: priv=%s... pub=%s... err=%s",
-                     op_privkey_hex[:8], authority_pubkey_hex[:8], e)
-        return None, f"key hex error: {e}"
+        logger.error("Bootstrap key hex invalid: priv=%s... err=%s",
+                     op_privkey_hex[:8], e)
+        return None, None, f"key hex error: {e}"
 
-    # Build subscription filter: the Authority's NIP-33 replaceable config event
-    # (kind 30078) scoped to this operator's `d` tag. No `since` — a replaceable
-    # is the current config however old it is.
+    # Build subscription filter: the config event (kind 30078) scoped to THIS
+    # operator's `d` tag. No `authors` clause — the `d` tag is already namespaced
+    # by operator pubkey, so the operator finds its own config without knowing
+    # who signed it. No `since` — a replaceable is the current config however old.
     sub_filter = {
         "kinds": [30078],
-        "authors": [authority_pubkey_hex],
         "#d": [_config_d_tag(op_pubkey_hex)],
     }
 
     import websocket  # type: ignore[import-untyped]
 
     best_config: dict[str, str] | None = None
+    best_author: str | None = None
     best_ts = 0
     relay_errors: list[str] = []
     events_found = 0
@@ -223,21 +238,27 @@ def receive_bootstrap_config(
                 if msg[0] == "EVENT" and len(msg) >= 3:
                     events_found += 1
                     event_data = msg[2]
+                    author_hex = event_data.get("pubkey", "")
+                    # When a trusted author is known, ignore anyone else's event
+                    # bearing our `d` tag (spoof guard).
+                    if expected_authority_hex and author_hex != expected_authority_hex:
+                        continue
                     try:
                         plaintext = nip04_decrypt(
                             ciphertext_with_iv=event_data["content"],
                             private_key_hex=op_privkey_hex,
-                            public_key_hex=authority_pubkey_hex,
+                            public_key_hex=author_hex,
                         )
                         payload = json.loads(plaintext)
                         if payload.get("type") == BOOTSTRAP_CONFIG_TAG:
                             ts = payload.get("ts", event_data.get("created_at", 0))
                             if ts > best_ts:
                                 best_config = payload.get("config", {})
+                                best_author = author_hex
                                 best_ts = ts
                                 logger.info(
                                     "Bootstrap config received from %s via %s (ts=%d)",
-                                    authority_pubkey_hex[:16], relay_url, ts,
+                                    author_hex[:16], relay_url, ts,
                                 )
                     except Exception as exc:  # noqa: BLE001
                         relay_errors.append(f"{relay_url}: decrypt err: {exc}")
@@ -261,4 +282,4 @@ def receive_bootstrap_config(
     if best_config is None:
         logger.warning("Bootstrap relay poll failed: %s", diag)
 
-    return best_config, diag
+    return best_config, best_author, diag

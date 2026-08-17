@@ -181,6 +181,13 @@ class ErrorCode:
     OPERATOR_CREDENTIALS_MISSING = "operator_credentials_missing"  # vault load failed
     OAUTH_SITUATION_UNKNOWN = "oauth_situation_unknown"  # fallthrough — situation string echoed in message
 
+# The DPYC Oracle's public MCP endpoint — the ONE fixed anchor an Operator is
+# allowed to know a priori. An nsec-only operator seeds its relays and resolves
+# community facts (its Authority, sibling services) through this endpoint via
+# MCP-to-MCP calls, so it never reads the dpyc-community registry on GitHub
+# itself. Changing this is the only bootstrap coordinate baked into the SDK.
+DPYC_ORACLE_MCP_URL = "https://dpyc-oracle.fastmcp.app/mcp"
+
 # Canonical links to DPYC ecosystem repos and live services.
 # Operators should include these in service_status responses so
 # AI agents can discover sibling services without web search.
@@ -192,5 +199,5 @@ ECOSYSTEM_LINKS: dict[str, str] = {
     "excalibur_mcp": "https://github.com/lonniev/excalibur-mcp",
     "dpyc_oracle": "https://github.com/lonniev/dpyc-oracle",
     "tollbooth_sample": "https://github.com/lonniev/tollbooth-sample",
-    "dpyc_oracle_mcp": "https://dpyc-oracle.fastmcp.app/mcp",
+    "dpyc_oracle_mcp": DPYC_ORACLE_MCP_URL,
 }

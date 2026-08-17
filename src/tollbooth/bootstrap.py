@@ -1,16 +1,21 @@
-"""Operator bootstrap — discover config from Authority using only nsec.
+"""Operator bootstrap — discover config from Nostr using only nsec.
 
-The bootstrap sequence:
+The bootstrap sequence (no direct GitHub access — operators are nsec-only):
 1. Derive npub from nsec
-2. Look up Authority's npub from the community registry
-3. Poll Nostr relays for bootstrap config DM from the Authority
+2. Seed the Nostr relay set from the Oracle (one MCP call to the one fixed
+   anchor, ``DPYC_ORACLE_MCP_URL``)
+3. Poll those relays for THIS operator's config event by its own ``d`` tag —
+   the operator does not need to know its Authority to find it; the Authority
+   npub is discovered from the event's author
 4. Extract Neon URL from the encrypted config
 5. Connect to Neon with encryption
 
 The Authority publishes the bootstrap config as a NIP-33 parameterized-
 replaceable event (kind 30078) at registration time; relays keep the latest,
-so it does not age off. The operator reads it on cold start — no OAuth,
-no MCP-to-MCP calls, no additional env vars beyond the nsec.
+so it does not age off. The operator reads it on cold start — no OAuth, no
+GitHub reads, no additional env vars beyond the nsec. The Oracle is asked who
+the Authority is (to accept only its event, and/or to verify the discovered
+author), but a working Neon URL is the final backstop either way.
 """
 
 from __future__ import annotations
@@ -120,49 +125,87 @@ class BootstrapClient:
         logger.info("Bootstrap identity: %s", self._npub[:16])
 
     async def bootstrap(self) -> BootstrapResult:
-        """Run the full bootstrap sequence.
+        """Run the full bootstrap sequence — nsec + Oracle + Nostr, no GitHub.
 
-        1. Resolve Authority npub from registry
-        2. Poll relays for bootstrap config DM from Authority
-        3. Extract Neon URL
+        1. Seed relays from the Oracle (or use injected ``relays``)
+        2. Ask the Oracle who our Authority is (best-effort — used to accept
+           only its config event; falls back to discover-from-event)
+        3. Poll relays for our config event by our own ``d`` tag
+        4. Extract Neon URL; the Authority npub is the event's author
         """
-        # Convert nsec to hex for vault encryption
         from pynostr.key import PrivateKey as _PK  # type: ignore[import-untyped]
+        from pynostr.key import PublicKey
+
+        from tollbooth.bootstrap_relay import receive_bootstrap_config
+        from tollbooth.oracle_client import default_oracle_client
+
+        # Convert nsec to hex for vault encryption
         nsec = self._nsec_hex
-        if nsec.startswith("nsec1"):
-            nsec_hex = _PK.from_nsec(nsec).hex()
-        else:
-            nsec_hex = nsec
+        nsec_hex = _PK.from_nsec(nsec).hex() if nsec.startswith("nsec1") else nsec
 
-        result = BootstrapResult(
-            npub=self.npub,
-            encryption_nsec_hex=nsec_hex,
-        )
+        result = BootstrapResult(npub=self.npub, encryption_nsec_hex=nsec_hex)
 
-        # Step 1: Resolve Authority npub from registry
+        oracle = default_oracle_client()
+
+        # Step 1: relay set. Injected relays win (tests / callers); otherwise the
+        # Oracle is the one fixed anchor an nsec-only operator may know a priori.
+        relays = self._relays
+        if relays is None:
+            try:
+                relays = await oracle.get_relays()
+            except Exception as e:  # noqa: BLE001
+                result.error = f"Cannot reach Oracle for relay set: {e}"
+                logger.warning("Bootstrap: %s", result.error)
+                return result
+            # Warm the process-wide cache so synchronous consumers (courier,
+            # profile, audit) reuse this set instead of re-fetching.
+            from tollbooth.relay_registry import seed_relays
+            seed_relays(relays)
+
+        # Step 2: ask the Oracle who our Authority is. When it answers, we accept
+        # ONLY that author's config event (spoof guard). When it can't (operator
+        # unknown/new, or Oracle briefly unreachable), we proceed by our own
+        # d-tag and discover the author from the event — a working Neon URL is
+        # the backstop, and the author can be re-verified later.
+        expected_authority_hex: str | None = None
         try:
-            authority_info = await self._resolve_authority()
-            result.authority_npub = authority_info.get("npub", "")
-        except Exception as e:  # noqa: BLE001
-            result.error = f"Cannot resolve Authority: {e}"
-            logger.warning("Bootstrap: %s", result.error)
-            return result
+            auth = await oracle.resolve_authority_for(self.npub)
+            if auth and auth.get("npub"):
+                result.authority_npub = auth["npub"]
+                expected_authority_hex = PublicKey.from_npub(auth["npub"]).hex()
+        except Exception as e:  # noqa: BLE001 — verification is best-effort
+            logger.info(
+                "Bootstrap: Oracle authority pre-resolve unavailable (%s); "
+                "accepting config by operator d-tag, discovering author from event.",
+                e,
+            )
 
-        if not result.authority_npub:
-            result.error = "No Authority npub found in registry"
-            return result
-
-        # Step 2: Read bootstrap config from Nostr relays
-        config = self._read_config_from_relays(result.authority_npub)
+        # Step 3: read our own config from Nostr using only our nsec.
+        config, author_hex, diag = receive_bootstrap_config(
+            operator_nsec=self._nsec_hex,
+            relays=relays,
+            expected_authority_hex=expected_authority_hex,
+        )
+        self._relay_diag = diag
 
         if config is None:
-            diag = getattr(self, '_relay_diag', 'no diag')
             logger.warning("Bootstrap relay diagnostics: %s", diag)
             result.error = (
-                f"No bootstrap config on relays from authority "
-                f"{result.authority_npub[:20]}..."
+                "No bootstrap config on relays for this operator"
+                + (
+                    f" from authority {result.authority_npub[:20]}..."
+                    if result.authority_npub
+                    else ""
+                )
             )
             return result
+
+        # Discover the Authority from the event when the Oracle didn't pre-resolve.
+        if author_hex and not result.authority_npub:
+            try:
+                result.authority_npub = PublicKey(bytes.fromhex(author_hex)).bech32()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("Could not encode author %s as npub: %s", author_hex[:16], e)
 
         result.config = config
         result.neon_database_url = config.get("neon_database_url")
@@ -170,40 +213,11 @@ class BootstrapClient:
 
         if result.success:
             logger.info(
-                "Bootstrap complete: npub=%s, authority=%s, neon=%s",
+                "Bootstrap complete: npub=%s, authority=%s, neon=configured",
                 self.npub[:16],
                 result.authority_npub[:16] if result.authority_npub else "?",
-                "configured" if result.neon_database_url else "missing",
             )
         else:
             result.error = "Neon URL not in bootstrap config from Authority"
 
         return result
-
-    async def _resolve_authority(self) -> dict[str, str]:
-        """Resolve this operator's Authority npub from the registry."""
-        from tollbooth.registry import resolve_authority_service
-        return await resolve_authority_service(self.npub)
-
-    def _read_config_from_relays(self, authority_npub: str) -> dict[str, str] | None:
-        """Poll Nostr relays for bootstrap config DM from the Authority."""
-        try:
-            from pynostr.key import PublicKey  # type: ignore[import-untyped]
-
-            from tollbooth.bootstrap_relay import receive_bootstrap_config
-
-            if authority_npub.startswith("npub1"):
-                authority_hex = PublicKey.from_npub(authority_npub).hex()
-            else:
-                authority_hex = authority_npub
-
-            config, diag = receive_bootstrap_config(
-                operator_nsec=self._nsec_hex,
-                authority_pubkey_hex=authority_hex,
-                relays=self._relays,
-            )
-            self._relay_diag = diag
-            return config
-        except Exception as exc:  # noqa: BLE001
-            self._relay_diag = str(exc)
-            return None

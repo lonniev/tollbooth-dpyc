@@ -46,10 +46,7 @@ from tollbooth.registry import (
     DEFAULT_REGISTRY_URL,
     DPYCRegistry,
     RegistryError,
-    resolve_authority_npub,
-    resolve_authority_service,
     resolve_oracle_service,
-    resolve_service_by_name,
 )
 from tollbooth.runtime import OperatorRuntime, resolve_npub
 from tollbooth.session_cache import SessionCache
@@ -388,13 +385,10 @@ __all__ = [
     "model_for",
     "probe_relay_liveness",
     "render_qr",
-    "resolve_authority_npub",
-    "resolve_authority_service",
     "resolve_npub",
     "resolve_oracle_service",
     "resolve_relays",
     "resolve_route",
-    "resolve_service_by_name",
     # Identity Credential
     "sign_identity_credential",
     "situation_response_from_row",

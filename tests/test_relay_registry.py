@@ -1,108 +1,89 @@
-"""Tests for the DPYC relay registry (single source of truth for relays)."""
+"""Tests for the DPYC relay registry (relays sourced from the Oracle).
+
+The relays.json parsing (primary-first ordering, wss:// filtering) now lives in
+the Oracle; the SDK-side registry just caches whatever ordered list the Oracle
+returns. These tests exercise the cache / stale-if-error / seed behavior against
+a mocked Oracle client.
+"""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from tollbooth.relay_registry import RelayRegistry, RelayRegistryError
 
-
-def _resp(payload: dict) -> MagicMock:
-    resp = MagicMock()
-    resp.raise_for_status = MagicMock()
-    resp.json = MagicMock(return_value=payload)
-    return resp
+RELAYS = ["wss://relay.primal.net", "wss://relay.damus.io", "wss://nos.lol"]
 
 
-def _client_returning(resp_or_exc):
-    """Build a mock httpx.Client context manager whose .get returns/raises."""
+def _oracle_factory(relays_or_exc):
+    """Patch target for ``default_oracle_client`` → returns one shared client."""
     client = MagicMock()
-    if isinstance(resp_or_exc, Exception):
-        client.get.side_effect = resp_or_exc
+    if isinstance(relays_or_exc, Exception):
+        client.get_relays = AsyncMock(side_effect=relays_or_exc)
     else:
-        client.get.return_value = resp_or_exc
-    ctx = MagicMock()
-    ctx.__enter__ = MagicMock(return_value=client)
-    ctx.__exit__ = MagicMock(return_value=False)
-    return ctx
-
-
-VALID = {
-    "version": "1.0.0",
-    "updated_at": "2026-07-08T12:00:00Z",
-    "relays": [
-        {"url": "wss://relay.damus.io"},
-        {"url": "wss://relay.primal.net", "primary": True},
-        {"url": "wss://nos.lol"},
-    ],
-}
+        client.get_relays = AsyncMock(return_value=relays_or_exc)
+    factory = MagicMock(return_value=client)
+    factory.client = client  # expose for call-count assertions
+    return factory
 
 
 class TestRelayRegistry:
-    def test_fetch_orders_primary_first(self):
-        reg = RelayRegistry(url="http://x/relays.json")
-        with patch("httpx.Client", return_value=_client_returning(_resp(VALID))):
-            relays = reg.relays()
-        # primary jumps to the front; the rest keep array order.
-        assert relays == [
-            "wss://relay.primal.net",
-            "wss://relay.damus.io",
-            "wss://nos.lol",
-        ]
+    def test_fetch_returns_oracle_set(self):
+        reg = RelayRegistry()
+        with patch("tollbooth.oracle_client.default_oracle_client", _oracle_factory(RELAYS)):
+            assert reg.relays() == RELAYS
 
     def test_cache_hit_skips_second_fetch(self):
-        reg = RelayRegistry(url="http://x/relays.json")
-        mk = patch("httpx.Client", return_value=_client_returning(_resp(VALID)))
-        with mk as m:
+        reg = RelayRegistry()
+        factory = _oracle_factory(RELAYS)
+        with patch("tollbooth.oracle_client.default_oracle_client", factory):
             reg.relays()
             reg.relays()  # within TTL — must not re-fetch
-            assert m.return_value.__enter__.return_value.get.call_count == 1
+        assert factory.client.get_relays.call_count == 1
 
     def test_stale_cache_refetches_after_ttl(self):
-        reg = RelayRegistry(url="http://x/relays.json", cache_ttl_seconds=0)
-        with patch("httpx.Client", return_value=_client_returning(_resp(VALID))) as m:
+        reg = RelayRegistry(cache_ttl_seconds=0)
+        factory = _oracle_factory(RELAYS)
+        with patch("tollbooth.oracle_client.default_oracle_client", factory):
             reg.relays()
             reg.relays()  # TTL=0 → always stale → re-fetch
-            assert m.return_value.__enter__.return_value.get.call_count == 2
+        assert factory.client.get_relays.call_count == 2
 
     def test_stale_if_error_serves_last_known_good(self):
-        reg = RelayRegistry(url="http://x/relays.json", cache_ttl_seconds=0)
-        # First call succeeds and populates the cache.
-        with patch("httpx.Client", return_value=_client_returning(_resp(VALID))):
+        reg = RelayRegistry(cache_ttl_seconds=0)
+        with patch("tollbooth.oracle_client.default_oracle_client", _oracle_factory(RELAYS)):
             first = reg.relays()
-        # Force past the failure backoff so the next call actually re-fetches.
-        reg._retry_after = 0.0
-        # Second refresh fails — stale cache is served rather than raising.
-        with patch("httpx.Client", return_value=_client_returning(RuntimeError("down"))):
+        reg._retry_after = 0.0  # skip the post-failure backoff window
+        with patch(
+            "tollbooth.oracle_client.default_oracle_client",
+            _oracle_factory(RuntimeError("oracle down")),
+        ):
             second = reg.relays()
         assert second == first
 
     def test_cold_cache_unreachable_raises(self):
-        reg = RelayRegistry(url="http://x/relays.json")
-        with patch("httpx.Client", return_value=_client_returning(RuntimeError("down"))):  # noqa: SIM117
-            with pytest.raises(RelayRegistryError):
-                reg.relays()
+        reg = RelayRegistry()
+        with patch(
+            "tollbooth.oracle_client.default_oracle_client",
+            _oracle_factory(RuntimeError("oracle down")),
+        ), pytest.raises(RelayRegistryError):
+            reg.relays()
 
-    def test_rejects_non_wss_and_empty(self):
-        reg = RelayRegistry(url="http://x/relays.json")
-        bad = {"version": "1.0.0", "updated_at": "x", "relays": [{"url": "http://nope"}]}
-        with patch("httpx.Client", return_value=_client_returning(_resp(bad))):  # noqa: SIM117
-            with pytest.raises(RelayRegistryError):
-                reg.relays()
-
-    def test_accepts_bare_string_relays(self):
-        reg = RelayRegistry(url="http://x/relays.json")
-        payload = {"version": "1.0.0", "updated_at": "x",
-                   "relays": ["wss://a.example", "wss://b.example"]}
-        with patch("httpx.Client", return_value=_client_returning(_resp(payload))):
-            assert reg.relays() == ["wss://a.example", "wss://b.example"]
+    def test_seed_populates_without_any_fetch(self):
+        reg = RelayRegistry()
+        reg.seed(RELAYS)
+        factory = _oracle_factory(RuntimeError("must not be called"))
+        with patch("tollbooth.oracle_client.default_oracle_client", factory):
+            assert reg.relays() == RELAYS
+        assert factory.client.get_relays.call_count == 0
 
     def test_invalidate_forces_refetch(self):
-        reg = RelayRegistry(url="http://x/relays.json")
-        with patch("httpx.Client", return_value=_client_returning(_resp(VALID))) as m:
+        reg = RelayRegistry()
+        factory = _oracle_factory(RELAYS)
+        with patch("tollbooth.oracle_client.default_oracle_client", factory):
             reg.relays()
             reg.invalidate()
             reg.relays()
-            assert m.return_value.__enter__.return_value.get.call_count == 2
+        assert factory.client.get_relays.call_count == 2
