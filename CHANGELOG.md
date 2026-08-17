@@ -3,6 +3,33 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed — operator bootstrap is GitHub-free (removes the fleet SPOF)
+
+Operators are nsec-only and must never read GitHub. Cold-start bootstrap no
+longer resolves the Authority from `raw.githubusercontent.com` and no longer
+fetches the relay list from GitHub. Instead:
+
+- Relays are seeded from the **Oracle** (`get_relays`) — the one fixed anchor an
+  operator may know a priori (`DPYC_ORACLE_MCP_URL`). `relay_registry` now sources
+  the set from the Oracle (cached 3 days, stale-if-error, seedable by the async
+  bootstrap path) instead of GitHub raw.
+- The config event is read from Nostr by the operator's **own `d` tag** — the
+  `authors` filter is gone, so the operator no longer needs to know its Authority
+  in advance; the Authority npub is *discovered* from the event's author (and also
+  stamped inside the encrypted payload). When the Oracle can resolve the Authority,
+  its pubkey is passed as `expected_authority_hex` to reject spoofed events.
+- `receive_bootstrap_config` signature: drops the required `authority_pubkey_hex`,
+  adds optional `expected_authority_hex`, and returns
+  `(config, authority_pubkey_hex, diag)`.
+- New `OracleClient` methods `get_relays`, `resolve_authority_for`, `resolve_service`
+  and a `default_oracle_client()` factory.
+
+Closes the fleet-wide bootstrap SPOF where a `raw.githubusercontent.com` 429
+stranded cold-starting operators (schwab-mcp, 2026-08-17). Requires the Oracle's
+matching read tools to be deployed first.
+
 ## [0.85.1] - 2026-08-16
 
 ### Fixed — complete the collector seal-to-operator wiring (finishes #228/#229)

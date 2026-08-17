@@ -68,29 +68,53 @@ def test_operator_reads_back_and_decrypts_with_only_its_nsec() -> None:
         json.dumps(["EOSE", "sub"]),
     ]
     with patch("websocket.create_connection", return_value=recv_ws):
-        config, diag = receive_bootstrap_config(
+        config, author, diag = receive_bootstrap_config(
             operator_nsec=OP_NSEC,
-            authority_pubkey_hex=AUTH_HEX,
             relays=["wss://relay.test"],
         )
     assert config == CONFIG, diag
+    # The Authority npub is DISCOVERED from the event's author — the operator
+    # supplied only its own nsec.
+    assert author == AUTH_HEX
 
 
-def test_receive_filter_targets_kind_30078_and_d_tag() -> None:
-    """The REQ filter must select the replaceable kind + the scoped d tag,
-    with no `since` window (a stable replaceable must not be aged out)."""
+def test_receive_filter_targets_kind_30078_and_d_tag_without_authors() -> None:
+    """The REQ filter selects the replaceable kind + the operator's own scoped
+    `d` tag, with NO `authors` clause (the operator finds its own config without
+    knowing who signed it) and no `since` window."""
     sent: list = []
     recv_ws = MagicMock()
     recv_ws.recv.side_effect = [json.dumps(["EOSE", "sub"])]
     recv_ws.send.side_effect = lambda m: sent.append(json.loads(m))
     with patch("websocket.create_connection", return_value=recv_ws):
         receive_bootstrap_config(
-            operator_nsec=OP_NSEC, authority_pubkey_hex=AUTH_HEX,
+            operator_nsec=OP_NSEC,
             relays=["wss://relay.test"],
         )
     req = next(m for m in sent if m[0] == "REQ")
     filt = req[2]
     assert filt["kinds"] == [30078]
-    assert filt["authors"] == [AUTH_HEX]
+    assert "authors" not in filt  # no pre-known Authority required
     assert filt["#d"] == [f"{BOOTSTRAP_CONFIG_TAG}:{OP_HEX}"]
     assert "since" not in filt
+
+
+def test_expected_authority_filter_rejects_a_spoofed_event() -> None:
+    """With a trusted Authority known, an event bearing our `d` tag from any
+    OTHER author is ignored — the spoof guard for the author-agnostic query."""
+    ev = _publish_and_capture()  # legitimately authored by AUTH_PK
+
+    recv_ws = MagicMock()
+    recv_ws.recv.side_effect = [
+        json.dumps(["EVENT", "sub", ev]),
+        json.dumps(["EOSE", "sub"]),
+    ]
+    imposter_hex = PrivateKey().public_key.hex()
+    with patch("websocket.create_connection", return_value=recv_ws):
+        config, author, diag = receive_bootstrap_config(
+            operator_nsec=OP_NSEC,
+            relays=["wss://relay.test"],
+            expected_authority_hex=imposter_hex,
+        )
+    assert config is None, diag  # real event dropped: author != expected
+    assert author is None

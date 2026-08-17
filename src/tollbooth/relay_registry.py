@@ -1,40 +1,39 @@
-"""DPYC relay registry — the single source of truth for Nostr relays.
+"""DPYC relay registry — the Nostr relay set, sourced from the Oracle.
 
-Every Tollbooth server draws its relay set from ``relays.json`` in the
-``dpyc-community`` repository, fetched over GitHub raw HTTPS and cached in
-process with a 3-day TTL. There is NO hardcoded relay list anywhere else —
-change the set in ``dpyc-community/relays.json`` and the whole federation
-follows on its next cache refresh.
+Every Tollbooth server draws its relay set from the DPYC Oracle
+(``get_relays`` over MCP), cached in process with a 3-day TTL. Operators are
+nsec-only and must never read GitHub directly, so the relay list — like every
+other community fact — comes from the Oracle, the one component allowed to read
+``dpyc-community``. The authoritative data still lives in
+``dpyc-community/relays.json``; the Oracle serves it.
 
-Resolution semantics (see ``dpyc-community/RELAYS.md``):
+Resolution semantics:
 
 - Fresh cache (< 3 days) → returned directly, no fetch.
-- Stale or absent cache → refetch.
-- Refresh fails but a previously-fetched copy exists → serve that
-  last-known-good copy (stale-if-error), with a short backoff so a GitHub
-  outage does not cause a fetch on every single call.
-- Cold start with no cache and an unreachable registry → ``RelayRegistryError``
-  (fail closed — the same trust model the membership registry uses).
+- Stale or absent cache → refetch from the Oracle.
+- Refresh fails but a previously-fetched (or seeded) copy exists → serve that
+  last-known-good copy (stale-if-error), with a short backoff so an Oracle
+  outage does not cause a fetch on every call.
+- Cold start with no cache and an unreachable Oracle → ``RelayRegistryError``
+  (fail closed).
 
-This module is synchronous by design: every relay consumer in the wheel
-(Secure Courier, bootstrap, profile, audit) is synchronous (blocking
-websockets / thread pools), so a sync ``httpx.Client`` slots in without
-forcing async through those paths.
+The bootstrap path fetches the relay set from the Oracle once (async) and
+**seeds** it here via ``seed_relays`` so later synchronous consumers (Secure
+Courier, profile, audit) read the warm cache without another round-trip.
+
+This module is synchronous by design: every relay consumer in the wheel is
+synchronous (blocking websockets / thread pools). On a cache-miss it drives the
+async Oracle client via ``asyncio.run`` — safe because these callers run
+outside an event loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from typing import Any
-
-import httpx
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_RELAYS_URL = (
-    "https://raw.githubusercontent.com/lonniev/dpyc-community/main/relays.json"
-)
 
 # 3 days — clients fetch only when their cache is stale.
 DEFAULT_RELAY_TTL_SECONDS = 3 * 24 * 60 * 60  # 259200
@@ -50,28 +49,30 @@ class RelayRegistryError(Exception):
 
 
 class RelayRegistry:
-    """Cached fetch of the DPYC supported-relay set via HTTP.
+    """Cached relay set sourced from the Oracle's ``get_relays`` tool."""
 
-    Fetches ``relays.json`` from the registry URL and caches the resolved,
-    ordered (primary-first) relay URLs with a monotonic-clock TTL.
-    """
-
-    def __init__(
-        self,
-        url: str = DEFAULT_RELAYS_URL,
-        cache_ttl_seconds: int = DEFAULT_RELAY_TTL_SECONDS,
-    ) -> None:
-        self._url = url
+    def __init__(self, cache_ttl_seconds: int = DEFAULT_RELAY_TTL_SECONDS) -> None:
         self._ttl = cache_ttl_seconds
         self._cache: list[str] | None = None
         self._cache_time: float = 0.0
         self._retry_after: float = 0.0
 
+    def seed(self, relays: list[str]) -> None:
+        """Populate the cache from an already-fetched relay set.
+
+        Called by the async bootstrap path after it fetches relays from the
+        Oracle, so synchronous consumers reuse the set instead of re-fetching.
+        """
+        if relays:
+            self._cache = list(relays)
+            self._cache_time = time.monotonic()
+            self._retry_after = 0.0
+
     def relays(self) -> list[str]:
         """Return the ordered relay URLs (primary first), refreshing if stale.
 
         Raises ``RelayRegistryError`` only on a cold cache with an unreachable
-        registry; otherwise a stale set is served rather than failing.
+        Oracle; otherwise a stale set is served rather than failing.
         """
         now = time.monotonic()
 
@@ -105,38 +106,23 @@ class RelayRegistry:
         return relays
 
     def _do_fetch(self) -> list[str]:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.get(self._url)
-            resp.raise_for_status()
-            data: Any = resp.json()
+        """Fetch the relay set from the Oracle (synchronous bridge)."""
+        from tollbooth.oracle_client import default_oracle_client
 
-        if not isinstance(data, dict) or not isinstance(data.get("relays"), list):
-            raise RelayRegistryError("relays.json missing a 'relays' list.")
+        try:
+            relays = asyncio.run(default_oracle_client().get_relays())
+        except RuntimeError as e:
+            # Only happens if called from within a running event loop — the
+            # async bootstrap path seeds instead of calling here, so this is a
+            # misuse, surfaced clearly rather than silently.
+            raise RelayRegistryError(
+                f"get_relays() called from an async context ({e}); "
+                "seed the registry or await the Oracle client directly."
+            ) from e
 
-        primary: list[str] = []
-        rest: list[str] = []
-        for entry in data["relays"]:
-            if isinstance(entry, dict):
-                url = entry.get("url")
-                is_primary = bool(entry.get("primary"))
-            elif isinstance(entry, str):
-                url = entry
-                is_primary = False
-            else:
-                continue
-            if not isinstance(url, str) or not url.startswith("wss://"):
-                continue
-            (primary if is_primary else rest).append(url)
-
-        # Primary first, then array order; de-duplicate while preserving order.
-        ordered: list[str] = []
-        for url in primary + rest:
-            if url not in ordered:
-                ordered.append(url)
-
-        if not ordered:
-            raise RelayRegistryError("relays.json contained no valid wss:// relays.")
-        return ordered
+        if not relays:
+            raise RelayRegistryError("Oracle returned no relays.")
+        return relays
 
     def invalidate(self) -> None:
         """Force the next call to re-fetch."""
@@ -146,17 +132,23 @@ class RelayRegistry:
 
 
 # Process-global singleton so every consumer (courier, bootstrap, profile,
-# audit) shares one 3-day cache — a single fetch serves the whole process.
+# audit) shares one 3-day cache — a single fetch (or bootstrap seed) serves the
+# whole process.
 _registry = RelayRegistry()
 
 
 def get_relays() -> list[str]:
-    """Return the DPYC supported relay URLs (primary first) from the registry.
+    """Return the DPYC supported relay URLs (primary first) from the Oracle.
 
     Cached process-wide with a 3-day TTL. Raises ``RelayRegistryError`` only
-    on a cold cache with an unreachable registry.
+    on a cold cache with an unreachable Oracle.
     """
     return _registry.relays()
+
+
+def seed_relays(relays: list[str]) -> None:
+    """Seed the process-wide relay cache from an already-fetched set."""
+    _registry.seed(relays)
 
 
 def invalidate_relays_cache() -> None:
