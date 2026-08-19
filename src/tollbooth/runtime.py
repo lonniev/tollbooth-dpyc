@@ -491,6 +491,12 @@ class OperatorRuntime:
             )
             await self._vault.ensure_schema()
             self._vault_ready_at = _time.monotonic()
+            # Self-provisioning actors skip the certified-operator bootstrap that seeds
+            # the relay cache (see the "authority" branch below). Seed it here, from this
+            # async context, or the synchronous Secure Courier get_relays() reaches the
+            # asyncio.run bridge inside the server's event loop and raises. Best-effort.
+            from tollbooth.relay_registry import ensure_relays_seeded
+            await ensure_relays_seeded()
             logger.info("Vault initialized from NEON_DATABASE_URL (vault_source=env, encrypted)")
             return self._vault
 

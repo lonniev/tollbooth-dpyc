@@ -3,6 +3,27 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.86.1] - 2026-08-18
+
+### Fixed — Authorities seed their relay cache (Secure Courier on self-provisioning actors)
+
+0.86.0 moved the relay set to the Oracle and warms the process-wide cache from the
+async bootstrap path — but that seed runs only in the **certified-operator** vault
+bootstrap (`vault_source="authority"`). Self-provisioning actors (Authorities,
+`vault_source="env"`) return before it, so their relay cache was never warmed. The
+synchronous Secure Courier then reached the `asyncio.run` bridge in
+`RelayRegistry._do_fetch` inside the server's running event loop and raised
+`get_relays() called from an async context`, blocking credential delivery
+(e.g. couriering BTCPay secrets to an Authority).
+
+- New `relay_registry.ensure_relays_seeded()` — an idempotent, best-effort **async**
+  warm of the process-wide relay cache from the Oracle; the async counterpart of the
+  synchronous `get_relays()`.
+- `OperatorRuntime.vault()` now calls it in the `vault_source="env"` branch, so an
+  Authority warms its relay cache at vault init and the Secure Courier serves the
+  cache instead of crashing. Certified operators are unaffected (they still seed via
+  the bootstrap path).
+
 ## [0.86.0] - 2026-08-17
 
 ### Changed — operator bootstrap is GitHub-free (removes the fleet SPOF)

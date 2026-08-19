@@ -68,6 +68,10 @@ class RelayRegistry:
             self._cache_time = time.monotonic()
             self._retry_after = 0.0
 
+    def is_warm(self) -> bool:
+        """True when a non-stale relay set is cached, so no fetch is needed."""
+        return self._cache is not None and (time.monotonic() - self._cache_time) < self._ttl
+
     def relays(self) -> list[str]:
         """Return the ordered relay URLs (primary first), refreshing if stale.
 
@@ -149,6 +153,32 @@ def get_relays() -> list[str]:
 def seed_relays(relays: list[str]) -> None:
     """Seed the process-wide relay cache from an already-fetched set."""
     _registry.seed(relays)
+
+
+async def ensure_relays_seeded() -> None:
+    """Warm the process-wide relay cache from the Oracle, from an async context.
+
+    The async counterpart of the synchronous :func:`get_relays`. Every actor that
+    starts *inside* an event loop must call this once at startup so the synchronous
+    relay consumers (Secure Courier, profile, audit) read a warm cache and never
+    reach the ``asyncio.run`` bridge in ``RelayRegistry._do_fetch`` — which raises
+    inside a running loop.
+
+    Self-provisioning actors (Authorities, ``vault_source='env'``) skip the
+    certified-operator bootstrap that would otherwise seed relays, so this is the
+    seam that keeps their Secure Courier working. Idempotent (a no-op when the cache
+    is already warm) and best-effort: an Oracle blip leaves the cache cold and a
+    later synchronous consumer surfaces a clear error, rather than crashing here.
+    """
+    if _registry.is_warm():
+        return
+    try:
+        from tollbooth.oracle_client import default_oracle_client
+
+        relays = await default_oracle_client().get_relays()
+        _registry.seed(relays)
+    except Exception as e:  # noqa: BLE001 — best-effort warm; the sync path surfaces a cold miss
+        logger.warning("Relay pre-seed from Oracle failed (%s); cache left cold.", e)
 
 
 def invalidate_relays_cache() -> None:
