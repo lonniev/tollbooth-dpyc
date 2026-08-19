@@ -19,10 +19,12 @@ synchronous Secure Courier then reached the `asyncio.run` bridge in
 - New `relay_registry.ensure_relays_seeded()` — an idempotent, best-effort **async**
   warm of the process-wide relay cache from the Oracle; the async counterpart of the
   synchronous `get_relays()`.
-- `OperatorRuntime.vault()` now calls it in the `vault_source="env"` branch, so an
-  Authority warms its relay cache at vault init and the Secure Courier serves the
-  cache instead of crashing. Certified operators are unaffected (they still seed via
-  the bootstrap path).
+- `OperatorRuntime.courier()` calls it **before** `resolve_relays()` (the courier
+  resolves relays before it touches the vault, so this is the load-bearing seam), and
+  `OperatorRuntime.vault()` calls it in the `vault_source="env"` branch as defense for
+  an Authority's other relay users (profile publish, audit). Both are idempotent, so
+  at most one Oracle fetch runs; certified operators stay warm from the bootstrap path
+  and simply no-op.
 
 ## [0.86.0] - 2026-08-17
 

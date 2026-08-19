@@ -661,6 +661,15 @@ class OperatorRuntime:
         except ImportError:
             return None
 
+        # Warm the relay cache from the Oracle FIRST, from this async context —
+        # resolve_relays() below drives the synchronous relay_registry.get_relays(),
+        # which reaches the asyncio.run bridge (and raises) inside a running event
+        # loop when the cache is cold. Self-provisioning Authorities never seeded it
+        # via the certified bootstrap, so this is the load-bearing seam. Idempotent
+        # and best-effort; certified operators already warm and simply no-op.
+        from tollbooth.relay_registry import ensure_relays_seeded
+        await ensure_relays_seeded()
+
         relays = resolve_relays()
 
         # Build credential vault from bootstrapped Neon
