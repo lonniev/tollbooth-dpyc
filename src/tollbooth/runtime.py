@@ -491,6 +491,12 @@ class OperatorRuntime:
             )
             await self._vault.ensure_schema()
             self._vault_ready_at = _time.monotonic()
+            # Self-provisioning actors skip the certified-operator bootstrap that seeds
+            # the relay cache (see the "authority" branch below). Seed it here, from this
+            # async context, or the synchronous Secure Courier get_relays() reaches the
+            # asyncio.run bridge inside the server's event loop and raises. Best-effort.
+            from tollbooth.relay_registry import ensure_relays_seeded
+            await ensure_relays_seeded()
             logger.info("Vault initialized from NEON_DATABASE_URL (vault_source=env, encrypted)")
             return self._vault
 
@@ -654,6 +660,15 @@ class OperatorRuntime:
             from tollbooth.secure_courier import SecureCourierService
         except ImportError:
             return None
+
+        # Warm the relay cache from the Oracle FIRST, from this async context —
+        # resolve_relays() below drives the synchronous relay_registry.get_relays(),
+        # which reaches the asyncio.run bridge (and raises) inside a running event
+        # loop when the cache is cold. Self-provisioning Authorities never seeded it
+        # via the certified bootstrap, so this is the load-bearing seam. Idempotent
+        # and best-effort; certified operators already warm and simply no-op.
+        from tollbooth.relay_registry import ensure_relays_seeded
+        await ensure_relays_seeded()
 
         relays = resolve_relays()
 

@@ -87,3 +87,50 @@ class TestRelayRegistry:
             reg.invalidate()
             reg.relays()
         assert factory.client.get_relays.call_count == 2
+
+    def test_is_warm_reflects_fresh_cache(self):
+        reg = RelayRegistry()
+        assert reg.is_warm() is False
+        reg.seed(RELAYS)
+        assert reg.is_warm() is True
+        # A zero-TTL registry is stale the moment it is seeded.
+        stale = RelayRegistry(cache_ttl_seconds=0)
+        stale.seed(RELAYS)
+        assert stale.is_warm() is False
+
+
+class TestEnsureRelaysSeeded:
+    """The async warm path that self-provisioning actors (Authorities) must call so
+    the synchronous Secure Courier never reaches the asyncio.run bridge."""
+
+    def setup_method(self):
+        from tollbooth.relay_registry import invalidate_relays_cache
+        invalidate_relays_cache()  # reset the process-global cache before each case
+
+    def teardown_method(self):
+        from tollbooth.relay_registry import invalidate_relays_cache
+        invalidate_relays_cache()
+
+    async def test_seeds_the_global_cache_from_oracle(self):
+        from tollbooth.relay_registry import ensure_relays_seeded, get_relays
+        factory = _oracle_factory(RELAYS)
+        with patch("tollbooth.oracle_client.default_oracle_client", factory):
+            await ensure_relays_seeded()
+            # The sync consumer now serves the warm cache — no second fetch.
+            assert get_relays() == RELAYS
+        assert factory.client.get_relays.call_count == 1
+
+    async def test_idempotent_when_already_warm(self):
+        from tollbooth.relay_registry import ensure_relays_seeded, seed_relays
+        seed_relays(RELAYS)
+        factory = _oracle_factory(RuntimeError("must not be called"))
+        with patch("tollbooth.oracle_client.default_oracle_client", factory):
+            await ensure_relays_seeded()  # cache warm → no fetch
+        assert factory.client.get_relays.call_count == 0
+
+    async def test_best_effort_on_oracle_failure_leaves_cache_cold(self):
+        from tollbooth.relay_registry import _registry, ensure_relays_seeded
+        factory = _oracle_factory(RuntimeError("oracle down"))
+        with patch("tollbooth.oracle_client.default_oracle_client", factory):
+            await ensure_relays_seeded()  # must NOT raise
+        assert _registry.is_warm() is False
