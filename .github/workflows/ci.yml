@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  pytest:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -42,3 +42,20 @@ jobs:
         # Measured ~70% (2026-06-11); gate set at 67 for env/noise headroom. Raise
         # it as coverage climbs — never lower it.
         run: pytest tests/ -q -ra --cov=tollbooth --cov-report=term-missing:skip-covered --cov-fail-under=67 --import-mode=importlib
+
+  # Stable, version-independent required check. Branch protection requires `test`,
+  # which passes ONLY when every pytest matrix leg (3.12 + 3.13) succeeds — so a
+  # matrix bump never orphans the required context. `always()` + an explicit result
+  # check is deliberate: a bare `needs:` gate would be SKIPPED on failure, and a
+  # skipped required check reads as passing.
+  test:
+    needs: [pytest]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: All pytest matrix legs passed
+        run: |
+          if [ "${{ needs.pytest.result }}" != "success" ]; then
+            echo "pytest did not succeed: ${{ needs.pytest.result }}"; exit 1
+          fi
+          echo "pytest passed on all Python versions"
