@@ -36,7 +36,12 @@ import time
 logger = logging.getLogger(__name__)
 
 # 3 days — clients fetch only when their cache is stale.
-DEFAULT_RELAY_TTL_SECONDS = 3 * 24 * 60 * 60  # 259200
+# One hour. The set itself changes rarely, but its ORDER now moves with
+# relay outages — a three-day cache meant the Oracle could demote a dead
+# relay and no operator would notice until Thursday. A report that
+# actually changes the order also invalidates this cache immediately
+# (see relay_reports.flush_relay_failures); the TTL is the backstop.
+DEFAULT_RELAY_TTL_SECONDS = 60 * 60  # 259200
 
 # After a failed refresh, wait this long before hitting the network again
 # (serving the stale set in the meantime) so an outage can't cause a fetch

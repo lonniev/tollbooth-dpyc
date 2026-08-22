@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tollbooth-dpyc"
-version = "0.86.1"
+version = "0.87.0"
 description = "Don't Pester Your Customer™ — Bitcoin Lightning micropayments for MCP servers"
 readme = "README.md"
 license = "Apache-2.0"
@@ -68,6 +68,11 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
     "mypy>=1.11",
+    # Test-only. The SDK signs with pynostr; the Oracle verifies with
+    # nostr-sdk. That cross-library seam is exactly the kind that breaks
+    # silently, so the suite proves a signature we produce verifies under the
+    # library that will actually check it. Not a runtime dependency.
+    "nostr-sdk>=0.45.0,<0.46",
 ]
 
 [project.urls]

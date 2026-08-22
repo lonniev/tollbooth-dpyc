@@ -3,6 +3,63 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.87.0] - 2026-08-22
+
+### Fixed — an unreachable rendezvous no longer reads as "the patron never replied"
+
+`receive_npub_proof` and `receive_credentials` drain only the pinned rendezvous
+relay. `_subscribe_to_relays` swallowed connect failures at debug level and
+returned nothing, so a relay outage and an empty mailbox produced the identical
+`courier_not_found` — whose recovery text asks the patron to confirm they
+replied. Observed live on 2026-08-22: a patron replied from Pricing Studio, the
+reply landed on `nos.lol`, the pinned `relay.primal.net` was returning HTTP 502,
+and the courier told the patron to check whether they had replied.
+
+`_subscribe_to_relays` / `_fetch_dms_from_relays` now return per-relay
+`{url: (connected, error)}`, and the drain reports the new
+`ErrorCode.COURIER_RELAY_UNREACHABLE` when the pinned relay never answered —
+carrying the relay URL and the transport error, popping nothing, and telling the
+caller explicitly not to re-send. `CourierUnreachableError` from
+`request_npub_proof` (every candidate relay refused the challenge) now carries
+that code too, instead of reaching the agent as a bare prose string.
+
+Only positive evidence of a failed connect counts. Absent reachability
+information the drain falls through to the ordinary `courier_not_found` path —
+blaming a relay on missing information would only move the misattribution
+somewhere new. `courier_not_found` keeps its exact meaning: the relay answered
+and no DM matched.
+
+### Added — operators tell the Oracle which relays are unreachable
+
+`relays.json` is a curated guess about which relays are worth using; it cannot
+know which one is down. Operators find out, one failed rendezvous at a time, and
+that discovery was being thrown away.
+
+New `relay_reports` module. `note_relay_failure(url, mode)` is synchronous,
+bounded, non-blocking bookkeeping — a patron waiting on a tool call never waits
+on telemetry. Buffered failures are flushed by `OperatorRuntime.courier()`, the
+one async seam every operator already passes through, and signed with the
+operator nsec so the Oracle can attribute them. Reports are emitted from the
+places that already know: a failed pinned publish, a challenge every relay
+refused, the liveness probe `resolve_relays()` already runs, and the new
+unreachable-drain branch.
+
+Only failures are reported. Success is far too frequent to be worth carrying,
+and a relay that works needs no announcement. A dead relay is reported once per
+cooldown window rather than on every attempt.
+
+A report is a hint, not a verdict: the Oracle probes the relay itself before
+changing anything (dpyc-oracle 0.3.0), so a report that turns out to be wrong —
+a local network fault, a firewall — costs one probe and moves nothing. That is
+what lets this be fire-and-forget.
+
+### Changed — the relay cache TTL drops from 3 days to 1 hour
+
+The relay *set* changes rarely, but its *order* now moves with relay outages. A
+three-day cache meant the Oracle could demote a dead relay and no operator would
+notice until Thursday. A report that actually changes the fleet order also
+invalidates the local cache immediately; the TTL is the backstop.
+
 ## [0.86.1] - 2026-08-18
 
 ### Fixed — Authorities seed their relay cache (Secure Courier on self-provisioning actors)

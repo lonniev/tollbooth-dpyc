@@ -2787,6 +2787,93 @@ class TestStrictPinnedRelayDrain:
         assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
 
     @pytest.mark.asyncio
+    async def test_unreachable_pinned_relay_is_not_blamed_on_the_sender(self):
+        """A dead rendezvous must not read as "the patron never replied".
+
+        The bug: the drain swallowed connect failures, so an outage and an
+        empty mailbox produced the same COURIER_NOT_FOUND — and the recovery
+        text told the patron to confirm they had replied, which they had.
+        """
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+        sender_npub = sender.public_key.bech32()
+        _seed_channel(ex, sender_npub)
+
+        with patch.object(
+            ex, "_fetch_dms_from_relays",
+            return_value={_TEST_RELAY: (False, "Connection refused")},
+        ), patch.object(ex, "send_dm"), patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+            )
+
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.COURIER_RELAY_UNREACHABLE
+        assert result["relay"] == _TEST_RELAY
+        assert "Connection refused" in result["relay_error"]
+        # Nothing was drained, so nothing may be claimed popped — the mailbox
+        # is left intact for a retry against a live rendezvous.
+        assert result["popped"] == 0
+        assert "do not re-send" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_pinned_relay_is_reported_to_the_oracle(self):
+        """The operator just learned something the whole fleet needs."""
+        from tollbooth import relay_reports
+
+        relay_reports.reset_relay_reports()
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+        sender_npub = sender.public_key.bech32()
+        _seed_channel(ex, sender_npub)
+
+        with patch.object(
+            ex, "_fetch_dms_from_relays",
+            return_value={_TEST_RELAY: (False, "Connection refused")},
+        ), patch.object(ex, "send_dm"), patch.object(ex, "_request_deletion"):
+            await ex.receive(sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN)
+
+        assert relay_reports.pending_relay_failures() == {_TEST_RELAY: "read"}
+        relay_reports.reset_relay_reports()
+
+    @pytest.mark.asyncio
+    async def test_a_reachable_pinned_relay_with_no_match_is_still_not_found(self):
+        """The distinction must be evidence-based, not a blanket relabel."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+        sender_npub = sender.public_key.bech32()
+        _seed_channel(ex, sender_npub)
+
+        with patch.object(
+            ex, "_fetch_dms_from_relays", return_value={_TEST_RELAY: (True, "")},
+        ), patch.object(ex, "send_dm"), patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+            )
+
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_missing_reachability_information_does_not_accuse_the_relay(self):
+        """Only positive evidence of a failed connect may blame a relay."""
+        operator = PrivateKey()
+        sender = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+        sender_npub = sender.public_key.bech32()
+        _seed_channel(ex, sender_npub)
+
+        with patch.object(ex, "_fetch_dms_from_relays", return_value={}), \
+             patch.object(ex, "send_dm"), patch.object(ex, "_request_deletion"):
+            result = await ex.receive(
+                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+            )
+
+        assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
+
+    @pytest.mark.asyncio
     async def test_match_on_pinned_relay_found(self):
         """A matching DM tagged with the pinned relay is accepted."""
         operator = PrivateKey()

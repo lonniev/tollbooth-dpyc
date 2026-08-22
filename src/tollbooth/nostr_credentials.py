@@ -45,6 +45,7 @@ from tollbooth.credential_templates import (
     validate_payload,
 )
 from tollbooth.credential_vault_backend import CredentialVaultBackend
+from tollbooth.relay_reports import note_relay_failure
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +233,12 @@ _COURIER_RESOLVE_ERRORS = {
     ErrorCode.COURIER_NO_PINNED_RELAY: (
         "The open channel has no pinned rendezvous relay on record, so there "
         "is no single relay to drain. Call {request_tool} for a fresh channel."
+    ),
+    ErrorCode.COURIER_RELAY_UNREACHABLE: (
+        "The pinned rendezvous relay did not answer, so nothing could be "
+        "drained and we cannot tell whether a reply is waiting there. This is "
+        "the relay's problem, not yours — do not re-send. Call {request_tool} "
+        "for a fresh channel, which will pin a relay that is currently up."
     ),
 }
 
@@ -1112,6 +1119,11 @@ class NostrCredentialExchange:
                 # No relay accepted — lifecycle state, not a stack trace.
                 # Record nothing in pending state; caller must re-issue
                 # after checking relay connectivity.
+                # Every candidate refused: the strongest relay signal the
+                # courier ever has. Tell the Oracle so the next operator to
+                # cold-start is not handed the same dead relay first.
+                for candidate in self._relays:
+                    note_relay_failure(candidate, "send")
                 raise CourierUnreachableError(
                     f"No configured relay accepted the challenge for "
                     f"{recipient_npub} ({len(self._relays)} attempted). "
@@ -1326,7 +1338,35 @@ class NostrCredentialExchange:
         # every real subscription stamps ``_relay`` (see _subscribe_one_relay),
         # so an untagged event only appears in tests.
         # Off the event loop — same blocking-relay-I/O reasoning as open_channel.
-        await asyncio.to_thread(self._fetch_dms_from_relays, [pinned])
+        reachability = await asyncio.to_thread(self._fetch_dms_from_relays, [pinned])
+        # Only positive evidence of a failed connect counts. If the fetch told
+        # us nothing about this relay, assume it answered and fall through to
+        # the ordinary "no matching DM" path — blaming a relay on missing
+        # information would just move the misattribution somewhere new.
+        entry = reachability.get(pinned) if isinstance(reachability, dict) else None
+        if entry is not None and not entry[0]:
+            connect_error = entry[1]
+            # Nothing was drained, so we know nothing about whether a reply is
+            # waiting. Reporting "no matching DM" here would blame the sender
+            # for a relay outage — the exact conflation this branch exists to
+            # end. Nothing is popped: the mailbox is left intact for a retry
+            # once a live rendezvous is pinned.
+            note_relay_failure(pinned, "read")
+            logger.warning(
+                "Pinned rendezvous %s unreachable during drain: %s",
+                pinned, connect_error,
+            )
+            return {
+                "success": False,
+                "error_code": ErrorCode.COURIER_RELAY_UNREACHABLE,
+                "popped": 0,
+                "relay": pinned,
+                "relay_error": connect_error,
+                "error": _courier_resolve_error(
+                    ErrorCode.COURIER_RELAY_UNREACHABLE, request_tool,
+                ),
+            }
+
         candidates = [
             c for c in self._find_dm_candidates(sender_hex)
             if c.get("_relay") in (pinned, None)
@@ -2047,7 +2087,9 @@ class NostrCredentialExchange:
         """
         self._subscribe_to_relays()
 
-    def _subscribe_to_relays(self, relays: list[str] | None = None) -> None:
+    def _subscribe_to_relays(
+        self, relays: list[str] | None = None,
+    ) -> dict[str, tuple[bool, str]]:
         """Subscribe to relays for DMs addressed to us.
 
         Uses multiple REQ filters to cover both NIP-04 (kind 4) and
@@ -2061,6 +2103,9 @@ class NostrCredentialExchange:
                 configured relays. The Secure Courier retrieve path passes
                 a single pinned rendezvous relay here so the drain touches
                 only the relay the original request committed to.
+
+        Returns:
+            Per-relay ``{url: (connected, error)}``.
         """
         target_relays = relays if relays is not None else self._relays
         since = int(time.time()) - self._freshness_window
@@ -2101,14 +2146,22 @@ class NostrCredentialExchange:
         filters = [filter_nip04, filter_giftwrap_tagged]
         sub_id = f"courier-{int(time.time())}"
 
+        reachability: dict[str, tuple[bool, str]] = {}
         for relay_url in target_relays:
             try:
                 self._subscribe_one_relay(relay_url, sub_id, filters)
+                reachability[relay_url] = (True, "")
             except Exception as exc:  # noqa: BLE001
+                # Non-fatal for a broadcast drain, but NOT nothing: on a pinned
+                # rendezvous drain, an unreachable relay is the whole answer.
+                # Swallowing it here is what let "the relay is down" masquerade
+                # as "the patron never replied".
                 logger.debug(
                     "Relay subscription %s failed (non-fatal): %s",
                     relay_url, exc,
                 )
+                reachability[relay_url] = (False, str(exc))
+        return reachability
 
     def _subscribe_one_relay(
         self,
@@ -2169,13 +2222,19 @@ class NostrCredentialExchange:
         finally:
             ws.close()
 
-    def _fetch_dms_from_relays(self, relays: list[str] | None = None) -> None:
+    def _fetch_dms_from_relays(
+        self, relays: list[str] | None = None,
+    ) -> dict[str, tuple[bool, str]]:
         """One-shot fetch of recent DMs.
 
         Defaults to all configured relays; pass a single-element list to
         drain only a pinned rendezvous relay.
+
+        Returns:
+            Per-relay ``{url: (connected, error)}``. A pinned drain uses this
+            to tell an unreachable rendezvous from an empty one.
         """
-        self._subscribe_to_relays(relays)
+        return self._subscribe_to_relays(relays)
 
     def _find_dm_candidates(self, sender_hex: str) -> list[dict[str, Any]]:
         """Find unconsumed DM candidates from a sender, newest first.
@@ -2448,6 +2507,7 @@ class NostrCredentialExchange:
                 logger.debug(
                     "Relay publish %s failed (non-fatal): %s", relay_url, exc,
                 )
+                note_relay_failure(relay_url, "send")
                 results.append((relay_url, False, str(exc)))
         return results
 
