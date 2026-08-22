@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tollbooth-dpyc"
-version = "0.87.1"
+version = "0.87.2"
 description = "Don't Pester Your Customer™ — Bitcoin Lightning micropayments for MCP servers"
 readme = "README.md"
 license = "Apache-2.0"
@@ -73,6 +73,10 @@ dev = [
     # silently, so the suite proves a signature we produce verifies under the
     # library that will actually check it. Not a runtime dependency.
     "nostr-sdk>=0.45.0,<0.46",
+    # Test-only. The JSON-argument middleware is wired into a real FastMCP
+    # server; a skipped wiring test would prove only that the parsing helper
+    # works, which was never the part in doubt.
+    "fastmcp>=3.2.0",
 ]
 
 [project.urls]

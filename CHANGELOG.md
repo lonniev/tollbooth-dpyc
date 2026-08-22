@@ -3,6 +3,51 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.87.2] - 2026-08-22
+
+### Fixed — a client that serialises an object argument is now understood
+
+An MCP client sending `{"patch": {"doc": …}}` was understood; the same client
+sending `{"patch": "{\"doc\": …}"}` — the identical value, encoded once more
+than the schema asks for — was not. FastMCP performs no string-to-object
+coercion, so the string reached pydantic and came back as:
+
+    Input should be a valid dictionary [type=dict_type, input_type=str]
+
+which reads as "your payload is malformed" when the payload is fine.
+
+Clients do this **unevenly**, and the unevenness is what made it expensive. The
+same client sends a small argument as an object and a large one as a string, so
+it presents as a size limit; or sends one tool an object and its sibling a
+string, so it presents as the two tools disagreeing. Both readings send an
+investigator after a server bug that does not exist. Reported against
+excalibur's `update_post` (a 10 KB patch rejected, the identical document
+accepted by `create_post`) and against roastify's `update_design_text`.
+
+Measured while diagnosing: a 10,470-byte **object** is accepted and a 12-byte
+**string** is refused. Size was never the variable.
+
+`register_standard_tools` now installs a FastMCP middleware that parses
+JSON-string arguments for parameters the tool itself declares as `object` or
+`array`. Schema-driven, so no operator annotates anything and no tool signature
+changes; the advertised schema is untouched, so well-behaved clients are
+unaffected.
+
+**What it deliberately will not touch.** A parameter declared `string`, however
+JSON-shaped its text. A union such as `str | dict`, where a string is a
+legitimate value — those declare under `anyOf`, which is not matched. A string
+that parses to a scalar rather than an object or array. And a string that does
+not parse at all is left exactly as it arrived, so validation still reports it:
+that caller really did send something malformed, and saying so plainly beats
+papering over it.
+
+The coercion therefore only ever applies where the schema says object-or-array
+and the value is a string — a combination already guaranteed to fail. It can
+turn a certain failure into a success; it cannot turn a success into anything
+else.
+
+New `tollbooth.json_args` exposes `coerce_json_arguments` for direct use.
+
 ## [0.87.1] - 2026-08-22
 
 ### Fixed — a relay publish counts only when the relay says OK to OUR event
