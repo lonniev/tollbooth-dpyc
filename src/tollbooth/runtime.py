@@ -4042,6 +4042,20 @@ def register_standard_tools(
     rt._tool = tool
     rt._mcp_name_cache.clear()  # invalidate any cached names
 
+    # Rescue arguments a client serialised one time too many: a value the tool
+    # declared as an object arriving as a JSON string. FastMCP does no such
+    # coercion, so those reach pydantic and fail as `dict_type` — a message that
+    # sends the caller looking for a malformed payload that isn't malformed.
+    # Installed here so every operator gets it without annotating a single
+    # parameter; see tollbooth.json_args for what it deliberately will not touch.
+    try:
+        from tollbooth.json_args import build_json_arg_middleware
+        _json_mw = build_json_arg_middleware()
+        if _json_mw is not None and hasattr(mcp, "add_middleware"):
+            mcp.add_middleware(_json_mw)
+    except Exception as exc:  # noqa: BLE001 — never block server construction
+        logger.warning("JSON argument coercion not installed: %s", exc)
+
     # -- Credit tools --------------------------------------------------
 
     @tool
