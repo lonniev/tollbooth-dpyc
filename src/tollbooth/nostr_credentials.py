@@ -194,6 +194,8 @@ class NostrProfile:
 # (see tools/proof.py); this only bounds how long the challenge stays claimable.
 _DEFAULT_FRESHNESS = 3600  # 1 hour
 _DEFAULT_SUBSCRIBE_TIMEOUT = 10
+# How long to wait for a relay's OK on an event we just published.
+_PUBLISH_ACK_TIMEOUT = 10
 
 # NACK copy sent to the sender of a popped courier DM whose anti-replay
 # token did NOT match the open channel. Deliberately does NOT reveal the
@@ -2471,17 +2473,92 @@ class NostrCredentialExchange:
         except Exception as exc:  # noqa: BLE001
             logger.debug("Failed to create deletion event: %s", exc)
 
+    @staticmethod
+    def _event_id_of(message: str) -> str:
+        """Pull the event id out of an ``["EVENT", {...}]`` relay message."""
+        try:
+            parsed = json.loads(message)
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        if isinstance(parsed, list) and len(parsed) >= 2 and isinstance(parsed[1], dict):
+            return str(parsed[1].get("id", ""))
+        return ""
+
+    def _await_ok_ack(
+        self, ws: Any, event_id: str, relay_url: str,
+    ) -> tuple[bool, str]:
+        """Read frames until THIS event's OK arrives.
+
+        Only ``["OK", <event_id>, true]`` counts as accepted. Silence is not
+        consent, a NOTICE is not consent, and an OK for somebody else's event
+        is not consent — the courier pins the relay that "accepted" the
+        challenge, so a publish wrongly scored as accepted pins a rendezvous
+        that never stored the DM and the patron is told to reply somewhere
+        the message does not exist.
+
+        Returns:
+            ``(accepted, detail)``.
+        """
+        deadline = time.monotonic() + _PUBLISH_ACK_TIMEOUT
+        last_frame = ""
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                ws.settimeout(remaining)
+                raw = ws.recv()
+            except Exception as exc:  # noqa: BLE001 — timeout or closed socket
+                if not last_frame:
+                    last_frame = f"{type(exc).__name__}: {exc}"
+                break
+            last_frame = str(raw)
+            try:
+                frame = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(frame, list) or not frame:
+                continue
+            if frame[0] == "NOTICE":
+                # Relays explain refusals here (rate limits, spam policy, size).
+                # It is the single most useful line when a publish goes wrong,
+                # and it used to be scored as success and thrown away.
+                logger.info(
+                    "Relay %s NOTICE while publishing %s: %s",
+                    relay_url, event_id[:12] or "event", str(frame[1:])[:200],
+                )
+                continue
+            if (frame[0] == "OK" and len(frame) >= 3
+                    and (not event_id or frame[1] == event_id)):
+                detail = str(frame[3]) if len(frame) > 3 else ""
+                if not bool(frame[2]):
+                    logger.warning(
+                        "Relay %s REJECTED %s: %s",
+                        relay_url, event_id[:12] or "event", detail,
+                    )
+                return bool(frame[2]), detail
+            # Anything else — including an OK for a different event — proves
+            # nothing about ours. Keep reading.
+
+        detail = f"no OK for {event_id[:12] or 'event'} within {_PUBLISH_ACK_TIMEOUT}s"
+        if last_frame:
+            detail += f"; last frame: {last_frame[:160]}"
+        logger.warning("Relay %s did not acknowledge: %s", relay_url, detail)
+        return False, detail
+
     def _publish_to_relays(
         self, message: str,
     ) -> list[tuple[str, bool, str]]:
         """Send an event to all configured relays.
 
         Returns:
-            List of ``(relay_url, accepted, detail)`` tuples.
-            *accepted* is ``True`` when the relay returned ``["OK", id, true, ...]``.
+            List of ``(relay_url, accepted, detail)`` tuples. *accepted* is
+            ``True`` only when that relay returned ``["OK", <this event's id>,
+            true, ...]``; silence and NOTICEs are failures, not successes.
         """
         results: list[tuple[str, bool, str]] = []
         sslopt: dict[str, Any] = {}
+        event_id = self._event_id_of(message)
         for relay_url in self._relays:
             try:
                 ws = create_connection(
@@ -2489,18 +2566,10 @@ class NostrCredentialExchange:
                 )
                 try:
                     ws.send(message)
-                    raw = ws.recv()
-                    try:
-                        ack = json.loads(raw)
-                        if isinstance(ack, list) and len(ack) >= 3 and ack[0] == "OK":
-                            ok = bool(ack[2])
-                            detail = ack[3] if len(ack) > 3 else ""
-                            results.append((relay_url, ok, detail))
-                        else:
-                            # Non-OK response (e.g., NOTICE) — treat as accepted
-                            results.append((relay_url, True, str(raw)))
-                    except (json.JSONDecodeError, IndexError):
-                        results.append((relay_url, True, str(raw)))
+                    ok, detail = self._await_ok_ack(ws, event_id, relay_url)
+                    if not ok:
+                        note_relay_failure(relay_url, "send")
+                    results.append((relay_url, ok, detail))
                 finally:
                     ws.close()
             except Exception as exc:  # noqa: BLE001
@@ -2521,9 +2590,10 @@ class NostrCredentialExchange:
         rendezvous and embeds it in the DM body before publishing.
 
         Returns:
-            ``(accepted, detail)`` — ``accepted`` is True when the relay
-            returned ``["OK", id, true, ...]`` (or any non-explicit
-            rejection).
+            ``(accepted, detail)`` — ``accepted`` is True ONLY when the relay
+            returned ``["OK", <this event's id>, true, ...]``. Silence, a
+            NOTICE, and an OK for another event are all failures: this is the
+            publish whose success decides the pinned rendezvous.
         """
         sslopt: dict[str, Any] = {}
         try:
@@ -2532,16 +2602,12 @@ class NostrCredentialExchange:
             )
             try:
                 ws.send(message)
-                raw = ws.recv()
-                try:
-                    ack = json.loads(raw)
-                    if isinstance(ack, list) and len(ack) >= 3 and ack[0] == "OK":
-                        ok = bool(ack[2])
-                        detail = ack[3] if len(ack) > 3 else ""
-                        return ok, detail
-                    return True, str(raw)
-                except (json.JSONDecodeError, IndexError):
-                    return True, str(raw)
+                ok, detail = self._await_ok_ack(
+                    ws, self._event_id_of(message), relay_url,
+                )
+                if not ok:
+                    note_relay_failure(relay_url, "send")
+                return ok, detail
             finally:
                 ws.close()
         except Exception as exc:  # noqa: BLE001

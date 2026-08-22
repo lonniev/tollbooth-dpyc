@@ -3,6 +3,40 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.87.1] - 2026-08-22
+
+### Fixed — a relay publish counts only when the relay says OK to OUR event
+
+`_publish_to_one_relay` and `_publish_to_relays` read exactly one frame after
+sending and scored anything that was not an explicit rejection as success. The
+docstring enshrined it: *"accepted is True when the relay returned
+`["OK", id, true, ...]` (or any non-explicit rejection)"*, and the broadcast
+path carried the comment *"Non-OK response (e.g., NOTICE) — treat as accepted"*.
+
+Four things were therefore scored as a successful publish: no response at all,
+a `NOTICE` (which is where relays explain rate limits, size caps and spam
+policy), a non-JSON frame, and an `OK` for somebody else's event.
+
+This is not cosmetic. `open_channel` pins the first relay that "accepted" the
+challenge as the per-conversation rendezvous, embeds it in the DM, and tells the
+patron to reply there. A publish wrongly scored accepted pins a relay that never
+stored the challenge — so the patron is directed to a rendezvous where no
+message exists, and the eventual drain reports that they never replied.
+
+Both paths now read frames until `["OK", <this event's id>, true]` arrives,
+within a 10s budget. NOTICEs are logged at INFO rather than swallowed — they are
+the single most useful line when a publish goes wrong — and an explicit
+rejection is logged at WARNING with the relay's stated reason. A publish that is
+never acknowledged now also reports the relay to the Oracle.
+
+Absent an event id in the outgoing message the old permissive behaviour is kept,
+so a malformed caller degrades rather than failing every publish.
+
+The same defect was fixed in Pricing Studio's `NostrRelayService.publishToRelay`
+earlier the same day; this is its Python twin, found while investigating a
+challenge DM that `request_npub_proof` reported sending to `wss://nos.lol` and
+that was not present on any relay in the set.
+
 ## [0.87.0] - 2026-08-22
 
 ### Fixed — an unreachable rendezvous no longer reads as "the patron never replied"
