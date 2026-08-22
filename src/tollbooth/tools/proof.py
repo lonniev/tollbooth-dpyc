@@ -17,6 +17,11 @@ import logging
 from datetime import UTC
 from typing import Any
 
+from tollbooth.constants import ErrorCode as _EC_MODULE
+from tollbooth.nostr_credentials import CourierUnreachableError
+
+_EC_UNREACHABLE = _EC_MODULE.COURIER_RELAY_UNREACHABLE
+
 logger = logging.getLogger(__name__)
 
 # The credential-template service name the proof challenge/response rides on.
@@ -215,6 +220,20 @@ async def request_npub_proof_tool(
         )
         if not result.get("success"):
             return result
+    except CourierUnreachableError as e:
+        # Every candidate relay refused the challenge. That is a relay
+        # situation, not a caller mistake, and it carries a code so an agent
+        # can branch instead of parsing prose.
+        return {
+            "success": False,
+            "error_code": _EC_UNREACHABLE,
+            "error": (
+                f"No relay would accept the proof challenge, so there is no "
+                f"rendezvous for the patron to reply on. This is a relay "
+                f"outage, not something the patron can fix. Try again shortly. "
+                f"({e})"
+            ),
+        }
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"Failed to send proof request: {e}"}
 

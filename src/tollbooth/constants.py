@@ -75,6 +75,7 @@ class ErrorCode:
     COURIER_TOKEN_EXPIRED = "courier_token_expired"        # channel's freshness window has elapsed
     COURIER_NO_PINNED_RELAY = "courier_no_pinned_relay"    # record has no rendezvous relay to drain
     COURIER_NOT_FOUND = "courier_not_found"                # relay drained; no DM matched the dpop_token
+    COURIER_RELAY_UNREACHABLE = "courier_relay_unreachable"  # pinned relay never answered; nothing was drained
 
     # Billing / pricing
     INSUFFICIENT_BALANCE = "insufficient_balance"

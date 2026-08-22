@@ -670,6 +670,16 @@ class OperatorRuntime:
         from tollbooth.relay_registry import ensure_relays_seeded
         await ensure_relays_seeded()
 
+        # Hand the Oracle whatever relay failures we buffered since the last
+        # time through here. This is the one async seam every operator passes
+        # on its way to a courier, so telemetry rides along instead of costing
+        # a patron-facing call anything. Best-effort by construction.
+        try:
+            from tollbooth.relay_reports import flush_relay_failures
+            await flush_relay_failures(self.operator_npub(), self._get_nsec_hex() or "")
+        except Exception as exc:  # noqa: BLE001 — telemetry never blocks a courier
+            logger.debug("Relay failure flush skipped: %s", exc)
+
         relays = resolve_relays()
 
         # Build credential vault from bootstrapped Neon

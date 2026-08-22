@@ -235,6 +235,14 @@ def resolve_relays(*, timeout: int = 5) -> list[str]:
 
     results = probe_relay_liveness(relays, timeout=timeout)
     live_set = {r["relay"] for r in results if r["connected"]}
+
+    # We just measured every relay for our own use; a dead one is worth
+    # telling the Oracle about, so the whole fleet stops being handed it
+    # first. Buffered only — the send happens later, off this path.
+    from tollbooth.relay_reports import note_relay_failure
+    for result in results:
+        if not result["connected"]:
+            note_relay_failure(result["relay"], "read")
     # Preserve registry (primary-first) order among the live relays.
     live = [url for url in relays if url in live_set]
 
