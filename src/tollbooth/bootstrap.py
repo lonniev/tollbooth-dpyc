@@ -20,6 +20,7 @@ author), but a working Neon URL is the final backstop either way.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 
@@ -36,6 +37,10 @@ class BootstrapResult:
     authority_npub: str = ""
     config: dict[str, str] = field(default_factory=dict)
     error: str | None = None
+    # True when the failure was about reachability rather than configuration.
+    # A missing nsec is a fact about this deployment and will not change; an
+    # unreachable relay is a fact about the last few seconds and will.
+    transient: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +48,12 @@ class BootstrapResult:
 # ---------------------------------------------------------------------------
 
 _cached_result: BootstrapResult | None = None
+
+# Seconds to wait after each failed relay poll; the final 0 means "no more
+# waiting, this was the last attempt". Roughly 75s of coverage in total, against
+# a job budget measured in minutes — sized for a relay outage lasting seconds,
+# not for one lasting long enough that a human should hear about it.
+_BOOTSTRAP_RETRY_BACKOFF = (2, 5, 10, 20, 38, 0)
 
 
 async def ensure_bootstrapped(
@@ -68,13 +79,29 @@ async def ensure_bootstrapped(
 
     nsec = os.environ.get("TOLLBOOTH_NOSTR_OPERATOR_NSEC", "")
     if not nsec:
+        # Definitive: no amount of retrying produces an nsec. Cache it.
         result = BootstrapResult(error="TOLLBOOTH_NOSTR_OPERATOR_NSEC not set")
         _cached_result = result
         return result
 
     client = BootstrapClient(nsec_hex=nsec, relays=relays)
-    _cached_result = await client.bootstrap()
-    return _cached_result
+    result = await client.bootstrap()
+
+    # Cache success, and cache a definitive failure. Do NOT cache a transient
+    # one: this result is memoised for the whole process, so caching "the
+    # relays were down a second ago" would pin a front to broken until it
+    # recycles, and pin every later tool call to the same stale verdict. The
+    # same lesson was learned one layer up at 0.62.3, where
+    # _ensure_async_executor cached its resolution before loading credentials
+    # and a cold-vault blip pinned a container to in-process for life.
+    if result.success or not result.transient:
+        _cached_result = result
+    else:
+        logger.info(
+            "Bootstrap failed transiently (%s); not cached, next call retries.",
+            result.error,
+        )
+    return result
 
 
 class BootstrapClient:
@@ -181,11 +208,36 @@ class BootstrapClient:
             )
 
         # Step 3: read our own config from Nostr using only our nsec.
-        config, author_hex, diag = receive_bootstrap_config(
-            operator_nsec=self._nsec_hex,
-            relays=relays,
-            expected_authority_hex=expected_authority_hex,
-        )
+        #
+        # Retried, because one pass is not evidence the config is unreachable.
+        # Relays flap on the order of seconds: on 2026-08-23 the two relays
+        # carrying one operator's config both refused within the same window
+        # (502 and 503) and were serving again about 110s later. A single poll
+        # turned that into a failed drill.
+        #
+        # A detached runner feels this where a warm front does not. Horizon
+        # bootstraps once per process and keeps the result; a Modal container
+        # cold-boots and bootstraps on EVERY job, so it meets whatever relay
+        # weather exists at that moment. The job already holds a multi-minute
+        # budget, so spending a fraction of it here is close to free — and
+        # giving up on the first pass spends none of it and discards the work.
+        config = author_hex = diag = None
+        for attempt, pause in enumerate(_BOOTSTRAP_RETRY_BACKOFF, start=1):
+            config, author_hex, diag = receive_bootstrap_config(
+                operator_nsec=self._nsec_hex,
+                relays=relays,
+                expected_authority_hex=expected_authority_hex,
+            )
+            if config is not None:
+                if attempt > 1:
+                    logger.info("Bootstrap config found on relay attempt %d", attempt)
+                break
+            if pause:
+                logger.info(
+                    "Bootstrap: no config on attempt %d/%d (%s); retrying in %ss",
+                    attempt, len(_BOOTSTRAP_RETRY_BACKOFF), diag, pause,
+                )
+                await asyncio.sleep(pause)
         self._relay_diag = diag
 
         if config is None:
@@ -198,6 +250,9 @@ class BootstrapClient:
                     else ""
                 )
             )
+            # Reachability is a moment-in-time fact, so this verdict is not
+            # durable — see ensure_bootstrapped, which declines to cache it.
+            result.transient = True
             return result
 
         # Discover the Authority from the event when the Oracle didn't pre-resolve.
