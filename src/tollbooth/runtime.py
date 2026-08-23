@@ -3609,6 +3609,15 @@ class OperatorRuntime:
         # running the retry in this process.
         recovered = False
         if job["status"] == "pending" or job["stalled"]:
+            # Resolve the executor FIRST. The probe runs only in
+            # start_async_job, so a process that has not yet dispatched a job
+            # still holds the InProcessExecutor default — and this path is
+            # reached by a POLL, which is exactly what a fresh container sees
+            # after a recycle. Without this line the comment above was
+            # aspirational: a job orphaned by a recycle recovered in-process on
+            # the new front, where the next recycle could orphan it again.
+            # Modal was bypassed precisely when durable execution was the point.
+            await self._ensure_async_executor()
             new_handle = await self._async_executor.submit(claim)
             if new_handle:
                 await store.set_run_handle(claim, new_handle)
