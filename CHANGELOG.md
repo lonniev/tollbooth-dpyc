@@ -3,6 +3,41 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.88.0] - 2026-08-23
+
+### Fixed — a relay down for a moment no longer becomes a permanent verdict
+
+Two failures compounded, and both were live on 2026-08-23.
+
+`BootstrapClient.bootstrap()` polled the relays for the Authority's config
+event **once**. Relays flap on the order of seconds: the two relays carrying one
+operator's config both refused inside the same window (502 and 503) and were
+serving again about 110 seconds later. A single poll turned that into
+"this operator has no bootstrap config", and a live drill was discarded.
+
+Then `ensure_bootstrapped` memoised the answer for the whole process — failures
+included. So that momentary verdict was cached, pinning a front to broken until
+it recycled and every later tool call to the same stale answer.
+
+- The relay poll is retried on a bounded ladder (~75s across six attempts). The
+  common case is unchanged: a first-pass hit costs no extra polls and no wait.
+- `BootstrapResult` gains `transient`, distinguishing "the relays were
+  unreachable a second ago" from "this deployment has no nsec".
+- `ensure_bootstrapped` caches success and definitive failures, and declines to
+  cache a transient one, so the next call is free to retry.
+
+**Why a detached runner feels this and a warm front does not.** Horizon
+bootstraps once per process and keeps the result. A Modal container cold-boots
+and bootstraps on *every* job, so it meets whatever relay weather exists at that
+moment — and the job already holds a multi-minute budget, making a fraction of a
+minute here close to free. Aborting on the first pass spent none of that budget
+and threw the work away.
+
+The same lesson was learned one layer up at 0.62.3, where
+`_ensure_async_executor` cached its resolution before loading credentials and a
+cold-vault blip pinned a container to in-process for its whole life. Bootstrap
+never got the same treatment; now it has.
+
 ## [0.87.3] - 2026-08-23
 
 ### Fixed — recovering an orphaned job now uses the detached executor it was dispatched to
