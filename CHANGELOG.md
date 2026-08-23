@@ -3,6 +3,32 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.87.3] - 2026-08-23
+
+### Fixed — recovering an orphaned job now uses the detached executor it was dispatched to
+
+`fetch_async_job` re-kicks a pending or stalled job, and its own comment states
+the intent: *"Re-kick an orphaned pending/stalled job through the EXECUTOR, so a
+Modal-configured operator recovers detached rather than silently running the
+retry in this process."* The code did the opposite.
+
+`_ensure_async_executor()` is called from exactly one place, `start_async_job`.
+The recovery path submitted straight into `self._async_executor`, which on a
+process that has not yet dispatched a job is still the `InProcessExecutor`
+default. And recovery is reached by a **poll** — precisely what a fresh
+container sees after a recycle.
+
+So the canonical durable-jobs scenario defeated itself. A job orphaned by a
+container recycle was recovered on the new front, ran there, and was orphanable
+again by the next recycle. The detached runner was bypassed exactly when it was
+the entire point. Observed on optionality 2026-08-23: a live `deal_scenario`
+dispatched to Modal, aborted there on a relay outage, and completed on the
+Horizon front — Modal's logs show no second container.
+
+One line: resolve the executor before submitting. The regression test asserts
+the detached executor is awaited and its handle recorded; against the unfixed
+code it reports `Awaited 0 times`.
+
 ## [0.87.2] - 2026-08-22
 
 ### Fixed — a client that serialises an object argument is now understood
