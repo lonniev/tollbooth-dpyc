@@ -2620,7 +2620,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/bb/89/6df40b0c5fd9a1c30
 
 [[package]]
 name = "tollbooth-dpyc"
-version = "0.88.0"
+version = "0.88.1"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -2659,7 +2659,7 @@ x402 = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cryptography", specifier = ">=46.0.5" },
+    { name = "cryptography", specifier = ">=49.0.0" },
     { name = "eth-account", marker = "extra == 'x402'", specifier = ">=0.13.0" },
     { name = "fastmcp", marker = "extra == 'dev'", specifier = ">=3.2.0" },
     { name = "fastmcp", marker = "extra == 'keyring'", specifier = ">=3.2.0" },

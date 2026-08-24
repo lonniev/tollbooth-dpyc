@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tollbooth-dpyc"
-version = "0.88.0"
+version = "0.88.1"
 description = "Don't Pester Your Customer™ — Bitcoin Lightning micropayments for MCP servers"
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,9 +26,14 @@ dependencies = [
     "pynostr==0.7.0",
     # AES-256-GCM in vault_encryption.py is sourced from `cryptography`. Pinning
     # an explicit floor keeps a fresh install from transitively pulling an older
-    # version with known CVEs. 46.0.5 is the floor that includes the 2024-2025
-    # fix cohort consumers of this wheel rely on.
-    "cryptography>=46.0.5",
+    # version with known CVEs. 49.0.0 is the floor that rejects
+    # GHSA-m2h6-j472-rp4c (wildcard DNS SANs escape permittedSubtrees) — the
+    # advisory is {introduced: 0, fixed: 49.0.0}, so the previous >=46.0.5
+    # admitted every affected release. Issue #196 was closed on the claim that
+    # 46.0.5 "already covers the patched range"; it does not, and 46.0.5 < 49.0.0
+    # is the whole of the argument. The lock happened to resolve 50.0.0, which is
+    # why nothing broke and why nobody noticed for eight days.
+    "cryptography>=49.0.0",
 ]
 
 [project.optional-dependencies]
