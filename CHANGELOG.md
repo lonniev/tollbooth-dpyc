@@ -3,6 +3,34 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.88.1] - 2026-08-24
+
+### Security — the declared `cryptography` floor admitted every version the advisory affects
+
+`pyproject.toml` declared `cryptography>=46.0.5`. GHSA-m2h6-j472-rp4c
+(the X.509 verifier accepts wildcard DNS SANs, escaping `permittedSubtrees`) is
+`{introduced: 0, fixed: 49.0.0}` — so that floor permitted 46.x, 47.x and 48.x,
+every one of them affected. The floor is now `>=49.0.0`.
+
+**No install was exposed.** `uv.lock` resolves `cryptography==50.0.0`, so every
+locked install already had the patched release. The defect was in what the wheel
+*allowed*: a consumer resolving fresh, without this lock, could legitimately land
+on 48.x.
+
+Two tests now guard both halves, because either alone is a false negative — a
+loose floor with a good lock still ships the CVE to anyone who resolves for
+themselves, and a good floor with a stale lock ships it here:
+
+- the declared specifier must exclude 48.0.0 and admit 49.0.0
+- `uv.lock` must resolve at or above 49.0.0
+
+Issue #196 was closed `COMPLETED` on the claim that "the existing floor
+`cryptography>=46.0.5` already covers the GHSA patched range". It does not:
+46.0.5 < 49.0.0, and that comparison is the entire argument. The fix had been
+written on `agent/fix-196` eight days earlier and never opened as a PR — the run
+died `awaiting-funds` first. Original work by the Journeyman; recovered, rebased
+and released here.
+
 ## [0.88.0] - 2026-08-23
 
 ### Fixed — a relay down for a moment no longer becomes a permanent verdict
