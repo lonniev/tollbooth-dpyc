@@ -289,7 +289,9 @@ class BootstrapClient:
 
         return result
 
-    async def _report_unreachable_relays(self, relays: list[str], diag: str) -> None:
+    async def _report_unreachable_relays(
+        self, relays: list[str], diag: str | None,
+    ) -> None:
         """Tell the Oracle which curated relays refused us. Best-effort, always.
 
         Nothing here may raise. This runs on a path that has ALREADY failed, and a
@@ -301,9 +303,9 @@ class BootstrapClient:
         otherwise would ask the Oracle to demote a healthy relay over our own empty
         mailbox.
         """
-        errors = diag.split("errors=[", 1)[1] if "errors=[" in (diag or "") else ""
-        if not errors:
+        if not diag or "errors=[" not in diag:
             return
+        errors = diag.split("errors=[", 1)[1]
         failed = [
             r for r in relays
             if f"{r}:" in errors and r not in self._reported_relays
