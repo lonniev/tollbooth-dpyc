@@ -121,6 +121,37 @@ class OracleClient:
             raise OracleClientError(f"Oracle returned no relays: {result}")
         return relays
 
+    async def report_relay_failure(
+        self,
+        relay: str,
+        reporter_npub: str,
+        signed_event: str,
+        mode: str = "unknown",
+    ) -> dict[str, Any]:
+        """Tell the Oracle a curated relay was unreachable, so it re-measures it.
+
+        A report does not set rank: the Oracle probes the relay itself and its own
+        measurement decides, so a mistaken report costs one probe and changes
+        nothing. Report failures only — a relay that works needs no announcement.
+
+        ``signed_event`` must be a Nostr event signed by ``reporter_npub`` whose
+        content names ``relay``, signed within the Oracle's freshness window (it
+        binds the signature to a moment so a report cannot be replayed forever).
+
+        Raises ``OracleClientError`` on connection/parse failure. A refusal the
+        Oracle can articulate — not a member, relay not curated — comes back as
+        data in the returned dict, because those are answers, not faults.
+        """
+        return await self.call_tool(
+            "report_relay_failure",
+            {
+                "relay": relay,
+                "reporter_npub": reporter_npub,
+                "signed_event": signed_event,
+                "mode": mode,
+            },
+        )
+
     async def resolve_authority_for(self, npub: str) -> dict[str, Any] | None:
         """Resolve the certifying Authority ``{npub, url, name}`` for an operator.
 
