@@ -3,6 +3,45 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.89.0] - 2026-08-29
+
+### Added — a bootstrap that cannot reach its relays now says so
+
+The curated relay order is a starting guess, and a guess cannot know what is up
+this minute. `get_relays()` already moves proven-dead relays to the back — but
+only if somebody reports one, and nothing in the SDK ever did. The Oracle's
+`report_relay_failure` (dpyc-oracle 0.3.0) had no caller.
+
+On 2026-08-29 an eXcalibur Modal container found all four of its bootstrap relays
+unreachable, could not read its own vault, and the scheduler published an author's
+fallback text instead of the resolve a patron had paid for. The same order was
+then handed to the next container, and the one after that.
+
+`BootstrapClient` now reports the relays that refused it, once the retry loop is
+exhausted — never per attempt, since a relay that flaps for one pass and serves on
+the next is not news. A detached runner is the fleet's best-placed reporter: it
+cold-boots and re-bootstraps on every job, so it meets the weather as it is, where
+a warm front bootstraps once and never looks again.
+
+The report needs no vault — only the nsec, to derive the npub and sign — so it
+works on exactly the path where nothing else does.
+
+- `OracleClient.report_relay_failure(relay, reporter_npub, signed_event, mode)`.
+- Reports only relays named in the poll's `errors=[...]`. A relay that answered
+  and simply held no config for us is reachable, and reporting it would ask the
+  Oracle to spend a probe demoting a healthy relay over our own empty mailbox.
+- One report per relay per process, so a container's repeated bootstraps do not
+  ask for the same probe again.
+- Best-effort throughout: this runs on a path that has already failed, and the
+  caller still has a verdict to return. Nothing here raises.
+
+A report does not set rank — the Oracle probes the relay itself and its own
+measurement decides, so a mistaken report costs one probe and changes nothing.
+
+Validated against the live Oracle: the signed event verifies, its pubkey matches
+the reporter, and its content names the relay. A throwaway key is declined on
+membership alone, which is the Oracle's design.
+
 ## [0.88.1] - 2026-08-24
 
 ### Security — the declared `cryptography` floor admitted every version the advisory affects

@@ -126,6 +126,9 @@ class BootstrapClient:
         self._relays = relays
         self._npub: str | None = None
         self._pubkey_hex: str | None = None
+        # Relays already reported this process, so one container's repeated
+        # bootstraps do not ask the Oracle to re-probe the same dead relay.
+        self._reported_relays: set[str] = set()
 
     @property
     def npub(self) -> str:
@@ -242,6 +245,15 @@ class BootstrapClient:
 
         if config is None:
             logger.warning("Bootstrap relay diagnostics: %s", diag)
+            # Tell the Oracle which relays refused us, so fleet ordering is
+            # corrected by measurement instead of staying a curated guess. A
+            # detached runner is the caller most likely to know: it cold-boots
+            # and re-bootstraps on EVERY job, so it meets the weather as it is.
+            #
+            # Deliberately AFTER the retry loop, not inside it: a relay that
+            # flaps for one pass and serves on the next is not news, and
+            # reporting per attempt would multiply one outage into a burst.
+            await self._report_unreachable_relays(relays, diag)
             result.error = (
                 "No bootstrap config on relays for this operator"
                 + (
@@ -276,3 +288,65 @@ class BootstrapClient:
             result.error = "Neon URL not in bootstrap config from Authority"
 
         return result
+
+    async def _report_unreachable_relays(
+        self, relays: list[str], diag: str | None,
+    ) -> None:
+        """Tell the Oracle which curated relays refused us. Best-effort, always.
+
+        Nothing here may raise. This runs on a path that has ALREADY failed, and a
+        failed report must not turn a transient bootstrap miss into a crash — the
+        caller still has a verdict to return.
+
+        Only relays named in the diagnostics' ``errors=[...]`` are reported. A relay
+        that connected and simply held no config for us is reachable, and saying
+        otherwise would ask the Oracle to demote a healthy relay over our own empty
+        mailbox.
+        """
+        if not diag or "errors=[" not in diag:
+            return
+        errors = diag.split("errors=[", 1)[1]
+        failed = [
+            r for r in relays
+            if f"{r}:" in errors and r not in self._reported_relays
+        ]
+        if not failed:
+            return
+
+        try:
+            from nostr_sdk import EventBuilder, Keys, Kind
+
+            from tollbooth.oracle_client import default_oracle_client
+
+            keys = Keys.parse(self._nsec_hex)
+            npub = keys.public_key().to_bech32()
+            oracle = default_oracle_client()
+        except Exception as exc:  # noqa: BLE001 — reporting is never load-bearing
+            logger.debug("Relay reporting unavailable (%s); skipping.", exc)
+            return
+
+        for relay in failed:
+            # Marked before the attempt, not after: a report that throws should not
+            # be retried on the next bootstrap of this same process either.
+            self._reported_relays.add(relay)
+            try:
+                # Signed per relay, immediately before sending. The Oracle binds
+                # the signature to a moment, and requires the content to name the
+                # relay so one blob cannot be replayed against a different one.
+                event = (
+                    EventBuilder(Kind(1), f"DPYC-RELAY-UNREACHABLE: {relay}")
+                    .finalize(keys)
+                    .as_json()
+                )
+                answer = await oracle.report_relay_failure(
+                    relay=relay,
+                    reporter_npub=npub,
+                    signed_event=event,
+                    mode="read",
+                )
+                logger.info(
+                    "Reported %s unreachable: accepted=%s probed=%s",
+                    relay, answer.get("accepted"), answer.get("probed"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Could not report %s to the Oracle: %s", relay, exc)
