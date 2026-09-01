@@ -43,6 +43,22 @@ def _test_template() -> dict[str, CredentialTemplate]:
     }
 
 
+@pytest.fixture(autouse=True)
+def _fake_relays_serve_dm_reads(monkeypatch):
+    """These tests point at fictional relay hosts.
+
+    ``open_channel`` will not pin a rendezvous it cannot read the reply back
+    out of, which means a live DM-subscription probe per candidate relay.
+    Nothing here is about that gate — it has its own suite in
+    ``test_rendezvous_must_serve_dms.py`` — so answer it yes and let each test
+    stay about its own subject.
+    """
+    monkeypatch.setattr(
+        NostrCredentialExchange, "_relay_serves_dm_reads",
+        lambda _self, _url: (True, ""),
+    )
+
+
 def _make_exchange(
     nsec: str | None = None,
     relays: list[str] | None = None,
