@@ -3,6 +3,33 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.89.1] - 2026-09-02
+
+### Fixed — a rendezvous relay must serve the DM back, not just accept it
+
+The courier pinned the first relay that answered `OK` on the welcome-DM publish.
+Write acceptance is only half a rendezvous: the DM also has to be *fetchable*
+from there, or the message is swallowed whole — the recipient's own client
+cannot see it either — while the publish ack makes the send look perfect.
+
+`wss://nos.lol`, first in the DPYC registry, is exactly that shape today. It
+takes the write, answers every kind-4/1059 filter with `CLOSED auth-required`,
+and then rejects every NIP-42 AUTH with "relay needs serviceUrl to be
+configured" — a gate nobody can pass. Credential brokering failed silently for
+any operator whose courier landed there first.
+
+`SecureCourier` now probes a candidate with the drain's own filter at `limit 1`
+before spending the write, and only an `EOSE` (or a delivered `EVENT`) counts as
+willingness to serve. A `CLOSED` and silence are both refusals — the same
+"silence is not consent" rule the publish ack already followed. Verdicts cache
+for ten minutes, since a relay's read policy changes on redeploys rather than
+per request, and each refusal is reported through `note_relay_failure(relay,
+"read")` so the measured ordering learns from it.
+
+- `SecureCourier._relay_serves_dm_reads(relay_url) -> (bool, str)`.
+- The exhaustion error now distinguishes the two halves: no relay both accepted
+  the challenge *and* would serve it back.
+
 ## [0.89.0] - 2026-08-29
 
 ### Added — a bootstrap that cannot reach its relays now says so
