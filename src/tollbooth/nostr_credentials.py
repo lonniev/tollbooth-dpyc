@@ -197,6 +197,12 @@ _DEFAULT_SUBSCRIBE_TIMEOUT = 10
 # How long to wait for a relay's OK on an event we just published.
 _PUBLISH_ACK_TIMEOUT = 10
 
+# How long a relay's "will you serve DM subscriptions back?" verdict stays
+# good for. A relay's read policy changes on redeploys, not on requests, so
+# re-probing per channel would be pure latency; ten minutes bounds how long a
+# newly-broken relay can keep being pinned as a rendezvous.
+_DM_READ_PROBE_TTL = 600.0
+
 # NACK copy sent to the sender of a popped courier DM whose anti-replay
 # token did NOT match the open channel. Deliberately does NOT reveal the
 # expected dpop_token phrase — telling an unknown sender the token they should
@@ -404,6 +410,10 @@ class NostrCredentialExchange:
         # Ephemeral agent keys for self-DM avoidance:
         # {(recipient_npub, service): PrivateKey}
         self._ephemeral_agents: dict[tuple[str, str], PrivateKey] = {}
+        # {relay_url: (serves_dm_reads, expires_monotonic, detail)} — see
+        # _relay_serves_dm_reads. A relay may only become a rendezvous if it
+        # will hand the DM back; write acceptance alone is not enough.
+        self._dm_read_probe_cache: dict[str, tuple[bool, float, str]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -1091,6 +1101,25 @@ class NostrCredentialExchange:
             committed_relay: str | None = None
             attempt_errors: list[str] = []
             for candidate_relay in self._relays:
+                # A rendezvous is a two-way seam: the DM has to land there AND
+                # be fetchable from there. A relay that takes the write and
+                # refuses every DM read swallows the message whole — the
+                # recipient's own client cannot see it either — while the
+                # publish OK makes the send look perfect. Probe the read
+                # before spending the write.
+                serves, why = self._relay_serves_dm_reads(candidate_relay)
+                if not serves:
+                    attempt_errors.append(
+                        f"{candidate_relay}: will not serve DM reads ({why})"
+                    )
+                    logger.info(
+                        "Relay %s refuses DM subscriptions — not a viable "
+                        "rendezvous for %s/%s: %s",
+                        candidate_relay, recipient_npub[:20], service, why,
+                    )
+                    note_relay_failure(candidate_relay, "read")
+                    continue
+
                 welcome_text = build_welcome(candidate_relay)
                 try:
                     if agent_key is not None:
@@ -1127,8 +1156,9 @@ class NostrCredentialExchange:
                 for candidate in self._relays:
                     note_relay_failure(candidate, "send")
                 raise CourierUnreachableError(
-                    f"No configured relay accepted the challenge for "
-                    f"{recipient_npub} ({len(self._relays)} attempted). "
+                    f"No configured relay both accepted the challenge for "
+                    f"{recipient_npub} and would serve it back "
+                    f"({len(self._relays)} attempted). "
                     f"Re-issue request after verifying relay connectivity. "
                     f"Errors: {'; '.join(attempt_errors)}"
                 )
@@ -2615,3 +2645,92 @@ class NostrCredentialExchange:
                 "Single-relay publish %s failed (non-fatal): %s", relay_url, exc,
             )
             return False, str(exc)
+
+    def _relay_serves_dm_reads(self, relay_url: str) -> tuple[bool, str]:
+        """Will this relay serve DM subscriptions back to us?
+
+        A relay that accepts a kind-4/1059 write but refuses the matching
+        read is a black hole: the courier pins it as the rendezvous, the
+        welcome DM lands there and nobody — the recipient's client included —
+        can ever fetch it. ``wss://nos.lol`` is exactly this shape today: it
+        answers every DM filter with ``CLOSED auth-required`` and then
+        rejects every NIP-42 AUTH with "relay needs serviceUrl to be
+        configured", so the gate can never be passed by anyone.
+
+        The probe is the drain's own filter (``_subscribe_to_relays``) with a
+        limit of one: only an ``EOSE`` (or a delivered ``EVENT``) proves the
+        relay will answer it. A ``CLOSED`` and silence are both refusals —
+        the same "silence is not consent" rule the publish ack follows. A
+        ``NOTICE`` is read past, not scored, for the same reason it is there:
+        it is the relay explaining itself, not answering.
+
+        Verdicts are cached process-wide for ``_DM_READ_PROBE_TTL`` seconds.
+
+        Returns:
+            ``(serves, detail)``.
+        """
+        now = time.monotonic()
+        with self._lock:
+            cached = self._dm_read_probe_cache.get(relay_url)
+            if cached is not None and now < cached[1]:
+                return cached[0], cached[2]
+
+        serves, detail = self._probe_dm_reads(relay_url)
+        with self._lock:
+            self._dm_read_probe_cache[relay_url] = (
+                serves, now + _DM_READ_PROBE_TTL, detail,
+            )
+        return serves, detail
+
+    def _probe_dm_reads(self, relay_url: str) -> tuple[bool, str]:
+        """Uncached half of :meth:`_relay_serves_dm_reads` — one REQ, one verdict."""
+        sub_id = f"rvz-{int(time.time() * 1000) % 10_000_000}"
+        filt = {
+            "kinds": [_KIND_ENCRYPTED_DM, _KIND_GIFT_WRAP],
+            "#p": [self._pubkey_hex],
+            "limit": 1,
+        }
+        try:
+            ws = create_connection(
+                relay_url, timeout=_DEFAULT_SUBSCRIBE_TIMEOUT, sslopt={},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"connect failed: {exc}"
+
+        last_frame = ""
+        try:
+            ws.send(json.dumps(["REQ", sub_id, filt]))
+            deadline = time.monotonic() + _DEFAULT_SUBSCRIBE_TIMEOUT
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False, f"no EOSE within {_DEFAULT_SUBSCRIBE_TIMEOUT}s"
+                ws.settimeout(remaining)
+                try:
+                    raw = ws.recv()
+                except Exception as exc:  # noqa: BLE001
+                    return False, f"read failed: {type(exc).__name__}: {exc}"
+                last_frame = str(raw)
+                try:
+                    frame = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(frame, list) or not frame:
+                    continue
+                if frame[0] in ("EOSE", "EVENT"):
+                    return True, ""
+                if frame[0] == "NOTICE":
+                    logger.info(
+                        "Relay %s NOTICE while probing DM reads: %s",
+                        relay_url, str(frame[1:])[:200],
+                    )
+                    continue
+                if frame[0] == "CLOSED":
+                    return False, f"refused DM filter: {last_frame[:160]}"
+        finally:
+            try:
+                ws.send(json.dumps(["CLOSE", sub_id]))
+            except Exception:  # noqa: BLE001, S110
+                pass
+            ws.close()
+
