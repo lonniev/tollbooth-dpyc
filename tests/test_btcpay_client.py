@@ -375,3 +375,104 @@ class TestBTCPayClientContextManager:
         assert not client._client.is_closed
         await client.close()
         assert client._client.is_closed
+
+
+# ---------------------------------------------------------------------------
+# The operator's own money
+# ---------------------------------------------------------------------------
+
+
+def _ok(payload: object) -> httpx.Response:
+    return httpx.Response(200, json=payload)
+
+
+class TestLightningBalance:
+    """One response object, two units, and a factor of a thousand between them."""
+
+    @pytest.mark.asyncio
+    async def test_offchain_is_millisats_and_onchain_is_sats(self) -> None:
+        client = BTCPayClient("https://btcpay.example.com", "k", "s1")
+        client._client.request = AsyncMock(
+            return_value=_ok(
+                {
+                    # BTCPay reports these in MILLISATOSHI, as strings.
+                    "offchain": {
+                        "local": "250000000",
+                        "remote": "75000000",
+                        "opening": "0",
+                        "closing": "0",
+                    },
+                    # ...and these in SATOSHI, in the same response.
+                    "onchain": {"confirmed": "41000", "unconfirmed": "0", "reserved": "0"},
+                }
+            )
+        )
+
+        b = await client.get_lightning_balance()
+
+        # 250,000,000 msat is 250,000 sats. Read as sats it would be a quarter
+        # of a bitcoin, and an operator with 250k sats would be told they could
+        # pay out a thousand times what they hold.
+        assert b["sendable_sats"] == 250_000
+        assert b["receivable_sats"] == 75_000
+        # On-chain is already sats and must NOT be divided again.
+        assert b["onchain_confirmed_sats"] == 41_000
+
+    @pytest.mark.asyncio
+    async def test_a_node_with_no_channels_reads_as_empty_not_as_an_error(self) -> None:
+        """A balance check that throws stops a payout for the wrong reason."""
+        client = BTCPayClient("https://btcpay.example.com", "k", "s1")
+        client._client.request = AsyncMock(
+            return_value=_ok({"offchain": {"local": None, "remote": ""}, "onchain": None})
+        )
+
+        b = await client.get_lightning_balance()
+
+        assert b["sendable_sats"] == 0
+        assert b["onchain_confirmed_sats"] == 0
+
+    @pytest.mark.asyncio
+    async def test_it_asks_the_store_it_was_built_for(self) -> None:
+        client = BTCPayClient("https://btcpay.example.com", "k", "store-abc")
+        client._client.request = AsyncMock(return_value=_ok({}))
+
+        await client.get_lightning_balance()
+
+        client._client.request.assert_called_once_with(
+            "GET", "/stores/store-abc/lightning/BTC/balance", json=None
+        )
+
+
+class TestPayLightningInvoice:
+    @pytest.mark.asyncio
+    async def test_both_fee_limits_are_sent_because_a_route_costs_extra(self) -> None:
+        """A routing fee is charged ON TOP, so an unbounded payment is unbounded."""
+        client = BTCPayClient("https://btcpay.example.com", "k", "store-abc")
+        client._client.request = AsyncMock(
+            return_value=_ok({"status": "Complete", "totalAmount": "1000"})
+        )
+
+        await client.pay_lightning_invoice("lnbc1...", max_fee_sats=25, max_fee_percent=2.5)
+
+        method, path = client._client.request.call_args[0]
+        body = client._client.request.call_args[1]["json"]
+        assert (method, path) == ("POST", "/stores/store-abc/lightning/BTC/invoices/pay")
+        assert body["BOLT11"] == "lnbc1..."
+        assert body["maxFeeFlat"] == "25"
+        assert body["maxFeePercent"] == "2.5"
+
+    @pytest.mark.asyncio
+    async def test_an_initiated_payment_is_returned_as_it_came_back(self) -> None:
+        """202 means UNDER WAY, not paid.
+
+        The caller has to be able to tell the difference, because treating
+        "initiated" as "settled" is how a payment gets sent a second time.
+        """
+        client = BTCPayClient("https://btcpay.example.com", "k", "s1")
+        client._client.request = AsyncMock(
+            return_value=httpx.Response(202, json={"status": "Pending", "paymentHash": "ab"})
+        )
+
+        out = await client.pay_lightning_invoice("lnbc1...", max_fee_sats=10)
+
+        assert out["status"] == "Pending"

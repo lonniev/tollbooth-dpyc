@@ -6,6 +6,23 @@ from typing import Any, Self
 
 import httpx
 
+
+def _num(value: Any) -> float:
+    """A BTCPay amount as a number, whatever it arrived as.
+
+    Every amount in the Lightning balance response is a JSON *string*, and any
+    of them may be null on a node that has no channels. `int("")` raises and
+    `int(None)` raises, and a balance check that throws is a balance check that
+    stops a payout for the wrong reason.
+    """
+    if value is None or value == "":
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ---------------------------------------------------------------------------
 # Exception hierarchy
 # ---------------------------------------------------------------------------
@@ -221,6 +238,90 @@ class BTCPayClient:
         }
         return await self._request(
             "POST", f"/stores/{self._store_id}/payouts", json_data=payload
+        )
+
+    # -- the operator's own money --------------------------------------------
+    #
+    # Everything above is about taking sats IN. These two are about sending
+    # them out, which is the same API and an entirely different risk: an
+    # invoice that fails costs nobody anything, and a payment that succeeds
+    # twice cannot be taken back.
+
+    async def get_lightning_balance(self, crypto_code: str = "BTC") -> dict[str, int]:
+        """GET /stores/{storeId}/lightning/{crypto}/balance — what the node holds.
+
+        Returned in **satoshis throughout**, which the API itself is not: BTCPay
+        reports off-chain amounts in millisatoshi and on-chain amounts in
+        satoshi, both as strings, in one response object. A caller that reads
+        `offchain.local` as sats is wrong by a factor of a thousand — in the
+        direction that says a nearly empty node is richly funded. Normalising
+        here means no operator has to know that.
+
+        `sendable` is the number that answers "can we pay this": the local end
+        of active channels, which is the only balance a Lightning payment can
+        actually draw on. On-chain funds are real and are reported, but they
+        cannot settle a Lightning invoice without opening a channel first.
+
+        Requires the `btcpay.store.canuselightningnode` permission, which an
+        invoice-only API key does not carry.
+        """
+        raw = await self._request(
+            "GET", f"/stores/{self._store_id}/lightning/{crypto_code}/balance"
+        )
+        off = raw.get("offchain") or {}
+        on = raw.get("onchain") or {}
+
+        def msat(key: str) -> int:
+            return int(_num(off.get(key)) // 1000)
+
+        def sat(key: str) -> int:
+            return int(_num(on.get(key)))
+
+        return {
+            "sendable_sats": msat("local"),
+            "receivable_sats": msat("remote"),
+            "opening_sats": msat("opening"),
+            "closing_sats": msat("closing"),
+            "onchain_confirmed_sats": sat("confirmed"),
+            "onchain_unconfirmed_sats": sat("unconfirmed"),
+        }
+
+    async def pay_lightning_invoice(
+        self,
+        bolt11: str,
+        *,
+        max_fee_sats: int,
+        max_fee_percent: float = 3.0,
+        send_timeout_seconds: int = 30,
+        crypto_code: str = "BTC",
+    ) -> dict[str, Any]:
+        """POST /stores/{storeId}/lightning/{crypto}/invoices/pay — send sats.
+
+        A routing fee is charged ON TOP of the invoice amount, so a payment
+        always costs more than it pays and the caller must have said how much
+        more it may cost. Both limits are required rather than defaulted to
+        nothing: BTCPay will otherwise accept whatever route it finds, and an
+        expensive route on a small payout can cost a meaningful share of it.
+
+        The API answers 200 when the payment settled and **202 when it is only
+        under way** — this returns the body either way, with `status` carrying
+        BTCPay's own word for it, because treating "initiated" as "paid" is how
+        a payment gets sent twice. A well-known 400 here is
+        `could-not-find-route`, which means no route existed, not that anything
+        was spent.
+
+        Requires the `btcpay.store.cancreatelightninginvoice` permission.
+        """
+        payload: dict[str, Any] = {
+            "BOLT11": bolt11,
+            "maxFeePercent": str(max_fee_percent),
+            "maxFeeFlat": str(int(max_fee_sats)),
+            "sendTimeout": int(send_timeout_seconds),
+        }
+        return await self._request(
+            "POST",
+            f"/stores/{self._store_id}/lightning/{crypto_code}/invoices/pay",
+            json_data=payload,
         )
 
     async def get_payout_processors(self) -> list[dict[str, Any]]:

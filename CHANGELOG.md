@@ -3,6 +3,38 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.90.0] - 2026-09-07
+
+### Added — the operator can see its own Lightning balance, and spend it
+
+Every BTCPay call in this SDK was about taking sats IN. `create_payout` was the
+one exception and it has no call site anywhere in the fleet, because a store
+payout lands in `AwaitingApproval` and needs a configured processor before it
+moves — which is a queue, not a payment. Two Greenfield endpoints that do move
+money are now wrapped:
+
+- `BTCPayClient.get_lightning_balance()` — `GET /stores/{id}/lightning/{crypto}/balance`,
+  normalised to **satoshis throughout**, which the API is not. BTCPay reports
+  off-chain amounts in millisatoshi and on-chain amounts in satoshi, both as
+  strings, in a single response object. A caller reading `offchain.local` as
+  sats is wrong by a factor of a thousand in the direction that says a nearly
+  empty node is richly funded. `sendable_sats` is the local end of active
+  channels — the only balance a Lightning payment can draw on. Null and empty
+  amounts read as zero rather than raising: a balance check that throws stops a
+  payout for the wrong reason. Needs `btcpay.store.canuselightningnode`.
+
+- `BTCPayClient.pay_lightning_invoice()` — `POST /stores/{id}/lightning/{crypto}/invoices/pay`.
+  Both fee limits are **required arguments, not defaults**: a routing fee is
+  charged on top of the invoice, so a payment always costs more than it pays,
+  and an unbounded one is unbounded. The body is returned as it came back,
+  including on **202, which means the payment is under way and not that it
+  settled** — treating "initiated" as "paid" is how a payment gets sent twice.
+  Needs `btcpay.store.cancreatelightninginvoice`.
+
+Neither is called by the SDK itself. They exist so an operator paying a winner
+or a charity does not have to reach past `BTCPayClient` and integrate with
+BTCPay directly.
+
 ## [0.89.1] - 2026-09-02
 
 ### Fixed — a rendezvous relay must serve the DM back, not just accept it
