@@ -584,16 +584,47 @@ class NeonVault:
     # -- Anchor operations ---------------------------------------------------
 
     async def fetch_all_balances(self) -> list[tuple[str, str]]:
-        """Fetch all (npub, ledger_json) pairs, sorted by npub.
+        """Fetch all (npub, ledger_json) pairs AS STORED, sorted by npub.
 
-        Used by the OTS anchoring system to build a Merkle tree of all
-        ledger balances.
+        Used by the OTS anchoring system to build a Merkle tree of all ledger
+        balances, which is why this returns the stored bytes and does NOT
+        decrypt: the anchor commits to what is actually in the column, and
+        decrypting here would silently change what every past anchor attested.
+
+        **If you want to read the balances, you want `fetch_all_ledgers`.**
+        On an encrypted vault every string this returns is ciphertext, so a
+        caller that json-parses them gets a parse error per patron and, if it
+        counts those as "unreadable", concludes the whole estate is corrupt.
         """
         result = await self._execute(
             f"SELECT npub, ledger_json FROM {self._t('balances')} ORDER BY npub"
         )
         rows = result.get("rows", [])
         return [(row["npub"], row["ledger_json"]) for row in rows]
+
+    async def fetch_all_ledgers(self) -> list[tuple[str, str]]:
+        """Fetch all (npub, ledger_json) pairs, DECRYPTED, sorted by npub.
+
+        The readable counterpart of `fetch_all_balances`. Every other read path
+        decrypts — `fetch_ledger` has always ended with `self._decrypt(...)` —
+        and the one bulk accessor did not, so the only way to read the whole
+        estate was to reach past the vault and decrypt by hand.
+
+        A row that will not decrypt is returned as an empty string rather than
+        raising, and rather than being dropped. Both alternatives are worse for
+        the caller that needs this most: an exception loses the ninety-nine
+        readable rows along with the one bad one, and silently omitting it
+        understates a total that somebody may be about to spend against.
+        """
+        rows = await self.fetch_all_balances()
+        out: list[tuple[str, str]] = []
+        for npub, stored in rows:
+            try:
+                out.append((npub, self._decrypt(stored)))
+            except Exception:  # noqa: BLE001 — one bad row must not lose the rest
+                logger.warning("ledger for %s… could not be decrypted", npub[:12])
+                out.append((npub, ""))
+        return out
 
     async def store_anchor(
         self,

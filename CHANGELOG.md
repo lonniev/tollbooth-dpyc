@@ -3,6 +3,29 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.90.1] - 2026-09-08
+
+### Added — `NeonVault.fetch_all_ledgers()`, the bulk accessor that decrypts
+
+`fetch_all_balances` returns the ledger column **as stored**, because the OTS
+anchoring system commits to exactly those bytes — decrypting there would silently
+change what every past anchor attested. But it was the only bulk accessor, so on
+an encrypted vault the sole way to READ the whole estate was to reach past the
+vault and decrypt by hand.
+
+The first caller to try (a solvency check totalling patron float before sending a
+Lightning payout) json-parsed the ciphertext, counted every parse failure as an
+unreadable ledger, and concluded 123 of 123 patrons were corrupt — so it refused
+every payout, correctly, for entirely the wrong reason.
+
+`fetch_all_ledgers()` is the readable counterpart: same rows, same order,
+decrypted the way `fetch_ledger` has always decrypted. A row that will not
+decrypt comes back as an empty string rather than raising — an exception would
+lose the ninety-nine good rows with the bad one — and rather than being dropped,
+which would understate a total somebody is about to spend against.
+
+`fetch_all_balances` is unchanged and its docstring now says which one you want.
+
 ## [0.90.0] - 2026-09-07
 
 ### Added — the operator can see its own Lightning balance, and spend it

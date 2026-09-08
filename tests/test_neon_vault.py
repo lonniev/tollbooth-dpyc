@@ -431,3 +431,46 @@ class TestProtocolConformance:
 
         vault = _vault()
         assert isinstance(vault, VaultBackend)
+
+
+class TestFetchAllLedgers:
+    """The bulk accessor that actually reads.
+
+    `fetch_all_balances` returns the stored bytes because the OTS anchor commits
+    to exactly those. On an encrypted vault that means ciphertext, and a caller
+    who json-parses it concludes every patron's ledger is corrupt — which is how
+    a solvency check reported 123 of 123 unreadable and refused every payout.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_decrypts_where_fetch_all_balances_does_not(self) -> None:
+        v = NeonVault.__new__(NeonVault)
+        v.fetch_all_balances = AsyncMock(  # type: ignore[method-assign]
+            return_value=[("npub1a", "CIPHER:a"), ("npub1b", "CIPHER:b")]
+        )
+        v._decrypt = lambda s: s.replace("CIPHER:", "plain-")  # type: ignore[method-assign]
+
+        assert await v.fetch_all_ledgers() == [
+            ("npub1a", "plain-a"),
+            ("npub1b", "plain-b"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_one_undecryptable_row_does_not_lose_the_others(self) -> None:
+        """An exception would throw away every readable ledger with the bad one,
+        and dropping the row would understate a total somebody may spend against."""
+        v = NeonVault.__new__(NeonVault)
+        v.fetch_all_balances = AsyncMock(  # type: ignore[method-assign]
+            return_value=[("npub1a", "ok"), ("npub1bad", "boom"), ("npub1c", "ok")]
+        )
+
+        def flaky(s: str) -> str:
+            if s == "boom":
+                raise ValueError("bad padding")
+            return "plain"
+
+        v._decrypt = flaky  # type: ignore[method-assign]
+
+        out = await v.fetch_all_ledgers()
+        assert out == [("npub1a", "plain"), ("npub1bad", ""), ("npub1c", "plain")]
+        assert len(out) == 3, "the bad row is kept, as an empty string"
