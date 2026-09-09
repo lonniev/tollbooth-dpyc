@@ -533,6 +533,14 @@ class NeonVault:
             f"ALTER TABLE {self._t('async_jobs')} "
             "ADD COLUMN IF NOT EXISTS expected_seconds INTEGER NOT NULL DEFAULT 0"
         )
+        # Retrofit charged_sats: what the request was ACTUALLY debited, so a
+        # runner refunding minutes later in another process gives back that
+        # rather than the list price. Without it a patron on a discount was
+        # refunded more than they paid.
+        await self._execute(
+            f"ALTER TABLE {self._t('async_jobs')} "
+            "ADD COLUMN IF NOT EXISTS charged_sats INTEGER NOT NULL DEFAULT 0"
+        )
         await self._execute(
             f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_async_jobs_npub "
             f"ON {self._t('async_jobs')}(npub)"

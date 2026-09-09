@@ -3,6 +3,44 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.91.0] - 2026-09-09
+
+### Fixed — a refund now gives back what was TAKEN, not the list price
+
+`rollback_debit` recomputed the fare from the pricing model and credited that.
+The pricing model holds the BASE price, before the constraint engine has run,
+so the figure was right only when nothing adjusted the fare. When something
+did, the refund was wrong in the generous direction: a patron on a
+full-discount coupon paid nothing for a call, the call raised, and the SDK
+handed back the list price. A refused call MINTED money.
+
+That is a leak rather than a rounding error wherever refusals are ordinary. A
+contended tool refuses all day — a lost race, a rule that says no — and every
+refusal moved sats to the caller that the caller never spent.
+
+- `debit_or_deny`'s effective cost is now recorded in a **`ContextVar`**, which
+  is per task rather than per process, and `rollback_debit` takes an explicit
+  `charged` argument. `paid_tool` passes it, so the synchronous path never
+  guesses.
+- The record carries its **tool id**. A task may serve more than one call, so
+  the recorded fare is trusted only for the tool it was taken for — never
+  refunding one tool's fare against another's.
+- `_last_debit_cost` is **unchanged**. Tools read it by name (the Authority
+  computes its certification fee from it) and it stays a plain attribute set at
+  the same point in the same order. Nothing about that path moved.
+- The old recompute survives as the last fallback, for callers that genuinely
+  cannot know — and it now says so in the log rather than looking like the
+  exact path.
+
+### Added — `charged_sats` on async job rows
+
+A job refunded minutes later, in another process, has no context to read. The
+fare charged when the job was ACCEPTED is now stored on the row and passed back
+on every one of the five refund paths, so a long-running job refunds the same
+figure a synchronous one does. Existing rows carry `0`, which reads as "not
+known" and falls through to the recompute — the retrofit is an
+`ADD COLUMN IF NOT EXISTS`, so no operator has to do anything.
+
 ## [0.90.0] - 2026-09-07
 
 ### Added — the operator can see its own Lightning balance, and spend it

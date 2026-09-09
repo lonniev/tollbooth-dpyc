@@ -301,8 +301,8 @@ class TestRuntimeAsyncJobs:
         rt._ASYNC_JOB_MAX_ATTEMPTS = 1  # first failure is terminal
         refunds: list[tuple] = []
 
-        async def fake_rollback(tool_id, npub, *, tool_kwargs=None):
-            refunds.append((tool_id, npub, tool_kwargs))
+        async def fake_rollback(tool_id, npub, *, tool_kwargs=None, charged=None):
+            refunds.append((tool_id, npub, tool_kwargs, charged))
 
         rt.rollback_debit = fake_rollback
 
@@ -322,14 +322,14 @@ class TestRuntimeAsyncJobs:
         assert fetched["refunded"] is True
         # the raw exception text must NOT reach the patron
         assert "hunter2" not in json.dumps(fetched)
-        assert refunds == [(TOOL_ID, NPUB, {"x": "1"})]
+        assert refunds == [(TOOL_ID, NPUB, {"x": "1"}, None)]
 
     async def test_runner_exceeding_budget_is_cancelled_and_refunds(self, vault):
         rt = _make_runtime(vault)
         refunds: list[tuple] = []
 
-        async def fake_rollback(tool_id, npub, *, tool_kwargs=None):
-            refunds.append((tool_id, npub, tool_kwargs))
+        async def fake_rollback(tool_id, npub, *, tool_kwargs=None, charged=None):
+            refunds.append((tool_id, npub, tool_kwargs, charged))
 
         rt.rollback_debit = fake_rollback
 
@@ -360,7 +360,7 @@ class TestRuntimeAsyncJobs:
         # a budget timeout is a terminal, refundable, transient situation
         assert fetched["error_code"] == "job_timed_out"
         assert fetched["transient"] is True
-        assert refunds == [(TOOL_ID, NPUB, {"x": "1"})]
+        assert refunds == [(TOOL_ID, NPUB, {"x": "1"}, None)]
 
     async def test_failure_then_retry_succeeds(self, vault):
         rt = _make_runtime(vault)
@@ -451,7 +451,7 @@ class TestRuntimeAsyncJobs:
         rt = _make_runtime(vault)
         refunds: list[str] = []
 
-        async def fake_rollback(tool_id, npub, *, tool_kwargs=None):
+        async def fake_rollback(tool_id, npub, *, tool_kwargs=None, charged=None):
             refunds.append(tool_id)
 
         rt.rollback_debit = fake_rollback

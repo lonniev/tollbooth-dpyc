@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 _ROW_FIELDS = (
     "claim, npub, kind, tool_id, params, status, attempts, "
     "max_runtime_seconds, expected_seconds, result_ttl_seconds, result, error, run_handle, "
+    "charged_sats, "
     "EXTRACT(EPOCH FROM (now() - created_at)) AS elapsed_seconds, "
     "(status = 'running' AND started_at IS NOT NULL AND "
     " started_at < now() - make_interval(secs => max_runtime_seconds)) AS stalled, "
@@ -137,6 +138,9 @@ def _row_to_job(row: dict[str, Any]) -> dict[str, Any]:
         "result": _as_dict(row.get("result")),
         "error": str(row.get("error") or ""),
         "run_handle": str(row.get("run_handle") or ""),
+        # What the request was debited. 0 means "not recorded" — a job
+        # created before this column existed — and the refund falls back.
+        "charged_sats": int(row.get("charged_sats") or 0),
         "elapsed_seconds": float(row.get("elapsed_seconds") or 0.0),
         "stalled": _as_bool(row.get("stalled")),
         "expired": _as_bool(row.get("expired")),
@@ -175,12 +179,20 @@ class AsyncJobStore:
         max_runtime_seconds: int,
         result_ttl_seconds: int,
         expected_seconds: int = 0,
+        charged_sats: int = 0,
     ) -> str:
-        """Persist a new pending job; return its claim check."""
+        """Persist a new pending job; return its claim check.
+
+        `charged_sats` is what the REQUEST was debited. It is written here
+        because the refund may happen in another process minutes later, where
+        the only honest alternative is recomputing the list price — which
+        over-refunds anybody whose fare a constraint had reduced.
+        """
         result = await self._vault._execute(
             f"INSERT INTO {self._t('async_jobs')} "
-            "(npub, kind, tool_id, params, max_runtime_seconds, result_ttl_seconds, expected_seconds) "
-            "VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7) RETURNING claim",
+            "(npub, kind, tool_id, params, max_runtime_seconds, result_ttl_seconds, "
+            "expected_seconds, charged_sats) "
+            "VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8) RETURNING claim",
             [
                 npub,
                 kind,
@@ -189,6 +201,7 @@ class AsyncJobStore:
                 int(max_runtime_seconds),
                 int(result_ttl_seconds),
                 int(expected_seconds),
+                int(charged_sats),
             ],
         )
         return str(result["rows"][0]["claim"])
