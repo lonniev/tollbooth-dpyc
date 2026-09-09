@@ -48,6 +48,7 @@ import os
 import signal
 import threading
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -62,6 +63,21 @@ from tollbooth.tool_identity import capability_uuid
 from tollbooth.vault_backend import LedgerUnavailableError, LedgerWriteError
 
 logger = logging.getLogger(__name__)
+
+#: `(tool_id, effective_sats)` — what `debit_or_deny` actually charged for the
+#: call running in THIS task.
+#:
+#: `OperatorRuntime._last_debit_cost` is the same figure on a process-wide
+#: singleton, kept unchanged because tools and the Authority read it by name.
+#: This is the one the refund path uses, because a refund happens after the
+#: body has awaited — by which time the attribute may hold another caller's
+#: fare entirely.
+#:
+#: The TOOL ID travels with it deliberately. A context is per task and a task
+#: may serve more than one call, so the record is only trusted for the tool it
+#: was taken for; anything else falls back rather than refunding one tool's
+#: fare against another's.
+_CHARGED: ContextVar[tuple[str, int] | None] = ContextVar("tollbooth_charged", default=None)
 
 # Vault field marking a refresh whose answer never arrived, and when. Not a
 # credential — a note to our future selves, so a grant that dies of a spent
@@ -1342,17 +1358,45 @@ class OperatorRuntime:
     async def rollback_debit(
         self, tool_id: str, npub: str,
         *, tool_kwargs: dict[str, Any] | None = None,
+        charged: int | None = None,
     ) -> None:
-        """Rollback a debit after a tool execution failure."""
+        """Give back what was TAKEN, after a tool execution failure.
+
+        `charged` is the effective cost `debit_or_deny` actually debited. Pass
+        it whenever it is known — it is the only figure that is right.
+
+        The fallback recomputes `pricing.compute(...)`, which is the BASE
+        price, before any constraint has run. That is correct only when nothing
+        adjusted the fare, and silently generous when something did: a patron
+        on a full-discount coupon paid nothing and was handed the list price
+        back, so a refusal MINTED money. Refusals are ordinary in a contended
+        tool — a lost race, a rule that says no — so it is a leak rather than a
+        rounding error.
+
+        The fallback is kept for callers that genuinely cannot know (a job
+        runner refunding in another process, long after the debit), and it says
+        so in the log rather than looking like the exact path.
+        """
         try:
             npub = resolve_npub(npub)
             cache = await self.ledger_cache()
             identity = self._tool_registry.get(tool_id)
             if identity is None or identity.category in ("free", "restricted"):
                 return
-            resolver = await self.pricing_resolver()
-            pricing = await resolver.get_tool_pricing(tool_id)
-            cost = pricing.compute(**(tool_kwargs or {}))
+            if charged is None:
+                recorded = _CHARGED.get()
+                if recorded is not None and recorded[0] == tool_id:
+                    charged = recorded[1]
+            if charged is None:
+                resolver = await self.pricing_resolver()
+                pricing = await resolver.get_tool_pricing(tool_id)
+                charged = pricing.compute(**(tool_kwargs or {}))
+                logger.info(
+                    "rollback for %s has no recorded charge; refunding the base price %d "
+                    "— a constraint-adjusted fare cannot be recovered from here",
+                    tool_id, charged,
+                )
+            cost = int(charged)
             if cost > 0:
                 await cache.credit(npub, cost, f"rollback:{self.mcp_name_for(tool_id)}")
         except Exception:
@@ -3363,6 +3407,10 @@ class OperatorRuntime:
         await self._ensure_async_executor()
         npub = resolve_npub(npub)
         store = await self.async_job_store()
+        # What this REQUEST was charged, carried onto the row so a refund minutes
+        # from now — in another process, where the context is gone — gives back
+        # what was taken rather than the list price.
+        recorded = _CHARGED.get()
         claim = await store.create(
             npub=npub,
             kind=kind,
@@ -3371,6 +3419,7 @@ class OperatorRuntime:
             max_runtime_seconds=max_runtime_seconds,
             result_ttl_seconds=result_ttl_seconds,
             expected_seconds=expected_seconds,
+            charged_sats=recorded[1] if recorded and recorded[0] == tool_id else 0,
         )
         from tollbooth.async_situation import AsyncJobSituation
 
@@ -3452,6 +3501,7 @@ class OperatorRuntime:
                     )
                     await self.rollback_debit(
                         job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                        charged=job.get("charged_sats") or None,
                     )
                     return
                 # Hard-cap the attempt at the job's declared max_runtime_seconds.
@@ -3481,6 +3531,7 @@ class OperatorRuntime:
                     await store.fail(claim, sit.to_row())
                     await self.rollback_debit(
                         job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                        charged=job.get("charged_sats") or None,
                     )
                     return
                 except TimeoutError:
@@ -3504,6 +3555,7 @@ class OperatorRuntime:
                     await store.fail(claim, situation.to_row())
                     await self.rollback_debit(
                         job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                        charged=job.get("charged_sats") or None,
                     )
                     return
                 except Exception:
@@ -3522,6 +3574,7 @@ class OperatorRuntime:
                         )
                         await self.rollback_debit(
                             job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                            charged=job.get("charged_sats") or None,
                         )
                         return
                     await store.release(claim)
@@ -3592,6 +3645,7 @@ class OperatorRuntime:
                 await store.fail(claim, "Job execution failed.")
                 await self.rollback_debit(
                     job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                    charged=job.get("charged_sats") or None,
                 )
                 return {
                     "success": True,
@@ -3706,11 +3760,22 @@ class OperatorRuntime:
                 # Store the computed cost on the runtime so the body can
                 # read it without recomputing (e.g., certify_credits).
                 rt._last_debit_cost = result_or_cost
+                # And in a CONTEXTVAR, which is per-task rather than per-process.
+                #
+                # The attribute above is one slot on a runtime singleton: with
+                # concurrent callers, two invocations clobber each other's value
+                # before either body reads it. That is survivable for a body
+                # that reads it as its first statement, and not survivable at
+                # all for `rollback_debit`, which runs after the body has
+                # awaited. This is the figure the refund path uses.
+                _CHARGED.set((tool_id, result_or_cost))
 
                 try:
                     result = await fn(*args, **kwargs)
                 except Exception as exc:
-                    await rt.rollback_debit(tool_id, npub, tool_kwargs=call_kwargs)
+                    await rt.rollback_debit(
+                        tool_id, npub, tool_kwargs=call_kwargs, charged=result_or_cost,
+                    )
                     if catch_errors:
                         from tollbooth.constants import ErrorCode as _EC
                         logger.exception("Tool %s failed", tool_id)

@@ -20,6 +20,7 @@ What survives are the behaviours that were never really about Prefect:
   catch a run that died without writing one.
 """
 
+import re
 import sys
 import types
 import uuid
@@ -27,6 +28,7 @@ import uuid
 import pytest
 from pynostr.key import PrivateKey as _PK
 
+from tollbooth import runtime as runtime_module
 from tollbooth.async_executor import InProcessExecutor, JobExecutor, ModalExecutor
 from tollbooth.async_jobs import AsyncJobStore
 from tollbooth.runtime import OperatorRuntime
@@ -64,11 +66,20 @@ class FakeVault:
         params = params or []
         if query.startswith("INSERT INTO async_jobs"):
             claim = str(uuid.uuid4())
+            # Bind by the query's OWN column list rather than by index. A fake
+            # that hardcodes positions goes quietly wrong the day a column is
+            # inserted in the middle — it keeps passing while storing one
+            # field's value under another's name.
+            cols = [c.strip() for c in
+                    re.search(r"\(([^)]*)\)\s*VALUES", query).group(1).split(",")]
+            row = dict(zip(cols, params, strict=True))
             self.rows[claim] = {
-                "claim": claim, "npub": params[0], "kind": params[1],
-                "tool_id": params[2], "params": params[3], "status": "pending",
-                "attempts": 0, "max_runtime_seconds": params[4],
-                "result_ttl_seconds": params[5], "result": None, "error": "",
+                "claim": claim, "npub": row["npub"], "kind": row["kind"],
+                "tool_id": row["tool_id"], "params": row["params"], "status": "pending",
+                "attempts": 0, "max_runtime_seconds": row["max_runtime_seconds"],
+                "result_ttl_seconds": row["result_ttl_seconds"],
+                "charged_sats": row.get("charged_sats", 0),
+                "result": None, "error": "",
                 "run_handle": None, "created_at": self.now, "started_at": None,
                 "expires_at": None,
             }
@@ -137,8 +148,11 @@ def vault_and_rt():
 def _recorder(rt):
     rt.refunds = []
 
-    async def _rollback(tool_id, npub, *, tool_kwargs=None):
-        rt.refunds.append(tool_id)
+    # `charged` is the effective fare the row carries — recorded alongside the
+    # tool so a test can assert the refund is for what was TAKEN, not the list
+    # price the pricing model would recompute.
+    async def _rollback(tool_id, npub, *, tool_kwargs=None, charged=None):
+        rt.refunds.append((tool_id, charged))
 
     return _rollback
 
@@ -227,7 +241,9 @@ async def test_a_dispatch_failure_refunds_and_never_runs_the_work_here(vault_and
         max_runtime_seconds=600, result_ttl_seconds=3600)
 
     assert out["status"] == "error" and out["refunded"] is True
-    assert rt.refunds == [TOOL_ID]
+    # Nothing was recorded for this call, so nothing is claimed: `None` sends
+    # `rollback_debit` to its honest fallback rather than asserting a fare of 0.
+    assert rt.refunds == [(TOOL_ID, None)]
     assert ran == [], "a dispatch failure must not fall back to in-process"
     assert rt._async_dispatch_error and "modal down" in rt._async_dispatch_error
 
@@ -269,8 +285,40 @@ async def test_a_crashed_or_cancelled_run_refunds_without_leaking_its_error(vaul
     out = await rt.fetch_async_job(claim, NPUB)
 
     assert out["status"] == "error" and out["refunded"] is True
-    assert rt.refunds == [TOOL_ID]
+    assert rt.refunds == [(TOOL_ID, None)]
     assert "RemoteError" not in str(out), "remote error text is operator-side only"
+
+
+@pytest.mark.asyncio
+async def test_the_fare_actually_charged_rides_the_row_to_the_refund(vault_and_rt):
+    """The half of the refund fix that a context variable cannot carry.
+
+    A job is refunded minutes later, from a poll that is a different request
+    and may be a different process — the context that knew the fare is long
+    gone. So the fare is written onto the job row when the job is ACCEPTED and
+    read back off it here. Without this the refund falls through to the pricing
+    model's BASE price, which is the list price a discounted caller never paid.
+    """
+    _vault, rt = vault_and_rt
+    _register_runner(rt)
+    rt.set_async_executor(RecordingExecutor(outcome={
+        "status": "failed", "result": None, "error": "boom",
+    }))
+
+    # What `debit_or_deny` would have recorded: a fare a constraint cut to 7.
+    token = runtime_module._CHARGED.set((TOOL_ID, 7))
+    try:
+        claim = (await rt.start_async_job("resolve", NPUB, {}, tool_id=TOOL_ID,
+            max_runtime_seconds=600, result_ttl_seconds=3600))["claim_check"]
+    finally:
+        runtime_module._CHARGED.reset(token)
+
+    # The poll runs with NO context — exactly as it does in production.
+    assert runtime_module._CHARGED.get() is None
+    out = await rt.fetch_async_job(claim, NPUB)
+
+    assert out["status"] == "error" and out["refunded"] is True
+    assert rt.refunds == [(TOOL_ID, 7)]
 
 
 @pytest.mark.asyncio
