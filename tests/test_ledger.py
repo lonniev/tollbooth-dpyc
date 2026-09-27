@@ -246,32 +246,6 @@ class TestUserLedger:
         assert ledger.balance_api_sats == 50
         assert "inv-1" in ledger.pending_invoices
 
-    def test_rollback_debit(self) -> None:
-        ledger = _ledger_with_balance(100)
-        ledger.debit("search", 30)
-        assert ledger.balance_api_sats == 70
-        ledger.rollback_debit("search", 30)
-        assert ledger.balance_api_sats == 100
-        assert ledger.total_consumed_api_sats == 0
-
-    def test_rollback_adds_to_existing_tranche(self) -> None:
-        """Rollback adds sats back to an existing tranche instead of creating a new one."""
-        ledger = _ledger_with_balance(100)
-        ledger.debit("search", 30)
-        initial_count = len(ledger.tranches)
-        ledger.rollback_debit("search", 30)
-        assert len(ledger.tranches) == initial_count  # no new tranche
-        assert ledger.tranches[0].remaining_sats == 100
-        assert ledger.balance_api_sats == 100
-
-    def test_rollback_clamps_to_zero(self) -> None:
-        ledger = _ledger_with_balance(100)
-        ledger.debit("search", 10)
-        # Rollback more than was debited
-        ledger.rollback_debit("search", 20)
-        assert ledger.history["search"].calls == 0
-        assert ledger.history["search"].api_sats == 0
-
     def test_seed_via_credit_deposit(self) -> None:
         """Seed balance via credit_deposit with sentinel ID."""
         ledger = UserLedger()
@@ -453,12 +427,16 @@ class TestLedgerSerialization:
         obj = json.loads(ledger.to_json())
         assert len(obj["tranches"]) == 0
 
-    def test_to_json_prunes_expired_tranches(self) -> None:
-        """Expired tranches are collected and pruned during serialization."""
+    def test_to_json_changes_nothing_expiry_is_swept_on_load(self) -> None:
+        """Serialising is not a mutation: an expired tranche is written as it
+        stands and collected when the ledger is next read into the write path."""
         ledger = UserLedger(tranches=[_tranche(100, expires_at=_EXPIRED)])
         obj = json.loads(ledger.to_json())
-        assert len(obj["tranches"]) == 0
-        assert obj["total_expired_api_sats"] == 100
+        assert len(obj["tranches"]) == 1
+        assert obj["total_expired_api_sats"] == 0
+        reloaded = UserLedger.from_json(ledger.to_json())
+        assert reloaded.total_expired_api_sats == 100
+        assert reloaded.balance_api_sats == 0
 
     def test_tranches_survive_roundtrip(self) -> None:
         """Tranche details (including expires_at) survive serialization."""
@@ -473,3 +451,18 @@ class TestLedgerSerialization:
         ledger = UserLedger(total_expired_api_sats=42)
         restored = UserLedger.from_json(ledger.to_json())
         assert restored.total_expired_api_sats == 42
+
+
+class TestNoInventedExpiry:
+    def test_no_code_in_the_ledger_layer_makes_up_a_lifetime(self) -> None:
+        """Owner, 2026-09-27: no opinionated code imposing an expiration. The
+        only lifetime a tranche ever gets is the seconds the pricing model
+        handed down; nothing here constructs one in days."""
+        import pathlib
+
+        import tollbooth.ledger as ledger_mod
+        import tollbooth.ledger_cache as cache_mod
+        for mod in (ledger_mod, cache_mod):
+            lines = pathlib.Path(mod.__file__).read_text().splitlines()
+            offenders = [l for l in lines if "timedelta(days=" in l and "retention_days" not in l]
+            assert not offenders, f"{mod.__name__}: {offenders}"

@@ -1,4 +1,4 @@
-"""Tests for ledger durability fixes: flush_user, credit-path flushing, background flush startup, vault caching."""
+"""Credits are written through and survive a cache rebuild."""
 
 import json
 from unittest.mock import AsyncMock
@@ -18,7 +18,7 @@ def _make_cache(vault: AsyncMock | None = None) -> LedgerCache:
     v = vault or AsyncMock()
     v.store_ledger = AsyncMock()
     v.fetch_ledger = AsyncMock(return_value=None)
-    return LedgerCache(v, maxsize=20, flush_interval_secs=600)
+    return LedgerCache(v, maxsize=20, fold_interval_secs=600)
 
 
 def _mock_btcpay(invoice_response: dict | None = None):
@@ -32,92 +32,7 @@ def _mock_btcpay(invoice_response: dict | None = None):
     return client
 
 
-# ---------------------------------------------------------------------------
-# LedgerCache.flush_user
-# ---------------------------------------------------------------------------
-
-
-class TestFlushUser:
-    @pytest.mark.asyncio
-    async def test_flush_dirty_entry_writes_to_vault(self) -> None:
-        """flush_user writes a dirty entry to vault and clears dirty flag."""
-        cache = _make_cache()
-        ledger = await cache.get("user-1")
-        ledger.credit_deposit(500, "test")
-        cache.mark_dirty("user-1")
-
-        result = await cache.flush_user("user-1")
-
-        assert result is True
-        cache._vault.store_ledger.assert_called_once_with("user-1", ledger.to_json())
-        # Dirty flag cleared
-        assert cache._entries["user-1"].dirty is False
-
-    @pytest.mark.asyncio
-    async def test_flush_clean_entry_is_noop(self) -> None:
-        """flush_user on a non-dirty entry does nothing."""
-        cache = _make_cache()
-        await cache.get("user-1")
-        # Not marked dirty
-
-        result = await cache.flush_user("user-1")
-
-        assert result is True
-        cache._vault.store_ledger.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_flush_missing_user_is_noop(self) -> None:
-        """flush_user on a user not in cache does nothing."""
-        cache = _make_cache()
-
-        result = await cache.flush_user("nonexistent")
-
-        assert result is True
-        cache._vault.store_ledger.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_flush_vault_failure_returns_false(self) -> None:
-        """flush_user returns False when vault write fails."""
-        vault = AsyncMock()
-        vault.fetch_ledger = AsyncMock(return_value=None)
-        vault.store_ledger = AsyncMock(side_effect=Exception("vault down"))
-        cache = LedgerCache(vault)
-
-        await cache.get("user-1")
-        cache.mark_dirty("user-1")
-
-        result = await cache.flush_user("user-1")
-
-        assert result is False
-        # Entry stays dirty for retry
-        assert cache._entries["user-1"].dirty is True
-
-    @pytest.mark.asyncio
-    async def test_flush_user_after_credit_deposit(self) -> None:
-        """Simulates the critical check_payment path: credit → mark_dirty → flush."""
-        cache = _make_cache()
-        ledger = await cache.get("user-1")
-        ledger.pending_invoices.append("inv-1")
-        cache.mark_dirty("user-1")
-
-        # Simulate check_payment crediting
-        ledger.credit_deposit(1000, "inv-1")
-        cache.mark_dirty("user-1")
-        await cache.flush_user("user-1")
-
-        # Verify vault received the credited ledger
-        stored_json = cache._vault.store_ledger.call_args[0][1]
-        stored_ledger = UserLedger.from_json(stored_json)
-        assert stored_ledger.balance_api_sats == 1000
-        assert "inv-1" not in stored_ledger.pending_invoices
-
-
-# ---------------------------------------------------------------------------
-# credits.py flush integration
-# ---------------------------------------------------------------------------
-
-
-class TestCreditPathFlushing:
+class TestCreditPathWritesThrough:
     @pytest.mark.asyncio
     async def test_purchase_credits_flushes_pending_invoice(self) -> None:
         """purchase_credits must flush to vault after adding pending invoice."""
@@ -141,10 +56,7 @@ class TestCreditPathFlushing:
         from tollbooth.tools.credits import check_payment_tool
 
         cache = _make_cache()
-        ledger = await cache.get("user-1")
-        ledger.pending_invoices.append("inv-1")
-        cache.mark_dirty("user-1")
-        # Reset the mock to only track flushes from check_payment
+        await cache.mutate("user-1", lambda led: led.pending_invoices.append("inv-1") or True)
         cache._vault.store_ledger.reset_mock()
 
         btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "1000"})
@@ -166,9 +78,7 @@ class TestCreditPathFlushing:
         from tollbooth.tools.credits import check_payment_tool
 
         cache = _make_cache()
-        ledger = await cache.get("user-1")
-        ledger.pending_invoices.append("inv-1")
-        cache.mark_dirty("user-1")
+        await cache.mutate("user-1", lambda led: led.pending_invoices.append("inv-1") or True)
         cache._vault.store_ledger.reset_mock()
 
         btcpay = _mock_btcpay({"id": "inv-1", "status": "Expired"})
@@ -190,12 +100,9 @@ class TestCreditPathFlushing:
         # Step 1: Set up cache with pending invoice
         vault = AsyncMock()
         vault.fetch_ledger = AsyncMock(return_value=None)
-        vault.store_ledger = AsyncMock()
+        vault.store_ledger = AsyncMock(return_value=1)
         cache = LedgerCache(vault)
-
-        ledger = await cache.get("user-1")
-        ledger.pending_invoices.append("inv-1")
-        cache.mark_dirty("user-1")
+        await cache.mutate("user-1", lambda led: led.pending_invoices.append("inv-1") or True)
 
         # Step 2: check_payment credits and flushes
         btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "500"})
@@ -207,8 +114,8 @@ class TestCreditPathFlushing:
 
         # Step 3: Simulate cache loss (server restart)
         vault2 = AsyncMock()
-        vault2.fetch_ledger = AsyncMock(return_value=flushed_json)
-        vault2.store_ledger = AsyncMock()
+        vault2.fetch_ledger = AsyncMock(return_value=(flushed_json, 1))
+        vault2.store_ledger = AsyncMock(return_value=2)
         cache2 = LedgerCache(vault2)
 
         # Step 4: Reload from vault
@@ -231,8 +138,8 @@ class TestCreditPathFlushing:
 
         # New cache loads from vault
         vault = AsyncMock()
-        vault.fetch_ledger = AsyncMock(return_value=flushed_json)
-        vault.store_ledger = AsyncMock()
+        vault.fetch_ledger = AsyncMock(return_value=(flushed_json, 1))
+        vault.store_ledger = AsyncMock(return_value=2)
         cache = LedgerCache(vault)
 
         btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "500"})
@@ -317,8 +224,8 @@ class TestRestoreCredits:
         ledger = UserLedger(credited_invoices=["inv-1"])
         ledger.credit_deposit(1000, "inv-1")
         vault = AsyncMock()
-        vault.fetch_ledger = AsyncMock(return_value=ledger.to_json())
-        vault.store_ledger = AsyncMock()
+        vault.fetch_ledger = AsyncMock(return_value=(ledger.to_json(), 1))
+        vault.store_ledger = AsyncMock(return_value=2)
         cache = LedgerCache(vault)
 
         btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "1000"})
@@ -349,7 +256,7 @@ class TestRestoreCredits:
 
         vault = AsyncMock()
         vault.fetch_ledger = AsyncMock(return_value=None)
-        vault.store_ledger = AsyncMock()
+        vault.store_ledger = AsyncMock(return_value=1)
         cache = LedgerCache(vault)
 
         btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "750"})
@@ -360,8 +267,8 @@ class TestRestoreCredits:
 
         # Simulate cache loss
         vault2 = AsyncMock()
-        vault2.fetch_ledger = AsyncMock(return_value=flushed_json)
-        vault2.store_ledger = AsyncMock()
+        vault2.fetch_ledger = AsyncMock(return_value=(flushed_json, 1))
+        vault2.store_ledger = AsyncMock(return_value=2)
         cache2 = LedgerCache(vault2)
 
         ledger2 = await cache2.get("user-1")

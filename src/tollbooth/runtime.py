@@ -458,11 +458,11 @@ class OperatorRuntime:
         self._cleanup_callbacks.clear()
 
     async def _shutdown_flush_ledger(self) -> None:
-        """Flush and stop the ledger cache (extracted for wait_for wrapping)."""
+        """Stop the usage fold and write what is pending (extracted for wait_for wrapping)."""
         assert self._ledger_cache is not None
-        flushed = await self._ledger_cache.flush_all()
+        pending = self._ledger_cache.pending_usage
         await self._ledger_cache.stop()
-        logger.info("Shutdown: flushed %d entries.", flushed)
+        logger.info("Shutdown: folded usage for %d patron(s).", pending)
 
     # ------------------------------------------------------------------
     # Bootstrap & Vault
@@ -538,7 +538,7 @@ class OperatorRuntime:
         from tollbooth import LedgerCache
         v = await self.vault()
         self._ledger_cache = LedgerCache(v)
-        asyncio.ensure_future(self._ledger_cache.start_background_flush())
+        asyncio.ensure_future(self._ledger_cache.start_usage_fold())
         return self._ledger_cache
 
     async def _effective_purchase_mode(self) -> str:
@@ -1251,18 +1251,11 @@ class OperatorRuntime:
         # ── No charge ─────────────────────────────────────────
         if effective_cost == 0:
             if npub:
+                # A usage counter, nothing more. It is folded into the next
+                # write of this patron's ledger (or the periodic fold) on fresh
+                # state — never written as a snapshot of its own.
                 cache = await self.ledger_cache()
-                ledger = await cache.get(npub)
-                ledger.debit(name, 0)
-                # Deliberately the cached (dirty) path, not write-through: this
-                # records a usage counter for a FREE call, and free calls are the
-                # common case. Routing it through mutate() would put a Postgres
-                # round-trip in front of every check_balance and status poll to
-                # persist a statistic. Money never travels this path — every
-                # charge, credit, settlement and restore uses mutate(), which
-                # re-applies against fresh state — so a counter lost to a CAS
-                # conflict costs a statistic, not a sat.
-                cache.mark_dirty(npub)
+                cache.note_usage(npub, name)
             await _burn_consumed_coupons()
             return 0
 
@@ -1280,7 +1273,7 @@ class OperatorRuntime:
 
         # ── Billing (atomic, write-through) ────────────────────
         cache = await self.ledger_cache()
-        ttl = await self.resolve_tranche_lifetime()
+        ttl = (await self.resolve_expiry()).seconds
 
         # Cold-start reconciliation of any settled-but-uncredited invoices —
         # best-effort, once per npub per process. Runs before the debit so the
@@ -3033,27 +3026,24 @@ class OperatorRuntime:
         )
         return self._cashier
 
-    async def resolve_tranche_lifetime(self) -> int | None:
-        """Return the tranche lifetime in seconds, or None if credits never expire.
+    async def resolve_expiry(self) -> Any:
+        """The operator's credit-expiry decision, from the active pricing model.
 
-        Reads the ``tranche_lifetime`` field from the active pricing model.
+        Returns an ``Expiry``: ``unchosen`` (no decision recorded), ``never``
+        (chosen: perpetual) or ``days``. Only ``days`` carries ``seconds``;
+        nothing here or below ever invents a lifetime. A model that cannot be
+        read counts as ``unchosen`` for this call — no expiry is applied.
         """
+        from tollbooth.pricing_model import Expiry
         try:
-            vault = await self.vault()
-            from tollbooth.pricing_store import PricingModelStore
-            store = PricingModelStore(neon_vault=vault)
-            from tollbooth.tools.pricing import get_pricing_model_tool
-            result = await get_pricing_model_tool(store, self.operator_npub())
-            if result.get("status") == "ok":
-                tl = result.get("tranche_lifetime")
-                if isinstance(tl, dict) and tl.get("ttl_days") is not None:
-                    return int(tl["ttl_days"]) * 86400
+            resolver = await self.pricing_resolver()
+            await resolver._ensure_fresh()
+            model = resolver._cached_model
+            if model is not None:
+                return model.expiry()
         except Exception:
-            logger.warning(
-                "resolve_tranche_lifetime failed; credits will not expire",
-                exc_info=True,
-            )
-        return None
+            logger.warning("resolve_expiry: pricing model unreadable; no expiry applied", exc_info=True)
+        return Expiry("unchosen")
 
     # ------------------------------------------------------------------
     # Low-balance warning injection
@@ -4255,7 +4245,7 @@ def register_standard_tools(
             cashier = await rt.ensure_cashier()
             cache = await rt.ledger_cache()
             from tollbooth.tools import credits
-            ttl = await rt.resolve_tranche_lifetime()
+            ttl = (await rt.resolve_expiry()).seconds
             return await credits.purchase_credits_tool(
                 cashier, cache, npub, amount_sats, certificate,
                 authority_npub=auth_info.get("npub", ""),
@@ -4291,7 +4281,7 @@ def register_standard_tools(
         except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        ttl = await rt.resolve_tranche_lifetime()
+        ttl = (await rt.resolve_expiry()).seconds
         result = await credits.check_payment_tool(
             cashier, cache, npub, invoice_id,
             tranche_lifetime_seconds=ttl,
@@ -4363,7 +4353,7 @@ def register_standard_tools(
         except (ValueError, RuntimeError) as e:
             return {"success": False, "error": str(e)}
         from tollbooth.tools import credits
-        ttl = await rt.resolve_tranche_lifetime()
+        ttl = (await rt.resolve_expiry()).seconds
         return await credits.restore_credits_tool(
             cashier, cache, patron_npub, invoice_id,
             tranche_lifetime_seconds=ttl,

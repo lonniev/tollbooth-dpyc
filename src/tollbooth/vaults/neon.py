@@ -115,7 +115,6 @@ class NeonVault:
             },
             timeout=30.0,
         )
-        self._version_cache: dict[str, int] = {}
         self._endpoint_host = hostname
 
         # Field encryption — if nsec provided, all stored values are AES-256-GCM encrypted.
@@ -229,97 +228,75 @@ class NeonVault:
 
     # -- VaultBackend protocol -----------------------------------------------
 
-    async def store_ledger(self, user_id: str, ledger_json: str) -> str:
-        """CAS-store ledger JSON into ``balances`` with an optimistic version guard.
+    async def store_ledger(
+        self, user_id: str, ledger_json: str, expected_version: int | None,
+    ) -> int:
+        """Write ``ledger_json`` only if ``balances`` still holds ``expected_version``.
 
-        The definitive store NEVER blind-overwrites: a write only lands if it
-        matches the version the writer last read. On conflict it raises
-        ``LedgerVersionConflict`` so the caller re-fetches and re-applies — this
-        is what makes the ledger safe under a horizontally-scaled fleet, where
-        the old fall-through-to-unconditional-UPSERT silently clobbered a
-        newer replica's balance write.
+        ``None`` means the writer read no row: insert one, and treat "a row
+        appeared meanwhile" as a conflict. Otherwise a guarded UPDATE lands only
+        when the version the writer read is the version on the row; anything
+        else raises ``LedgerVersionConflict`` and the caller re-reads. The
+        version is the one that came back with the snapshot — this class keeps
+        no memory of versions, so a writer cannot borrow a fresher one.
 
-        Returns the new version as a string.
+        Returns the new version.
         """
         ledger_json = self._encrypt(ledger_json)
-        cached_version = self._version_cache.get(user_id)
 
-        if cached_version is not None:
+        if expected_version is None:
             result = await self._execute(
-                f"UPDATE {self._t('balances')} "
-                "SET ledger_json = $1, version = version + 1, last_flush = now() "
-                "WHERE npub = $2 AND version = $3 "
+                f"INSERT INTO {self._t('balances')}(npub, ledger_json, version, last_flush, created_at) "
+                "VALUES ($1, $2, 1, now(), now()) "
+                "ON CONFLICT (npub) DO NOTHING "
                 "RETURNING version",
-                [ledger_json, user_id, cached_version],
+                [user_id, ledger_json],
             )
             rows = result.get("rows", [])
             if rows:
-                new_version = rows[0]["version"]
-                self._version_cache[user_id] = new_version
-                return str(new_version)
-            # Someone else advanced the row past our version — do NOT clobber.
-            logger.info(
-                "Ledger CAS conflict for %s (had v%d) — caller must re-fetch.",
-                user_id[:20], cached_version,
-            )
+                return int(rows[0]["version"])
             raise LedgerVersionConflict(
-                f"ledger version conflict for {user_id[:20]} (had v{cached_version})"
+                f"ledger for {user_id[:20]} appeared before this insert — refetch required"
             )
 
-        # No cached version → first write for this user_id in this process.
-        # Insert; if a row already exists (another replica created it), DO
-        # NOTHING and treat it as a conflict so the caller re-fetches rather
-        # than overwriting a row it never read.
         result = await self._execute(
-            f"INSERT INTO {self._t('balances')}(npub, ledger_json, version, last_flush, created_at) "
-            "VALUES ($1, $2, 1, now(), now()) "
-            "ON CONFLICT (npub) DO NOTHING "
+            f"UPDATE {self._t('balances')} "
+            "SET ledger_json = $1, version = version + 1, last_flush = now() "
+            "WHERE npub = $2 AND version = $3 "
             "RETURNING version",
-            [user_id, ledger_json],
+            [ledger_json, user_id, expected_version],
         )
         rows = result.get("rows", [])
         if rows:
-            new_version = rows[0]["version"]
-            self._version_cache[user_id] = new_version
-            return str(new_version)
+            return int(rows[0]["version"])
+        logger.info(
+            "Ledger CAS conflict for %s (wrote at v%d) — caller must re-fetch.",
+            user_id[:20], expected_version,
+        )
         raise LedgerVersionConflict(
-            f"ledger exists for {user_id[:20]} but no version was read — refetch required"
+            f"ledger version conflict for {user_id[:20]} (had v{expected_version})"
         )
 
-    async def fetch_ledger(self, user_id: str) -> str | None:
-        """Fetch the current ledger JSON for a user.
-
-        Returns the ledger JSON string, or ``None`` if no record exists.
-        Also caches the version for subsequent optimistic updates.
-        """
+    async def fetch_ledger(self, user_id: str) -> tuple[str, int] | None:
+        """The current ledger JSON and the version it was read at, or ``None``."""
         result = await self._execute(
             f"SELECT ledger_json, version FROM {self._t('balances')} WHERE npub = $1",
             [user_id],
         )
         rows = result.get("rows", [])
         if not rows:
-            # No row: drop any stale cached version so a subsequent store_ledger
-            # takes the clean INSERT path instead of a doomed CAS against a
-            # version that no longer exists.
-            self._version_cache.pop(user_id, None)
             return None
-
-        ledger_json = rows[0]["ledger_json"]
-        version = rows[0]["version"]
-        self._version_cache[user_id] = version
-        return self._decrypt(ledger_json)
+        return self._decrypt(rows[0]["ledger_json"]), int(rows[0]["version"])
 
     async def snapshot_ledger(
         self, user_id: str, ledger_json: str, timestamp: str,
     ) -> str | None:
-        """Store a timestamped snapshot in the transactions journal.
+        """Append a timestamped copy to the ``transactions`` journal.
 
-        First updates ``balances`` via ``store_ledger``, then inserts a
-        ``snapshot`` record into the ``transactions`` table. Returns the
-        transaction ID as a string, or ``None`` if the journal insert fails.
+        Never touches the live ``balances`` row — that is ``store_ledger``'s
+        job, under its version guard. Returns the journal row id, or ``None``
+        if the insert fails.
         """
-        await self.store_ledger(user_id, ledger_json)
-
         try:
             balance = self._extract_balance(ledger_json)
             result = await self._execute(

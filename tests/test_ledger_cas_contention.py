@@ -1,27 +1,18 @@
-"""What happens to money when two replicas write the same ledger at once.
+"""What happens to money when two writers hit the same ledger at once.
 
-The definitive store refuses to blind-overwrite: ``store_ledger`` compares the
-version the writer last read and raises ``LedgerVersionConflict`` if the row has
-moved on. That is correct, and it is only half a protocol — the other half is the
-caller re-fetching and re-applying, which ``mutate()`` does and the old
-``mark_dirty`` + ``flush_user`` path did not. That path retried the *same stale
-snapshot*, which can never satisfy the CAS guard, then gave up and left the entry
-dirty forever, unflushable for the life of the process.
+The definitive store refuses to blind-overwrite: ``store_ledger`` lands only
+at the version the writer read its snapshot at, and raises
+``LedgerVersionConflict`` otherwise. The other half of the protocol is the
+caller re-reading and re-applying, which ``mutate()`` does.
 
-Observed live 2026-08-01: two Uvicorn workers serving one eXcalibur deployment
-produced a continuous stream of ``Failed to flush ledger to vault``, three
-conflicts for one npub inside 65 ms. It read as a Neon outage. Neon was healthy —
-a snippet write and read-back through the same database succeeded during the same
-window. It was contention, and the swallowed exception is what disguised it.
-
-So these tests assert two things:
-
-1. **A money mutation survives losing a CAS race** — it is re-applied against the
-   winner's state, and both writers' effects are present afterwards.
-2. **A re-applied mutation does not double-credit.** ``credit_deposit`` is NOT
-   idempotent; it appends a tranche every call. Every restore path therefore
-   guards on the tranche already existing, and that guard is load-bearing
-   precisely because the retry re-runs the function.
+Two incidents shaped these tests. 2026-08-01, eXcalibur: two Uvicorn workers
+produced a stream of ``Failed to flush ledger to vault`` that read as a Neon
+outage and was contention. 2026-09-27, Bee's Knees: a settled 1,000-sat
+top-up was credited, acknowledged by DM, and erased within the hour — a
+background flush holding a stale snapshot wrote it under the version a fresher
+writer had just produced, because the version was read from a per-user cache
+rather than carried with the snapshot. There is no such flush any more; the
+last test here is that interleaving, and it now cannot lose.
 """
 
 from __future__ import annotations
@@ -35,66 +26,54 @@ from tollbooth.ledger_cache import LedgerCache
 from tollbooth.vault_backend import LedgerVersionConflict
 
 
-class _FakeVault:
-    """A vault with a real version counter and honest CAS semantics.
+class _HonestVault:
+    """One row, one version; a write lands only at the version that was read.
 
-    ``conflicts_before_success`` makes the next N writes lose the race, the way a
-    second replica writing between our read and our write would.
+    ``rival`` is a ledger another writer commits BETWEEN our read and our
+    write — published at the moment our first write arrives, which is what
+    makes it a race and not merely a rejected write.
     """
 
-    def __init__(self, *, conflicts_before_success: int = 0):
+    def __init__(self, *, rival: UserLedger | None = None):
         self.stored: str | None = None
         self.version = 0
-        self.conflicts_left = conflicts_before_success
+        self.rival = rival
         self.writes = 0
         self.reads = 0
-        # What a competing replica has already committed; served on re-fetch.
-        self.competitor_json: str | None = None
+        self.expected_seen: list[int | None] = []
 
-    async def fetch_ledger(self, user_id: str) -> str | None:
+    async def fetch_ledger(self, user_id: str) -> tuple[str, int] | None:
         self.reads += 1
-        return self.stored
+        return None if self.stored is None else (self.stored, self.version)
 
-    async def store_ledger(self, user_id: str, ledger_json: str) -> str:
+    async def store_ledger(self, user_id: str, ledger_json: str, expected_version: int | None) -> int:
         self.writes += 1
-        if self.conflicts_left > 0:
-            self.conflicts_left -= 1
-            # Losing the race means someone else's write landed BETWEEN our read
-            # and ours — so their state becomes the stored state, and that is
-            # what our re-fetch must see. Publishing it here rather than up front
-            # is what makes this a race and not merely a rejected write.
-            if self.competitor_json is not None:
-                self.stored = self.competitor_json
-                self.version += 1
-            raise LedgerVersionConflict(f"version conflict for {user_id}")
+        self.expected_seen.append(expected_version)
+        if self.rival is not None:
+            self.stored = self.rival.to_json()
+            self.version += 1
+            self.rival = None
+        have = None if self.stored is None else self.version
+        if expected_version != have:
+            raise LedgerVersionConflict(f"expected v{expected_version}, row is v{have}")
         self.stored = ledger_json
         self.version += 1
-        return str(self.version)
+        return self.version
+
+    async def snapshot_ledger(self, user_id: str, ledger_json: str, timestamp: str) -> str | None:
+        return None
 
 
-def _cache(vault: _FakeVault) -> LedgerCache:
-    return LedgerCache(vault, maxsize=20, flush_interval_secs=600)
-
-
-# ---------------------------------------------------------------------------
-# 1. A money mutation survives a lost race
-# ---------------------------------------------------------------------------
+def _cache(vault: _HonestVault) -> LedgerCache:
+    return LedgerCache(vault, maxsize=20, fold_interval_secs=600)
 
 
 class TestMutateSurvivesContention:
     @pytest.mark.asyncio
     async def test_a_credit_is_reapplied_onto_the_winners_state(self):
-        """The classic lost-update: we credit while another replica credits.
-
-        Neither may be dropped. Ours is re-applied against THEIR committed state,
-        so the final ledger carries both tranches.
-        """
-        vault = _FakeVault(conflicts_before_success=1)
-        # The competitor got there first with 500 sats.
         rival = UserLedger()
         rival.credit_deposit(500, "rival-invoice")
-        vault.competitor_json = rival.to_json()
-
+        vault = _HonestVault(rival=rival)
         cache = _cache(vault)
 
         def _credit_ours(led: UserLedger) -> int:
@@ -105,24 +84,16 @@ class TestMutateSurvivesContention:
 
         assert granted == 300
         assert vault.writes == 2, "the first write lost the race and was retried"
+        assert vault.expected_seen == [None, 1], "the retry wrote at the version it re-read"
         final = UserLedger.from_json(vault.stored)
         assert final.balance_api_sats == 800, "both credits survived"
-        assert "rival-invoice" in final.credited_invoices
-        assert "our-invoice" in final.credited_invoices
+        assert {"rival-invoice", "our-invoice"} <= set(final.credited_invoices)
 
     @pytest.mark.asyncio
     async def test_an_idempotency_guard_still_sees_fresh_state_after_a_conflict(self):
-        """The guard must run against the WINNER's ledger, not our stale copy.
-
-        This is why settlement checks `credited_invoices` inside the mutation: if
-        the rival already credited this very invoice, the re-applied attempt has
-        to notice and decline, or the patron is credited twice for one payment.
-        """
-        vault = _FakeVault(conflicts_before_success=1)
         rival = UserLedger()
         rival.credit_deposit(500, "invoice-42")  # rival settled the SAME invoice
-        vault.competitor_json = rival.to_json()
-
+        vault = _HonestVault(rival=rival)
         cache = _cache(vault)
 
         def _settle(led: UserLedger) -> int:
@@ -141,27 +112,15 @@ class TestMutateSurvivesContention:
 class TestRestoreIsRetrySafe:
     @pytest.mark.asyncio
     async def test_a_rival_crediting_mid_restore_does_not_double_credit(self):
-        """The real ``restore_credits_tool`` against a real lost race.
-
-        ``restore_credits_tool`` guards on ``credited_invoices`` up front, but
-        that read happens BEFORE the write. A rival crediting the same invoice in
-        between slips past it — and because ``mutate()`` re-applies the function
-        on conflict, an unguarded restore would then mint a second tranche for
-        one payment. The in-mutation tranche check is what closes that window.
-        """
         from tollbooth.tools.credits import restore_credits_tool
 
         rival = UserLedger()
-        rival.credit_deposit(1000, "inv-1")  # the rival restored it first
-
-        vault = _FakeVault(conflicts_before_success=1)
-        vault.competitor_json = rival.to_json()
+        rival.credit_deposit(1000, "inv-1")
+        vault = _HonestVault(rival=rival)
         cache = _cache(vault)
 
         btcpay = AsyncMock()
-        btcpay.get_invoice = AsyncMock(return_value={
-            "id": "inv-1", "status": "Settled", "amount": "1000",
-        })
+        btcpay.get_invoice = AsyncMock(return_value={"id": "inv-1", "status": "Settled", "amount": "1000"})
 
         result = await restore_credits_tool(btcpay, cache, "user-1", "inv-1")
 
@@ -172,73 +131,57 @@ class TestRestoreIsRetrySafe:
         assert len([t for t in final.tranches if t.invoice_id == "inv-1"]) == 1
 
 
-# ---------------------------------------------------------------------------
-# 2. A lost race no longer strands a cache entry forever
-# ---------------------------------------------------------------------------
-
-
-class TestFlushNoLongerStrands:
+class TestNothingWritesAStaleSnapshot:
     @pytest.mark.asyncio
-    async def test_a_conflicted_flush_adopts_fresh_state_instead_of_looping(self):
-        """The old path retried the same stale snapshot — which the CAS guard can
-        never accept — and left the entry dirty for the life of the process.
-
-        Now the conflict is recognized: the newer stored state is adopted and the
-        entry stops being a permanently-unflushable zombie.
-        """
-        vault = _FakeVault(conflicts_before_success=99)  # every write loses
-        winner = UserLedger()
-        winner.credit_deposit(700, "winner-invoice")
-        vault.competitor_json = winner.to_json()
-
+    async def test_the_2026_09_27_interleaving_cannot_erase_a_credit(self):
+        """Free calls arm usage counters; a settlement lands; then the counters
+        are written. Under the old flush the counters' whole-ledger snapshot,
+        taken before the settlement, went out under the settlement's version
+        and erased it. Now the counters are deltas folded onto the fresh row."""
+        vault = _HonestVault()
         cache = _cache(vault)
-        await cache.get("user-1")
-        cache.mark_dirty("user-1")
-        assert cache.dirty_count == 1
-
-        flushed = await cache.flush_user("user-1")
-
-        assert flushed is False, "honest: this replica's counters did not persist"
-        assert cache.dirty_count == 0, "entry is no longer a stuck zombie"
-        # And the adopted state is the winner's, not an empty overwrite.
-        adopted = await cache.get("user-1")
-        assert adopted.balance_api_sats == 700
+        # A patron with a row: the page polls, counters accumulate.
+        await cache.credit("patron", 118, "seed")
+        for _ in range(8):
+            cache.note_usage("patron", "match_state")
+        # check_payment settles a 1,000-sat invoice through mutate.
+        def _settle(led: UserLedger) -> int:
+            led.credit_deposit(1000, "5oKNGu3DKs5NHPFWsGBPPR")
+            return 1000
+        assert await cache.mutate("patron", _settle) == 1000
+        # Whatever writes next carries counters, not a snapshot.
+        assert await cache.fold_usage() == 0, "the settlement already carried them"
+        final = UserLedger.from_json(vault.stored)
+        assert final.balance_api_sats == 1118
+        assert "5oKNGu3DKs5NHPFWsGBPPR" in final.credited_invoices
+        assert final.history["match_state"].calls == 8
 
     @pytest.mark.asyncio
-    async def test_a_conflicted_flush_does_not_burn_its_retries(self):
-        """Retrying a CAS conflict is provably useless — the version we hold is
-        one we will never hold again. It must not cost a retry budget or a sleep."""
-        vault = _FakeVault(conflicts_before_success=99)
-        vault.competitor_json = UserLedger().to_json()
-
+    async def test_counters_noted_after_a_settlement_fold_on_top_of_it(self):
+        vault = _HonestVault()
         cache = _cache(vault)
-        await cache.get("user-1")
-        cache.mark_dirty("user-1")
-
-        await cache.flush_user("user-1")
-
-        assert vault.writes == 1, "one attempt, then adopt — no pointless retries"
+        await cache.credit("patron", 1000, "inv")
+        cache.note_usage("patron", "match_state")
+        await cache.fold_usage()
+        final = UserLedger.from_json(vault.stored)
+        assert final.balance_api_sats == 1000
+        assert final.history["match_state"].calls == 1
+        assert vault.expected_seen == [None, 1], "every write carried the version it read"
 
     @pytest.mark.asyncio
-    async def test_a_non_conflict_failure_still_retries(self):
-        """Only CAS conflicts short-circuit. A genuine transient error — a dropped
-        connection — is still worth a second attempt."""
-        vault = _FakeVault()
-        attempts = {"n": 0}
+    async def test_every_write_carries_the_version_of_its_own_read(self):
+        """The invariant itself: the store sees, for each write, exactly the
+        version handed out by the read that produced the snapshot."""
+        vault = _HonestVault()
+        cache = _cache(vault)
+        for i in range(5):
+            await cache.credit("patron", 1, f"inv-{i}")
+            cache.note_usage("patron", "poll")
+            await cache.fold_usage()
+        assert vault.expected_seen == [None, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        assert vault.version == 10
 
-        async def _flaky(user_id, ledger_json):
-            attempts["n"] += 1
-            if attempts["n"] == 1:
-                raise ConnectionError("connection reset")
-            vault.stored = ledger_json
-            return "1"
-
-        vault.store_ledger = _flaky  # type: ignore[assignment]
-        cache = LedgerCache(vault, maxsize=20, flush_interval_secs=600, flush_retry_delay=0)
-        await cache.get("user-1")
-        cache.mark_dirty("user-1")
-
-        flushed = await cache.flush_user("user-1")
-
-        assert flushed is True
-        assert attempts["n"] == 2, "a transient failure earns its retry"
+    @pytest.mark.asyncio
+    async def test_the_cache_has_no_way_to_write_a_snapshot(self):
+        for gone in ("mark_dirty", "flush_user", "flush_dirty", "flush_all", "snapshot_all", "write_through_credit"):
+            assert not hasattr(LedgerCache, gone), f"{gone} must not exist"

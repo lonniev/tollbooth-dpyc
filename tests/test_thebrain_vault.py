@@ -742,8 +742,8 @@ class TestStoreLedger:
         vault._get_children = AsyncMock(return_value=[])
         vault._set_note = AsyncMock()
 
-        result = await vault.store_ledger("user1", '{"balance": 100}')
-        assert result == "daily-child-id"
+        result = await vault.store_ledger("user1", '{"balance": 100}', None)
+        assert result == 1
 
         # Should have created ledger parent under home thought
         vault._create_thought.assert_any_call("user1/ledger", HOME_ID)
@@ -764,8 +764,8 @@ class TestStoreLedger:
         )
         vault._set_note = AsyncMock()
 
-        result = await vault.store_ledger("user1", '{"balance": 200}')
-        assert result == "existing-child"
+        result = await vault.store_ledger("user1", '{"balance": 200}', None)
+        assert result == 1
         vault._set_note.assert_called_once_with("existing-child", '{"balance": 200}')
 
     @pytest.mark.asyncio
@@ -777,8 +777,8 @@ class TestStoreLedger:
         vault._daily_child_cache[f"user1/{today}"] = "cached-child-id"
         vault._set_note = AsyncMock()
 
-        result = await vault.store_ledger("user1", '{"balance": 300}')
-        assert result == "cached-child-id"
+        result = await vault.store_ledger("user1", '{"balance": 300}', None)
+        assert result == 1
         vault._set_note.assert_called_once_with("cached-child-id", '{"balance": 300}')
 
     @pytest.mark.asyncio
@@ -805,8 +805,8 @@ class TestStoreLedger:
             return_value=[{"id": "fresh-child", "name": today}]
         )
 
-        result = await vault.store_ledger("user1", '{"balance": 400}')
-        assert result == "fresh-child"
+        result = await vault.store_ledger("user1", '{"balance": 400}', None)
+        assert result == 1
         # Cache should be updated
         assert vault._daily_child_cache[f"user1/{today}"] == "fresh-child"
 
@@ -824,8 +824,8 @@ class TestStoreLedger:
         vault._search_children_by_name = AsyncMock(return_value="search-found-child")
         vault._set_note = AsyncMock()
 
-        result = await vault.store_ledger("user1", '{"balance": 500}')
-        assert result == "search-found-child"
+        result = await vault.store_ledger("user1", '{"balance": 500}', None)
+        assert result == 1
         vault._set_note.assert_called_once_with("search-found-child", '{"balance": 500}')
         # Should NOT have created a new thought
         assert not hasattr(vault._create_thought, 'called') or not vault._create_thought.called
@@ -843,8 +843,8 @@ class TestStoreLedger:
         vault._create_thought = AsyncMock(return_value={"id": "new-child"})
         vault._set_note = AsyncMock()
 
-        result = await vault.store_ledger("user1", '{"balance": 600}')
-        assert result == "new-child"
+        result = await vault.store_ledger("user1", '{"balance": 600}', None)
+        assert result == 1
         vault._create_thought.assert_called_once_with(today, "ledger-parent")
 
     @pytest.mark.asyncio
@@ -860,7 +860,7 @@ class TestStoreLedger:
         )
         vault._set_note = AsyncMock()
 
-        await vault.store_ledger("user1", '{"data": "test"}')
+        await vault.store_ledger("user1", '{"data": "test"}', None)
         vault._get_children.assert_called_once_with("ledger-parent", no_cache=True)
 
 
@@ -889,7 +889,7 @@ class TestFetchLedger:
         vault._get_note = AsyncMock(return_value='{"balance": 999}')
 
         result = await vault.fetch_ledger("user1")
-        assert result == '{"balance": 999}'
+        assert result == ('{"balance": 999}', 0)
         # Should read note from most recent (2026-02-21)
         vault._get_note.assert_called_once_with("c2")
 
@@ -901,7 +901,7 @@ class TestFetchLedger:
         vault._get_note = AsyncMock(return_value='{"balance": 42}')
 
         result = await vault.fetch_ledger("user1")
-        assert result == '{"balance": 42}'
+        assert result == ('{"balance": 42}', 0)
         vault._get_note.assert_called_once_with("ledger-parent")
 
     @pytest.mark.asyncio
@@ -924,7 +924,7 @@ class TestFetchLedger:
         vault._get_note = AsyncMock(side_effect=_get_note_side_effect)
 
         result = await vault.fetch_ledger("user1")
-        assert result == '{"balance": 42}'
+        assert result == ('{"balance": 42}', 0)
 
     @pytest.mark.asyncio
     async def test_skips_empty_duplicates(self) -> None:
@@ -946,7 +946,7 @@ class TestFetchLedger:
         vault._get_note = AsyncMock(side_effect=_get_note_side_effect)
 
         result = await vault.fetch_ledger("user1")
-        assert result == '{"balance": 777}'
+        assert result == ('{"balance": 777}', 0)
 
     @pytest.mark.asyncio
     async def test_fetch_uses_no_cache(self) -> None:

@@ -17,7 +17,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +160,8 @@ class UserLedger:
 
     Credits live in ordered tranches. ``balance_api_sats`` is a computed
     property that sums non-expired tranche balances. Debits draw FIFO
-    from the oldest non-expired tranche. Rollbacks create compensating
-    tranches (never-expiring) rather than modifying existing ones.
+    from the oldest non-expired tranche. A refund is a compensating tranche
+    (``LedgerCache.credit``), never an edit of an existing one.
 
     ``from_json()`` returns a fresh ledger on corrupt data (never blocks a user).
     """
@@ -319,18 +319,21 @@ class UserLedger:
             remaining_to_debit -= draw
 
         self.total_consumed_api_sats += api_sats
-
-        today = date.today().isoformat()  # noqa: DTZ011
-        day_log = self.daily_log.setdefault(today, {})
-        usage = day_log.setdefault(tool_name, ToolUsage())
-        usage.calls += 1
-        usage.api_sats += api_sats
-
-        agg = self.history.setdefault(tool_name, ToolUsage())
-        agg.calls += 1
-        agg.api_sats += api_sats
-
+        self.record_usage(tool_name, 1, api_sats)
         return True
+
+    def record_usage(self, tool_name: str, calls: int = 1, api_sats: int = 0) -> None:
+        """Count ``calls`` uses of a tool today and all-time. Counters only —
+        no tranche, total or invoice changes."""
+        if calls <= 0:
+            return
+        today = date.today().isoformat()  # noqa: DTZ011
+        usage = self.daily_log.setdefault(today, {}).setdefault(tool_name, ToolUsage())
+        usage.calls += calls
+        usage.api_sats += api_sats
+        agg = self.history.setdefault(tool_name, ToolUsage())
+        agg.calls += calls
+        agg.api_sats += api_sats
 
     def credit_deposit(
         self, api_sats: int, invoice_id: str, ttl_seconds: int | None = None,
@@ -351,43 +354,6 @@ class UserLedger:
             self.pending_invoices.remove(invoice_id)
         if invoice_id not in self.credited_invoices:
             self.credited_invoices.append(invoice_id)
-
-    def rollback_debit(self, tool_name: str, api_sats: int) -> None:
-        """Undo a previous debit by adding sats back to the soonest-expiring tranche."""
-        if api_sats <= 0:
-            return
-        now = datetime.now(UTC)
-        # Find the active tranche expiring soonest; fall back to any active tranche
-        active = [t for t in self.tranches if t.remaining_sats > 0 and not t.is_expired_at(now)]
-        target = None
-        if active:
-            with_expiry = [t for t in active if t.expires_at is not None]
-            target = min(with_expiry, key=lambda t: cast(datetime, t.expires_at)) if with_expiry else active[0]
-        if target:
-            target.remaining_sats += api_sats
-            target.original_sats += api_sats
-        else:
-            # No active tranches — create one with 7-day TTL
-            self.tranches.append(Tranche(
-                granted_at=now.isoformat(),
-                original_sats=api_sats,
-                remaining_sats=api_sats,
-                invoice_id=f"rollback:{tool_name}",
-                expires_at=(now + timedelta(days=7)).isoformat(),
-            ))
-        self.total_consumed_api_sats -= api_sats
-
-        today = date.today().isoformat()  # noqa: DTZ011
-        day_log = self.daily_log.get(today, {})
-        usage = day_log.get(tool_name)
-        if usage:
-            usage.calls = max(0, usage.calls - 1)
-            usage.api_sats = max(0, usage.api_sats - api_sats)
-
-        agg = self.history.get(tool_name)
-        if agg:
-            agg.calls = max(0, agg.calls - 1)
-            agg.api_sats = max(0, agg.api_sats - api_sats)
 
     def rotate_daily_log(self, retention_days: int = 30) -> None:
         """Fold daily entries older than ``retention_days`` into ``history``."""
@@ -434,9 +400,11 @@ class UserLedger:
     # -- serialization --------------------------------------------------------
 
     def to_json(self) -> str:
-        """Serialize to JSON (schema v4). Prunes empty/expired tranches."""
-        self._collect_expired()
-        # Prune fully consumed tranches
+        """Serialize to JSON (schema v4). Prunes fully consumed tranches.
+
+        Serialisation changes nothing: expiry is swept by ``debit`` and on
+        load, inside the write path, never as a side effect of writing out.
+        """
         active = [t for t in self.tranches if t.remaining_sats > 0]
         return json.dumps({
             "v": _SCHEMA_VERSION,

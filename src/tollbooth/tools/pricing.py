@@ -149,6 +149,8 @@ def _model_to_response(model: PricingModel) -> dict[str, Any]:
     }
     if model.tranche_lifetime is not None:
         d["tranche_lifetime"] = model.tranche_lifetime.to_dict()
+    # Named, so "never decided" and "decided: never" cannot be confused.
+    d["expiration"] = model.expiry().to_dict()
     return d
 
 

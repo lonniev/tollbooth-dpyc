@@ -3,6 +3,58 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed — the ledger has one write path, and every write carries the version it read
+
+On 2026-09-27 a Bee's Knees patron's settled 1,000-sat top-up was credited,
+acknowledged by DM, and gone within the hour: no tranche, no invoice record,
+not even the pending entry. The row had reverted to a snapshot taken before
+the purchase. The writer was the write-behind flush for free-call usage
+counters. It sent the whole ledger, and it took the version to compare
+against from a per-user cache on the vault at write time — a cache the
+settlement had just advanced. The stale snapshot passed the guard and erased
+the credit. 0.62.0 and 0.78.0 had moved money onto `mutate()`; this path
+survived because it was "only accounting", and it also swept expired
+tranches and stamped a 7-day lifetime on tranches that had none.
+
+- **One writer.** `LedgerCache.mutate()` is the only code that writes a
+  ledger row: under the per-patron lock it reads the ledger with its version,
+  applies the function, and writes at that exact version; on conflict it
+  re-reads and re-applies. It always installs what it read or wrote as the
+  served snapshot, including when the function declines to write.
+- **Versions bound to snapshots.** `VaultBackend.fetch_ledger` returns
+  `(json, version)`; `store_ledger(user_id, json, expected_version)` lands
+  only at that version (`None` inserts, and conflicts if a row appeared).
+  `NeonVault` remembers no versions. `AuditedVault` and the TheBrain vault
+  follow the shape; TheBrain is single-writer and says so.
+- **Usage counters are deltas.** Free calls record `note_usage`; the next
+  `mutate` for that patron folds the counters into the fresh ledger it is
+  writing, and a `fold_usage` pass every minute writes the counters of
+  patrons who only made free calls — one small write per active patron per
+  minute, not one whole-ledger write per seven seconds of page polling. A
+  fold that cannot read or loses its retries keeps its counters.
+- **Reads never write.** `get()` and `get_fresh()` mark nothing, flush
+  nothing, migrate nothing. `to_json()` no longer sweeps expiry as a side
+  effect of serialising.
+- **Removed:** `mark_dirty`, `flush_user`, `flush_dirty`, `flush_all`,
+  `snapshot_all`, `write_through_credit`, `start_background_flush`, the
+  flush metrics, `UserLedger.rollback_debit` (no callers), and both 7-day
+  defaults. `snapshot_ledger` is journal-only.
+
+### Changed — expiry is the operator's decision, and "not decided" is named
+
+Owner: "clarity between having failed to choose an expiration and having
+explicitly chosen no expiration. We do not want opinionated code running
+around imposing a 7-day expiration."
+
+- `PricingModel.expiry()` and `OperatorRuntime.resolve_expiry()` return an
+  `Expiry`: `unchosen` (no `tranche_lifetime` in the model), `never`
+  (`tranche_lifetime` present with no days) or `days`. Only `days` ever
+  stamps an expiry. `get_pricing_model` reports it as `expiration`.
+- `resolve_tranche_lifetime()` is gone; callers read `resolve_expiry().seconds`.
+- A test asserts the ledger layer constructs no lifetime of its own.
+
 ## [0.92.0] — 2026-09-27
 
 ### Fixed — a cold start no longer pays for every relay in series

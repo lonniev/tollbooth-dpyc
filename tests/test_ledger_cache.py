@@ -1,732 +1,354 @@
-"""Tests for LedgerCache: LRU eviction, background flush, concurrency."""
+"""LedgerCache: one write path, versions bound to snapshots, reads that never write.
+
+The store is faked honestly: it hands out a version with every read and
+accepts a write only at that exact version. That is the property the old
+per-user version cache broke — and the property every test here leans on.
+"""
 
 import asyncio
-import time
 from unittest.mock import AsyncMock
 
 import pytest
 
 from tollbooth.ledger import UserLedger
 from tollbooth.ledger_cache import LedgerCache
+from tollbooth.vault_backend import (
+    LedgerUnavailableError,
+    LedgerVersionConflict,
+    LedgerWriteError,
+)
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-async def _wait_until(predicate, timeout: float = 2.0) -> bool:
-    """Poll until predicate() is true or timeout elapses.
-
-    Returns whether it became true. Bounded wait-until-condition — returns as
-    soon as the condition holds (no fixed sleep guessing at flush timing).
-    """
-    deadline = asyncio.get_event_loop().time() + timeout
-    while not predicate():
-        if asyncio.get_event_loop().time() > deadline:
-            return False
-        await asyncio.sleep(0.01)
-    return True
-
-
-def _mock_vault(ledger_json: str | None = None, fail_store: bool = False):
-    """Create a mock vault with fetch_ledger/store_ledger."""
-    vault = AsyncMock()
-    vault.fetch_ledger = AsyncMock(return_value=ledger_json)
-    if fail_store:
-        vault.store_ledger = AsyncMock(side_effect=Exception("vault write failed"))
-    else:
-        vault.store_ledger = AsyncMock(return_value="ledger-thought-id")
-    return vault
-
-
-def _funded_vault(balance: int = 500) -> AsyncMock:
-    """Create a mock vault that returns a funded ledger."""
-    ledger = UserLedger()
-    ledger.credit_deposit(balance, "seed")
-    return _mock_vault(ledger_json=ledger.to_json())
-
-
-# ---------------------------------------------------------------------------
-# Cache miss / hit
+# An honest store
 # ---------------------------------------------------------------------------
 
 
-class TestLedgerCacheGetMiss:
-    @pytest.mark.asyncio
-    async def test_cache_miss_returns_fresh_ledger(self) -> None:
-        vault = _mock_vault(ledger_json=None)
-        cache = LedgerCache(vault, maxsize=5)
-        ledger = await cache.get("user1")
-        assert ledger.balance_api_sats == 0
-        vault.fetch_ledger.assert_called_once_with("user1")
+class HonestVault:
+    """One row per user; a write lands only at the version the writer read."""
 
-    @pytest.mark.asyncio
-    async def test_cache_miss_loads_from_vault(self) -> None:
-        stored = UserLedger()
-        stored.credit_deposit(500, "seed")
-        vault = _mock_vault(ledger_json=stored.to_json())
-        cache = LedgerCache(vault, maxsize=5)
-        ledger = await cache.get("user1")
-        assert ledger.balance_api_sats == 500
+    def __init__(self) -> None:
+        self.rows: dict[str, tuple[str, int]] = {}
+        self.reads = 0
+        self.writes = 0
+        self.refused = 0
+        self.log: list[tuple[str, int | None]] = []  # (user, expected_version) per write
 
-    @pytest.mark.asyncio
-    async def test_cache_miss_vault_error_returns_fresh(self) -> None:
-        vault = AsyncMock()
-        vault.fetch_ledger = AsyncMock(side_effect=Exception("network error"))
-        cache = LedgerCache(vault, maxsize=5)
-        ledger = await cache.get("user1")
-        assert ledger.balance_api_sats == 0
+    async def fetch_ledger(self, user_id: str) -> tuple[str, int] | None:
+        self.reads += 1
+        return self.rows.get(user_id)
 
+    async def store_ledger(self, user_id: str, ledger_json: str, expected_version: int | None) -> int:
+        self.writes += 1
+        self.log.append((user_id, expected_version))
+        current = self.rows.get(user_id)
+        if expected_version is None:
+            if current is not None:
+                self.refused += 1
+                raise LedgerVersionConflict("row appeared")
+            self.rows[user_id] = (ledger_json, 1)
+            return 1
+        if current is None or current[1] != expected_version:
+            self.refused += 1
+            raise LedgerVersionConflict(f"had v{expected_version}")
+        self.rows[user_id] = (ledger_json, expected_version + 1)
+        return expected_version + 1
 
-class TestLedgerCacheGetHit:
-    @pytest.mark.asyncio
-    async def test_cache_hit_returns_same_object(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-        ledger1 = await cache.get("user1")
-        ledger2 = await cache.get("user1")
-        assert ledger1 is ledger2
-        # Vault should only be called once
-        vault.fetch_ledger.assert_called_once()
+    async def snapshot_ledger(self, user_id: str, ledger_json: str, timestamp: str) -> str | None:
+        return "snap"
 
-    @pytest.mark.asyncio
-    async def test_mutations_visible_on_cache_hit(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-        ledger = await cache.get("user1")
-        ledger.credit_deposit(999, "test")
-        cache.mark_dirty("user1")
-        ledger2 = await cache.get("user1")
-        assert ledger2.balance_api_sats == 999
+    # test helpers
+    def seed(self, user_id: str, ledger: UserLedger, version: int = 1) -> None:
+        self.rows[user_id] = (ledger.to_json(), version)
+
+    def ledger(self, user_id: str) -> UserLedger:
+        return UserLedger.from_json(self.rows[user_id][0])
+
+    def version(self, user_id: str) -> int:
+        return self.rows[user_id][1]
 
 
-# ---------------------------------------------------------------------------
-# LRU eviction
-# ---------------------------------------------------------------------------
-
-
-class TestLedgerCacheEviction:
-    @pytest.mark.asyncio
-    async def test_eviction_at_capacity(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=2)
-        await cache.get("user1")
-        await cache.get("user2")
-        await cache.get("user3")  # should evict user1
-        assert cache.size == 2
-        # user1 was evicted, next access should reload from vault
-        vault.fetch_ledger.reset_mock()
-        await cache.get("user1")
-        vault.fetch_ledger.assert_called_with("user1")
-
-    @pytest.mark.asyncio
-    async def test_eviction_flushes_dirty_entry(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=2)
-        ledger1 = await cache.get("user1")
-        ledger1.credit_deposit(42, "test")
-        cache.mark_dirty("user1")
-        await cache.get("user2")
-        await cache.get("user3")  # evicts user1 (fire-and-forget flush)
-        await asyncio.sleep(0)  # let background task run
-        vault.store_ledger.assert_called_once()
-        args = vault.store_ledger.call_args[0]
-        assert args[0] == "user1"
-
-    @pytest.mark.asyncio
-    async def test_eviction_does_not_flush_clean_entry(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=2)
-        await cache.get("user1")  # clean
-        await cache.get("user2")
-        await cache.get("user3")  # evicts user1 (clean)
-        vault.store_ledger.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_lru_order_access_refreshes(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=2)
-        await cache.get("user1")
-        await cache.get("user2")
-        await cache.get("user1")   # refresh user1 — user2 is now LRU
-        await cache.get("user3")   # evicts user2
-        assert cache.size == 2
-        # user1 should still be cached (no vault call)
-        vault.fetch_ledger.reset_mock()
-        await cache.get("user1")
-        vault.fetch_ledger.assert_not_called()
+def _funded(balance: int = 500) -> HonestVault:
+    v = HonestVault()
+    led = UserLedger()
+    led.credit_deposit(balance, "seed")
+    v.seed("u1", led)
+    return v
 
 
 # ---------------------------------------------------------------------------
-# Dirty tracking and flush
+# Reads
 # ---------------------------------------------------------------------------
 
 
-class TestLedgerCacheFlush:
+class TestGet:
     @pytest.mark.asyncio
-    async def test_mark_dirty_and_flush(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-        ledger = await cache.get("user1")
-        ledger.credit_deposit(100, "test")
-        cache.mark_dirty("user1")
-        # dirty_count should be 1
-        assert cache._entries["user1"].dirty_count == 1
-        count = await cache.flush_dirty()
-        assert count == 1
-        vault.store_ledger.assert_called_once()
-        # After flush, dirty_count should be reset
-        assert cache._entries["user1"].dirty_count == 0
+    async def test_miss_on_a_new_patron_is_an_empty_ledger(self) -> None:
+        cache = LedgerCache(HonestVault())
+        led = await cache.get("u1")
+        assert led.balance_api_sats == 0
+        assert not getattr(led, "_vault_unavailable", False)
 
     @pytest.mark.asyncio
-    async def test_flush_skips_clean_entries(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-        await cache.get("user1")  # clean
-        count = await cache.flush_dirty()
-        assert count == 0
-        vault.store_ledger.assert_not_called()
+    async def test_miss_loads_the_stored_ledger(self) -> None:
+        cache = LedgerCache(_funded(500))
+        assert (await cache.get("u1")).balance_api_sats == 500
 
     @pytest.mark.asyncio
-    async def test_flush_clears_dirty_flag(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-        await cache.flush_dirty()
-        # Second flush should be a no-op
-        vault.store_ledger.reset_mock()
-        count = await cache.flush_dirty()
-        assert count == 0
-        vault.store_ledger.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_flush_failure_keeps_dirty(self) -> None:
-        vault = _mock_vault(fail_store=True)
-        cache = LedgerCache(vault, maxsize=5)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-        count = await cache.flush_dirty()
-        assert count == 0  # failed, entry still dirty
-        # dirty_count should be preserved on failure
-        assert cache._entries["user1"].dirty_count == 1
-        # Retry should attempt again
-        vault.store_ledger.reset_mock()
-        vault.store_ledger = AsyncMock(return_value="ok")
-        count = await cache.flush_dirty()
-        assert count == 1
-
-    @pytest.mark.asyncio
-    async def test_flush_all(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-        await cache.get("user1")
-        await cache.get("user2")
-        cache.mark_dirty("user1")
-        cache.mark_dirty("user2")
-        count = await cache.flush_all()
-        assert count == 2
-
-    @pytest.mark.asyncio
-    async def test_mark_dirty_nonexistent_noop(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-        cache.mark_dirty("ghost")  # should not raise
-
-    @pytest.mark.asyncio
-    async def test_mark_dirty_increments_count(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-        cache.mark_dirty("user1")
-        cache.mark_dirty("user1")
-        assert cache._entries["user1"].dirty_count == 3
-
-
-# ---------------------------------------------------------------------------
-# Snapshot all
-# ---------------------------------------------------------------------------
-
-
-class TestLedgerCacheSnapshotAll:
-    @pytest.mark.asyncio
-    async def test_snapshot_all_iterates_entries(self) -> None:
-        vault = _mock_vault()
-        vault.snapshot_ledger = AsyncMock(return_value="snap-id")
-        cache = LedgerCache(vault, maxsize=5)
-        await cache.get("user1")
-        await cache.get("user2")
-        count = await cache.snapshot_all("2026-02-16T12:00:00Z")
-        assert count == 2
-        assert vault.snapshot_ledger.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_snapshot_all_empty_cache(self) -> None:
-        vault = _mock_vault()
-        vault.snapshot_ledger = AsyncMock(return_value="snap-id")
-        cache = LedgerCache(vault, maxsize=5)
-        count = await cache.snapshot_all("2026-02-16T12:00:00Z")
-        assert count == 0
-        vault.snapshot_ledger.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_snapshot_all_skips_failures(self) -> None:
-        vault = _mock_vault()
-        call_count = 0
-
-        async def snapshot_side_effect(user_id, ledger_json, ts):
-            nonlocal call_count
-            call_count += 1
-            if user_id == "user1":
-                raise Exception("vault error")  # noqa: TRY002
-            return "snap-id"
-
-        vault.snapshot_ledger = AsyncMock(side_effect=snapshot_side_effect)
-        cache = LedgerCache(vault, maxsize=5)
-        await cache.get("user1")
-        await cache.get("user2")
-        count = await cache.snapshot_all("2026-02-16T12:00:00Z")
-        assert count == 1  # user1 failed, user2 succeeded
-        assert call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_snapshot_all_counts_none_as_skipped(self) -> None:
-        vault = _mock_vault()
-        vault.snapshot_ledger = AsyncMock(return_value=None)
-        cache = LedgerCache(vault, maxsize=5)
-        await cache.get("user1")
-        count = await cache.snapshot_all("2026-02-16T12:00:00Z")
-        assert count == 0  # None means no ledger thought existed
-
-
-# ---------------------------------------------------------------------------
-# Background flush
-# ---------------------------------------------------------------------------
-
-
-class TestLedgerCacheBackgroundFlush:
-    @pytest.mark.asyncio
-    async def test_start_and_stop(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5, flush_interval_secs=1)
-        await cache.start_background_flush()
-        assert cache._flush_task is not None
-        await cache.stop()
-        assert cache._flush_task is None
-
-    @pytest.mark.asyncio
-    async def test_background_flush_writes_dirty(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5, flush_interval_secs=0.1)
-        ledger = await cache.get("user1")
-        ledger.credit_deposit(77, "test")
-        cache.mark_dirty("user1")
-        await cache.start_background_flush()
-        flushed = await _wait_until(lambda: vault.store_ledger.called)
-        await cache.stop()
-        assert flushed, "background flush did not write within timeout"
-        vault.store_ledger.assert_called()
-
-    @pytest.mark.asyncio
-    async def test_stop_flushes_remaining(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5, flush_interval_secs=999)
-        await cache.start_background_flush()
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-        await cache.stop()  # should flush before returning
-        vault.store_ledger.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_double_start_idempotent(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5, flush_interval_secs=1)
-        await cache.start_background_flush()
-        task1 = cache._flush_task
-        await cache.start_background_flush()
-        assert cache._flush_task is task1  # same task, not duplicated
-        await cache.stop()
-
-
-# ---------------------------------------------------------------------------
-# Concurrency
-# ---------------------------------------------------------------------------
-
-
-class TestLedgerCacheConcurrency:
-    @pytest.mark.asyncio
-    async def test_concurrent_get_same_user(self) -> None:
-        """Two concurrent gets for the same user should both see the same ledger."""
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-
-        results = await asyncio.gather(
-            cache.get("user1"),
-            cache.get("user1"),
-        )
-        assert results[0] is results[1]
-
-    @pytest.mark.asyncio
-    async def test_concurrent_get_different_users(self) -> None:
-        """Concurrent gets for different users should not interfere."""
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-
-        results = await asyncio.gather(
-            cache.get("user1"),
-            cache.get("user2"),
-        )
-        assert results[0] is not results[1]
-        assert cache.size == 2
-
-
-# ---------------------------------------------------------------------------
-# Flush retry
-# ---------------------------------------------------------------------------
-
-
-class TestLedgerCacheFlushRetry:
-    @pytest.mark.asyncio
-    async def test_retry_succeeds_on_transient_failure(self) -> None:
-        """Flush succeeds on second attempt after transient vault error."""
-        vault = _mock_vault()
-        call_count = 0
-
-        async def store_side_effect(user_id, ledger_json):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise Exception("transient error")  # noqa: TRY002
-            return "ok"
-
-        vault.store_ledger = AsyncMock(side_effect=store_side_effect)
-        cache = LedgerCache(vault, maxsize=5, flush_retries=1, flush_retry_delay=0.01)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-
-        result = await cache.flush_user("user1")
-
-        assert result is True
-        assert call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_retry_exhausted_returns_false(self) -> None:
-        """All retry attempts fail -> returns False, entry stays dirty."""
-        vault = _mock_vault(fail_store=True)
-        cache = LedgerCache(vault, maxsize=5, flush_retries=2, flush_retry_delay=0.01)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-
-        result = await cache.flush_user("user1")
-
-        assert result is False
-        assert cache._entries["user1"].dirty is True
-        # 1 initial + 2 retries = 3 total attempts
-        assert vault.store_ledger.call_count == 3
-
-    @pytest.mark.asyncio
-    async def test_zero_retries_single_attempt(self) -> None:
-        """flush_retries=0 means exactly one attempt, no retries."""
-        vault = _mock_vault(fail_store=True)
-        cache = LedgerCache(vault, maxsize=5, flush_retries=0, flush_retry_delay=0.01)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-
-        result = await cache.flush_user("user1")
-
-        assert result is False
-        assert vault.store_ledger.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_default_config_has_retry(self) -> None:
-        """Default LedgerCache has flush_retries=1 visible in health()."""
-        vault = _mock_vault()
+    async def test_hit_returns_the_same_snapshot_without_a_read(self) -> None:
+        vault = _funded()
         cache = LedgerCache(vault)
-        health = cache.health()
-        assert health["flush_retries"] == 1
-        assert health["flush_retry_delay"] == 2.0
+        a = await cache.get("u1")
+        b = await cache.get("u1")
+        assert a is b
+        assert vault.reads == 1
 
-
-# ---------------------------------------------------------------------------
-# Size property
-# ---------------------------------------------------------------------------
-
-
-class TestLedgerCacheSize:
     @pytest.mark.asyncio
-    async def test_size_empty(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
+    async def test_an_unreadable_store_yields_a_flagged_uncached_empty_ledger(self) -> None:
+        vault = AsyncMock()
+        vault.fetch_ledger = AsyncMock(side_effect=Exception("cold"))
+        cache = LedgerCache(vault)
+        led = await cache.get("u1")
+        assert led.balance_api_sats == 0
+        assert getattr(led, "_vault_unavailable", False) is True
         assert cache.size == 0
 
     @pytest.mark.asyncio
-    async def test_size_after_gets(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-        await cache.get("user1")
-        await cache.get("user2")
+    async def test_reads_never_write(self) -> None:
+        vault = _funded()
+        cache = LedgerCache(vault)
+        for _ in range(5):
+            await cache.get("u1")
+        await cache.get_fresh("u1")
+        assert vault.writes == 0
+
+    @pytest.mark.asyncio
+    async def test_get_fresh_reloads_and_replaces_the_snapshot(self) -> None:
+        vault = _funded(500)
+        cache = LedgerCache(vault)
+        stale = await cache.get("u1")
+        richer = UserLedger()
+        richer.credit_deposit(900, "elsewhere")
+        vault.seed("u1", richer, version=2)
+        fresh = await cache.get_fresh("u1")
+        assert fresh.balance_api_sats == 900
+        assert fresh is not stale
+        assert (await cache.get("u1")) is fresh
+
+
+class TestEviction:
+    @pytest.mark.asyncio
+    async def test_capacity_evicts_the_least_recently_used(self) -> None:
+        cache = LedgerCache(HonestVault(), maxsize=2)
+        await cache.get("a")
+        await cache.get("b")
+        await cache.get("a")  # refresh a
+        await cache.get("c")  # evicts b
+        assert set(cache._entries) == {"a", "c"}
         assert cache.size == 2
 
-
-# ---------------------------------------------------------------------------
-# Flush-due (per-entry triggers)
-# ---------------------------------------------------------------------------
-
-
-class TestFlushDue:
     @pytest.mark.asyncio
-    async def test_flush_due_after_count_threshold(self) -> None:
-        """dirty_count >= N triggers flush_due."""
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5, flush_batch_size=3)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-        cache.mark_dirty("user1")
-        assert not cache.flush_due("user1")  # 2 < 3
-        cache.mark_dirty("user1")
-        assert cache.flush_due("user1")  # 3 >= 3
+    async def test_eviction_writes_nothing(self) -> None:
+        vault = HonestVault()
+        cache = LedgerCache(vault, maxsize=1)
+        await cache.get("a")
+        await cache.get("b")
+        assert vault.writes == 0
 
-    @pytest.mark.asyncio
-    async def test_flush_not_due_below_threshold(self) -> None:
-        """dirty_count < N doesn't trigger flush."""
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5, flush_batch_size=10)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-        assert not cache.flush_due("user1")
 
+class TestConcurrency:
     @pytest.mark.asyncio
-    async def test_flush_due_after_staleness(self) -> None:
-        """Time > T since last flush triggers flush_due."""
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5, flush_staleness_secs=0.05)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-        assert not cache.flush_due("user1")  # just created, not stale yet
-        # Simulate time passing by backdating last_flush_time
-        cache._entries["user1"].last_flush_time = time.monotonic() - 0.1
-        assert cache.flush_due("user1")
-
-    @pytest.mark.asyncio
-    async def test_flush_due_requires_dirty(self) -> None:
-        """Clean entries never trigger flush_due."""
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5, flush_batch_size=1)
-        await cache.get("user1")
-        assert not cache.flush_due("user1")
-
-    @pytest.mark.asyncio
-    async def test_flush_due_resets_after_flush(self) -> None:
-        """dirty_count resets to 0 after a successful flush."""
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5, flush_batch_size=2)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-        cache.mark_dirty("user1")
-        assert cache.flush_due("user1")
-        await cache.flush_user("user1")
-        assert not cache.flush_due("user1")
-        assert cache._entries["user1"].dirty_count == 0
-
-    @pytest.mark.asyncio
-    async def test_flush_due_nonexistent_user(self) -> None:
-        """flush_due for unknown user returns False."""
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-        assert not cache.flush_due("ghost")
-
-    @pytest.mark.asyncio
-    async def test_get_triggers_flush_at_threshold(self) -> None:
-        """get() auto-flushes when the entry hits the batch threshold."""
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5, flush_batch_size=3)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-        cache.mark_dirty("user1")
-        cache.mark_dirty("user1")  # dirty_count = 3 = batch_size
-        vault.store_ledger.assert_not_called()
-        # Next get() should trigger the fire-and-forget flush
-        await cache.get("user1")
-        await asyncio.sleep(0)  # let background task run
-        vault.store_ledger.assert_called_once()
-        assert cache._entries["user1"].dirty_count == 0
-
-    @pytest.mark.asyncio
-    async def test_get_triggers_flush_on_staleness(self) -> None:
-        """get() auto-flushes when entry is stale."""
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5, flush_staleness_secs=0.05)
-        await cache.get("user1")
-        cache.mark_dirty("user1")
-        # Backdate last_flush_time to simulate staleness
-        cache._entries["user1"].last_flush_time = time.monotonic() - 0.1
-        vault.store_ledger.assert_not_called()
-        await cache.get("user1")
-        await asyncio.sleep(0)  # let fire-and-forget flush run
-        vault.store_ledger.assert_called_once()
+    async def test_concurrent_gets_of_one_patron_read_the_store_once(self) -> None:
+        vault = _funded()
+        cache = LedgerCache(vault)
+        results = await asyncio.gather(*(cache.get("u1") for _ in range(10)))
+        assert all(r is results[0] for r in results)
+        assert vault.reads == 1
 
 
 # ---------------------------------------------------------------------------
-# Debit method
-# ---------------------------------------------------------------------------
-
-
-class TestDebitMethod:
-    @pytest.mark.asyncio
-    async def test_debit_succeeds_with_balance(self) -> None:
-        """debit() returns True, debits, and persists write-through."""
-        vault = _funded_vault(500)
-        cache = LedgerCache(vault, maxsize=5)
-        result = await cache.debit("user1", "search_thoughts", 10)
-        assert result is True
-        vault.store_ledger.assert_called_once()  # write-through, not deferred
-        assert cache._entries["user1"].dirty is False  # persisted → clean
-        ledger = await cache.get("user1")
-        assert ledger.balance_api_sats == 490
-
-    @pytest.mark.asyncio
-    async def test_debit_fails_insufficient_balance(self) -> None:
-        """debit() returns False when insufficient — no write, no debit."""
-        vault = _mock_vault()  # empty ledger, 0 balance
-        cache = LedgerCache(vault, maxsize=5)
-        result = await cache.debit("user1", "search_thoughts", 10)
-        assert result is False
-        vault.store_ledger.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_debit_writes_through_every_call(self) -> None:
-        """Each debit persists immediately — no write-behind batching."""
-        vault = _funded_vault(500)
-        cache = LedgerCache(vault, maxsize=5)
-        await cache.debit("user1", "tool_a", 1)
-        await cache.debit("user1", "tool_b", 1)
-        await cache.debit("user1", "tool_c", 1)
-        assert vault.store_ledger.call_count == 3
-
-    @pytest.mark.asyncio
-    async def test_debit_retries_on_version_conflict(self) -> None:
-        """A losing CAS race re-fetches fresh state and re-applies (no clobber)."""
-        from tollbooth.vault_backend import LedgerVersionConflict
-
-        seed = UserLedger()
-        seed.credit_deposit(500, "seed")
-        vault = _mock_vault(ledger_json=seed.to_json())
-        calls = {"n": 0}
-
-        async def flaky_store(user_id: str, ledger_json: str) -> str:
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise LedgerVersionConflict("lost race")
-            return "v2"
-
-        vault.store_ledger = AsyncMock(side_effect=flaky_store)
-        cache = LedgerCache(vault, maxsize=5)
-        result = await cache.debit("user1", "tool_a", 10)
-        assert result is True
-        assert calls["n"] == 2  # conflicted once, retried, then persisted
-
-
-# ---------------------------------------------------------------------------
-# Write-through credit
+# The write path
 # ---------------------------------------------------------------------------
 
 
 class TestMutate:
     @pytest.mark.asyncio
-    async def test_credit_writes_through(self) -> None:
-        seed = UserLedger()
-        seed.credit_deposit(100, "seed")
-        vault = _mock_vault(ledger_json=seed.to_json())
-        cache = LedgerCache(vault, maxsize=5)
-        await cache.credit("user1", 1000, "invoice-x")
-        vault.store_ledger.assert_called_once()  # durable immediately
-        assert (await cache.get("user1")).balance_api_sats == 1100
-
-    @pytest.mark.asyncio
-    async def test_no_write_when_fn_returns_false(self) -> None:
-        vault = _funded_vault(500)
-        cache = LedgerCache(vault, maxsize=5)
-        out = await cache.mutate("user1", lambda _l: False)
-        assert out is False
-        vault.store_ledger.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_raises_and_never_writes_on_unreadable_store(self) -> None:
-        # A cold/unreachable store must NOT let a mutation apply to an empty
-        # fallback and zero a real balance — it must raise.
-        from tollbooth.vault_backend import LedgerUnavailableError
-
-        vault = AsyncMock()
-        vault.fetch_ledger = AsyncMock(side_effect=Exception("neon cold"))
-        vault.store_ledger = AsyncMock(return_value="v1")
-        cache = LedgerCache(vault, maxsize=5)
-        with pytest.raises(LedgerUnavailableError):
-            await cache.credit("user1", 1000, "invoice-x")
-        vault.store_ledger.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_raises_after_exhausting_conflict_retries(self) -> None:
-        from tollbooth.vault_backend import LedgerVersionConflict, LedgerWriteError
-
-        seed = UserLedger()
-        seed.credit_deposit(500, "seed")
-        vault = _mock_vault(ledger_json=seed.to_json())
-        vault.store_ledger = AsyncMock(side_effect=LedgerVersionConflict("always loses"))
-        cache = LedgerCache(vault, maxsize=5)
-        with pytest.raises(LedgerWriteError):
-            await cache.debit("user1", "tool_a", 10)
-
-
-class TestWriteThroughCredit:
-    @pytest.mark.asyncio
-    async def test_write_through_credit_flushes_immediately(self) -> None:
-        """write_through_credit() calls vault.store_ledger right away."""
-        vault = _mock_vault()
-        cache = LedgerCache(vault, maxsize=5)
-        ledger = await cache.get("user1")
-        ledger.credit_deposit(1000, "invoice-123")
-        result = await cache.write_through_credit("user1")
-        assert result is True
-        vault.store_ledger.assert_called_once()
-        # Entry should be clean after write-through
-        assert not cache._entries["user1"].dirty
-
-    @pytest.mark.asyncio
-    async def test_write_through_credit_returns_false_on_failure(self) -> None:
-        """write_through_credit() returns False when vault write fails."""
-        vault = _mock_vault(fail_store=True)
-        cache = LedgerCache(vault, maxsize=5, flush_retries=0)
-        await cache.get("user1")
-        result = await cache.write_through_credit("user1")
-        assert result is False
-        # Entry should still be dirty
-        assert cache._entries["user1"].dirty is True
-
-
-# ---------------------------------------------------------------------------
-# Health metrics
-# ---------------------------------------------------------------------------
-
-
-class TestLedgerCacheHealth:
-    def test_health_includes_flush_config(self) -> None:
-        vault = _mock_vault()
-        cache = LedgerCache(
-            vault,
-            flush_batch_size=5,
-            flush_staleness_secs=60.0,
-        )
-        health = cache.health()
-        assert health["flush_batch_size"] == 5
-        assert health["flush_staleness_secs"] == 60.0
-        assert "last_flush_check_age_secs" not in health
-
-    def test_health_default_values(self) -> None:
-        vault = _mock_vault()
+    async def test_writes_at_the_version_it_read(self) -> None:
+        vault = _funded()
+        vault.rows["u1"] = (vault.rows["u1"][0], 7)
         cache = LedgerCache(vault)
-        health = cache.health()
-        assert health["flush_batch_size"] == 10
-        assert health["flush_staleness_secs"] == 120.0
-        assert health["flush_retries"] == 1
-        assert health["flush_retry_delay"] == 2.0
+        await cache.credit("u1", 100, "inv")
+        assert vault.log == [("u1", 7)]
+        assert vault.version("u1") == 8
+
+    @pytest.mark.asyncio
+    async def test_a_new_patron_is_inserted_not_updated(self) -> None:
+        vault = HonestVault()
+        cache = LedgerCache(vault)
+        await cache.credit("u1", 100, "inv")
+        assert vault.log == [("u1", None)]
+        assert vault.version("u1") == 1
+
+    @pytest.mark.asyncio
+    async def test_the_snapshot_served_afterwards_is_what_was_written(self) -> None:
+        vault = _funded(500)
+        cache = LedgerCache(vault)
+        await cache.credit("u1", 100, "inv")
+        assert (await cache.get("u1")).balance_api_sats == 600
+        assert vault.reads == 1, "the post-write snapshot is served without another read"
+
+    @pytest.mark.asyncio
+    async def test_fn_returning_false_writes_nothing_and_installs_the_fresh_read(self) -> None:
+        vault = _funded(5)
+        cache = LedgerCache(vault)
+        old = await cache.get("u1")
+        richer = UserLedger()
+        richer.credit_deposit(5, "seed")
+        richer.credit_deposit(50, "later")
+        vault.seed("u1", richer, version=2)
+        ok = await cache.debit("u1", "tool", 100)  # still short
+        assert ok is False
+        assert vault.writes == 0
+        served = await cache.get("u1")
+        assert served is not old and served.balance_api_sats == 55
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_store_raises_and_never_writes(self) -> None:
+        vault = HonestVault()
+        vault.fetch_ledger = AsyncMock(side_effect=Exception("cold"))  # type: ignore[method-assign]
+        cache = LedgerCache(vault)
+        with pytest.raises(LedgerUnavailableError):
+            await cache.credit("u1", 100, "inv")
+        assert vault.writes == 0
+
+    @pytest.mark.asyncio
+    async def test_a_lost_race_is_replayed_on_the_winners_state(self) -> None:
+        vault = _funded(500)
+        cache = LedgerCache(vault)
+        real_store = vault.store_ledger
+        raced = {"done": False}
+
+        async def store_with_a_rival(user_id, ledger_json, expected_version):
+            if not raced["done"]:
+                raced["done"] = True
+                rival = vault.ledger(user_id)
+                rival.credit_deposit(250, "rival")
+                vault.rows[user_id] = (rival.to_json(), vault.version(user_id) + 1)
+            return await real_store(user_id, ledger_json, expected_version)
+
+        vault.store_ledger = store_with_a_rival  # type: ignore[method-assign]
+        await cache.credit("u1", 100, "ours")
+        final = vault.ledger("u1")
+        assert final.balance_api_sats == 850, "both writers' credits survive"
+        assert vault.refused == 1
+
+    @pytest.mark.asyncio
+    async def test_exhausted_retries_raise(self) -> None:
+        vault = _funded()
+        vault.store_ledger = AsyncMock(side_effect=LedgerVersionConflict("always"))  # type: ignore[method-assign]
+        cache = LedgerCache(vault)
+        with pytest.raises(LedgerWriteError):
+            await cache.credit("u1", 1, "inv", )
+
+    @pytest.mark.asyncio
+    async def test_debit_succeeds_and_is_written_through(self) -> None:
+        vault = _funded(100)
+        cache = LedgerCache(vault)
+        assert await cache.debit("u1", "tool", 30) is True
+        assert vault.ledger("u1").balance_api_sats == 70
+        assert vault.ledger("u1").history["tool"].calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Usage accounting as deltas
+# ---------------------------------------------------------------------------
+
+
+class TestUsage:
+    @pytest.mark.asyncio
+    async def test_a_free_call_writes_nothing_by_itself(self) -> None:
+        vault = _funded()
+        cache = LedgerCache(vault)
+        for _ in range(20):
+            cache.note_usage("u1", "match_state")
+        assert vault.writes == 0
+        assert cache.pending_usage == 1
+
+    @pytest.mark.asyncio
+    async def test_the_next_mutate_carries_the_counters_along(self) -> None:
+        vault = _funded(500)
+        cache = LedgerCache(vault)
+        cache.note_usage("u1", "match_state")
+        cache.note_usage("u1", "match_state")
+        cache.note_usage("u1", "my_bee")
+        await cache.credit("u1", 100, "inv")
+        stored = vault.ledger("u1")
+        assert stored.history["match_state"].calls == 2
+        assert stored.history["my_bee"].calls == 1
+        assert stored.balance_api_sats == 600
+        assert vault.writes == 1
+        assert cache.pending_usage == 0
+
+    @pytest.mark.asyncio
+    async def test_fold_writes_pending_counters_onto_fresh_state(self) -> None:
+        vault = _funded(500)
+        cache = LedgerCache(vault)
+        cache.note_usage("u1", "match_state")
+        folded = await cache.fold_usage()
+        assert folded == 1
+        stored = vault.ledger("u1")
+        assert stored.history["match_state"].calls == 1
+        assert stored.balance_api_sats == 500
+        assert cache.pending_usage == 0
+
+    @pytest.mark.asyncio
+    async def test_a_fold_that_cannot_read_keeps_its_counters(self) -> None:
+        vault = HonestVault()
+        vault.fetch_ledger = AsyncMock(side_effect=Exception("cold"))  # type: ignore[method-assign]
+        cache = LedgerCache(vault)
+        cache.note_usage("u1", "tool")
+        assert await cache.fold_usage() == 0
+        assert cache.pending_usage == 1
+        assert cache._usage["u1"] == {"tool": 1}
+
+    @pytest.mark.asyncio
+    async def test_a_refused_debit_keeps_the_counters_for_a_real_write(self) -> None:
+        vault = _funded(5)
+        cache = LedgerCache(vault)
+        cache.note_usage("u1", "tool")
+        assert await cache.debit("u1", "tool", 100) is False
+        assert vault.writes == 0
+        assert cache._usage["u1"] == {"tool": 1}
+
+    @pytest.mark.asyncio
+    async def test_counters_never_touch_tranches(self) -> None:
+        """The persistence-boundary assertion: a fold changes counters only."""
+        vault = _funded(500)
+        before = vault.ledger("u1").to_json()
+        cache = LedgerCache(vault)
+        cache.note_usage("u1", "tool")
+        await cache.fold_usage()
+        after = vault.ledger("u1")
+        import json
+        b, a = json.loads(before), json.loads(after.to_json())
+        for key in ("tranches", "total_deposited_api_sats", "total_consumed_api_sats",
+                    "total_expired_api_sats", "pending_invoices", "credited_invoices", "invoices"):
+            assert a[key] == b[key], key
+
+    @pytest.mark.asyncio
+    async def test_the_fold_loop_starts_stops_and_writes_what_is_pending(self) -> None:
+        vault = _funded()
+        cache = LedgerCache(vault, fold_interval_secs=3600)
+        await cache.start_usage_fold()
+        await cache.start_usage_fold()  # idempotent
+        assert cache.health()["usage_fold_running"] is True
+        cache.note_usage("u1", "tool")
+        await cache.stop()
+        assert cache.health()["usage_fold_running"] is False
+        assert vault.ledger("u1").history["tool"].calls == 1
+
+
+class TestHealth:
+    def test_health_names_the_fold_not_a_flush(self) -> None:
+        h = LedgerCache(HonestVault()).health()
+        assert set(h) == {"cache_size", "pending_usage", "usage_folds", "fold_interval_secs", "usage_fold_running"}
+        assert h["fold_interval_secs"] == 60

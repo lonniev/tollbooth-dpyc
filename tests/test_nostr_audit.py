@@ -328,14 +328,14 @@ class TestAuditedVaultDelegation:
         publisher = MagicMock(spec=NostrAuditPublisher)
         vault = AuditedVault(inner, publisher)
 
-        result = await vault.store_ledger("npub1user", SAMPLE_LEDGER_JSON)
+        result = await vault.store_ledger("npub1user", SAMPLE_LEDGER_JSON, 3)
 
         assert result == "42"
         inner.store_ledger.assert_awaited_once_with(
-            "npub1user", SAMPLE_LEDGER_JSON,
+            "npub1user", SAMPLE_LEDGER_JSON, 3,
         )
         publisher.publish_ledger_update.assert_called_once_with(
-            "npub1user", SAMPLE_LEDGER_JSON, "flush",
+            "npub1user", SAMPLE_LEDGER_JSON, "write",
         )
 
     @pytest.mark.asyncio
@@ -377,7 +377,7 @@ class TestAuditedVaultDelegation:
         vault = AuditedVault(inner, publisher)
 
         with pytest.raises(RuntimeError, match="db error"):
-            await vault.store_ledger("npub1user", SAMPLE_LEDGER_JSON)
+            await vault.store_ledger("npub1user", SAMPLE_LEDGER_JSON, 3)
 
         # Publisher should NOT be called if inner vault fails
         publisher.publish_ledger_update.assert_not_called()

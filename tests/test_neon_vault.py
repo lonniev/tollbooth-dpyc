@@ -158,67 +158,56 @@ class TestExecute:
 
 class TestStoreLedger:
     @pytest.mark.asyncio
-    async def test_inserts_new_ledger(self) -> None:
+    async def test_inserts_a_new_row_when_no_version_was_read(self) -> None:
         vault = _vault()
         vault._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(
-                rows=[{"version": 1}], command="INSERT",
-            ))
+            return_value=_response(200, _sql_result(rows=[{"version": 1}], command="INSERT"))
         )
-        result = await vault.store_ledger("npub1abc", '{"v": 4, "tranches": []}')
-        assert result == "1"
-        assert vault._version_cache["npub1abc"] == 1
+        result = await vault.store_ledger("npub1abc", '{"v": 4, "tranches": []}', None)
+        assert result == 1
+        body = vault._client.post.call_args.kwargs["json"]
+        assert "INSERT INTO" in body["query"] and "ON CONFLICT (npub) DO NOTHING" in body["query"]
 
     @pytest.mark.asyncio
-    async def test_optimistic_update_with_cached_version(self) -> None:
+    async def test_update_is_guarded_by_the_version_the_writer_passed(self) -> None:
         vault = _vault()
-        vault._version_cache["npub1abc"] = 3
         vault._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(
-                rows=[{"version": 4}], command="UPDATE",
-            ))
+            return_value=_response(200, _sql_result(rows=[{"version": 4}], command="UPDATE"))
         )
-        result = await vault.store_ledger("npub1abc", '{"v": 4}')
-        assert result == "4"
-        assert vault._version_cache["npub1abc"] == 4
+        result = await vault.store_ledger("npub1abc", '{"v": 4}', 3)
+        assert result == 4
+        body = vault._client.post.call_args.kwargs["json"]
+        assert "WHERE npub = $2 AND version = $3" in body["query"]
+        assert body["params"][2] == 3, "the guard is the caller's version, not a remembered one"
 
-        # Verify the UPDATE query included version guard
-        call_args = vault._client.post.call_args
-        body = call_args.kwargs.get("json", call_args[1] if len(call_args.args) > 1 else None)
-        assert "version = $3" in body["query"]
-        assert body["params"][2] == 3
+    @pytest.mark.asyncio
+    async def test_the_vault_remembers_no_versions(self) -> None:
+        vault = _vault()
+        assert not hasattr(vault, "_version_cache")
 
     @pytest.mark.asyncio
     async def test_version_conflict_raises_never_clobbers(self) -> None:
-        # A CAS conflict must RAISE (so the caller re-fetches) — never fall
-        # through to an unconditional upsert that clobbers a newer replica's
-        # balance write.
         vault = _vault()
-        vault._version_cache["npub1abc"] = 5
-
-        call_count = 0
+        calls = 0
 
         async def mock_post(url: str, **kwargs: dict) -> httpx.Response:
-            nonlocal call_count
-            call_count += 1
+            nonlocal calls
+            calls += 1
             return _response(200, _sql_result(rows=[], command="UPDATE"))
 
         vault._client.post = AsyncMock(side_effect=mock_post)
         with pytest.raises(LedgerVersionConflict):
-            await vault.store_ledger("npub1abc", '{"v": 4}')
-        assert call_count == 1  # only the guarded UPDATE — no clobbering fallthrough
-        assert vault._version_cache["npub1abc"] == 5  # unchanged
+            await vault.store_ledger("npub1abc", '{"v": 4}', 5)
+        assert calls == 1  # only the guarded UPDATE — no clobbering fallthrough
 
     @pytest.mark.asyncio
     async def test_first_write_conflict_raises(self) -> None:
-        # No cached version → INSERT ... DO NOTHING. If a row already exists
-        # (another replica created it), refuse rather than blind-overwrite.
         vault = _vault()
         vault._client.post = AsyncMock(
             return_value=_response(200, _sql_result(rows=[], command="INSERT"))
         )
         with pytest.raises(LedgerVersionConflict):
-            await vault.store_ledger("npub1abc", '{"v": 4}')
+            await vault.store_ledger("npub1abc", '{"v": 4}', None)
 
 
 # ---------------------------------------------------------------------------
@@ -228,36 +217,18 @@ class TestStoreLedger:
 
 class TestFetchLedger:
     @pytest.mark.asyncio
-    async def test_returns_ledger_json(self) -> None:
+    async def test_returns_the_json_with_its_version(self) -> None:
         vault = _vault()
         vault._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(
-                rows=[{"ledger_json": '{"v": 4}', "version": 3}],
-            ))
+            return_value=_response(200, _sql_result(rows=[{"ledger_json": '{"v": 4}', "version": 3}]))
         )
-        result = await vault.fetch_ledger("npub1abc")
-        assert result == '{"v": 4}'
-        assert vault._version_cache["npub1abc"] == 3
+        assert await vault.fetch_ledger("npub1abc") == ('{"v": 4}', 3)
 
     @pytest.mark.asyncio
     async def test_returns_none_when_not_found(self) -> None:
         vault = _vault()
-        vault._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(rows=[]))
-        )
-        result = await vault.fetch_ledger("npub1unknown")
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_caches_version(self) -> None:
-        vault = _vault()
-        vault._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(
-                rows=[{"ledger_json": '{"v": 4}', "version": 7}],
-            ))
-        )
-        await vault.fetch_ledger("npub1abc")
-        assert vault._version_cache["npub1abc"] == 7
+        vault._client.post = AsyncMock(return_value=_response(200, _sql_result(rows=[])))
+        assert await vault.fetch_ledger("npub1unknown") is None
 
 
 # ---------------------------------------------------------------------------
@@ -267,82 +238,26 @@ class TestFetchLedger:
 
 class TestSnapshotLedger:
     @pytest.mark.asyncio
-    async def test_stores_and_records_snapshot(self) -> None:
+    async def test_journals_without_touching_the_live_row(self) -> None:
         vault = _vault()
-
-        call_count = 0
-
-        async def mock_post(url: str, **kwargs: dict) -> httpx.Response:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                # store_ledger UPSERT
-                return _response(200, _sql_result(
-                    rows=[{"version": 2}], command="INSERT",
-                ))
-            else:
-                # snapshot journal INSERT
-                return _response(200, _sql_result(
-                    rows=[{"id": 42}], command="INSERT",
-                ))
-
-        vault._client.post = AsyncMock(side_effect=mock_post)
-
-        ledger = '{"v": 4, "tranches": [{"remaining_sats": 100}]}'
-        result = await vault.snapshot_ledger("npub1abc", ledger, "2026-02-23T12:00:00Z")
+        vault._client.post = AsyncMock(
+            return_value=_response(200, _sql_result(rows=[{"id": 42}], command="INSERT"))
+        )
+        result = await vault.snapshot_ledger("npub1abc", '{"v": 4, "tranches": []}', "2026-02-23T12:00:00Z")
         assert result == "42"
-        assert call_count == 2
+        assert vault._client.post.call_count == 1
+        body = vault._client.post.call_args.kwargs["json"]
+        assert "transactions" in body["query"] and "balances" not in body["query"]
 
     @pytest.mark.asyncio
     async def test_returns_none_on_journal_failure(self) -> None:
         vault = _vault()
-
-        call_count = 0
-
-        async def mock_post(url: str, **kwargs: dict) -> httpx.Response:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return _response(200, _sql_result(
-                    rows=[{"version": 1}], command="INSERT",
-                ))
-            else:
-                return _response(200, {"message": "ERROR: relation does not exist"})
-
-        vault._client.post = AsyncMock(side_effect=mock_post)
-
+        vault._client.post = AsyncMock(
+            return_value=_response(400, {"message": "relation does not exist"})
+        )
         result = await vault.snapshot_ledger("npub1abc", '{"v": 4}', "2026-02-23T12:00:00Z")
-        assert result is None  # Journal failed but store succeeded
+        assert result is None
 
-    @pytest.mark.asyncio
-    async def test_extracts_balance_for_journal(self) -> None:
-        vault = _vault()
-
-        captured_params: list = []
-
-        async def mock_post(url: str, **kwargs: dict) -> httpx.Response:
-            body = kwargs.get("json", {})
-            query = body.get("query", "") if isinstance(body, dict) else ""
-            if "snapshot" in query:
-                captured_params.extend(body.get("params", []))
-                return _response(200, _sql_result(
-                    rows=[{"id": 99}], command="INSERT",
-                ))
-            return _response(200, _sql_result(
-                rows=[{"version": 1}], command="INSERT",
-            ))
-
-        vault._client.post = AsyncMock(side_effect=mock_post)
-
-        ledger = '{"v": 4, "tranches": [{"remaining_sats": 100}, {"remaining_sats": 50}]}'
-        await vault.snapshot_ledger("npub1abc", ledger, "2026-02-23T12:00:00Z")
-
-        # The balance_after param should be 150
-        assert 150 in captured_params
-
-
-# ---------------------------------------------------------------------------
-# ensure_schema
 # ---------------------------------------------------------------------------
 
 
