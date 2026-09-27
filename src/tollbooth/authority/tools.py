@@ -611,16 +611,26 @@ async def _require_authority_consent(
     }
 
 
-# Bootstrap DMs are kind-4 events on free public relays, which purge them
-# on their own retention schedules (empirically < 69 days on damus/primal,
-# 2026-06-06). A one-shot publication therefore guarantees an eventual
-# cold-start outage. Re-send whenever the last publication is older than
-# this — opportunistically, on Authority tool traffic (the OTS pattern).
+# Bootstrap config is a NIP-33 replaceable (kind 30078), but free public
+# relays still drop replaceables under load and a one-shot publish leaves
+# every pre-widening operator one-relay deep. Re-send whenever the last
+# publication is older than this — opportunistically, on Authority tool
+# traffic (the OTS pattern).
 _BOOTSTRAP_DM_REFRESH_SECONDS = 7 * 24 * 3600
 # In-process throttle so high-traffic tools don't re-check the vault stamp
-# on every call.
+# on every call. Armed only after a successful check — a swallowed vault
+# error must not silence the npub for an hour (2026-09-27 field report).
 _BOOTSTRAP_DM_CHECK_INTERVAL = 3600.0
 _bootstrap_dm_last_check: dict[str, float] = {}
+# Strong refs to in-flight refresh tasks. An unreferenced create_task is
+# eligible for GC mid-flight (asyncio docs); the publish inside can take
+# seconds, and a serverless host idles the process the moment the response
+# returns. Same pattern as OperatorRuntime._quota_alert_tasks.
+_bootstrap_dm_tasks: set[asyncio.Task[Any]] = set()
+# One fleet-wide sweep per process, so a recycle after this fix re-covers
+# every operator that registered before the write set widened — without
+# waiting a week for each one's opportunistic refresh.
+_bootstrap_fleet_sweep_started = False
 
 
 async def _resend_bootstrap_dm(npub: str) -> bool:
@@ -637,27 +647,39 @@ async def _resend_bootstrap_dm(npub: str) -> bool:
             return False
         from tollbooth.bootstrap_relay import send_bootstrap_config
         signer = _get_nostr_signer()
-        # The publish is blocking websocket I/O (up to ~10s per relay) —
-        # keep it off the event loop.
-        sent = await asyncio.to_thread(
+        # The publish is blocking websocket I/O — keep it off the event loop.
+        # fan_out inside send_bootstrap_config bounds the whole set to one
+        # budget instead of a serial 10 s-per-relay walk.
+        result = await asyncio.to_thread(
             send_bootstrap_config,
             authority_nsec=signer.nsec,
             operator_npub=npub,
             config={"neon_database_url": neon_url, "schema": schema},
         )
-        if sent:
+        accepted, rejected = int(result.accepted), int(result.rejected)
+        if accepted > 0:
             await store_operator_config(
                 vault, npub, "bootstrap_dm_sent_at", str(int(time.time())),
             )
-            logger.info("Bootstrap config DM (re)sent to operator %s", npub[:16])
-        return sent
+            logger.info(
+                "Bootstrap config (re)sent to operator %s: "
+                "accepted=%d rejected=%d",
+                npub[:16], accepted, rejected,
+            )
+            return True
+        logger.warning(
+            "Bootstrap config resend for %s did not publish: "
+            "accepted=%d rejected=%d",
+            npub[:16], accepted, rejected,
+        )
+        return False
     except Exception as exc:  # noqa: BLE001
         logger.warning("Bootstrap DM resend failed for %s: %s", npub[:16], exc)
         return False
 
 
 async def _maybe_refresh_bootstrap_dm(npub: str) -> None:
-    """Re-publish the operator's bootstrap DM if the last send has aged.
+    """Re-publish the operator's bootstrap config if the last send has aged.
 
     Called opportunistically from Authority tool traffic. Cheap by
     design: an in-process throttle gates the vault read, and the
@@ -665,19 +687,96 @@ async def _maybe_refresh_bootstrap_dm(npub: str) -> None:
     ``_BOOTSTRAP_DM_REFRESH_SECONDS``. Never raises.
     """
     now = time.monotonic()
-    last_check = _bootstrap_dm_last_check.get(npub, 0.0)
-    if now - last_check < _BOOTSTRAP_DM_CHECK_INTERVAL:
+    # Missing key = never checked. Do NOT default to 0.0: monotonic() is
+    # seconds since an arbitrary epoch (often boot), so on a host younger
+    # than the check interval a missing-key default of 0 would throttle
+    # every first call and the weekly refresh would never fire.
+    last_check = _bootstrap_dm_last_check.get(npub)
+    if last_check is not None and now - last_check < _BOOTSTRAP_DM_CHECK_INTERVAL:
         return
-    _bootstrap_dm_last_check[npub] = now
     try:
         vault = await _get_runtime().vault()
         from tollbooth.authority.tenant_provisioner import get_operator_config_value
         stamp = await get_operator_config_value(vault, npub, "bootstrap_dm_sent_at")
         sent_at = int(stamp) if stamp else 0
+        # Arm the throttle only after the vault answered — a failure here
+        # must leave the npub free to retry on the next call.
+        _bootstrap_dm_last_check[npub] = now
         if time.time() - sent_at >= _BOOTSTRAP_DM_REFRESH_SECONDS:
-            await _resend_bootstrap_dm(npub)
+            published = await _resend_bootstrap_dm(npub)
+            if not published:
+                logger.warning(
+                    "Bootstrap DM refresh due for %s but did not publish",
+                    npub[:16],
+                )
     except Exception as exc:  # noqa: BLE001
-        logger.debug("Bootstrap DM refresh check skipped for %s: %s", npub[:16], exc)
+        logger.warning(
+            "Bootstrap DM refresh check failed for %s: %s", npub[:16], exc,
+        )
+
+
+def _schedule_bootstrap_dm_refresh(npub: str) -> None:
+    """Fire-and-forget refresh that keeps a strong ref until the task ends."""
+    try:
+        task = asyncio.create_task(_maybe_refresh_bootstrap_dm(npub))
+    except RuntimeError:
+        # No running loop (unusual on these async tool paths) — skip.
+        return
+    _bootstrap_dm_tasks.add(task)
+    task.add_done_callback(_bootstrap_dm_tasks.discard)
+
+
+async def _fleet_resend_bootstrap_dms() -> None:
+    """One-shot: republish every registered operator's bootstrap config.
+
+    Idempotent. Enumerates ``bootstrap_config`` the same way role migration
+    does. Runs once per process after the first Authority tool traffic so a
+    deploy of this fix re-covers operators left one-relay deep without a
+    manual ``get_operator_config`` per npub.
+    """
+    try:
+        vault = await _get_runtime().vault()
+        t = vault._t if hasattr(vault, "_t") else (lambda x: x)
+        result = await vault._execute(
+            f"SELECT DISTINCT npub FROM {t('bootstrap_config')} "
+            "WHERE key = 'neon_database_url'"
+        )
+        rows = result.get("rows", [])
+        npubs: list[str] = []
+        for row in rows:
+            if isinstance(row, list):
+                npubs.append(row[0])
+            else:
+                npubs.append(row.get("npub", ""))
+        ok = fail = 0
+        for npub in npubs:
+            if not npub:
+                continue
+            if await _resend_bootstrap_dm(npub):
+                ok += 1
+            else:
+                fail += 1
+        logger.info(
+            "Bootstrap fleet republish complete: %d sent, %d failed, %d operators",
+            ok, fail, len(npubs),
+        )
+    except Exception as exc:  # noqa: BLE001 — never break tool traffic
+        logger.warning("Bootstrap fleet republish failed: %s", exc)
+
+
+def _schedule_fleet_bootstrap_sweep() -> None:
+    """Kick the one-shot fleet republish at most once per process."""
+    global _bootstrap_fleet_sweep_started
+    if _bootstrap_fleet_sweep_started:
+        return
+    _bootstrap_fleet_sweep_started = True
+    try:
+        task = asyncio.create_task(_fleet_resend_bootstrap_dms())
+    except RuntimeError:
+        _bootstrap_fleet_sweep_started = False
+        return
+    _bootstrap_dm_tasks.add(task)
+    task.add_done_callback(_bootstrap_dm_tasks.discard)
 
 
 async def _provision_operator(
@@ -1050,9 +1149,11 @@ def register_authority_tools(
         result["vault_backend"] = "neon" if s.neon_database_url else "unconfigured"
         result["cache_health"] = cache.health()
 
-        # Opportunistic bootstrap DM refresh for the inspected operator.
+        # Opportunistic bootstrap config refresh for the inspected operator.
+        # Strong-ref the task so it survives past the response (2026-09-27).
         if npub:
-            asyncio.create_task(_maybe_refresh_bootstrap_dm(user_id))
+            _schedule_bootstrap_dm_refresh(user_id)
+        _schedule_fleet_bootstrap_sweep()
 
         return result
 
@@ -1140,11 +1241,12 @@ def register_authority_tools(
         # made it log "Failed to persist fee debit" about a fee that was, in
         # fact, persisted.
 
-        # Opportunistic bootstrap DM refresh (the OTS pattern): relays
-        # purge kind-4 events, so keep this operator's bootstrap config
-        # alive on the back of its own certification traffic. Fire and
-        # forget — certification latency must not pay for relay I/O.
-        asyncio.create_task(_maybe_refresh_bootstrap_dm(npub))
+        # Opportunistic bootstrap config refresh (the OTS pattern): keep
+        # this operator's config alive on the back of its own certification
+        # traffic. Fire and forget with a strong ref — certification latency
+        # must not pay for relay I/O, but the task must outlive the response.
+        _schedule_bootstrap_dm_refresh(npub)
+        _schedule_fleet_bootstrap_sweep()
 
         return {
             "success": True,

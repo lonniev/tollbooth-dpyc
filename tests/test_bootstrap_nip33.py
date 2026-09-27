@@ -43,11 +43,11 @@ def _publish_and_capture() -> dict:
     ws.recv.return_value = json.dumps(["OK", "id", True, ""])
     ws.send.side_effect = _send
     with patch("websocket.create_connection", return_value=ws):
-        ok = send_bootstrap_config(
+        accepted, rejected = send_bootstrap_config(
             authority_nsec=AUTH_NSEC, operator_npub=OP_NPUB,
             config=CONFIG, relays=["wss://relay.test"],
         )
-    assert ok is True
+    assert accepted == 1 and rejected == 0
     return captured["event"]
 
 
