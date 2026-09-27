@@ -224,9 +224,13 @@ class BootstrapClient:
         # weather exists at that moment. The job already holds a multi-minute
         # budget, so spending a fraction of it here is close to free — and
         # giving up on the first pass spends none of it and discards the work.
+        #
+        # The poll is synchronous websocket I/O, so it runs on a worker thread:
+        # every other session on this process keeps moving while we read.
         config = author_hex = diag = None
         for attempt, pause in enumerate(_BOOTSTRAP_RETRY_BACKOFF, start=1):
-            config, author_hex, diag = receive_bootstrap_config(
+            config, author_hex, diag = await asyncio.to_thread(
+                receive_bootstrap_config,
                 operator_nsec=self._nsec_hex,
                 relays=relays,
                 expected_authority_hex=expected_authority_hex,

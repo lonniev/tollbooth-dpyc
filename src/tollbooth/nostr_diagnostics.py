@@ -192,36 +192,48 @@ def probe_relay_liveness(
     *,
     timeout: int = 5,
 ) -> list[dict[str, Any]]:
-    """Probe WebSocket connectivity for a list of relays.
+    """Probe WebSocket connectivity for a list of relays, all at once.
 
-    Returns a list of dicts: ``{relay, connected, latency_ms, error}``.
-    Sorted: connected relays first (by latency), then disconnected.
+    Wall-clock is about the slowest relay the caller waits for — never the
+    sum — because the probes run concurrently (:func:`tollbooth.relay_fanout.fan_out`).
+    A relay still silent at the deadline counts as down.
 
     Args:
         relay_urls: Relay WebSocket URLs to probe.
         timeout: Per-relay connection timeout in seconds (default 5).
+
+    Returns:
+        A list of ``{relay, connected, latency_ms, error}`` dicts sorted by
+        connected-first, then ascending latency.
     """
-    results = [test_ws_connectivity(url, timeout=timeout) for url in relay_urls]
-    # Sort: connected first (by latency), then disconnected
+    from tollbooth.relay_fanout import fan_out
+
+    outcomes = fan_out(
+        relay_urls,
+        lambda url: test_ws_connectivity(url, timeout=timeout),
+        deadline=timeout + 0.5,
+    )
+    results = [
+        o.value if o.ok
+        else {"relay": o.relay, "connected": False, "latency_ms": None, "error": o.error}
+        for o in outcomes
+    ]
     results.sort(key=lambda r: (not r["connected"], r["latency_ms"] or float("inf")))
     return results
 
 
-# ── Relay resolution ──────────────────────────────────────────────────
-
-
-def resolve_relays(*, timeout: int = 5) -> list[str]:
+def resolve_relays(*, timeout: int = 3) -> list[str]:
     """Resolve a live, ordered set of Nostr relay URLs.
 
     The relay set is governed solely by the DPYC community registry
     (``dpyc-community/relays.json``, via ``relay_registry.get_relays``). This
-    function sources that curated, primary-first set, probes each relay for
-    liveness, and returns the live relays **in registry order** (so the
+    function sources that curated, primary-first set, probes every relay for
+    liveness at once, and returns the live relays **in registry order** (so the
     ``primary`` relay stays first for the courier's rendezvous). If none
     respond, it returns the full registry set unprobed, hoping for recovery.
 
     Args:
-        timeout: Per-relay probe timeout in seconds (default 5).
+        timeout: Per-relay probe timeout in seconds (default 3).
 
     Returns:
         A non-empty list of relay WebSocket URLs.

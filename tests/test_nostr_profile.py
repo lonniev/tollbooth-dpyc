@@ -217,3 +217,18 @@ def test_publish_profile_event_does_not_delegate_when_validation_fails():
         r = publish_profile_event(ev, sk.public_key.bech32())
     assert r["success"] is False
     delegated.assert_not_called()
+
+
+def test_publish_event_with_no_relays_is_an_honest_zero_not_a_crash():
+    """An empty registry used to raise from ``ThreadPoolExecutor(max_workers=0)``."""
+    ev = _signed_kind(PrivateKey(), 0, {"name": "x"})
+    with patch("tollbooth.relay_registry.get_relays", return_value=[]):
+        result = nostr_profile.publish_event(ev)
+    assert result == {
+        "success": False, "event_id": ev["id"], "accepted": 0, "attempted": 0, "relays": [],
+    }
+
+
+def test_fetch_with_no_relays_is_none_not_a_crash():
+    with patch("tollbooth.relay_registry.get_relays", return_value=[]):
+        assert nostr_profile.fetch_profile(PrivateKey().public_key.bech32()) is None

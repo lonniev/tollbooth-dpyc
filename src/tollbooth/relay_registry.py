@@ -22,9 +22,9 @@ The bootstrap path fetches the relay set from the Oracle once (async) and
 Courier, profile, audit) read the warm cache without another round-trip.
 
 This module is synchronous by design: every relay consumer in the wheel is
-synchronous (blocking websockets / thread pools). On a cache-miss it drives the
-async Oracle client via ``asyncio.run`` — safe because these callers run
-outside an event loop.
+synchronous (blocking websockets / thread pools) and runs on a worker thread,
+never on the event loop. On a cache-miss it drives the async Oracle client via
+``asyncio.run`` — safe on a worker thread, which has no running loop.
 """
 
 from __future__ import annotations

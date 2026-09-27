@@ -696,7 +696,8 @@ class OperatorRuntime:
         except Exception as exc:  # noqa: BLE001 — telemetry never blocks a courier
             logger.debug("Relay failure flush skipped: %s", exc)
 
-        relays = resolve_relays()
+        # Liveness probes are synchronous websocket I/O — off the loop thread.
+        relays = await asyncio.to_thread(resolve_relays)
 
         # Build credential vault from bootstrapped Neon
         credential_vault = None

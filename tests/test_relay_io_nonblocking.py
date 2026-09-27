@@ -116,3 +116,94 @@ async def test_receive_drain_does_not_block_event_loop() -> None:
         f"event loop appears blocked: tick at "
         f"{progressed[0] - start:.3f}s (drain is {_DRAIN_SECONDS}s)"
     )
+
+
+# ---------------------------------------------------------------------------
+# The two cold-start sweeps: bootstrap config read and the courier's relay probe
+# ---------------------------------------------------------------------------
+
+def _slow_connect_serving(event: dict):
+    """A mock websocket whose first recv() blocks, then serves EVENT + EOSE."""
+
+    def _connect(*_args, **_kwargs):
+        ws = MagicMock()
+        frames = [json.dumps(["EVENT", "s", event]), json.dumps(["EOSE", "s"])]
+
+        def _recv():
+            if len(frames) == 2:
+                time.sleep(_DRAIN_SECONDS)
+            return frames.pop(0)
+
+        ws.recv.side_effect = _recv
+        return ws
+
+    return _connect
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_relay_read_does_not_block_event_loop() -> None:
+    from unittest.mock import AsyncMock
+
+    from tollbooth.bootstrap import BootstrapClient
+    from tollbooth.bootstrap_relay import send_bootstrap_config
+
+    operator, authority = PrivateKey(), PrivateKey()
+    captured: dict = {}
+
+    def _capture(msg: str) -> None:
+        arr = json.loads(msg)
+        if arr[0] == "EVENT":
+            captured["event"] = arr[1]
+
+    publisher = MagicMock()
+    publisher.recv.return_value = json.dumps(["OK", "id", True, ""])
+    publisher.send.side_effect = _capture
+    with patch("websocket.create_connection", return_value=publisher):
+        assert send_bootstrap_config(
+            authority_nsec=authority.bech32(), operator_npub=operator.public_key.bech32(),
+            config={"neon_database_url": "postgresql://x"}, relays=["wss://relay.test"],
+        )
+    event = captured["event"]
+
+    oracle = AsyncMock()
+    oracle.resolve_authority_for = AsyncMock(return_value=None)
+    client = BootstrapClient(nsec_hex=operator.bech32(), relays=["wss://relay.test"])
+    progressed: list[float] = []
+
+    with patch("websocket.create_connection", side_effect=_slow_connect_serving(event)), \
+         patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle):
+        start = time.monotonic()
+        result, _ = await asyncio.gather(client.bootstrap(), _ticker(progressed))
+
+    assert result.success is True
+    assert progressed, "ticker coroutine never ran"
+    assert progressed[0] - start < _BLOCKED_THRESHOLD, (
+        f"event loop appears blocked: tick at "
+        f"{progressed[0] - start:.3f}s (relay read is {_DRAIN_SECONDS}s)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_relay_liveness_probe_does_not_block_event_loop() -> None:
+    from tollbooth.nostr_diagnostics import resolve_relays
+
+    def _slow_probe(*_args, **_kwargs):
+        time.sleep(_DRAIN_SECONDS)
+        return MagicMock()
+
+    relays = ["wss://primary.test", "wss://second.test"]
+    progressed: list[float] = []
+
+    with patch("tollbooth.relay_registry.get_relays", return_value=relays), \
+         patch("tollbooth.nostr_diagnostics.create_connection", side_effect=_slow_probe):
+        start = time.monotonic()
+        live, _ = await asyncio.gather(
+            asyncio.to_thread(resolve_relays, timeout=2), _ticker(progressed),
+        )
+
+    assert live == relays  # registry order, both live
+    assert progressed, "ticker coroutine never ran"
+    assert progressed[0] - start < _BLOCKED_THRESHOLD, (
+        f"event loop appears blocked: tick at "
+        f"{progressed[0] - start:.3f}s (probe is {_DRAIN_SECONDS}s)"
+    )

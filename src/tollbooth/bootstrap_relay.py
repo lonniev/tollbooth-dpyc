@@ -30,10 +30,21 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
+from typing import Any
+
+from tollbooth.relay_fanout import fan_out
 
 logger = logging.getLogger(__name__)
 
 BOOTSTRAP_CONFIG_TAG = "dpyc-bootstrap-config"
+
+# One budget for a relay's connect AND its read-to-EOSE, so an abandoned
+# worker ends on its own within it. Healthy relays answer in well under a
+# second; six seconds is patience for a slow one, not for a dead one.
+_READ_BUDGET_SECONDS = 6.0
+# After the first config arrives, how much longer to listen for a newer one.
+_SETTLE_SECONDS = 1.5
 
 
 def _config_d_tag(op_pubkey_hex: str) -> str:
@@ -180,7 +191,6 @@ def receive_bootstrap_config(
     """
     from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
-    from tollbooth.nip04 import decrypt as nip04_decrypt
     from tollbooth.relay_registry import get_relays
     relay_urls = relays or get_relays()
 
@@ -212,70 +222,51 @@ def receive_bootstrap_config(
         "#d": [_config_d_tag(op_pubkey_hex)],
     }
 
-    import websocket  # type: ignore[import-untyped]
+    outcomes = fan_out(
+        relay_urls,
+        lambda url: _read_one(url, sub_filter, op_privkey_hex, expected_authority_hex),
+        deadline=_READ_BUDGET_SECONDS,
+        settle=_SETTLE_SECONDS,
+        accept=lambda read: read.config is not None,
+    )
 
+    # Newest ``ts`` wins across every relay that answered. A re-published
+    # replaceable propagates unevenly, so one relay may still serve an older
+    # revision — and a stale config can carry a rotated-away role password,
+    # which fails worse than no config at all. The settle window above is what
+    # lets a slightly slower relay still cast its vote.
     best_config: dict[str, str] | None = None
     best_author: str | None = None
     best_ts = 0
-    relay_errors: list[str] = []
     events_found = 0
+    undecryptable = 0
+    relay_errors: list[str] = []
+    abandoned = 0
+    for o in outcomes:
+        if o.state == "abandoned":
+            abandoned += 1
+            continue
+        if o.state == "error":
+            relay_errors.append(f"{o.relay}: {o.error}")
+            continue
+        read: _RelayRead = o.value
+        events_found += read.events
+        undecryptable += read.undecryptable
+        if read.config is not None and read.ts > best_ts:
+            best_config, best_author, best_ts = read.config, read.author_hex, read.ts
+            logger.info(
+                "Bootstrap config received from %s via %s (ts=%d)",
+                read.author_hex[:16], o.relay, read.ts,
+            )
 
-    for relay_url in relay_urls:
-        try:
-            ws = websocket.create_connection(relay_url, timeout=10)
-            sub_id = f"bootstrap-{int(time.time())}"
-            ws.send(json.dumps(["REQ", sub_id, sub_filter]))
-
-            # Read events until EOSE
-            deadline = time.time() + 10
-            while time.time() < deadline:
-                raw = ws.recv()
-                msg = json.loads(raw)
-
-                if msg[0] == "EOSE":
-                    break
-
-                if msg[0] == "EVENT" and len(msg) >= 3:
-                    events_found += 1
-                    event_data = msg[2]
-                    author_hex = event_data.get("pubkey", "")
-                    # When a trusted author is known, ignore anyone else's event
-                    # bearing our `d` tag (spoof guard).
-                    if expected_authority_hex and author_hex != expected_authority_hex:
-                        continue
-                    try:
-                        plaintext = nip04_decrypt(
-                            ciphertext_with_iv=event_data["content"],
-                            private_key_hex=op_privkey_hex,
-                            public_key_hex=author_hex,
-                        )
-                        payload = json.loads(plaintext)
-                        if payload.get("type") == BOOTSTRAP_CONFIG_TAG:
-                            ts = payload.get("ts", event_data.get("created_at", 0))
-                            if ts > best_ts:
-                                best_config = payload.get("config", {})
-                                best_author = author_hex
-                                best_ts = ts
-                                logger.info(
-                                    "Bootstrap config received from %s via %s (ts=%d)",
-                                    author_hex[:16], relay_url, ts,
-                                )
-                    except Exception as exc:  # noqa: BLE001
-                        relay_errors.append(f"{relay_url}: decrypt err: {exc}")
-
-            ws.send(json.dumps(["CLOSE", sub_id]))
-            ws.close()
-
-            # No early break: poll EVERY relay and let the newest ``ts``
-            # win. Re-published replaceable events propagate unevenly, so one
-            # relay may still serve an older revision — and a stale config can
-            # carry a rotated-away role password, which fails worse than no
-            # config at all. Newest-wins across all relays guards that.
-
-        except Exception as exc:  # noqa: BLE001
-            relay_errors.append(f"{relay_url}: {exc}")
-
+    # ``errors=[…]`` names relays that REFUSED us; the Oracle re-measures each
+    # one. A slow relay and a relay serving an undecryptable event both answered,
+    # so they are counted before that bracket, never inside it.
     diag = f"relays={len(relay_urls)}, events={events_found}"
+    if abandoned:
+        diag += f", slow={abandoned}"
+    if undecryptable:
+        diag += f", undecryptable={undecryptable}"
     if relay_errors:
         diag += f", errors=[{'; '.join(relay_errors)}]"
 
@@ -283,3 +274,75 @@ def receive_bootstrap_config(
         logger.warning("Bootstrap relay poll failed: %s", diag)
 
     return best_config, best_author, diag
+
+
+@dataclass(frozen=True, slots=True)
+class _RelayRead:
+    """One relay's answer: the newest decryptable config it served, plus counts."""
+
+    config: dict[str, str] | None
+    author_hex: str | None
+    ts: int
+    events: int
+    undecryptable: int
+
+
+def _read_one(
+    relay_url: str,
+    sub_filter: dict[str, Any],
+    op_privkey_hex: str,
+    expected_authority_hex: str | None,
+) -> _RelayRead:
+    """Subscribe to one relay and read until EOSE, inside one time budget.
+
+    Runs on a fan-out worker thread. Transport failures raise (the relay
+    refused us); an event that fails to decrypt is counted, not raised (the
+    relay answered, it just served something that is not ours).
+    """
+    import websocket  # type: ignore[import-untyped]
+
+    from tollbooth.nip04 import decrypt as nip04_decrypt
+
+    t0 = time.monotonic()
+    ws = websocket.create_connection(relay_url, timeout=_READ_BUDGET_SECONDS)
+    config: dict[str, str] | None = None
+    author: str | None = None
+    best_ts = 0
+    events = 0
+    undecryptable = 0
+    try:
+        sub_id = f"bootstrap-{int(time.time())}"
+        ws.send(json.dumps(["REQ", sub_id, sub_filter]))
+        while (remaining := _READ_BUDGET_SECONDS - (time.monotonic() - t0)) > 0:
+            ws.settimeout(remaining)
+            msg = json.loads(ws.recv())
+            if msg[0] == "EOSE":
+                break
+            if msg[0] != "EVENT" or len(msg) < 3:
+                continue
+            events += 1
+            event_data = msg[2]
+            author_hex = event_data.get("pubkey", "")
+            # When a trusted author is known, ignore anyone else's event bearing
+            # our `d` tag (spoof guard).
+            if expected_authority_hex and author_hex != expected_authority_hex:
+                continue
+            try:
+                payload = json.loads(nip04_decrypt(
+                    ciphertext_with_iv=event_data["content"],
+                    private_key_hex=op_privkey_hex,
+                    public_key_hex=author_hex,
+                ))
+            except Exception as exc:  # noqa: BLE001
+                undecryptable += 1
+                logger.warning("Bootstrap event on %s did not decrypt: %s", relay_url, exc)
+                continue
+            if payload.get("type") != BOOTSTRAP_CONFIG_TAG:
+                continue
+            ts = payload.get("ts", event_data.get("created_at", 0))
+            if ts > best_ts:
+                config, author, best_ts = payload.get("config", {}), author_hex, ts
+        ws.send(json.dumps(["CLOSE", sub_id]))
+    finally:
+        ws.close()
+    return _RelayRead(config, author, best_ts, events, undecryptable)

@@ -18,15 +18,16 @@ from __future__ import annotations
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from tollbooth.relay_fanout import fan_out
 
 logger = logging.getLogger(__name__)
 
 _KIND_METADATA = 0
-# Per-relay socket timeout. Relays are queried in PARALLEL (one thread each),
-# so total wall-clock is bounded by the single slowest relay (~_TIMEOUT), not
-# the sum across the set. Kept short: a profile read/publish should feel
-# instant, and a slow or dead relay must never hold the whole call hostage.
+# Per-relay socket timeout. Relays are asked together (``fan_out``), so total
+# wall-clock is bounded by the single slowest relay (~_TIMEOUT), not the sum
+# across the set. Kept short: a profile read/publish should feel instant, and
+# a slow or dead relay must never hold the whole call hostage.
 _TIMEOUT = 5
 # Recognized kind-0 fields (NIP-01 + common extensions). Others are dropped.
 _PROFILE_FIELDS = {
@@ -82,7 +83,7 @@ def _fetch_one(relay_url: str, sub_filter: dict) -> tuple[int, dict] | None:
 def fetch_profile(npub: str, relays: list[str] | None = None) -> dict[str, str] | None:
     """Return the latest kind-0 metadata for ``npub`` (newest across relays).
 
-    Queries all relays in parallel and keeps the newest result; wall-clock is
+    Asks all relays together and keeps the newest result; wall-clock is
     bounded by the slowest single relay (~_TIMEOUT), not their sum. Returns the
     recognized profile fields as a dict, or None if no profile is found / npub
     is malformed / relays unreachable.
@@ -98,15 +99,9 @@ def fetch_profile(npub: str, relays: list[str] | None = None) -> dict[str, str] 
 
     best: dict | None = None
     best_ts = -1
-    with ThreadPoolExecutor(max_workers=len(relay_urls)) as pool:
-        futures = {pool.submit(_fetch_one, url, sub_filter): url for url in relay_urls}
-        for future in as_completed(futures, timeout=_TIMEOUT + 2):
-            try:
-                result = future.result()
-            except Exception:  # noqa: BLE001, S112
-                continue
-            if result is not None and result[0] > best_ts:
-                best_ts, best = result[0], result[1]
+    for o in fan_out(relay_urls, lambda url: _fetch_one(url, sub_filter), deadline=_TIMEOUT + 2):
+        if o.ok and o.value is not None and o.value[0] > best_ts:
+            best_ts, best = o.value
 
     if best is None:
         return None
@@ -120,7 +115,7 @@ def publish_event(signed_event: dict | str, relays: list[str] | None = None) -> 
     authorship policy, because legitimate callers exist where the signer is
     deliberately NOT the claimed subject (e.g. an ephemeral scribe key
     annotating on a proven patron's behalf). Fans the event out to all relays
-    in parallel (one thread each; wall-clock ~ the single slowest relay) and
+    together (wall-clock ~ the single slowest relay) and
     parses each ack strictly per NIP-20 — only ``["OK", <id>, true, …]`` counts
     as accepted.
 
@@ -142,18 +137,10 @@ def publish_event(signed_event: dict | str, relays: list[str] | None = None) -> 
 
     results: list[dict] = []
     accepted = 0
-    with ThreadPoolExecutor(max_workers=len(relay_urls)) as pool:
-        futures = {pool.submit(_publish_one, url, message): url for url in relay_urls}
-        for future in as_completed(futures, timeout=_TIMEOUT + 2):
-            url = futures[future]
-            try:
-                ok, err = future.result()
-            except Exception as exc:  # noqa: BLE001
-                results.append({"relay": url, "accepted": False, "error": f"{url}: {exc}"})
-                continue
-            if ok:
-                accepted += 1
-            results.append({"relay": url, "accepted": ok, "error": err})
+    for o in fan_out(relay_urls, lambda url: _publish_one(url, message), deadline=_TIMEOUT + 2):
+        ok, err = o.value if o.ok else (False, f"{o.relay}: {o.error}")
+        accepted += ok
+        results.append({"relay": o.relay, "accepted": ok, "error": err})
 
     return {
         "success": accepted > 0,
