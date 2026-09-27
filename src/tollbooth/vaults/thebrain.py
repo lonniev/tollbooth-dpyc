@@ -82,6 +82,8 @@ class TheBrainVault:
         )
         self._index_cache: dict[str, str] | None = None
         self._daily_child_cache: dict[str, str] = {}
+        # Single-writer version counters, per user, for the VaultBackend protocol.
+        self._versions: dict[str, int] = {}
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""
@@ -458,17 +460,31 @@ class TheBrainVault:
 
     # -- VaultBackend protocol -----------------------------------------------
 
-    async def store_ledger(self, user_id: str, ledger_json: str) -> str:
+    async def store_ledger(
+        self, user_id: str, ledger_json: str, expected_version: int | None,
+    ) -> int:
         """Store ledger JSON in a daily child thought under the ledger parent.
 
         Creates one child per day (named ``YYYY-MM-DD`` in UTC). Subsequent
-        flushes on the same day update the existing child's note. Previous
+        writes on the same day update the existing child's note. Previous
         days are preserved as immutable history.
+
+        Single-writer backend: TheBrain offers no compare-and-swap, so
+        ``expected_version`` is accepted for protocol shape and not enforced.
+        A per-process counter is returned as the version so ``LedgerCache``
+        can hand it back on the next write. Do not run this backend behind
+        more than one replica.
 
         The ledger parent is discovered via hasMember links using the key
         ``"{user_id}/ledger"``.
-        Returns the daily child thought ID.
         """
+        await self._write_daily_note(user_id, ledger_json)
+        version = self._versions.get(user_id, 0) + 1
+        self._versions[user_id] = version
+        return version
+
+    async def _write_daily_note(self, user_id: str, ledger_json: str) -> str:
+        """Write the note on today's daily child; returns the child thought id."""
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         cache_key = f"{user_id}/{today}"
 
@@ -529,14 +545,20 @@ class TheBrainVault:
         self._daily_child_cache[cache_key] = daily_child_id
         return daily_child_id
 
-    async def fetch_ledger(self, user_id: str) -> str | None:
-        """Fetch the most recent ledger JSON for a user.
+    async def fetch_ledger(self, user_id: str) -> tuple[str, int] | None:
+        """The most recent ledger JSON for a user, with this process's version
+        counter for it (0 until this process has written it).
 
         Reads the most recent daily child (sorted by ``YYYY-MM-DD`` name
         descending). Falls back to the parent thought's note for pre-migration
-        ledgers that haven't been flushed since the upgrade.
-        Returns None if no ledger exists.
+        ledgers. Returns None if no ledger exists.
         """
+        note = await self._read_latest_note(user_id)
+        if note is None:
+            return None
+        return note, self._versions.get(user_id, 0)
+
+    async def _read_latest_note(self, user_id: str) -> str | None:
         members = await self._discover_members()
         ledger_key = f"{user_id}/ledger"
         ledger_parent_id = members.get(ledger_key)

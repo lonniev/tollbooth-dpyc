@@ -295,13 +295,20 @@ class AuditedVault:
         """Pure passthrough to inner vault (SQL access for PricingModelStore etc.)."""
         return await self._inner._execute(query, params)
 
-    async def store_ledger(self, user_id: str, ledger_json: str) -> str:
-        """Delegate to inner vault, then publish audit event."""
-        result = await self._inner.store_ledger(user_id, ledger_json)
-        self._publisher.publish_ledger_update(user_id, ledger_json, "flush")
+    async def store_ledger(
+        self, user_id: str, ledger_json: str, expected_version: int | None,
+    ) -> int:
+        """Delegate to inner vault, then publish audit event.
+
+        The inner store enforces the version guard; a refused write raises
+        before anything is published, so the audit trail only ever shows
+        writes that landed.
+        """
+        result = await self._inner.store_ledger(user_id, ledger_json, expected_version)
+        self._publisher.publish_ledger_update(user_id, ledger_json, "write")
         return result
 
-    async def fetch_ledger(self, user_id: str) -> str | None:
+    async def fetch_ledger(self, user_id: str) -> tuple[str, int] | None:
         """Pure passthrough to inner vault."""
         return await self._inner.fetch_ledger(user_id)
 

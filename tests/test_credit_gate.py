@@ -111,11 +111,8 @@ class FakeLedgerCache:
         led = await self.get(npub)
         led.credit_deposit(api_sats, invoice_id, ttl_seconds=ttl_seconds)
 
-    def mark_dirty(self, npub):
-        pass
-
-    async def flush_user(self, npub):
-        return True
+    def note_usage(self, npub, tool_name):
+        self.noted = getattr(self, "noted", []) + [(npub, tool_name)]
 
 
 def _registry(name="read_tool", category="read"):
@@ -324,31 +321,48 @@ async def test_consumed_coupons_are_burned():
     burn.assert_awaited_once_with("coupon-1", PATRON)
 
 
-# ── resolve_tranche_lifetime (regression: was silently broken 2026-03-31 →
-#    2026-06-11; called a non-existent ensure_pricing_store, masked by bare except) ──
+# ── resolve_expiry: the operator's decision, including "none made" ─────────
 
-@pytest.mark.asyncio
-async def test_resolve_tranche_lifetime_reads_ttl_from_pricing_model():
+def _rt_with_model(model_dict):
+    from tollbooth.pricing_model import PricingModel
     rt = OperatorRuntime(tool_registry={}, nsec_env_var="__UNUSED__")
     rt._operator_npub = PATRON
-    rt.vault = AsyncMock(return_value=MagicMock())
-    with patch("tollbooth.pricing_store.PricingModelStore"), \
-         patch("tollbooth.tools.pricing.get_pricing_model_tool",
-               new=AsyncMock(return_value={"status": "ok", "tranche_lifetime": {"ttl_days": 7}})):
-        ttl = await rt.resolve_tranche_lifetime()
-    assert ttl == 7 * 86400  # honors the pricing model's tranche lifetime
+    resolver = MagicMock()
+    resolver._ensure_fresh = AsyncMock()
+    import json as _json
+    resolver._cached_model = None if model_dict is None else PricingModel.from_json(
+        _json.dumps(model_dict), model_id="m", operator=PATRON, is_active=True,
+    )
+    rt.pricing_resolver = AsyncMock(return_value=resolver)
+    return rt
 
 
 @pytest.mark.asyncio
-async def test_resolve_tranche_lifetime_none_when_unset():
-    rt = OperatorRuntime(tool_registry={}, nsec_env_var="__UNUSED__")
-    rt._operator_npub = PATRON
-    rt.vault = AsyncMock(return_value=MagicMock())
-    with patch("tollbooth.pricing_store.PricingModelStore"), \
-         patch("tollbooth.tools.pricing.get_pricing_model_tool",
-               new=AsyncMock(return_value={"status": "ok"})):  # no tranche_lifetime
-        ttl = await rt.resolve_tranche_lifetime()
-    assert ttl is None
+async def test_resolve_expiry_days_from_the_pricing_model():
+    rt = _rt_with_model({"name": "n", "tools": [], "tranche_lifetime": {"ttl_days": 7}})
+    e = await rt.resolve_expiry()
+    assert e.state == "days" and e.days == 7 and e.seconds == 7 * 86400
+
+
+@pytest.mark.asyncio
+async def test_resolve_expiry_never_when_chosen_none():
+    rt = _rt_with_model({"name": "n", "tools": [], "tranche_lifetime": {}})
+    e = await rt.resolve_expiry()
+    assert e.state == "never" and e.seconds is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_expiry_unchosen_when_the_model_says_nothing():
+    rt = _rt_with_model({"name": "n", "tools": []})
+    e = await rt.resolve_expiry()
+    assert e.state == "unchosen" and e.seconds is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_expiry_unchosen_when_no_model_and_never_invents_a_lifetime():
+    rt = _rt_with_model(None)
+    e = await rt.resolve_expiry()
+    assert e.state == "unchosen" and e.seconds is None
 
 
 @pytest.mark.asyncio

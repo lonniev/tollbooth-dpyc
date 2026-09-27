@@ -133,6 +133,9 @@ class FakeLedgerCache:
         ledger = await self.get(npub)
         return fn(ledger)
 
+    def note_usage(self, npub: str, tool_name: str) -> None:
+        pass
+
     async def debit(self, npub: str, tool_name: str, cost: int) -> bool:
         ledger = await self.get(npub)
         return ledger.debit(tool_name, cost)

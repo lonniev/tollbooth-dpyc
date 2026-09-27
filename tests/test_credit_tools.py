@@ -903,7 +903,6 @@ class TestReconcilePendingInvoices:
         assert result["reconciled"] == 0
         # Balance should not increase
         assert ledger.balance_api_sats == 500
-        cache.flush_user.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

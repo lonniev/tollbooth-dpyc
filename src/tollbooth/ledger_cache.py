@@ -1,17 +1,39 @@
-"""In-memory LRU cache for UserLedger with write-behind flush to vault.
+"""The one write path for a patron's ledger, and a read cache beside it.
 
-The cache is the hot path for all credit operations. The vault is the
-durable backing store, updated asynchronously every ``flush_interval_secs``.
+**Read, apply, compare-and-swap, re-apply; nothing else writes.**
+
+``mutate(user_id, fn)`` is the only code that writes a ledger row. Under the
+per-user lock it reads the current ledger *and the version it was read at*,
+applies ``fn``, and writes back with that exact version. If another writer —
+another replica, or another coroutine of this process — landed first, the
+store refuses, and ``mutate`` re-reads and re-applies. Money functions are
+idempotent against fresh state (a settled invoice is credited once, a debit
+re-checks the balance), so re-application is always safe.
+
+Usage counters for free calls do not get a write of their own. ``note_usage``
+accumulates them in memory as deltas; the next ``mutate`` for that patron folds
+them into the fresh ledger it is about to write, and a periodic ``fold_usage``
+pass writes the deltas of patrons who only made free calls. A delta applied to
+fresh state cannot overwrite anything; a fold that fails keeps its deltas for
+the next pass; a process that dies loses a statistic, never a sat.
+
+Reads (``get``, ``get_fresh``) never write and never change what they return.
+No expiry is invented here: tranche lifetimes come from the pricing model and
+are applied by the callers of ``mutate``.
+
+History: 0.62.0 made money writes read-apply-CAS; 0.78.0 moved the last
+money paths onto it; what remained was a write-behind flush of whole-ledger
+snapshots for free-call counters, whose version came from a per-user cache
+rather than from the snapshot. On 2026-09-27 such a flush landed after a
+settlement and erased 1,000 sats. That flush, and every path that could write
+a ledger it had not just read, is gone.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
-from datetime import UTC
 from typing import TYPE_CHECKING
 
 from tollbooth.ledger import UserLedger
@@ -32,156 +54,80 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # How many times a mutation re-fetches + re-applies after losing a CAS race
-# before giving up. Conflicts only happen when multiple replicas write the
-# same ledger in the same instant, so a handful of retries is ample.
+# before giving up. Conflicts only happen when writers hit the same ledger in
+# the same instant, so a handful of retries is ample.
 _MAX_WRITE_RETRIES = 6
 
 
-@dataclass
-class _CacheEntry:
-    """Internal cache entry wrapping a UserLedger with dirty tracking."""
-
-    ledger: UserLedger
-    dirty: bool = False
-    dirty_count: int = 0
-    last_flush_time: float = field(default_factory=time.monotonic)
-
-
 class LedgerCache:
-    """LRU cache for UserLedger objects with write-behind flush.
+    """Read cache plus the single write path for patron ledgers.
 
-    - ``get()`` returns a cached ledger or loads from vault on miss.
-    - Mutations should be followed by ``mark_dirty(user_id)``.
-    - A background task flushes dirty entries to the vault periodically.
-    - On LRU eviction, dirty entries are flushed synchronously.
-    - Per-user asyncio locks prevent concurrent access races.
+    - ``get()`` returns the cached snapshot, loading it on a miss.
+    - ``get_fresh()`` reloads from the store and replaces the snapshot.
+    - ``mutate()`` is the only writer: lock, read with version, apply, CAS write.
+    - ``note_usage()`` records a free call; ``fold_usage()`` writes pending
+      counters through ``mutate``.
     """
 
     def __init__(
         self,
         vault: VaultBackend,
         maxsize: int = 20,
-        flush_interval_secs: int = 60,
-        flush_retries: int = 1,
-        flush_retry_delay: float = 2.0,
-        flush_batch_size: int = 10,
-        flush_staleness_secs: float = 120.0,
+        fold_interval_secs: int = 60,
     ) -> None:
         self._vault = vault
         self._maxsize = maxsize
-        self._flush_interval = flush_interval_secs
-        self._flush_retries = flush_retries
-        self._flush_retry_delay = flush_retry_delay
-        self._flush_batch_size = flush_batch_size
-        self._flush_staleness_secs = flush_staleness_secs
-        self._entries: OrderedDict[str, _CacheEntry] = OrderedDict()
+        self._fold_interval = fold_interval_secs
+        self._entries: OrderedDict[str, UserLedger] = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
-        self._flush_task: asyncio.Task[None] | None = None
-        self._last_flush_at: str | None = None
-        self._total_flushes: int = 0
+        self._usage: dict[str, dict[str, int]] = {}
+        self._fold_task: asyncio.Task[None] | None = None
+        self._folds: int = 0
 
     def _get_lock(self, user_id: str) -> asyncio.Lock:
-        """Get or create a per-user lock."""
         if user_id not in self._locks:
             self._locks[user_id] = asyncio.Lock()
         return self._locks[user_id]
 
-    def _flush_due_entry(self, entry: _CacheEntry) -> bool:
-        """Check if this entry needs flushing based on count or staleness."""
-        if not entry.dirty:
-            return False
-        if entry.dirty_count >= self._flush_batch_size:
-            return True
-        return time.monotonic() - entry.last_flush_time > self._flush_staleness_secs
-
-    def flush_due(self, user_id: str) -> bool:
-        """Check if a user's cache entry is due for flushing."""
-        entry = self._entries.get(user_id)
-        if entry is None:
-            return False
-        return self._flush_due_entry(entry)
+    # -- reads -----------------------------------------------------------------
 
     async def get(self, user_id: str) -> UserLedger:
-        """Return the cached ledger, loading from vault on miss."""
-        lock = self._get_lock(user_id)
-        async with lock:
-            if user_id in self._entries:
-                entry = self._entries[user_id]
-                # Migrate any perpetual tranches still in cache from pre-TTL code
-                if self._migrate_perpetual_tranches(entry.ledger):
-                    entry.dirty = True
-                if self._flush_due_entry(entry):
-                    self._fire_and_forget_flush(user_id, entry)
+        """Return the cached ledger, loading it from the store on a miss.
+
+        Never writes. A store that cannot be read yields an empty ledger flagged
+        ``_vault_unavailable`` and NOT cached, so the next call tries again.
+        """
+        async with self._get_lock(user_id):
+            cached = self._entries.get(user_id)
+            if cached is not None:
                 self._entries.move_to_end(user_id)
-                return entry.ledger
-
-            # Cache miss — load from vault
-            ledger, from_vault = await self._load_from_vault(user_id)
-
-            if not from_vault:
-                # Vault fetch failed (cold start, Neon not ready).
-                # Return the empty ledger but do NOT cache it — next call
-                # will retry the vault fetch after it has had time to connect.
+                return cached
+            loaded = await self._load(user_id)
+            if loaded is None:
+                ledger = UserLedger()
                 ledger._vault_unavailable = True  # type: ignore[attr-defined]
                 return ledger
-
-            # Belt-and-suspenders: migrate perpetual tranches even on fresh load
-            # (from_dict should handle this, but catch any edge cases)
-            dirty = self._migrate_perpetual_tranches(ledger)
-
-            # Evict LRU if at capacity
-            while len(self._entries) >= self._maxsize:
-                self._fire_and_forget_evict()
-
-            entry = _CacheEntry(ledger=ledger)
-            if dirty:
-                entry.dirty = True
-            self._entries[user_id] = entry
-            self._entries.move_to_end(user_id)
+            ledger, _version = loaded
+            self._install(user_id, ledger)
             return ledger
 
-    @staticmethod
-    def _migrate_perpetual_tranches(ledger: UserLedger) -> bool:
-        """Assign 7-day TTL to any cached tranches that still lack expiration.
+    async def get_fresh(self, user_id: str) -> UserLedger:
+        """Reload the ledger from the definitive store and replace the snapshot.
 
-        Returns True if any tranches were migrated (entry should be flushed).
+        On a read failure the returned ledger is flagged ``_vault_unavailable``
+        (and not cached), so callers can refuse to show a phantom balance.
         """
-        from datetime import datetime, timedelta
+        async with self._get_lock(user_id):
+            loaded = await self._load(user_id)
+            if loaded is None:
+                ledger = UserLedger()
+                ledger._vault_unavailable = True  # type: ignore[attr-defined]
+                return ledger
+            ledger, _version = loaded
+            self._install(user_id, ledger)
+            return ledger
 
-        migrated = False
-        for t in ledger.tranches:
-            if t.expires_at is None and t.remaining_sats > 0:
-                t.expires_at = (
-                    datetime.now(UTC) + timedelta(days=7)
-                ).isoformat()
-                migrated = True
-        if migrated:
-            logger.info(
-                "Migrated perpetual tranches for cached ledger "
-                "(patron=%s, count=%d)",
-                getattr(ledger, "user_id", "?"),
-                sum(1 for t in ledger.tranches if t.expires_at is not None),
-            )
-        return migrated
-
-    def mark_dirty(self, user_id: str) -> None:
-        """Mark a cached entry as dirty (needs flush to vault)."""
-        entry = self._entries.get(user_id)
-        if entry:
-            entry.dirty = True
-            entry.dirty_count += 1
-
-    async def flush_user(self, user_id: str) -> bool:
-        """Immediately flush a single user's entry to vault.
-
-        Use for credit-critical paths (check_payment, purchase_credits)
-        where data MUST be durable before returning success.
-        Returns True on success, False on failure (logged, not raised).
-        """
-        entry = self._entries.get(user_id)
-        if not entry or not entry.dirty:
-            return True  # Nothing to flush
-        return await self._flush_entry(user_id, entry)
+    # -- the write path --------------------------------------------------------
 
     async def mutate(
         self,
@@ -190,53 +136,60 @@ class LedgerCache:
         *,
         retries: int = _MAX_WRITE_RETRIES,
     ) -> _T:
-        """Atomically read-modify-**write-through** a ledger against the vault.
+        """Read the current ledger, apply ``fn``, and write it back at the
+        version it was read at.
 
-        The definitive store is the source of truth. This fetches the CURRENT
-        ledger from the vault (never a stale in-memory copy), applies
-        ``fn(ledger)``, and CAS-writes it back. If another replica wrote first
-        (``LedgerVersionConflict``) it re-fetches and re-applies ``fn`` on the
-        fresh state, up to ``retries`` — so concurrent replicas can't clobber
-        each other's balance changes.
+        Pending free-call usage for ``user_id`` is folded into the ledger first,
+        so it rides along with whatever ``fn`` does. ``fn`` returning ``False``
+        means "nothing to persist" (a debit found the balance short): nothing
+        is written, the deltas are kept for a later fold, and ``False`` is
+        returned. Any other value is written through and returned.
 
-        ``fn`` returning ``False`` signals a no-op (e.g. debit found
-        insufficient balance): nothing is written and ``False`` is returned.
-        Any other return value is written through and returned.
+        On a version conflict the whole step repeats against fresh state, up to
+        ``retries`` times. The snapshot this cache serves is always the ledger
+        last read or written here.
 
-        Raises ``LedgerUnavailableError`` if the vault can't be read (so a cold
-        store never makes a mutation apply to an empty fallback ledger and zero
-        a real balance), or ``LedgerWriteError`` if retries are exhausted.
+        Raises ``LedgerUnavailableError`` if the store cannot be read (a
+        mutation is never applied to an empty fallback) and ``LedgerWriteError``
+        when the retries are exhausted.
         """
-        lock = self._get_lock(user_id)
-        async with lock:
-            for _ in range(retries):
-                ledger, from_vault = await self._load_from_vault(user_id)
-                if not from_vault:
-                    raise LedgerUnavailableError(
-                        f"definitive ledger store unreadable for {user_id[:20]}"
-                    )
-                result = fn(ledger)
-                if result is False:
-                    return result  # explicit no-op — nothing to persist
-                try:
-                    await self._vault.store_ledger(user_id, ledger.to_json())
-                except LedgerVersionConflict:
-                    continue  # lost the race — re-fetch fresh state and re-apply
-                # Persisted. Cache the authoritative post-write ledger (clean)
-                # so same-process reads see it without another round-trip.
-                self._entries[user_id] = _CacheEntry(ledger=ledger)
-                self._entries.move_to_end(user_id)
-                return result
-        raise LedgerWriteError(
-            f"ledger write for {user_id[:20]} lost {retries} consecutive CAS races"
-        )
+        async with self._get_lock(user_id):
+            deltas = self._usage.pop(user_id, None)
+            try:
+                for _ in range(retries):
+                    loaded = await self._load(user_id)
+                    if loaded is None:
+                        raise LedgerUnavailableError(
+                            f"definitive ledger store unreadable for {user_id[:20]}"
+                        )
+                    ledger, version = loaded
+                    if deltas:
+                        for tool, calls in deltas.items():
+                            ledger.record_usage(tool, calls)
+                    result = fn(ledger)
+                    if result is False:
+                        # Nothing to persist. The snapshot read is still the best
+                        # one this process has; the deltas wait for a real write.
+                        self._install(user_id, ledger)
+                        self._requeue(user_id, deltas)
+                        deltas = None
+                        return result
+                    try:
+                        await self._vault.store_ledger(user_id, ledger.to_json(), version)
+                    except LedgerVersionConflict:
+                        continue  # lost the race — re-read, re-fold, re-apply
+                    self._install(user_id, ledger)
+                    deltas = None
+                    return result
+                raise LedgerWriteError(
+                    f"ledger write for {user_id[:20]} lost {retries} consecutive CAS races"
+                )
+            finally:
+                # A read failure or exhausted retries must not lose the counters.
+                self._requeue(user_id, deltas)
 
     async def debit(self, user_id: str, tool_name: str, cost: int) -> bool:
-        """Atomic write-through debit. Returns False on insufficient balance.
-
-        Read-modify-write against the definitive store with conflict retry, so
-        two replicas can't both spend the same sats.
-        """
+        """Write-through debit against fresh state. False when the balance is short."""
         return await self.mutate(user_id, lambda ledger: ledger.debit(tool_name, cost))
 
     async def credit(
@@ -247,261 +200,113 @@ class LedgerCache:
         *,
         ttl_seconds: int | None = None,
     ) -> None:
-        """Atomic write-through credit — adds a tranche against fresh state."""
+        """Write-through credit — adds a tranche against fresh state."""
         await self.mutate(
             user_id,
             lambda ledger: ledger.credit_deposit(api_sats, invoice_id, ttl_seconds=ttl_seconds),
         )
 
-    async def get_fresh(self, user_id: str) -> UserLedger:
-        """Force-reload the ledger from the definitive store, refreshing the cache.
+    # -- usage accounting ------------------------------------------------------
 
-        Use immediately before a mutate-then-``flush_user`` sequence so the
-        subsequent CAS write matches the CURRENT version — not a stale cached
-        one that would conflict forever. On a vault-read failure the returned
-        ledger is flagged ``_vault_unavailable`` (and NOT cached), so callers
-        can refuse to credit a phantom balance during a cold start.
+    def note_usage(self, user_id: str, tool_name: str) -> None:
+        """Record one free call. Nothing is written until the next fold or mutate."""
+        per_user = self._usage.setdefault(user_id, {})
+        per_user[tool_name] = per_user.get(tool_name, 0) + 1
+
+    async def fold_usage(self) -> int:
+        """Write every patron's pending usage counters through ``mutate``.
+
+        Returns how many patrons were written. A patron whose write failed keeps
+        its deltas for the next pass.
         """
-        lock = self._get_lock(user_id)
-        async with lock:
-            ledger, from_vault = await self._load_from_vault(user_id)
-            if not from_vault:
-                ledger._vault_unavailable = True  # type: ignore[attr-defined]
-                return ledger
-            entry = _CacheEntry(ledger=ledger)
-            self._entries[user_id] = entry
-            self._entries.move_to_end(user_id)
-            return ledger
-
-    async def write_through_credit(self, user_id: str) -> bool:
-        """Mark dirty and immediately flush. Use for credit settlements."""
-        self.mark_dirty(user_id)
-        return await self.flush_user(user_id)
-
-    async def _load_from_vault(self, user_id: str) -> tuple[UserLedger, bool]:
-        """Load ledger JSON from vault.
-
-        Returns (ledger, from_vault) — from_vault is True if the data came
-        from Neon (or the user genuinely has no ledger), False if the vault
-        fetch failed and we're returning an empty fallback that should NOT
-        be cached (to avoid masking a cold-start timing issue).
-        """
-        try:
-            ledger_json = await self._vault.fetch_ledger(user_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Failed to load ledger from vault for %s — returning uncached empty ledger. Underlying error: %s: %s",
-                user_id[:20], type(exc).__name__, exc,
-            )
-            return UserLedger(), False
-
-        if ledger_json is None:
-            return UserLedger(), True
-        return UserLedger.from_json(ledger_json), True
-
-    def _fire_and_forget_flush(
-        self, user_id: str, entry: _CacheEntry,
-    ) -> None:
-        """Schedule a flush as a background task — never blocks the hot path.
-
-        Idempotent: if the task fails or two tasks race, the worst outcome is
-        a duplicate Neon write (full ledger overwrite, not an increment).
-        """
-        asyncio.create_task(self._safe_flush(user_id, entry))
-
-    def _fire_and_forget_evict(self) -> None:
-        """Evict the LRU entry, flushing dirty state in the background."""
-        if not self._entries:
-            return
-        user_id, entry = next(iter(self._entries.items()))
-        if entry.dirty:
-            asyncio.create_task(self._safe_flush(user_id, entry))
-        del self._entries[user_id]
-        self._locks.pop(user_id, None)
-
-    async def _safe_flush(self, user_id: str, entry: _CacheEntry) -> None:
-        """Flush wrapper that swallows exceptions — safe for create_task."""
-        try:
-            await self._flush_entry(user_id, entry)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Background flush failed for %s (swallowed).", user_id[:20],
-            )
-
-    async def _evict_lru(self) -> None:
-        """Evict the least-recently-used entry, flushing if dirty.
-
-        Retained for callers that need awaited eviction (e.g. shutdown).
-        The hot path uses ``_fire_and_forget_evict()`` instead.
-        """
-        if not self._entries:
-            return
-        user_id, entry = next(iter(self._entries.items()))
-        if entry.dirty:
-            await self._flush_entry(user_id, entry)
-        del self._entries[user_id]
-        self._locks.pop(user_id, None)
-
-    async def _flush_entry(self, user_id: str, entry: _CacheEntry) -> bool:
-        """Flush a single entry to vault with retry. Returns True on success."""
-        from datetime import datetime
-
-        max_attempts = 1 + self._flush_retries
-        for attempt in range(max_attempts):
+        folded = 0
+        for user_id in list(self._usage):
             try:
-                ledger_json = entry.ledger.to_json()
-                version = await self._vault.store_ledger(user_id, ledger_json)
-                logger.info(
-                    "Flushed ledger for %s to vault (v%s, %d bytes).",
-                    user_id[:20], version, len(ledger_json),
-                )
-                entry.dirty = False
-                entry.dirty_count = 0
-                entry.last_flush_time = time.monotonic()
-                self._last_flush_at = datetime.now(UTC).isoformat()
-                self._total_flushes += 1
-                return True
-            except LedgerVersionConflict:
-                # Another writer advanced the row past the version this process
-                # last read. Retrying the SAME snapshot cannot succeed — the CAS
-                # guard compares against a version we will never hold again — so
-                # the old code burned its retries and then left the entry dirty
-                # forever, unflushable for the life of the process.
-                #
-                # Surrender ours and adopt the newer stored state. That is only
-                # acceptable because money no longer travels this path: charges,
-                # credits, settlements and restores all go through `mutate()`,
-                # which re-applies against fresh state on conflict. What remains
-                # here is usage accounting, where losing a counter costs a
-                # statistic, not a sat.
-                fresh, from_vault = await self._load_from_vault(user_id)
-                if from_vault:
-                    self._entries[user_id] = _CacheEntry(ledger=fresh)
-                    self._entries.move_to_end(user_id)
-                    logger.info(
-                        "Ledger CAS conflict for %s — adopted the newer stored "
-                        "state; this replica's unflushed usage counters were "
-                        "dropped.", user_id[:20],
-                    )
-                else:
-                    # Can't even re-read. Leave the entry alone; a later flush
-                    # or a cold reload will resolve it.
-                    logger.warning(
-                        "Ledger CAS conflict for %s and the store could not be "
-                        "re-read; leaving the cached entry in place.", user_id[:20],
-                    )
-                return False
-            except Exception as exc:  # noqa: BLE001
-                # The reason used to be discarded, which is how a fleet-wide
-                # "Failed to flush" read as a Neon outage when it was contention.
-                if attempt < max_attempts - 1:
-                    logger.warning(
-                        "Flush attempt %d/%d failed for %s (%s: %s), retrying in %.1fs...",
-                        attempt + 1, max_attempts, user_id[:20],
-                        type(exc).__name__, exc, self._flush_retry_delay,
-                    )
-                    await asyncio.sleep(self._flush_retry_delay)
-                else:
-                    logger.warning(
-                        "Failed to flush ledger to vault for %s after %d attempt(s) "
-                        "(%s: %s).",
-                        user_id[:20], max_attempts, type(exc).__name__, exc,
-                    )
-        return False
+                await self.mutate(user_id, lambda _ledger: True)
+                folded += 1
+            except (LedgerUnavailableError, LedgerWriteError) as exc:
+                logger.info("Usage fold deferred for %s: %s", user_id[:20], exc)
+            except Exception:  # a fold is accounting, never a fault
+                logger.warning("Usage fold failed for %s (kept for next pass).", user_id[:20], exc_info=True)
+        if folded:
+            self._folds += folded
+        return folded
 
-    async def flush_dirty(self) -> int:
-        """Flush all dirty entries to vault. Returns count of flushed entries."""
-        flushed = 0
-        for user_id, entry in list(self._entries.items()):
-            if entry.dirty and await self._flush_entry(user_id, entry):
-                flushed += 1
-        return flushed
+    async def start_usage_fold(self) -> None:
+        """Start the periodic fold of pending usage counters."""
+        if self._fold_task is None:
+            self._fold_task = asyncio.create_task(self._fold_loop())
 
-    async def snapshot_all(self, timestamp: str) -> int:
-        """Snapshot all cached ledgers to vault. Returns count of snapshots created."""
-        snapped = 0
-        for user_id, entry in list(self._entries.items()):
-            try:
-                result = await self._vault.snapshot_ledger(
-                    user_id, entry.ledger.to_json(), timestamp
-                )
-                if result is not None:
-                    snapped += 1
-            except Exception:  # noqa: BLE001
-                logger.warning("Failed to snapshot ledger for %s.", user_id)
-        return snapped
-
-    async def flush_all(self) -> int:
-        """Flush every dirty entry (used during shutdown). Returns flush count."""
-        return await self.flush_dirty()
-
-    async def start_background_flush(self) -> None:
-        """Start the periodic background flush task."""
-        if self._flush_task is not None:
-            return
-        self._flush_task = asyncio.create_task(self._background_flush_loop())
-
-    async def _background_flush_loop(self) -> None:
-        """Periodically flush dirty entries until cancelled."""
-        logger.warning(
-            "Background flush loop started (interval=%ds). "
-            "In serverless envs, opportunistic flush handles persistence instead.",
-            self._flush_interval,
-        )
-        cycles = 0
+    async def _fold_loop(self) -> None:
         try:
             while True:
-                await asyncio.sleep(self._flush_interval)
-                count = await self.flush_dirty()
-                cycles += 1
-                if count > 0:
-                    logger.info(
-                        "Background flush: wrote %d ledger(s) "
-                        "(cycle %d, total flushes: %d).",
-                        count, cycles, self._total_flushes,
-                    )
-                elif cycles % 10 == 0:
-                    # Heartbeat every 10 cycles even when idle
-                    logger.info(
-                        "Background flush heartbeat: cycle %d, "
-                        "cache size %d, dirty %d, total flushes %d.",
-                        cycles, self.size, self.dirty_count, self._total_flushes,
-                    )
+                await asyncio.sleep(self._fold_interval)
+                if self._usage:
+                    await self.fold_usage()
         except asyncio.CancelledError:
             pass
 
     async def stop(self) -> None:
-        """Cancel background flush and flush all remaining dirty entries."""
-        if self._flush_task is not None:
-            self._flush_task.cancel()
+        """Stop the periodic fold and write whatever usage is still pending."""
+        if self._fold_task is not None:
+            self._fold_task.cancel()
             try:
-                await self._flush_task
+                await self._fold_task
             except asyncio.CancelledError:
                 pass
-            self._flush_task = None
-        await self.flush_all()
+            self._fold_task = None
+        await self.fold_usage()
+
+    # -- internals -------------------------------------------------------------
+
+    async def _load(self, user_id: str) -> tuple[UserLedger, int | None] | None:
+        """``(ledger, version)`` from the store, ``(empty, None)`` for a patron
+        with no row yet, or ``None`` when the store could not be read."""
+        try:
+            row = await self._vault.fetch_ledger(user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to load ledger from vault for %s: %s: %s",
+                user_id[:20], type(exc).__name__, exc,
+            )
+            return None
+        if row is None:
+            return UserLedger(), None
+        ledger_json, version = row
+        return UserLedger.from_json(ledger_json), version
+
+    def _install(self, user_id: str, ledger: UserLedger) -> None:
+        self._entries[user_id] = ledger
+        self._entries.move_to_end(user_id)
+        while len(self._entries) > self._maxsize:
+            evicted, _ = self._entries.popitem(last=False)
+            self._locks.pop(evicted, None)
+
+    def _requeue(self, user_id: str, deltas: dict[str, int] | None) -> None:
+        if not deltas:
+            return
+        per_user = self._usage.setdefault(user_id, {})
+        for tool, calls in deltas.items():
+            per_user[tool] = per_user.get(tool, 0) + calls
+
+    # -- metrics ---------------------------------------------------------------
 
     @property
     def size(self) -> int:
-        """Number of entries currently in cache."""
+        """Number of ledgers currently cached."""
         return len(self._entries)
 
     @property
-    def dirty_count(self) -> int:
-        """Number of dirty (unflushed) entries in cache."""
-        return sum(1 for e in self._entries.values() if e.dirty)
+    def pending_usage(self) -> int:
+        """Number of patrons with usage counters not yet written."""
+        return len(self._usage)
 
     def health(self) -> dict[str, object]:
-        """Return cache health metrics for monitoring."""
+        """Cache health for monitoring."""
         return {
             "cache_size": self.size,
-            "dirty_entries": self.dirty_count,
-            "last_flush_at": self._last_flush_at,
-            "total_flushes": self._total_flushes,
-            "flush_retries": self._flush_retries,
-            "flush_retry_delay": self._flush_retry_delay,
-            "flush_batch_size": self._flush_batch_size,
-            "flush_staleness_secs": self._flush_staleness_secs,
-            "background_flush_running": self._flush_task is not None
-                                        and not self._flush_task.done(),
+            "pending_usage": self.pending_usage,
+            "usage_folds": self._folds,
+            "fold_interval_secs": self._fold_interval,
+            "usage_fold_running": self._fold_task is not None and not self._fold_task.done(),
         }

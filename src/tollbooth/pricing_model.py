@@ -147,6 +147,31 @@ class ToolPrice:
         )
 
 
+@dataclass(frozen=True)
+class Expiry:
+    """What the operator decided about credit expiry — including that they
+    have not decided.
+
+    ``state`` is ``"unchosen"`` (no ``tranche_lifetime`` in the model: the
+    question is still open, and no code answers it for them), ``"never"``
+    (``tranche_lifetime`` present with no days: credits are perpetual by
+    choice) or ``"days"``. Only ``"days"`` ever stamps an expiry on a tranche.
+    """
+
+    state: str  # "unchosen" | "never" | "days"
+    days: int | None = None
+
+    @property
+    def seconds(self) -> int | None:
+        return self.days * 86400 if self.state == "days" and self.days is not None else None
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"state": self.state}
+        if self.state == "days":
+            d["days"] = self.days
+        return d
+
+
 @dataclass
 class TrancheLifetime:
     """How long a tranche of api_sats endures before expiring.
@@ -246,6 +271,14 @@ class PricingModel:
     is_active: bool = False
     tools: list[ToolPrice] = field(default_factory=list)
     tranche_lifetime: TrancheLifetime | None = None
+
+    def expiry(self) -> Expiry:
+        """The operator's expiry decision, or that none was made."""
+        if self.tranche_lifetime is None:
+            return Expiry("unchosen")
+        if self.tranche_lifetime.ttl_days is None:
+            return Expiry("never")
+        return Expiry("days", self.tranche_lifetime.ttl_days)
 
     def tool_cost_map(self) -> dict[str, int]:
         """Return a flat {tool_id: price_sats} lookup dict."""
