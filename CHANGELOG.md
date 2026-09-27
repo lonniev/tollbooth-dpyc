@@ -3,6 +3,36 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed — a cold start no longer pays for every relay in series
+
+Measured on the live fleet on 2026-09-26: an operator's first paid call after a
+process start took 16–20 s, and 16.6 s of it was the bootstrap read asking the
+eleven registry relays one after another — 10 s of that a single relay timing
+out — while every healthy relay had answered inside 0.6 s. The first courier
+use then paid another 8.5 s for the same serial walk as a liveness probe. Both
+sweeps ran synchronously inside async code, so every other session on the
+process stood still with them.
+
+- **One fan-out.** `tollbooth.relay_fanout.fan_out` asks every relay at once
+  and returns one outcome per relay in registry order — never arrival order,
+  so rankings hold. It stops when all have answered, at a deadline, or a
+  settle window after the first acceptable answer. A relay still silent then
+  is *abandoned*: slow, not unreachable.
+- **Bootstrap read** (`receive_bootstrap_config`) rides it with a 6 s budget
+  and a 1.5 s settle window, so newest-revision-wins still hears a slightly
+  slower relay holding a fresher config. Only relays that refused us land in
+  the diag's `errors=[…]` (what the Oracle re-measures); slow and
+  undecryptable answers are counted before that bracket, never inside it.
+- **Liveness probe** (`probe_relay_liveness`, behind `resolve_relays`) rides
+  it too; `resolve_relays` now waits 3 s per relay, not 5.
+- **Off the loop.** `BootstrapClient.bootstrap` and `OperatorRuntime.courier`
+  hop the sweep to a worker thread with `asyncio.to_thread`.
+- **Profile read/publish** move onto the same primitive, which also closes an
+  empty-registry crash (`ThreadPoolExecutor(max_workers=0)`) and an uncaught
+  `as_completed` timeout.
+
 ## [0.91.0] - 2026-09-09
 
 ### Fixed — a refund now gives back what was TAKEN, not the list price
