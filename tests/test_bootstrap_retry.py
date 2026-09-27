@@ -33,10 +33,13 @@ CONFIG = {"neon_database_url": "postgres://example/db"}
 def _no_cache_no_sleep(monkeypatch):
     """Isolate the module global, and never actually wait."""
     bs._cached_result = None
+    bs._bootstrap_lock = None
     monkeypatch.setattr(bs, "_BOOTSTRAP_RETRY_BACKOFF", (0, 0, 0, 0))
+    monkeypatch.setattr(bs, "FRONT_BOOTSTRAP_RETRY_BACKOFF", (0, 0, 0, 0))
     monkeypatch.setattr(bs.asyncio, "sleep", AsyncMock())
     yield
     bs._cached_result = None
+    bs._bootstrap_lock = None
 
 
 def _client():

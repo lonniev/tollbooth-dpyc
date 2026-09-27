@@ -2,11 +2,11 @@
 
 The Authority publishes the operator's Neon URL as a NIP-33 parameterized-
 replaceable event (kind 30078, NIP-04-encrypted content), scoped by a
-per-operator ``d`` tag. Because relays keep only the latest replaceable per
-(author, kind, ``d``), the config does NOT age off the way a stream of kind-4
-DMs does — there is no heartbeat and no re-publish schedule to maintain. The
-operator reads it on cold start using only its nsec — no OAuth, no MCP-to-MCP
-calls, no additional env vars.
+per-operator ``d`` tag. Relays keep only the latest replaceable per
+(author, kind, ``d``), but free public relays still drop events under load, so
+the Authority re-publishes weekly on tool traffic. The operator reads it on
+cold start using only its nsec — no OAuth, no MCP-to-MCP calls, no additional
+env vars.
 
 Send side (Authority):
     send_bootstrap_config(
@@ -57,13 +57,37 @@ def _config_d_tag(op_pubkey_hex: str) -> str:
     return f"{BOOTSTRAP_CONFIG_TAG}:{op_pubkey_hex}"
 
 
+# One budget for a relay's connect AND its NIP-20 OK read. Healthy relays
+# answer in well under a second; ten seconds is patience for a slow one.
+_PUBLISH_BUDGET_SECONDS = 10.0
+
+
+@dataclass(frozen=True, slots=True)
+class PublishResult:
+    """How many relays accepted vs refused a bootstrap config publish.
+
+    Falsy when nothing accepted, so legacy ``if sent:`` call sites keep working.
+    """
+
+    accepted: int
+    rejected: int
+
+    def __bool__(self) -> bool:
+        return self.accepted > 0
+
+    def __iter__(self):
+        # Unpack as ``accepted, rejected = send_bootstrap_config(...)``.
+        yield self.accepted
+        yield self.rejected
+
+
 def send_bootstrap_config(
     *,
     authority_nsec: str,
     operator_npub: str,
     config: dict[str, str],
     relays: list[str] | None = None,
-) -> bool:
+) -> PublishResult:
     """Publish bootstrap config for an operator as a NIP-33 replaceable event.
 
     Called by the Authority after provisioning a Neon schema. The config is
@@ -73,7 +97,11 @@ def send_bootstrap_config(
     kind-4 DMs does. Content is NIP-04-encrypted so only the operator can read
     it (infrastructure config, not a personal credential).
 
-    Returns True if published to at least one relay.
+    Publishes via :func:`relay_fanout.fan_out` so the weekly refresh finishes
+    inside one request instead of a serial 10 s-per-relay walk.
+
+    Returns a :class:`PublishResult` (``accepted``, ``rejected``). Falsy when
+    nothing accepted, so ``if sent:`` call sites keep working.
     """
     from pynostr.event import Event  # type: ignore[import-untyped]
     from pynostr.key import PrivateKey, PublicKey  # type: ignore[import-untyped]
@@ -123,44 +151,63 @@ def send_bootstrap_config(
         tags=[["d", _config_d_tag(op_pubkey_hex)], ["p", op_pubkey_hex]],
     )
     event.sign(auth_pk.hex())
+    event_msg = json.dumps(["EVENT", event.to_dict()])
 
-    # Publish to relays
+    outcomes = fan_out(
+        relay_urls,
+        lambda url: _publish_one(url, event_msg),
+        deadline=_PUBLISH_BUDGET_SECONDS,
+    )
+
+    accepted = 0
+    rejected = 0
+    for o in outcomes:
+        if o.state == "ok" and o.value is True:
+            accepted += 1
+            logger.info(
+                "Bootstrap config sent to %s via %s", operator_npub[:16], o.relay,
+            )
+        else:
+            rejected += 1
+            detail = o.error if o.state != "ok" else "rejected"
+            # Abandoned / refused relays are weather; a true NIP-20 rejection is news.
+            log = logger.warning if o.state == "ok" else logger.debug
+            log(
+                "Relay %s did not accept bootstrap config for %s: %s",
+                o.relay, operator_npub[:16], detail,
+            )
+
+    return PublishResult(accepted, rejected)
+
+
+def _publish_one(relay_url: str, event_msg: str) -> bool:
+    """Publish one EVENT to one relay; return True only on NIP-20 OK/true.
+
+    Runs on a fan-out worker thread. Transport failures raise (the relay
+    refused us); a parsed rejection returns False (the relay answered no).
+    """
     import websocket  # type: ignore[import-untyped]
 
-    published = 0
-    for relay_url in relay_urls:
+    ws = websocket.create_connection(relay_url, timeout=_PUBLISH_BUDGET_SECONDS)
+    try:
+        ws.send(event_msg)
+        # Read OK response — NIP-20: ["OK", <event_id>, <true|false>, <message>].
+        # Parse strictly: a rejection like ["OK", id, false, "rate-limited"]
+        # must not count as published (substring matching on "ok" did,
+        # silently dropping relays from the bootstrap config's coverage).
+        resp = ws.recv()
         try:
-            ws = websocket.create_connection(relay_url, timeout=10)
-            msg = json.dumps(["EVENT", event.to_dict()])
-            ws.send(msg)
-            # Read OK response — NIP-20: ["OK", <event_id>, <true|false>, <message>].
-            # Parse strictly: a rejection like ["OK", id, false, "rate-limited"]
-            # must not count as published (substring matching on "ok" did,
-            # silently dropping relays from the bootstrap config's coverage).
-            resp = ws.recv()
-            ws.close()
-            try:
-                reply = json.loads(resp)
-                accepted = (
-                    isinstance(reply, list)
-                    and len(reply) >= 3
-                    and reply[0] == "OK"
-                    and reply[2] is True
-                )
-            except (json.JSONDecodeError, TypeError):
-                accepted = False
-            if accepted:
-                published += 1
-                logger.info("Bootstrap config sent to %s via %s", operator_npub[:16], relay_url)
-            else:
-                logger.warning(
-                    "Relay %s rejected bootstrap config for %s: %s",
-                    relay_url, operator_npub[:16], resp[:200],
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Failed to publish bootstrap config to %s: %s", relay_url, exc)
-
-    return published > 0
+            reply = json.loads(resp)
+            return (
+                isinstance(reply, list)
+                and len(reply) >= 3
+                and reply[0] == "OK"
+                and reply[2] is True
+            )
+        except (json.JSONDecodeError, TypeError):
+            return False
+    finally:
+        ws.close()
 
 
 def receive_bootstrap_config(

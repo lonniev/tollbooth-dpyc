@@ -5,6 +5,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — bootstrap config is one relay deep no longer: weekly republish finishes, cold start single-flights
+
+Field report 2026-09-27 (eXcalibur on Horizon, SDK 0.92.0): a warm process answered
+every tool in ~1 s until a recycle put four concurrent first calls on a cold replica
+that held the operator's kind-30078 config on **nos.lol only** (`created_at` 2026-06-22).
+Each call walked the full ~80 s retry ladder and then failed with
+`Bootstrap failed: No bootstrap config on relays for this operator`.
+`bootstrap_dm_sent_at` had not moved in three months despite `certify_credits` traffic
+that should have refreshed it weekly. Three defects, one stall:
+
+1. **Weekly refresh never landed.** `operator_status` / `certify_credits` fired
+   `asyncio.create_task(_maybe_refresh_bootstrap_dm(...))` and dropped the handle —
+   an unreferenced task is GC-eligible mid-flight, and a serverless host idles the
+   process the moment the response returns. The in-process throttle was armed
+   *before* the vault read, so a swallowed exception silenced the npub for an hour
+   at DEBUG only. And a missing-key default of `0.0` against `time.monotonic()`
+   (seconds since boot) throttled every first check on a host younger than one hour
+   — so on Horizon the weekly path never even started.
+2. **Publish was serial.** `send_bootstrap_config` walked relays one-by-one at up to
+   10 s each; the refresh could not finish inside one request.
+3. **Cold bootstrap had no single-flight.** Concurrent first calls each constructed a
+   `BootstrapClient` and each ran the full detached-runner ladder
+   (`(2, 5, 10, 20, 38, 0)` ≈ 75 s of pauses). A front has no multi-minute budget.
+
+Fix:
+
+- `_schedule_bootstrap_dm_refresh` keeps a strong ref (same pattern as
+  `OperatorRuntime._quota_alert_tasks`); throttle arms only after the vault answers;
+  missing-key is "never checked", not `0.0`; a due refresh that does not publish logs
+  at WARNING with accepted/rejected counts.
+- `send_bootstrap_config` publishes via `relay_fanout.fan_out` and returns a
+  `PublishResult(accepted, rejected)` (falsy when nothing accepted).
+- `ensure_bootstrapped` holds an `asyncio.Lock` so one read serves every waiter, and
+  defaults to `FRONT_BOOTSTRAP_RETRY_BACKOFF = (2, 0)` — at most two tries. Detached
+  runners keep the long ladder by passing `_BOOTSTRAP_RETRY_BACKOFF`.
+- One-shot fleet republish after the first Authority tool traffic: every registered
+  operator gets a `_resend_bootstrap_dm` so operators left one-relay deep recover
+  without a manual `get_operator_config` per npub.
+
 ### Fixed — the ledger has one write path, and every write carries the version it read
 
 On 2026-09-27 a Bee's Knees patron's settled 1,000-sat top-up was credited,

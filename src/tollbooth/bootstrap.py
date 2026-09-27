@@ -53,21 +53,48 @@ _cached_result: BootstrapResult | None = None
 # waiting, this was the last attempt". Roughly 75s of coverage in total, against
 # a job budget measured in minutes — sized for a relay outage lasting seconds,
 # not for one lasting long enough that a human should hear about it.
+#
+# Detached runners (Modal cold-boot per job) keep this long ladder: the job
+# already holds a multi-minute budget. Live agent fronts must NOT — see
+# ``FRONT_BOOTSTRAP_RETRY_BACKOFF``.
 _BOOTSTRAP_RETRY_BACKOFF = (2, 5, 10, 20, 38, 0)
+
+# Front ladder: at most two tries, then answer quickly. A miss is not cached
+# (see ensure_bootstrapped), so the next call retries; spending ~80 s on four
+# concurrent cold first-calls is what pinned eXcalibur on 2026-09-27.
+FRONT_BOOTSTRAP_RETRY_BACKOFF = (2, 0)
+
+# Single-flight: concurrent first calls on a cold process share one read.
+# Lazily built so importing this module never needs a running event loop.
+_bootstrap_lock: asyncio.Lock | None = None
+
+
+def _get_bootstrap_lock() -> asyncio.Lock:
+    global _bootstrap_lock
+    if _bootstrap_lock is None:
+        _bootstrap_lock = asyncio.Lock()
+    return _bootstrap_lock
 
 
 async def ensure_bootstrapped(
     relays: list[str] | None = None,
+    *,
+    retry_backoff: tuple[int, ...] | None = None,
 ) -> BootstrapResult:
     """Run bootstrap once, cache the result for process lifetime.
 
     Call this from the first tool invocation. Returns immediately
-    on subsequent calls.
+    on subsequent calls. Concurrent first calls share a single in-flight
+    read (one relay poll serves every waiter).
 
     Args:
         relays: Optional relay URLs to search for the Authority's
             bootstrap config DM. Falls back to the DPYC community relay
             registry (``relay_registry.get_relays``) if not provided.
+        retry_backoff: Pause schedule after each failed poll (final 0 =
+            last attempt). Defaults to :data:`FRONT_BOOTSTRAP_RETRY_BACKOFF`
+            — short enough for a live front. Detached runners that cold-boot
+            per job should pass :data:`_BOOTSTRAP_RETRY_BACKOFF`.
 
     Reads ``TOLLBOOTH_NOSTR_OPERATOR_NSEC`` from the environment.
     """
@@ -77,31 +104,42 @@ async def ensure_bootstrapped(
     if _cached_result is not None:
         return _cached_result
 
-    nsec = os.environ.get("TOLLBOOTH_NOSTR_OPERATOR_NSEC", "")
-    if not nsec:
-        # Definitive: no amount of retrying produces an nsec. Cache it.
-        result = BootstrapResult(error="TOLLBOOTH_NOSTR_OPERATOR_NSEC not set")
-        _cached_result = result
-        return result
+    # One read serves every waiter. Hold the lock for the whole bootstrap so
+    # four concurrent cold first-calls (the 2026-09-27 eXcalibur shape) cannot
+    # each construct a client and each walk the full retry ladder.
+    async with _get_bootstrap_lock():
+        if _cached_result is not None:
+            return _cached_result
 
-    client = BootstrapClient(nsec_hex=nsec, relays=relays)
-    result = await client.bootstrap()
+        nsec = os.environ.get("TOLLBOOTH_NOSTR_OPERATOR_NSEC", "")
+        if not nsec:
+            # Definitive: no amount of retrying produces an nsec. Cache it.
+            result = BootstrapResult(error="TOLLBOOTH_NOSTR_OPERATOR_NSEC not set")
+            _cached_result = result
+            return result
 
-    # Cache success, and cache a definitive failure. Do NOT cache a transient
-    # one: this result is memoised for the whole process, so caching "the
-    # relays were down a second ago" would pin a front to broken until it
-    # recycles, and pin every later tool call to the same stale verdict. The
-    # same lesson was learned one layer up at 0.62.3, where
-    # _ensure_async_executor cached its resolution before loading credentials
-    # and a cold-vault blip pinned a container to in-process for life.
-    if result.success or not result.transient:
-        _cached_result = result
-    else:
-        logger.info(
-            "Bootstrap failed transiently (%s); not cached, next call retries.",
-            result.error,
+        client = BootstrapClient(nsec_hex=nsec, relays=relays)
+        result = await client.bootstrap(
+            retry_backoff=retry_backoff
+            if retry_backoff is not None
+            else FRONT_BOOTSTRAP_RETRY_BACKOFF,
         )
-    return result
+
+        # Cache success, and cache a definitive failure. Do NOT cache a transient
+        # one: this result is memoised for the whole process, so caching "the
+        # relays were down a second ago" would pin a front to broken until it
+        # recycles, and pin every later tool call to the same stale verdict. The
+        # same lesson was learned one layer up at 0.62.3, where
+        # _ensure_async_executor cached its resolution before loading credentials
+        # and a cold-vault blip pinned a container to in-process for life.
+        if result.success or not result.transient:
+            _cached_result = result
+        else:
+            logger.info(
+                "Bootstrap failed transiently (%s); not cached, next call retries.",
+                result.error,
+            )
+        return result
 
 
 class BootstrapClient:
@@ -154,7 +192,11 @@ class BootstrapClient:
         self._pubkey_hex = pk.public_key.hex()
         logger.info("Bootstrap identity: %s", self._npub[:16])
 
-    async def bootstrap(self) -> BootstrapResult:
+    async def bootstrap(
+        self,
+        *,
+        retry_backoff: tuple[int, ...] | None = None,
+    ) -> BootstrapResult:
         """Run the full bootstrap sequence — nsec + Oracle + Nostr, no GitHub.
 
         1. Seed relays from the Oracle (or use injected ``relays``)
@@ -162,12 +204,19 @@ class BootstrapClient:
            only its config event; falls back to discover-from-event)
         3. Poll relays for our config event by our own ``d`` tag
         4. Extract Neon URL; the Authority npub is the event's author
+
+        ``retry_backoff`` defaults to the long detached-runner ladder
+        (:data:`_BOOTSTRAP_RETRY_BACKOFF`). Callers that serve live agents
+        should pass :data:`FRONT_BOOTSTRAP_RETRY_BACKOFF` (or let
+        :func:`ensure_bootstrapped` do so).
         """
         from pynostr.key import PrivateKey as _PK  # type: ignore[import-untyped]
         from pynostr.key import PublicKey
 
         from tollbooth.bootstrap_relay import receive_bootstrap_config
         from tollbooth.oracle_client import default_oracle_client
+
+        ladder = retry_backoff if retry_backoff is not None else _BOOTSTRAP_RETRY_BACKOFF
 
         # Convert nsec to hex for vault encryption
         nsec = self._nsec_hex
@@ -224,11 +273,12 @@ class BootstrapClient:
         # weather exists at that moment. The job already holds a multi-minute
         # budget, so spending a fraction of it here is close to free — and
         # giving up on the first pass spends none of it and discards the work.
+        # Live fronts pass a short ladder via ensure_bootstrapped.
         #
         # The poll is synchronous websocket I/O, so it runs on a worker thread:
         # every other session on this process keeps moving while we read.
         config = author_hex = diag = None
-        for attempt, pause in enumerate(_BOOTSTRAP_RETRY_BACKOFF, start=1):
+        for attempt, pause in enumerate(ladder, start=1):
             config, author_hex, diag = await asyncio.to_thread(
                 receive_bootstrap_config,
                 operator_nsec=self._nsec_hex,
@@ -242,7 +292,7 @@ class BootstrapClient:
             if pause:
                 logger.info(
                     "Bootstrap: no config on attempt %d/%d (%s); retrying in %ss",
-                    attempt, len(_BOOTSTRAP_RETRY_BACKOFF), diag, pause,
+                    attempt, len(ladder), diag, pause,
                 )
                 await asyncio.sleep(pause)
         self._relay_diag = diag
