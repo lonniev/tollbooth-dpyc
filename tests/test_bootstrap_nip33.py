@@ -118,3 +118,92 @@ def test_expected_authority_filter_rejects_a_spoofed_event() -> None:
         )
     assert config is None, diag  # real event dropped: author != expected
     assert author is None
+
+
+# ---------------------------------------------------------------------------
+# Relays are read together; newest revision still wins within the settle window
+# ---------------------------------------------------------------------------
+
+def _event_for(config: dict, at: int) -> dict:
+    """Publish ``config`` stamped at epoch ``at``; return the EVENT dict."""
+    captured: dict = {}
+
+    def _send(msg: str) -> None:
+        arr = json.loads(msg)
+        if arr[0] == "EVENT":
+            captured["event"] = arr[1]
+
+    ws = MagicMock()
+    ws.recv.return_value = json.dumps(["OK", "id", True, ""])
+    ws.send.side_effect = _send
+    with patch("websocket.create_connection", return_value=ws), patch("time.time", return_value=at):
+        assert send_bootstrap_config(
+            authority_nsec=AUTH_NSEC, operator_npub=OP_NPUB,
+            config=config, relays=["wss://relay.test"],
+        )
+    return captured["event"]
+
+
+def _serving(event: dict | None, *, delay: float = 0.0, refuse: bool = False):
+    """A per-relay create_connection: optionally slow, optionally refusing."""
+    import time as _time
+
+    def _connect(*_a, **_k):
+        if refuse:
+            raise ConnectionRefusedError("refused")
+        ws = MagicMock()
+        frames = ([json.dumps(["EVENT", "s", event])] if event else []) + [json.dumps(["EOSE", "s"])]
+
+        def _recv():
+            if delay and not ws._slept:
+                ws._slept = True
+                _time.sleep(delay)
+            return frames.pop(0)
+
+        ws._slept = False
+        ws.recv.side_effect = _recv
+        return ws
+
+    return _connect
+
+
+def _by_relay(table: dict):
+    def _connect(url, *a, **k):
+        return table[url](url, *a, **k)
+    return _connect
+
+
+def test_slower_relay_holding_the_newer_revision_wins_within_the_settle_window() -> None:
+    stale = _event_for({"neon_database_url": "postgresql://rotated-away"}, at=1_700_000_000)
+    fresh = _event_for({"neon_database_url": "postgresql://current"}, at=1_700_000_100)
+    table = {
+        "wss://quick-but-stale": _serving(stale),
+        "wss://slower-but-fresh": _serving(fresh, delay=0.3),
+    }
+    with patch("websocket.create_connection", side_effect=_by_relay(table)):
+        config, author, diag = receive_bootstrap_config(
+            operator_nsec=OP_NSEC, relays=list(table),
+        )
+    assert config == {"neon_database_url": "postgresql://current"}
+    assert author == AUTH_HEX
+    assert diag == "relays=2, events=2"
+
+
+def test_refusing_relay_is_an_error_but_a_slow_one_is_only_slow(monkeypatch) -> None:
+    import tollbooth.bootstrap_relay as br
+
+    monkeypatch.setattr(br, "_READ_BUDGET_SECONDS", 0.4)
+    monkeypatch.setattr(br, "_SETTLE_SECONDS", 0.1)
+    fresh = _event_for(CONFIG, at=1_700_000_000)
+    table = {
+        "wss://serves": _serving(fresh),
+        "wss://refuses": _serving(None, refuse=True),
+        "wss://asleep": _serving(fresh, delay=3.0),
+    }
+    with patch("websocket.create_connection", side_effect=_by_relay(table)):
+        config, _author, diag = receive_bootstrap_config(
+            operator_nsec=OP_NSEC, relays=list(table),
+        )
+    assert config == CONFIG
+    assert diag == "relays=3, events=1, slow=1, errors=[wss://refuses: refused]"
+    assert "wss://asleep" not in diag.split("errors=[", 1)[1]

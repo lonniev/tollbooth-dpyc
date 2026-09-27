@@ -193,3 +193,45 @@ class TestResolveRelays:
         result = resolve_relays()
 
         assert result == _REGISTRY_SET
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: the probe asks every relay at once and abandons the silent one
+# ---------------------------------------------------------------------------
+
+class TestProbeIsConcurrent:
+    def test_silent_relay_is_down_and_does_not_hold_the_others_hostage(self):
+        import time
+
+        def _mock_create(url, timeout=10):
+            if url == "wss://silent":
+                time.sleep(1.0)  # longer than the probe's whole deadline
+            return MagicMock()
+
+        with patch("tollbooth.nostr_diagnostics.create_connection", side_effect=_mock_create):
+            start = time.monotonic()
+            results = probe_relay_liveness(["wss://silent", "wss://quick"], timeout=0.1)
+            elapsed = time.monotonic() - start
+
+        by_relay = {r["relay"]: r for r in results}
+        assert by_relay["wss://quick"]["connected"] is True
+        assert by_relay["wss://silent"]["connected"] is False
+        assert "no answer" in by_relay["wss://silent"]["error"]
+        assert by_relay["wss://silent"]["latency_ms"] is None
+        assert elapsed < 0.9, f"probe waited on the silent relay: {elapsed:.2f}s"
+
+    def test_slow_relays_cost_the_slowest_not_the_sum(self):
+        import time
+
+        def _mock_create(url, timeout=10):
+            time.sleep(0.2)
+            return MagicMock()
+
+        relays = [f"wss://r{i}" for i in range(6)]
+        with patch("tollbooth.nostr_diagnostics.create_connection", side_effect=_mock_create):
+            start = time.monotonic()
+            results = probe_relay_liveness(relays, timeout=2)
+            elapsed = time.monotonic() - start
+
+        assert all(r["connected"] for r in results)
+        assert elapsed < 0.7, f"six 0.2s relays took {elapsed:.2f}s — that is a series"
