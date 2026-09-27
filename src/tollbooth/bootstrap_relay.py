@@ -252,7 +252,7 @@ def receive_bootstrap_config(
         read: _RelayRead = o.value
         events_found += read.events
         undecryptable += read.undecryptable
-        if read.config is not None and read.ts > best_ts:
+        if read.config is not None and read.author_hex and read.ts > best_ts:
             best_config, best_author, best_ts = read.config, read.author_hex, read.ts
             logger.info(
                 "Bootstrap config received from %s via %s (ts=%d)",
