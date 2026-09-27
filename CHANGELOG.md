@@ -33,6 +33,21 @@ process stood still with them.
   empty-registry crash (`ThreadPoolExecutor(max_workers=0)`) and an uncaught
   `as_completed` timeout.
 
+### Fixed — ready means ready
+
+`session_status` answered `warming_up` for 15 seconds after the vault came
+up, from a timestamp, while the pricing probe one step below would have proved
+the operator live. Nothing was hydrating; caches fill on demand. Measured on
+2026-09-26: the second status call, 0.2 s after a 16–20 s bootstrap, still
+said `warming_up`, and every agent that obeyed it paid a round trip for the
+same answer.
+
+- The clock rule and its `_vault_ready_at` stamp are gone. A lifecycle hint is
+  derived only from something observed on this call — a persistence error, a
+  missing pricing model — never from a timer. A warming-up hint exists to
+  explain, in the rare case, why a retry would help; it must never discourage
+  an agent from calling a tool promptly.
+
 ## [0.91.0] - 2026-09-09
 
 ### Fixed — a refund now gives back what was TAKEN, not the list price
