@@ -249,7 +249,6 @@ class OperatorRuntime:
 
         # Lazy singletons
         self._vault: Any | None = None
-        self._vault_ready_at: float = 0.0  # time.monotonic() when vault first became ready
         self._ledger_cache: Any | None = None
         self._courier: Any | None = None
         self._cashier: Any | None = None
@@ -484,7 +483,6 @@ class OperatorRuntime:
             return self._vault
 
         import os
-        import time as _time
 
         from tollbooth.vaults import NeonVault
 
@@ -506,7 +504,6 @@ class OperatorRuntime:
                 encryption_nsec_hex=self._get_nsec_hex(),
             )
             await self._vault.ensure_schema()
-            self._vault_ready_at = _time.monotonic()
             # Self-provisioning actors skip the certified-operator bootstrap that seeds
             # the relay cache (see the "authority" branch below). Seed it here, from this
             # async context, or the synchronous Secure Courier get_relays() reaches the
@@ -530,7 +527,6 @@ class OperatorRuntime:
             encryption_nsec_hex=result.encryption_nsec_hex,
         )
         await self._vault.ensure_schema()
-        self._vault_ready_at = _time.monotonic()
         logger.info("Vault bootstrapped from Authority (encrypted)")
         return self._vault
 
@@ -4626,9 +4622,11 @@ def register_standard_tools(
         state and clear guidance on what to do next. Free.
 
         Lifecycle states:
-        - ready: Operator is warm and fully operational — vault AND pricing
-          model verified. Proceed with tool calls.
-        - warming_up: Operator is initializing (cold start). Try a tool call — it will warm up on demand.
+        - ready: Vault AND pricing model verified on this call. Proceed with
+          tool calls — this is the answer the moment the vault is up.
+        - warming_up: Persistence could not be reached on this call (a
+          transient failure, seen, not assumed). Retry; the next call
+          completes the bootstrap. Never reported on a clock.
         - misconfigured: Persistence rejected a query with a permanent SQL
           error (permission denied, missing relation). Paid tools will fail
           until the operator repairs the database — retrying does not help.
@@ -4706,19 +4704,7 @@ def register_standard_tools(
                     "detail": exc_str,
                 }
 
-        # 3. Check if vault just finished bootstrapping (< 15s ago)
-        import time as _time
-        if rt._vault_ready_at > 0 and (_time.monotonic() - rt._vault_ready_at) < 15:
-            return {
-                "success": True,
-                "lifecycle": "warming_up",
-                "operator_npub": npub,
-                "message": "Operator vault just came online. Credential "
-                           "and ledger caches are still hydrating. "
-                           "Try a tool call — it will complete the warm-up.",
-            }
-
-        # 4. Pricing-layer probe — "ready means ready". The paid-tool gate
+        # 3. Pricing-layer probe — "ready means ready". The paid-tool gate
         # depends on the pricing model loading from Neon; a vault that
         # answers while the pricing table rejects queries must not report
         # ready (that green light cost a real outage its true diagnosis).
@@ -4759,7 +4745,7 @@ def register_standard_tools(
                 "detail": resolver.last_error_summary,
             }
 
-        # 5. Fully ready
+        # 4. Fully ready
         result: dict[str, Any] = {
             "success": True,
             "lifecycle": "ready",
