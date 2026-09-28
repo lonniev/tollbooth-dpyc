@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed — a cold start reads one breadcrumb instead of preparing the schema
+
+Every cold operator process ran `NeonVault.ensure_schema()` inside its first
+request: 22 to 24 sequential round trips to Neon, `CREATE … IF NOT EXISTS`
+for every table, almost always changing nothing. The first courier added two
+more and every pricing write three. Measured 2026-09-28, Horizon freezes a
+process between requests, so this could not be moved off the request path.
+
+- **One breadcrumb, one read.** A one-row `tollbooth_schema` table records the
+  schema version the database is prepared for. A cold start reads it with one
+  SELECT; when it is current, nothing else runs. A read that fails for any
+  reason other than "the table is not there yet" propagates — it is never
+  mistaken for an unprepared database.
+- **One compound request per concern when it is not.** Ledger, notarization,
+  pricing, coupons, async jobs and credentials each own their DDL beside the
+  code that uses the tables (`schema_statements`), and each prepares in one
+  Neon batch — one round trip, one transaction. The crumb is written last, so
+  it only exists when everything before it landed; a failed step raises
+  `SchemaPrepError` carrying every step, and no crumb.
+- **A DDL change cannot ship behind a stale crumb.** `SCHEMA_VERSION` and a
+  digest of every statement live together in `tollbooth/vaults/schema.py`; a
+  test fails until both move.
+- **No DDL on hot paths.** The courier and `set_pricing_model` no longer
+  prepare tables. `restore_neon_schema` forces a full prepare and reports
+  each concern's step.
+- **One copy of each table's DDL.** Pricing and coupons were defined twice;
+  on operator schemas the pricing copy had created a second set of indexes
+  under unprefixed names, one of them a partial UNIQUE index checked on every
+  pricing write. Those duplicates are dropped by the pricing concern, once.
+  `neon_schema.sql`, an unused out-of-date copy, is deleted.
+
 ## [0.93.0] — 2026-09-27
 
 ### Fixed — bootstrap config is one relay deep no longer: weekly republish finishes, cold start single-flights

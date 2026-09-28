@@ -205,8 +205,6 @@ async def set_pricing_model_tool(
         return {"status": "error", "error": "Tool chain validation failed", "details": validation_errors}
 
     try:
-        await store.ensure_schema()
-
         # Check if this is an update to an existing model
         if model.model_id:
             existing = await store.fetch_active_model(operator)

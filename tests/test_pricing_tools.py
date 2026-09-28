@@ -136,10 +136,7 @@ class TestSetPricingModelTool:
         async def mock_post(url: str, **kwargs: dict) -> httpx.Response:
             nonlocal call_count
             call_count += 1
-            if call_count <= 3:
-                # ensure_schema: 3 CREATE calls
-                return _response(200, _sql_result(rows=[], command="CREATE"))
-            elif call_count == 4:
+            if call_count == 1:
                 # create_model: INSERT returns new UUID
                 # (model_id is "" from from_json, so skips fetch_active_model)
                 return _response(200, _sql_result(
@@ -167,10 +164,7 @@ class TestSetPricingModelTool:
         async def mock_post(url: str, **kwargs: dict) -> httpx.Response:
             nonlocal call_count
             call_count += 1
-            if call_count <= 3:
-                # ensure_schema
-                return _response(200, _sql_result(rows=[], command="CREATE"))
-            elif call_count == 4:
+            if call_count == 1:
                 # fetch_active_model: existing model with matching ID
                 return _response(200, _sql_result(rows=[_sample_row("uuid-existing")]))
             else:
@@ -234,15 +228,12 @@ class TestRoundTrip:
         async def mock_post(url: str, **kwargs: dict) -> httpx.Response:
             nonlocal call_count
             call_count += 1
-            if call_count <= 3:
-                # ensure_schema: 3 CREATE calls
-                return _response(200, _sql_result(rows=[], command="CREATE"))
-            elif call_count == 4:
+            if call_count == 1:
                 # set: create_model INSERT (model_id="" so skips fetch)
                 return _response(200, _sql_result(
                     rows=[{"id": created_model_id}], command="INSERT",
                 ))
-            elif call_count <= 6:
+            elif call_count <= 3:
                 # set: activate_model (2 UPDATEs)
                 return _response(200, _sql_result(rows=[], command="UPDATE"))
             else:

@@ -20,7 +20,6 @@ class PricingModelStore:
     Usage::
 
         store = PricingModelStore(neon_vault=vault)
-        await store.ensure_schema()
 
         model = PricingModel(operator="npub1abc", name="Launch Pricing", ...)
         model_id = await store.create_model(model)
@@ -33,28 +32,6 @@ class PricingModelStore:
     def _t(self, table: str) -> str:
         """Schema-qualified table name via the underlying NeonVault."""
         return self._neon._t(table)
-
-    async def ensure_schema(self) -> None:
-        """Create the ``operator_pricing_models`` table and indexes."""
-        await self._neon._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('operator_pricing_models')} ("
-            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
-            "    operator TEXT NOT NULL,"
-            "    name TEXT NOT NULL,"
-            "    model_json JSONB NOT NULL,"
-            "    is_active BOOLEAN DEFAULT false,"
-            "    created_at TIMESTAMPTZ DEFAULT now(),"
-            "    updated_at TIMESTAMPTZ DEFAULT now()"
-            ")"
-        )
-        await self._neon._execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS one_active_per_operator "
-            f"ON {self._t('operator_pricing_models')} (operator) WHERE is_active = true"
-        )
-        await self._neon._execute(
-            "CREATE INDEX IF NOT EXISTS idx_pricing_models_operator "
-            f"ON {self._t('operator_pricing_models')} (operator)"
-        )
 
     async def fetch_active_model(self, operator: str) -> PricingModel | None:
         """Return the active pricing model for an operator, or ``None``."""
@@ -159,3 +136,40 @@ class PricingModelStore:
         count = result.get("rowCount", 0) or 0
         logger.info("Reset %d pricing model(s) for %s", count, operator[:20])
         return count
+
+
+def schema_statements(t: Any, idx: str) -> list[str]:
+    """The pricing models table — one active model per operator.
+
+    Before the schema breadcrumb, this module created the same indexes again
+    WITHOUT the schema-scoped name prefix, leaving every operator schema with
+    two copies of each (one a partial UNIQUE index, checked on every write).
+    On a prefixed schema those copies are dropped here, once.
+    """
+    statements = [
+        (
+            f"CREATE TABLE IF NOT EXISTS {t('operator_pricing_models')} ("
+            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            "    operator TEXT NOT NULL,"
+            "    name TEXT NOT NULL,"
+            "    model_json JSONB NOT NULL,"
+            "    is_active BOOLEAN DEFAULT false,"
+            "    created_at TIMESTAMPTZ DEFAULT now(),"
+            "    updated_at TIMESTAMPTZ DEFAULT now()"
+            ")"
+        ),
+        (
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {idx}one_active_per_operator "
+            f"ON {t('operator_pricing_models')} (operator) WHERE is_active = true"
+        ),
+        (
+            f"CREATE INDEX IF NOT EXISTS {idx}idx_pricing_models_operator "
+            f"ON {t('operator_pricing_models')} (operator)"
+        ),
+    ]
+    if idx:
+        statements += [
+            f"DROP INDEX IF EXISTS {t('one_active_per_operator')}",
+            f"DROP INDEX IF EXISTS {t('idx_pricing_models_operator')}",
+        ]
+    return statements

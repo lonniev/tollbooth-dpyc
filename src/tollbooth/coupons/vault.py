@@ -6,9 +6,8 @@ does.  Two tables live in the operator's schema:
 * ``coupons`` — operator-owned offers (name, discount %, window, caps)
 * ``patron_coupons`` — per-patron redemption rows (use_count)
 
-``ensure_schema`` is idempotent (``CREATE TABLE IF NOT EXISTS``) and is
-called once from :meth:`NeonVault.ensure_schema` so upgrading operators
-pick up the tables on first paid call.
+The tables' DDL is ``schema_statements`` below, prepared with every other
+concern by ``tollbooth.vaults.schema``.
 """
 
 from __future__ import annotations
@@ -48,49 +47,6 @@ class CouponsVault:
 
     def _t(self, table: str) -> str:
         return self._neon._t(table)
-
-    # -- Schema -----------------------------------------------------------
-
-    async def ensure_schema(self) -> None:
-        """Create the coupons + patron_coupons tables.  Idempotent."""
-        idx_prefix = ""
-        if getattr(self._neon, "_schema_prefix", ""):
-            idx_prefix = self._neon._schema_prefix.rstrip(".") + "_"
-
-        await self._neon._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('coupons')} ("
-            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
-            "    operator TEXT NOT NULL,"
-            "    name TEXT NOT NULL,"
-            "    discount_percent NUMERIC(5,2) NOT NULL,"
-            "    valid_from TIMESTAMPTZ NOT NULL,"
-            "    valid_until TIMESTAMPTZ NOT NULL,"
-            "    uses_per_patron INTEGER,"
-            "    total_uses INTEGER,"
-            "    times_redeemed INTEGER NOT NULL DEFAULT 0,"
-            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-            "    UNIQUE (operator, name)"
-            ")"
-        )
-        await self._neon._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_coupons_operator "
-            f"ON {self._t('coupons')}(operator)"
-        )
-        await self._neon._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('patron_coupons')} ("
-            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
-            f"    coupon_id UUID NOT NULL REFERENCES {self._t('coupons')}(id) ON DELETE CASCADE,"
-            "    npub TEXT NOT NULL,"
-            "    use_count INTEGER NOT NULL DEFAULT 0,"
-            "    redeemed_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-            "    UNIQUE (coupon_id, npub)"
-            ")"
-        )
-        await self._neon._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_patron_coupons_npub "
-            f"ON {self._t('patron_coupons')}(npub)"
-        )
 
     # -- Operator CRUD ----------------------------------------------------
 
@@ -406,3 +362,37 @@ class CouponsVault:
     def now_utc() -> datetime:
         """Convenience helper — UTC ``datetime`` for window checks."""
         return datetime.now(UTC)
+
+
+def schema_statements(t: Any, idx: str) -> list[str]:
+    """Coupons and their per-patron redemptions."""
+    return [
+        (
+            f"CREATE TABLE IF NOT EXISTS {t('coupons')} ("
+            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            "    operator TEXT NOT NULL,"
+            "    name TEXT NOT NULL,"
+            "    discount_percent NUMERIC(5,2) NOT NULL,"
+            "    valid_from TIMESTAMPTZ NOT NULL,"
+            "    valid_until TIMESTAMPTZ NOT NULL,"
+            "    uses_per_patron INTEGER,"
+            "    total_uses INTEGER,"
+            "    times_redeemed INTEGER NOT NULL DEFAULT 0,"
+            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    UNIQUE (operator, name)"
+            ")"
+        ),
+        f"CREATE INDEX IF NOT EXISTS {idx}idx_coupons_operator ON {t('coupons')}(operator)",
+        (
+            f"CREATE TABLE IF NOT EXISTS {t('patron_coupons')} ("
+            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            f"    coupon_id UUID NOT NULL REFERENCES {t('coupons')}(id) ON DELETE CASCADE,"
+            "    npub TEXT NOT NULL,"
+            "    use_count INTEGER NOT NULL DEFAULT 0,"
+            "    redeemed_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    UNIQUE (coupon_id, npub)"
+            ")"
+        ),
+        f"CREATE INDEX IF NOT EXISTS {idx}idx_patron_coupons_npub ON {t('patron_coupons')}(npub)",
+    ]

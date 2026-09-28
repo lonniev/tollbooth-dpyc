@@ -261,44 +261,7 @@ class TestSnapshotLedger:
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureSchema:
-    @pytest.mark.asyncio
-    async def test_creates_tables_and_indexes(self) -> None:
-        vault = _vault()
-
-        def mock_post(url, json=None, **kw):
-            query = json.get("query", "") if json else ""
-            if "SHOW search_path" in query:
-                return _response(200, _sql_result(
-                    rows=[{"search_path": '"$user", public'}], command="SHOW",
-                ))
-            return _response(200, _sql_result(rows=[], command="CREATE"))
-
-        vault._client.post = AsyncMock(side_effect=mock_post)
-        await vault.ensure_schema()
-        # SHOW search_path + CREATE TABLE/INDEX statements
-        assert vault._client.post.call_count >= 9  # at minimum SHOW + tables + indexes
-
-    @pytest.mark.asyncio
-    async def test_schema_statements_use_if_not_exists(self) -> None:
-        vault = _vault()
-
-        def mock_post(url, json=None, **kw):
-            query = json.get("query", "") if json else ""
-            if "SHOW search_path" in query:
-                return _response(200, _sql_result(
-                    rows=[{"search_path": '"$user", public'}], command="SHOW",
-                ))
-            return _response(200, _sql_result(rows=[], command="CREATE"))
-
-        vault._client.post = AsyncMock(side_effect=mock_post)
-        await vault.ensure_schema()
-
-        for call in vault._client.post.call_args_list:
-            body = call.kwargs.get("json", call[1] if len(call.args) > 1 else None)
-            query = body["query"]
-            if "SHOW" not in query:
-                assert "IF NOT EXISTS" in query
+# Schema preparation is covered in tests/test_schema_prep.py.
 
 
 # ---------------------------------------------------------------------------

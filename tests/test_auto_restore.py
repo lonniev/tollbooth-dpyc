@@ -88,17 +88,6 @@ class TestSessionBindingSQL:
         result = await vault.delete_session_binding("user_01", "thebrain")
         assert result is False
 
-    @pytest.mark.asyncio
-    async def test_ensure_schema_creates_session_bindings(self):
-        """ensure_schema() creates both credentials and session_bindings tables."""
-        vault, neon = _make_credential_vault()
-        await vault.ensure_schema()
-        # Should have been called twice: credentials + session_bindings
-        assert neon._execute.call_count == 2
-        sqls = [call[0][0] for call in neon._execute.call_args_list]
-        assert any("credentials" in s for s in sqls)
-        assert any("session_bindings" in s for s in sqls)
-
 
 # ---------------------------------------------------------------------------
 # Protocol conformance

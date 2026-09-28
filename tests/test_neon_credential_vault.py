@@ -51,35 +51,11 @@ def _sql_result(
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureSchema:
-    @pytest.mark.asyncio
-    async def test_creates_credentials_table(self) -> None:
-        neon = _neon_vault()
-        neon._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(rows=[], command="CREATE"))
-        )
-        vault = _cred_vault(neon)
-        await vault.ensure_schema()
-        # ensure_schema creates both credentials and session_bindings tables
-        assert neon._client.post.call_count == 2
-        first_body = neon._client.post.call_args_list[0].kwargs.get("json")
-        assert "credentials" in first_body["query"]
-        assert "IF NOT EXISTS" in first_body["query"]
-        second_body = neon._client.post.call_args_list[1].kwargs.get("json")
-        assert "session_bindings" in second_body["query"]
-
-    @pytest.mark.asyncio
-    async def test_schema_idempotent(self) -> None:
-        """Calling ensure_schema twice doesn't raise."""
-        neon = _neon_vault()
-        neon._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(rows=[], command="CREATE"))
-        )
-        vault = _cred_vault(neon)
-        await vault.ensure_schema()
-        await vault.ensure_schema()
-        # 2 tables per call × 2 calls = 4
-        assert neon._client.post.call_count == 4
+class TestSchemaStatements:
+    def test_credentials_and_session_bindings(self) -> None:
+        from tollbooth.vaults.neon import credential_schema_statements
+        sql = credential_schema_statements(lambda n: n, "")
+        assert [("credentials" in sql[0]), ("session_bindings" in sql[1])] == [True, True]
 
 
 # ---------------------------------------------------------------------------
