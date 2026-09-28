@@ -16,10 +16,8 @@ Send side (Authority):
     )
 
 Receive side (Operator) — nsec only, Authority discovered from the event:
-    config, authority_hex, diag = receive_bootstrap_config(
-        operator_nsec="nsec1...",
-    )
-    neon_url = config.get("neon_database_url")
+    read = receive_bootstrap_config(operator_nsec="nsec1...")
+    neon_url = read.config.get("neon_database_url")
 
 When ``relays`` is omitted, both sides draw the relay set from the DPYC
 community registry (``relay_registry.get_relays``).
@@ -45,6 +43,29 @@ BOOTSTRAP_CONFIG_TAG = "dpyc-bootstrap-config"
 _READ_BUDGET_SECONDS = 6.0
 # After the first config arrives, how much longer to listen for a newer one.
 _SETTLE_SECONDS = 1.5
+# A config held by fewer relays than this is one relay outage away from an
+# operator that cannot start (six were on nos.lol alone, 2026-09-28).
+_THIN_BELOW = 3
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigRead:
+    """What one read of the relays found.
+
+    ``event`` is the Authority-signed event that supplied ``config``, and
+    ``holders`` the relays that served that very event — so a reader can tell
+    when its config is thinly held and re-broadcast it (:func:`broadcast_signed_event`).
+    """
+
+    config: dict[str, str] | None
+    author_hex: str | None
+    diag: str
+    event: dict[str, Any] | None = None
+    holders: tuple[str, ...] = ()
+
+    @property
+    def thin(self) -> bool:
+        return self.event is not None and len(self.holders) < _THIN_BELOW
 
 
 def _config_d_tag(op_pubkey_hex: str) -> str:
@@ -151,10 +172,19 @@ def send_bootstrap_config(
         tags=[["d", _config_d_tag(op_pubkey_hex)], ["p", op_pubkey_hex]],
     )
     event.sign(auth_pk.hex())
-    event_msg = json.dumps(["EVENT", event.to_dict()])
+    return broadcast_signed_event(event.to_dict(), relay_urls)
 
+
+def broadcast_signed_event(event: dict[str, Any], relays: list[str]) -> PublishResult:
+    """Publish an already-signed event, unchanged, to every relay at once.
+
+    Anyone may relay a signed Nostr event — each relay verifies the author's
+    signature — so an operator can spread the Authority's config event without
+    holding any key but its own.
+    """
+    event_msg = json.dumps(["EVENT", event])
     outcomes = fan_out(
-        relay_urls,
+        relays,
         lambda url: _publish_one(url, event_msg),
         deadline=_PUBLISH_BUDGET_SECONDS,
     )
@@ -164,17 +194,15 @@ def send_bootstrap_config(
     for o in outcomes:
         if o.state == "ok" and o.value is True:
             accepted += 1
-            logger.info(
-                "Bootstrap config sent to %s via %s", operator_npub[:16], o.relay,
-            )
+            logger.info("Bootstrap config event %s accepted by %s", event["id"][:12], o.relay)
         else:
             rejected += 1
             detail = o.error if o.state != "ok" else "rejected"
             # Abandoned / refused relays are weather; a true NIP-20 rejection is news.
             log = logger.warning if o.state == "ok" else logger.debug
             log(
-                "Relay %s did not accept bootstrap config for %s: %s",
-                o.relay, operator_npub[:16], detail,
+                "Relay %s did not accept bootstrap config event %s: %s",
+                o.relay, event["id"][:12], detail,
             )
 
     return PublishResult(accepted, rejected)
@@ -215,7 +243,7 @@ def receive_bootstrap_config(
     operator_nsec: str,
     relays: list[str] | None = None,
     expected_authority_hex: str | None = None,
-) -> tuple[dict[str, str] | None, str | None, str]:
+) -> ConfigRead:
     """Read bootstrap config from Nostr relays using ONLY the operator nsec.
 
     Called by the operator on cold start. Polls relays for the config event
@@ -232,9 +260,9 @@ def receive_bootstrap_config(
     all authors and the caller is expected to verify the returned author
     out-of-band (Oracle cross-check) before trusting the config.
 
-    Returns ``(config, authority_pubkey_hex, diag)`` — ``authority_pubkey_hex``
-    is the hex pubkey of the event that supplied the winning config, or ``None``
-    when no config was found.
+    Returns a :class:`ConfigRead`: the winning config, its author's hex pubkey
+    (``None`` when no config was found), the diagnostics, and the signed event
+    with the relays that served it.
     """
     from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
@@ -258,7 +286,7 @@ def receive_bootstrap_config(
     except ValueError as e:
         logger.error("Bootstrap key hex invalid: priv=%s... err=%s",
                      op_privkey_hex[:8], e)
-        return None, None, f"key hex error: {e}"
+        return ConfigRead(None, None, f"key hex error: {e}")
 
     # Build subscription filter: the config event (kind 30078) scoped to THIS
     # operator's `d` tag. No `authors` clause — the `d` tag is already namespaced
@@ -284,7 +312,9 @@ def receive_bootstrap_config(
     # lets a slightly slower relay still cast its vote.
     best_config: dict[str, str] | None = None
     best_author: str | None = None
+    best_event: dict[str, Any] | None = None
     best_ts = 0
+    served: list[tuple[str, str]] = []  # (relay, id of the event it supplied)
     events_found = 0
     undecryptable = 0
     relay_errors: list[str] = []
@@ -299,8 +329,11 @@ def receive_bootstrap_config(
         read: _RelayRead = o.value
         events_found += read.events
         undecryptable += read.undecryptable
+        if read.event is not None:
+            served.append((o.relay, read.event["id"]))
         if read.config is not None and read.author_hex and read.ts > best_ts:
             best_config, best_author, best_ts = read.config, read.author_hex, read.ts
+            best_event = read.event
             logger.info(
                 "Bootstrap config received from %s via %s (ts=%d)",
                 read.author_hex[:16], o.relay, read.ts,
@@ -320,7 +353,8 @@ def receive_bootstrap_config(
     if best_config is None:
         logger.warning("Bootstrap relay poll failed: %s", diag)
 
-    return best_config, best_author, diag
+    holders = tuple(r for r, eid in served if best_event and eid == best_event["id"])
+    return ConfigRead(best_config, best_author, diag, best_event, holders)
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +366,7 @@ class _RelayRead:
     ts: int
     events: int
     undecryptable: int
+    event: dict[str, Any] | None = None
 
 
 def _read_one(
@@ -354,6 +389,7 @@ def _read_one(
     ws = websocket.create_connection(relay_url, timeout=_READ_BUDGET_SECONDS)
     config: dict[str, str] | None = None
     author: str | None = None
+    signed: dict[str, Any] | None = None
     best_ts = 0
     events = 0
     undecryptable = 0
@@ -389,7 +425,8 @@ def _read_one(
             ts = payload.get("ts", event_data.get("created_at", 0))
             if ts > best_ts:
                 config, author, best_ts = payload.get("config", {}), author_hex, ts
+                signed = event_data
         ws.send(json.dumps(["CLOSE", sub_id]))
     finally:
         ws.close()
-    return _RelayRead(config, author, best_ts, events, undecryptable)
+    return _RelayRead(config, author, best_ts, events, undecryptable, signed)

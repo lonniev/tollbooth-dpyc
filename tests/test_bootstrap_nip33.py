@@ -68,14 +68,14 @@ def test_operator_reads_back_and_decrypts_with_only_its_nsec() -> None:
         json.dumps(["EOSE", "sub"]),
     ]
     with patch("websocket.create_connection", return_value=recv_ws):
-        config, author, diag = receive_bootstrap_config(
+        read = receive_bootstrap_config(
             operator_nsec=OP_NSEC,
             relays=["wss://relay.test"],
         )
-    assert config == CONFIG, diag
+    assert read.config == CONFIG, read.diag
     # The Authority npub is DISCOVERED from the event's author — the operator
     # supplied only its own nsec.
-    assert author == AUTH_HEX
+    assert read.author_hex == AUTH_HEX
 
 
 def test_receive_filter_targets_kind_30078_and_d_tag_without_authors() -> None:
@@ -111,13 +111,13 @@ def test_expected_authority_filter_rejects_a_spoofed_event() -> None:
     ]
     imposter_hex = PrivateKey().public_key.hex()
     with patch("websocket.create_connection", return_value=recv_ws):
-        config, author, diag = receive_bootstrap_config(
+        read = receive_bootstrap_config(
             operator_nsec=OP_NSEC,
             relays=["wss://relay.test"],
             expected_authority_hex=imposter_hex,
         )
-    assert config is None, diag  # real event dropped: author != expected
-    assert author is None
+    assert read.config is None, read.diag  # real event dropped: author != expected
+    assert read.author_hex is None
 
 
 # ---------------------------------------------------------------------------
@@ -181,12 +181,12 @@ def test_slower_relay_holding_the_newer_revision_wins_within_the_settle_window()
         "wss://slower-but-fresh": _serving(fresh, delay=0.3),
     }
     with patch("websocket.create_connection", side_effect=_by_relay(table)):
-        config, author, diag = receive_bootstrap_config(
+        read = receive_bootstrap_config(
             operator_nsec=OP_NSEC, relays=list(table),
         )
-    assert config == {"neon_database_url": "postgresql://current"}
-    assert author == AUTH_HEX
-    assert diag == "relays=2, events=2"
+    assert read.config == {"neon_database_url": "postgresql://current"}
+    assert read.author_hex == AUTH_HEX
+    assert read.diag == "relays=2, events=2"
 
 
 def test_refusing_relay_is_an_error_but_a_slow_one_is_only_slow(monkeypatch) -> None:
@@ -201,9 +201,57 @@ def test_refusing_relay_is_an_error_but_a_slow_one_is_only_slow(monkeypatch) -> 
         "wss://asleep": _serving(fresh, delay=3.0),
     }
     with patch("websocket.create_connection", side_effect=_by_relay(table)):
-        config, _author, diag = receive_bootstrap_config(
+        read = receive_bootstrap_config(
             operator_nsec=OP_NSEC, relays=list(table),
         )
-    assert config == CONFIG
-    assert diag == "relays=3, events=1, slow=1, errors=[wss://refuses: refused]"
-    assert "wss://asleep" not in diag.split("errors=[", 1)[1]
+    assert read.config == CONFIG
+    assert read.diag == "relays=3, events=1, slow=1, errors=[wss://refuses: refused]"
+    assert "wss://asleep" not in read.diag.split("errors=[", 1)[1]
+
+
+# ---------------------------------------------------------------------------
+# Which relays hold the winning event — so an operator can heal a thin config
+# ---------------------------------------------------------------------------
+
+def test_holders_are_the_relays_that_served_the_winning_event() -> None:
+    stale = _event_for({"neon_database_url": "postgresql://rotated-away"}, at=1_700_000_000)
+    fresh = _event_for({"neon_database_url": "postgresql://current"}, at=1_700_000_100)
+    table = {
+        "wss://fresh-a": _serving(fresh),
+        "wss://fresh-b": _serving(fresh),
+        "wss://stale": _serving(stale),
+        "wss://empty": _serving(None),
+    }
+    with patch("websocket.create_connection", side_effect=_by_relay(table)):
+        read = receive_bootstrap_config(operator_nsec=OP_NSEC, relays=list(table))
+    assert read.event["id"] == fresh["id"]
+    assert sorted(read.holders) == ["wss://fresh-a", "wss://fresh-b"]
+    assert read.thin, "two copies is one outage from one"
+
+
+def test_a_config_on_three_relays_is_not_thin() -> None:
+    fresh = _event_for(CONFIG, at=1_700_000_000)
+    table = {f"wss://r{i}": _serving(fresh) for i in range(3)}
+    with patch("websocket.create_connection", side_effect=_by_relay(table)):
+        read = receive_bootstrap_config(operator_nsec=OP_NSEC, relays=list(table))
+    assert not read.thin
+
+
+def test_no_config_is_never_thin() -> None:
+    with patch("websocket.create_connection", side_effect=_serving(None)):
+        read = receive_bootstrap_config(operator_nsec=OP_NSEC, relays=["wss://r"])
+    assert read.config is None and not read.thin
+
+
+def test_a_rebroadcast_is_the_authority_event_unchanged() -> None:
+    from tollbooth.bootstrap_relay import broadcast_signed_event
+
+    fresh = _event_for(CONFIG, at=1_700_000_000)
+    sent: list = []
+    ws = MagicMock()
+    ws.recv.return_value = json.dumps(["OK", fresh["id"], True, ""])
+    ws.send.side_effect = lambda m: sent.append(json.loads(m))
+    with patch("websocket.create_connection", return_value=ws):
+        result = broadcast_signed_event(fresh, ["wss://a", "wss://b"])
+    assert (result.accepted, result.rejected) == (2, 0)
+    assert all(m == ["EVENT", fresh] for m in sent), "same id, same signature — nothing re-signed"

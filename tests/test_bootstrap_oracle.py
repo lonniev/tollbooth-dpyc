@@ -15,6 +15,7 @@ import pytest
 from pynostr.key import PrivateKey
 
 from tollbooth.bootstrap import BootstrapClient
+from tollbooth.bootstrap_relay import ConfigRead
 
 OP = PrivateKey()
 AUTH = PrivateKey()
@@ -43,7 +44,7 @@ async def test_bootstrap_is_github_free_and_pins_expected_authority():
     )
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
-        return_value=({"neon_database_url": "postgresql://x"}, AUTH.public_key.hex(), "diag"),
+        return_value=ConfigRead({"neon_database_url": "postgresql://x"}, AUTH.public_key.hex(), "diag"),
     ) as rbc:
         result = await client.bootstrap()
 
@@ -61,7 +62,7 @@ async def test_bootstrap_discovers_authority_from_event_when_oracle_cannot_resol
     oracle = _oracle(relays=["wss://r.test"], authority=None)  # Oracle can't resolve
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
-        return_value=({"neon_database_url": "postgresql://y"}, AUTH.public_key.hex(), "diag"),
+        return_value=ConfigRead({"neon_database_url": "postgresql://y"}, AUTH.public_key.hex(), "diag"),
     ) as rbc:
         result = await client.bootstrap()
 
@@ -89,7 +90,7 @@ async def test_bootstrap_never_constructs_the_github_registry():
     oracle = _oracle(authority={"npub": AUTH.public_key.bech32(), "url": "u", "name": "n"})
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
-        return_value=({"neon_database_url": "postgresql://z"}, AUTH.public_key.hex(), "d"),
+        return_value=ConfigRead({"neon_database_url": "postgresql://z"}, AUTH.public_key.hex(), "d"),
     ), patch("tollbooth.registry.DPYCRegistry") as reg:
         result = await client.bootstrap()
 
@@ -122,7 +123,7 @@ async def test_both_oracle_questions_share_one_session_and_are_asked_at_once():
     client = BootstrapClient(nsec_hex=OP.bech32())
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
-        return_value=({"neon_database_url": "postgresql://x"}, AUTH.public_key.hex(), "d"),
+        return_value=ConfigRead({"neon_database_url": "postgresql://x"}, AUTH.public_key.hex(), "d"),
     ) as rbc:
         result = await asyncio.wait_for(client.bootstrap(), timeout=2)
 
@@ -158,7 +159,7 @@ async def test_injected_relays_survive_an_unreachable_oracle():
     client = BootstrapClient(nsec_hex=OP.bech32(), relays=["wss://mine.test"])
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
-        return_value=({"neon_database_url": "postgresql://x"}, AUTH.public_key.hex(), "d"),
+        return_value=ConfigRead({"neon_database_url": "postgresql://x"}, AUTH.public_key.hex(), "d"),
     ) as rbc:
         result = await client.bootstrap()
 

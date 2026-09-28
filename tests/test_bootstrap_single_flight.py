@@ -21,6 +21,7 @@ from tollbooth.bootstrap import (
     BootstrapResult,
     ensure_bootstrapped,
 )
+from tollbooth.bootstrap_relay import ConfigRead
 
 NSEC_HEX = "a" * 64
 CONFIG = {"neon_database_url": "postgres://example/db"}
@@ -99,7 +100,7 @@ class TestFrontLadder:
     async def test_client_honours_an_injected_short_ladder(self):
         short = (0, 0)
         with patch("tollbooth.bootstrap_relay.receive_bootstrap_config",
-                   return_value=(None, None, "relays=1, events=0")) as poll, \
+                   return_value=ConfigRead(None, None, "relays=1, events=0")) as poll, \
              patch("tollbooth.oracle_client.default_oracle_client") as oracle:
             oracle.return_value = AsyncMock()
             oracle.return_value.get_relays = AsyncMock(return_value=["wss://a"])
