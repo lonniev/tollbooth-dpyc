@@ -23,6 +23,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tollbooth.oracle_client import OracleClient
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +218,7 @@ class BootstrapClient:
         from pynostr.key import PublicKey
 
         from tollbooth.bootstrap_relay import receive_bootstrap_config
-        from tollbooth.oracle_client import default_oracle_client
+        from tollbooth.oracle_client import OracleClientError, default_oracle_client
 
         ladder = retry_backoff if retry_backoff is not None else _BOOTSTRAP_RETRY_BACKOFF
 
@@ -224,40 +228,45 @@ class BootstrapClient:
 
         result = BootstrapResult(npub=self.npub, encryption_nsec_hex=nsec_hex)
 
-        oracle = default_oracle_client()
-
+        # Steps 1–2 are two independent questions for the Oracle, so they share
+        # one connection and are asked at once; the relay read below waits on
+        # both, since the Authority's hex is its spoof guard.
+        #
         # Step 1: relay set. Injected relays win (tests / callers); otherwise the
         # Oracle is the one fixed anchor an nsec-only operator may know a priori.
-        relays = self._relays
-        if relays is None:
-            try:
-                relays = await oracle.get_relays()
-            except Exception as e:  # noqa: BLE001
-                result.error = f"Cannot reach Oracle for relay set: {e}"
-                logger.warning("Bootstrap: %s", result.error)
-                return result
-            # Warm the process-wide cache so synchronous consumers (courier,
-            # profile, audit) reuse this set instead of re-fetching.
-            from tollbooth.relay_registry import seed_relays
-            seed_relays(relays)
-
-        # Step 2: ask the Oracle who our Authority is. When it answers, we accept
-        # ONLY that author's config event (spoof guard). When it can't (operator
+        #
+        # Step 2: who is our Authority? When the Oracle answers, we accept ONLY
+        # that author's config event (spoof guard). When it can't (operator
         # unknown/new, or Oracle briefly unreachable), we proceed by our own
         # d-tag and discover the author from the event — a working Neon URL is
         # the backstop, and the author can be re-verified later.
-        expected_authority_hex: str | None = None
         try:
-            auth = await oracle.resolve_authority_for(self.npub)
-            if auth and auth.get("npub"):
-                result.authority_npub = auth["npub"]
-                expected_authority_hex = PublicKey.from_npub(auth["npub"]).hex()
-        except Exception as e:  # noqa: BLE001 — verification is best-effort
+            async with default_oracle_client().session() as oracle:
+                relays, authority = await asyncio.gather(
+                    self._relays_from(oracle),
+                    oracle.resolve_authority_for(self.npub),
+                    return_exceptions=True,
+                )
+        except OracleClientError as e:
+            # No connection: the injected relays still stand; only the guard is lost.
+            relays = self._relays if self._relays is not None else e
+            authority = e
+
+        if isinstance(relays, BaseException):
+            result.error = f"Cannot reach Oracle for relay set: {relays}"
+            logger.warning("Bootstrap: %s", result.error)
+            return result
+
+        expected_authority_hex: str | None = None
+        if isinstance(authority, BaseException):
             logger.info(
                 "Bootstrap: Oracle authority pre-resolve unavailable (%s); "
                 "accepting config by operator d-tag, discovering author from event.",
-                e,
+                authority,
             )
+        elif authority and authority.get("npub"):
+            result.authority_npub = authority["npub"]
+            expected_authority_hex = PublicKey.from_npub(authority["npub"]).hex()
 
         # Step 3: read our own config from Nostr using only our nsec.
         #
@@ -342,6 +351,18 @@ class BootstrapClient:
             result.error = "Neon URL not in bootstrap config from Authority"
 
         return result
+
+    async def _relays_from(self, oracle: OracleClient) -> list[str]:
+        """The injected relays, else the Oracle's set — which then warms the
+        process-wide cache so synchronous consumers (courier, profile, audit)
+        reuse it instead of re-fetching."""
+        if self._relays is not None:
+            return self._relays
+        from tollbooth.relay_registry import seed_relays
+
+        relays = await oracle.get_relays()
+        seed_relays(relays)
+        return relays
 
     async def _report_unreachable_relays(
         self, relays: list[str], diag: str | None,

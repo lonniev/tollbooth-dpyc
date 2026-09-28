@@ -14,7 +14,7 @@ later tool call to the same stale answer.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -52,6 +52,8 @@ def _oracle():
     o = AsyncMock()
     o.get_relays = AsyncMock(return_value=["wss://a", "wss://b"])
     o.resolve_authority_for = AsyncMock(return_value=None)
+    o.session = MagicMock()  # a session yields a client bound to one connection
+    o.session.return_value.__aenter__.return_value = o
     return o
 
 
