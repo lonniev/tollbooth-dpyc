@@ -252,6 +252,11 @@ class OperatorRuntime:
         # One bootstrap at a time: the warm-up and the first real call join it.
         self._vault_lock = asyncio.Lock()
         self._warm_task: asyncio.Task[None] | None = None
+        # EXPERIMENT diagnostics (coldstart/warm-on-initialize): which process
+        # answered, and what its warm-up did. Not for merge as-is.
+        import uuid as _uuid
+        self._instance = _uuid.uuid4().hex[:8]
+        self._warm_log: dict[str, Any] = {"state": "never"}
         self._ledger_cache: Any | None = None
         self._courier: Any | None = None
         self._cashier: Any | None = None
@@ -559,13 +564,20 @@ class OperatorRuntime:
         import time as _time
 
         t0 = _time.monotonic()
+        self._warm_log = {"state": "running"}
         try:
             resolver = await self.pricing_resolver()
+            self._warm_log = {"state": "vault", "vault_s": round(_time.monotonic() - t0, 2)}
             await resolver._ensure_fresh()
+            self._warm_log = {**self._warm_log, "state": "done", "total_s": round(_time.monotonic() - t0, 2)}
             logger.info("Warm-up: vault and pricing ready in %.2fs", _time.monotonic() - t0)
-        except Exception as exc:  # noqa: BLE001 — a warm-up is a head start, never a verdict
+        except BaseException as exc:  # noqa: BLE001 — a warm-up is a head start, never a verdict
+            self._warm_log = {"state": "failed", "error": f"{type(exc).__name__}: {str(exc)[:80]}",
+                              "after_s": round(_time.monotonic() - t0, 2)}
             logger.info("Warm-up did not finish (%s: %s); the first call will retry.", type(exc).__name__, exc)
             self._warm_task = None
+            if isinstance(exc, asyncio.CancelledError):
+                raise
 
     async def ledger_cache(self) -> Any:
         """Return the LedgerCache, bootstrapping if needed."""
@@ -4536,6 +4548,7 @@ def register_standard_tools(
     async def service_status() -> dict[str, Any]:
         """Check the health and configuration of this service. Free."""
         import os
+        warm_seen = dict(rt._warm_log)  # EXPERIMENT: before this call touches the vault
         # Trigger lazy init so the field reflects whether the vault CAN
         # be opened (config present + reachable), not whether some prior
         # tool happened to touch it. ``rt.vault()`` raises on missing
@@ -4592,6 +4605,8 @@ def register_standard_tools(
         # none). Free and unauthenticated so an agent can answer "do I need
         # credentials here?" before proving anything.
         status["patron_auth"] = rt.patron_auth_block()
+        status["instance"] = rt._instance  # EXPERIMENT
+        status["warm_seen"] = warm_seen  # EXPERIMENT
         # Durable long-runner diagnostics: the non-secret key_id names the
         # operator's Prefect Secret block (dpyc-closure-key-<key_id>), and
         # whether a detached executor is currently installed. Helps an operator
