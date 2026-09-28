@@ -380,3 +380,52 @@ async def test_resolve_oracle_service_convenience():
         )
         assert result["url"] == "https://dpyc-oracle.fastmcp.app/mcp"
         instance.aclose.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# session() — one connection for several calls
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_session_shares_one_connection_across_calls():
+    connection = AsyncMock()
+    connection.call_tool = AsyncMock(return_value=[_text_block({"relays": ["wss://a"]})])
+    connection.__aenter__ = AsyncMock(return_value=connection)
+    connection.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("tollbooth.oracle_client.Client", return_value=connection) as opened:
+        async with OracleClient("https://oracle.example.com/mcp").session() as oracle:
+            await oracle.get_relays()
+            await oracle.call_tool("resolve_authority_for", {"npub": "npub1x"})
+
+    assert opened.call_count == 1, "one handshake for every call in the session"
+    assert connection.call_tool.await_count == 2
+    connection.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_cannot_connect_raises_the_client_error():
+    connection = AsyncMock()
+    connection.__aenter__ = AsyncMock(side_effect=ConnectionError("refused"))
+
+    with (
+        patch("tollbooth.oracle_client.Client", return_value=connection),
+        pytest.raises(OracleClientError, match="refused"),
+    ):
+        async with OracleClient("https://oracle.example.com/mcp").session():
+            pass
+
+
+@pytest.mark.asyncio
+async def test_a_failure_inside_a_session_is_not_relabelled_as_the_oracle():
+    connection = AsyncMock()
+    connection.__aenter__ = AsyncMock(return_value=connection)
+    connection.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("tollbooth.oracle_client.Client", return_value=connection),
+        pytest.raises(KeyError),
+    ):
+        async with OracleClient("https://oracle.example.com/mcp").session():
+            raise KeyError("the caller's own bug")

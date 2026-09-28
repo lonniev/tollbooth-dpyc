@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 try:
@@ -28,13 +30,36 @@ class OracleClientError(Exception):
 class OracleClient:
     """Server-to-server MCP client for Oracle tool calls.
 
-    Opens a short-lived ``fastmcp.Client`` SSE connection per
-    ``call_tool()`` invocation. Oracle tools are free and
-    unauthenticated, so no credits or certificates are needed.
+    Opens a short-lived ``fastmcp.Client`` connection per ``call_tool()``
+    invocation, unless the client came from :meth:`session`, which shares one
+    connection across every call. Oracle tools are free and unauthenticated,
+    so no credits or certificates are needed.
     """
 
-    def __init__(self, oracle_url: str) -> None:
+    def __init__(self, oracle_url: str, *, connection: Any = None) -> None:
         self._oracle_url = oracle_url
+        self._connection = connection
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[OracleClient]:
+        """Yield a client whose calls all share one open connection.
+
+        A cold start asks the Oracle more than one question; a connection per
+        question pays the handshake each time and forces the questions into
+        sequence. Calls through a session may run concurrently — MCP
+        multiplexes them over the one connection.
+        """
+        _require_fastmcp()
+        async with AsyncExitStack() as stack:
+            try:
+                connection = await stack.enter_async_context(
+                    Client(self._oracle_url, auth="oauth")
+                )
+            except Exception as e:
+                raise OracleClientError(
+                    f"Failed to connect to Oracle at {self._oracle_url}: {e}"
+                ) from e
+            yield OracleClient(self._oracle_url, connection=connection)
 
     async def call_tool(
         self, tool_name: str, arguments: dict[str, Any] | None = None
@@ -43,17 +68,13 @@ class OracleClient:
 
         Raises ``OracleClientError`` on any failure (connection, parse, tool error).
         """
-        if Client is None:
-            raise OracleClientError(
-                "fastmcp package required for Oracle delegation. "
-                "Install with: pip install fastmcp"
-            )
-
+        _require_fastmcp()
         try:
-            async with Client(self._oracle_url, auth="oauth") as client:
-                result = await client.call_tool(tool_name, arguments or {})
-        except OracleClientError:
-            raise
+            if self._connection is not None:
+                result = await self._connection.call_tool(tool_name, arguments or {})
+            else:
+                async with Client(self._oracle_url, auth="oauth") as client:
+                    result = await client.call_tool(tool_name, arguments or {})
         except Exception as e:
             raise OracleClientError(
                 f"Failed to connect to Oracle at {self._oracle_url}: {e}"
@@ -180,6 +201,14 @@ class OracleClient:
             return None
         service = result.get("service")
         return service if isinstance(service, dict) else None
+
+
+def _require_fastmcp() -> None:
+    if Client is None:
+        raise OracleClientError(
+            "fastmcp package required for Oracle delegation. "
+            "Install with: pip install fastmcp"
+        )
 
 
 def default_oracle_client() -> OracleClient:

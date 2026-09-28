@@ -8,6 +8,7 @@ from Nostr by the operator's own d-tag.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,6 +28,8 @@ def _oracle(*, relays=None, authority=None, relays_exc=None):
         else AsyncMock(return_value=relays or ["wss://r.test"])
     )
     oracle.resolve_authority_for = AsyncMock(return_value=authority)
+    oracle.session = MagicMock()  # a session yields a client bound to one connection
+    oracle.session.return_value.__aenter__.return_value = oracle
     return oracle
 
 
@@ -92,3 +95,74 @@ async def test_bootstrap_never_constructs_the_github_registry():
 
     assert result.success
     reg.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_both_oracle_questions_share_one_session_and_are_asked_at_once():
+    """Relays and Authority are independent: neither waits for the other.
+
+    Each fake answer waits until the other question has been asked, so asking
+    them one after the other never finishes.
+    """
+    asked = {"relays": asyncio.Event(), "authority": asyncio.Event()}
+
+    async def get_relays():
+        asked["relays"].set()
+        await asked["authority"].wait()
+        return ["wss://r.test"]
+
+    async def resolve_authority_for(npub):
+        asked["authority"].set()
+        await asked["relays"].wait()
+        return {"npub": AUTH.public_key.bech32()}
+
+    oracle = _oracle()
+    oracle.get_relays = AsyncMock(side_effect=get_relays)
+    oracle.resolve_authority_for = AsyncMock(side_effect=resolve_authority_for)
+    client = BootstrapClient(nsec_hex=OP.bech32())
+    with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
+        "tollbooth.bootstrap_relay.receive_bootstrap_config",
+        return_value=({"neon_database_url": "postgresql://x"}, AUTH.public_key.hex(), "d"),
+    ) as rbc:
+        result = await asyncio.wait_for(client.bootstrap(), timeout=2)
+
+    assert result.success
+    assert oracle.session.call_count == 1
+    assert rbc.call_args.kwargs["expected_authority_hex"] == AUTH.public_key.hex()
+
+
+@pytest.mark.asyncio
+async def test_relays_fail_while_authority_answers_is_still_a_clear_failure():
+    client = BootstrapClient(nsec_hex=OP.bech32())
+    oracle = _oracle(
+        relays_exc=RuntimeError("oracle down"),
+        authority={"npub": AUTH.public_key.bech32()},
+    )
+    with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
+        "tollbooth.bootstrap_relay.receive_bootstrap_config",
+    ) as rbc:
+        result = await client.bootstrap()
+
+    assert not result.success
+    assert "Cannot reach Oracle for relay set" in (result.error or "")
+    rbc.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_injected_relays_survive_an_unreachable_oracle():
+    """With relays in hand, the Oracle is only the spoof guard's source — best-effort."""
+    from tollbooth.oracle_client import OracleClientError
+
+    oracle = _oracle()
+    oracle.session.return_value.__aenter__.side_effect = OracleClientError("refused")
+    client = BootstrapClient(nsec_hex=OP.bech32(), relays=["wss://mine.test"])
+    with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
+        "tollbooth.bootstrap_relay.receive_bootstrap_config",
+        return_value=({"neon_database_url": "postgresql://x"}, AUTH.public_key.hex(), "d"),
+    ) as rbc:
+        result = await client.bootstrap()
+
+    assert result.success
+    assert rbc.call_args.kwargs["relays"] == ["wss://mine.test"]
+    assert rbc.call_args.kwargs["expected_authority_hex"] is None
+    assert result.authority_npub == AUTH.public_key.bech32(), "discovered from the event"

@@ -10,7 +10,7 @@ quickly, because the miss is not cached and the next call retries.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -104,6 +104,8 @@ class TestFrontLadder:
             oracle.return_value = AsyncMock()
             oracle.return_value.get_relays = AsyncMock(return_value=["wss://a"])
             oracle.return_value.resolve_authority_for = AsyncMock(return_value=None)
+            oracle.return_value.session = MagicMock()
+            oracle.return_value.session.return_value.__aenter__.return_value = oracle.return_value
             c = BootstrapClient(nsec_hex=NSEC_HEX)
             c._npub, c._pubkey_hex = "npub1test", "b" * 64
             result = await c.bootstrap(retry_backoff=short)
