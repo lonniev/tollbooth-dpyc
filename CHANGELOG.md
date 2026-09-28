@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — bootstrap asks the Oracle both questions at once on one connection
+
+A cold start asked the Oracle for the relay set and then for its Authority,
+each over its own MCP connection — two handshakes, two round trips in
+sequence. `OracleClient.session()` yields a client whose calls share one
+connection (MCP multiplexes concurrent calls on it), and `bootstrap()` asks
+both questions at once on it. The relay read still waits for the Authority's
+hex, so the spoof guard is unchanged; with injected relays an unreachable
+Oracle still costs only the guard. Measured live: 1.5 s → 1.3 s warm, 4.1 s →
+1.4 s when the Authority lookup was slow.
+
 ### Changed — a cold start reads one breadcrumb instead of preparing the schema
 
 Every cold operator process ran `NeonVault.ensure_schema()` inside its first
