@@ -62,16 +62,13 @@ def _row(**overrides) -> dict:
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureSchema:
-    @pytest.mark.asyncio
-    async def test_creates_tables_and_indexes(self) -> None:
-        v = _vault()
-        v._client.post = AsyncMock(
-            return_value=_response(200, {"command": "CREATE", "rows": []})
-        )
-        await _cvault(v).ensure_schema()
-        # 2 CREATE TABLE + 2 CREATE INDEX
-        assert v._client.post.call_count == 4
+class TestSchemaStatements:
+    def test_coupons_then_redemptions_each_indexed(self) -> None:
+        from tollbooth.coupons.vault import schema_statements
+        sql = schema_statements(lambda n: f"op_test.{n}", "op_test_")
+        assert len(sql) == 4
+        assert "op_test.coupons" in sql[0] and "op_test_idx_coupons_operator" in sql[1]
+        assert "REFERENCES op_test.coupons(id)" in sql[2], "redemptions follow their coupon"
 
 
 # ---------------------------------------------------------------------------

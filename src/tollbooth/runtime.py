@@ -650,7 +650,6 @@ class OperatorRuntime:
                 try:
                     from tollbooth.vaults.neon import NeonCredentialVault
                     cv = NeonCredentialVault(neon_vault=self._vault)
-                    await cv.ensure_schema()
                     self._courier._exchange._credential_vault = cv
                     logger.info("Attached credential vault to courier (late init)")
                 except Exception as exc:  # noqa: BLE001
@@ -700,8 +699,8 @@ class OperatorRuntime:
         try:
             v = await self.vault()
             from tollbooth.vaults.neon import NeonCredentialVault
+            # Its tables were prepared with every other concern when the vault opened.
             credential_vault = NeonCredentialVault(neon_vault=v)
-            await credential_vault.ensure_schema()
             logger.info("Credential vault initialized (NeonCredentialVault)")
         except Exception as exc:  # noqa: BLE001
             logger.warning("No persistent credential vault (%s): %s", type(exc).__name__, exc)
@@ -5614,16 +5613,13 @@ def register_standard_tools(
 
     @tool
     async def restore_neon_schema(dpop_token: str = "") -> dict[str, Any]:
-        """Re-run ``ensure_schema()`` on every NeonVault this operator uses.
+        """Prepare this operator's database schema again, ignoring the breadcrumb.
 
-        Diagnostic / recovery tool for the case where the Neon HTTP SQL API
-        is returning persistent 4xx errors and the operator suspects the
-        schema isn't there or grants are wrong. Idempotent — uses
-        ``CREATE TABLE IF NOT EXISTS`` so a successful re-run is harmless.
-
-        Returns the per-step result. If any step raises, surfaces the Neon
-        error message inline (0.31.0 reads the SQL error body that earlier
-        wheels swallowed behind ``raise_for_status``).
+        Diagnostic / recovery tool for when Neon keeps answering 4xx and the
+        operator suspects a table or grant is missing. Every statement is
+        idempotent, so a clean re-run is harmless; the breadcrumb is rewritten
+        at the end. Returns one step per concern, with Neon's own error text
+        inline for any that failed.
 
         RESTRICTED to operator — requires proof (nsec-signed).
         """
@@ -5639,20 +5635,6 @@ def register_standard_tools(
         if err:
             return err
 
-        steps: list[dict[str, Any]] = []
-
-        async def _try(label: str, coro: Any) -> None:
-            try:
-                await coro
-                steps.append({"step": label, "ok": True})
-            except Exception as exc:  # noqa: BLE001
-                steps.append({
-                    "step": label,
-                    "ok": False,
-                    "error_type": type(exc).__name__,
-                    "error": str(exc)[:500],
-                })
-
         try:
             vault = await rt.vault()
         except Exception as exc:  # noqa: BLE001
@@ -5662,31 +5644,12 @@ def register_standard_tools(
                 "error": f"Could not open vault: {exc}",
             }
 
-        await _try("NeonVault.ensure_schema", vault.ensure_schema())
-
+        from tollbooth.vaults.schema import SchemaPrepError, prepare_schema
         try:
-            from tollbooth.pricing_store import PricingModelStore
-            store = PricingModelStore(neon_vault=vault)
-            await _try("PricingModelStore.ensure_schema", store.ensure_schema())
-        except Exception as exc:  # noqa: BLE001
-            steps.append({"step": "PricingModelStore.ensure_schema", "ok": False, "error": str(exc)[:500]})
-
-        # Credential vault tables live on the same Neon. The live vault is on
-        # the courier's exchange, not the runtime — but for schema creation we
-        # only need a NeonCredentialVault bound to the same NeonVault we already
-        # have (CREATE TABLE IF NOT EXISTS, idempotent). Build one directly, the
-        # way the PricingModelStore block above does, so restore re-creates the
-        # credential schema even on a cold runtime whose courier hasn't
-        # materialized yet. (Previously this read a non-existent
-        # `rt._credential_vault` attribute and silently never ran.)
-        try:
-            from tollbooth.vaults.neon import NeonCredentialVault
-            cred_vault = NeonCredentialVault(neon_vault=vault)
-            await _try("CredentialVault.ensure_schema", cred_vault.ensure_schema())
-        except Exception as exc:  # noqa: BLE001
-            steps.append({"step": "CredentialVault.ensure_schema", "ok": False, "error": str(exc)[:500]})
-
-        all_ok = all(s.get("ok") for s in steps)
+            steps = await prepare_schema(vault, force=True)
+        except SchemaPrepError as exc:
+            steps = exc.steps
+        all_ok = bool(steps) and all(s.get("ok") for s in steps)
         return {
             "success": all_ok,
             "steps": steps,

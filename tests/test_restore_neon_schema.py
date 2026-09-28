@@ -1,11 +1,5 @@
-"""Regression test for restore_neon_schema's credential-vault schema step.
-
-Before this was fixed, restore_neon_schema read a non-existent
-``rt._credential_vault`` attribute (always None), so the credential-vault
-schema was silently never re-created during a restore. The fix builds a
-NeonCredentialVault directly from the operator's NeonVault (mirroring the
-PricingModelStore step). This pins that the credential schema step now runs.
-"""
+"""restore_neon_schema prepares the schema again, ignoring the breadcrumb,
+and reports each concern's step — including Neon's own words for a failure."""
 
 from __future__ import annotations
 
@@ -15,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
+from tollbooth.vaults.schema import SchemaPrepError
 
 os.environ.setdefault(
     "TOLLBOOTH_NOSTR_OPERATOR_NSEC",
@@ -24,7 +19,7 @@ os.environ.setdefault(
 OP = "npub1operatorXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 
 
-def _register(rt):
+def _tools(rt):
     tools: dict = {}
 
     def fake_slug_tool(_mcp, _slug):
@@ -40,54 +35,37 @@ def _register(rt):
 
 def _runtime():
     rt = OperatorRuntime(tool_registry={}, service_name="Test Operator")
-    fake_vault = MagicMock()
-    fake_vault.ensure_schema = AsyncMock()
-    rt.vault = AsyncMock(return_value=fake_vault)
-    rt.require_caller_proof = AsyncMock(return_value=None)  # proof passes
+    vault = MagicMock()
+    rt.vault = AsyncMock(return_value=vault)
+    rt.require_caller_proof = AsyncMock(return_value=None)
     rt.operator_npub = MagicMock(return_value=OP)
-    return rt, fake_vault
+    return rt, vault
 
 
 @pytest.mark.asyncio
-async def test_restore_runs_credential_vault_ensure_schema():
-    rt, fake_vault = _runtime()
-    tools = _register(rt)
-
-    pricing_cls = MagicMock()
-    pricing_cls.return_value.ensure_schema = AsyncMock()
-    cred_cls = MagicMock()
-    cred_cls.return_value.ensure_schema = AsyncMock()
-
-    with patch("tollbooth.pricing_store.PricingModelStore", pricing_cls), \
-         patch("tollbooth.vaults.neon.NeonCredentialVault", cred_cls):
-        r = await tools["restore_neon_schema"](dpop_token="ok")
-
-    assert r["success"] is True
-    step_names = {s["step"] for s in r["steps"]}
-    # The credential-vault step now runs (it never did under the dead getattr).
-    assert "CredentialVault.ensure_schema" in step_names
-    cred_step = next(s for s in r["steps"] if s["step"] == "CredentialVault.ensure_schema")
-    assert cred_step["ok"] is True
-    # Built from the same NeonVault we already hold, and schema ensured.
-    cred_cls.assert_called_once_with(neon_vault=fake_vault)
-    cred_cls.return_value.ensure_schema.assert_awaited_once()
+async def test_restore_forces_a_full_prepare_and_reports_every_step():
+    rt, vault = _runtime()
+    steps = [{"step": "ledger", "ok": True}, {"step": "credentials", "ok": True}, {"step": "crumb", "ok": True}]
+    prepare = AsyncMock(return_value=steps)
+    with patch("tollbooth.vaults.schema.prepare_schema", prepare):
+        r = await _tools(rt)["restore_neon_schema"](dpop_token="ok")
+    prepare.assert_awaited_once_with(vault, force=True)
+    assert r["success"] is True and r["steps"] == steps
 
 
 @pytest.mark.asyncio
-async def test_restore_reports_credential_step_failure_inline():
+async def test_restore_reports_the_failing_step_inline():
     rt, _ = _runtime()
-    tools = _register(rt)
+    steps = [{"step": "ledger", "ok": True},
+             {"step": "credentials", "ok": False, "error_type": "NeonQueryError", "error": "grants missing"}]
+    with patch("tollbooth.vaults.schema.prepare_schema", AsyncMock(side_effect=SchemaPrepError(steps))):
+        r = await _tools(rt)["restore_neon_schema"](dpop_token="ok")
+    assert r["success"] is False
+    assert r["steps"][-1]["step"] == "credentials" and "grants missing" in r["steps"][-1]["error"]
 
-    pricing_cls = MagicMock()
-    pricing_cls.return_value.ensure_schema = AsyncMock()
-    cred_cls = MagicMock()
-    cred_cls.return_value.ensure_schema = AsyncMock(side_effect=RuntimeError("grants missing"))
 
-    with patch("tollbooth.pricing_store.PricingModelStore", pricing_cls), \
-         patch("tollbooth.vaults.neon.NeonCredentialVault", cred_cls):
-        r = await tools["restore_neon_schema"](dpop_token="ok")
-
-    cred_step = next(s for s in r["steps"] if s["step"] == "CredentialVault.ensure_schema")
-    assert cred_step["ok"] is False
-    assert "grants missing" in cred_step["error"]
-    assert r["success"] is False  # a failed step makes the whole run fail
+@pytest.mark.asyncio
+async def test_restore_requires_the_operators_proof():
+    rt, _ = _runtime()
+    r = await _tools(rt)["restore_neon_schema"](dpop_token="")
+    assert r["success"] is False and "proof" in r["error"]

@@ -226,6 +226,35 @@ class NeonVault:
 
         return data
 
+    async def _execute_batch(self, queries: list[str]) -> list[dict[str, Any]]:
+        """Run several statements in ONE request and ONE transaction.
+
+        Neon's HTTP endpoint takes ``{"queries": [{"query", "params"}, …]}``
+        and answers ``{"results": […]}`` (the batch the serverless driver's
+        ``transaction()`` sends). Used for schema preparation, where one
+        concern's tables land together or not at all.
+        """
+        body = {"queries": [{"query": q, "params": []} for q in queries]}
+        resp = await self._client.post(self._endpoint, json=body)
+        if resp.status_code >= 400:
+            try:
+                err_body = resp.json()
+            except Exception:  # noqa: BLE001
+                err_body = None
+            if isinstance(err_body, dict) and err_body.get("message"):
+                raise NeonQueryError(
+                    f"Neon HTTP {resp.status_code}: {err_body['message']} "
+                    f"(batch of {len(queries)}, first={queries[0][:80] if queries else ''}…)",
+                    code=str(err_body.get("code") or ""),
+                    status=resp.status_code,
+                )
+            resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and "message" in data and "results" not in data:
+            raise NeonQueryError(data["message"], code=str(data.get("code") or ""))
+        results = data.get("results", []) if isinstance(data, dict) else []
+        return list(results)
+
     # -- VaultBackend protocol -----------------------------------------------
 
     async def store_ledger(
@@ -316,216 +345,16 @@ class NeonVault:
 
     # -- Schema management ---------------------------------------------------
 
-    async def ensure_schema(self) -> None:
-        """Create the ``balances`` and ``transactions`` tables if they don't exist.
+    async def ensure_schema(self) -> list[dict[str, Any]]:
+        """Make sure this database is prepared for the SDK's schema version.
 
-        Safe to call on every startup — uses ``IF NOT EXISTS``.
-
-        When the connection uses a per-operator schema (search_path=op_xxx,public),
-        tables must be created in the operator's schema explicitly. Otherwise
-        CREATE TABLE IF NOT EXISTS sees the table in ``public`` and skips,
-        leaving the operator's schema without its own tables.
-
-        The per-operator role typically OWNS the schema (Authority transfers
-        ownership at provisioning time) but does NOT have CREATE on the
-        database itself. That means ``CREATE SCHEMA IF NOT EXISTS`` raises
-        ``permission denied for database`` even when the schema already
-        exists — Postgres checks the privilege before the IF NOT EXISTS
-        short-circuit. So: probe ``pg_namespace`` first, and only attempt
-        CREATE SCHEMA when the schema is genuinely missing.
+        One read of the ``tollbooth_schema`` breadcrumb when it already is (the
+        usual cold start); otherwise each concern's tables in one compound
+        request apiece, then the crumb. See ``tollbooth.vaults.schema``.
         """
-        # Ensure the operator's schema exists if we have one
-        if self._schema_prefix:
-            schema_name = self._schema_prefix.rstrip(".")
-            idx_prefix = f"{schema_name}_"
-            # Probe for existence — operator role can SELECT pg_namespace
-            # even when it can't CREATE on the database.
-            exists_result = await self._execute(
-                "SELECT 1 FROM pg_namespace WHERE nspname = $1",
-                [schema_name],
-            )
-            if not exists_result.get("rows"):
-                # Genuinely missing — attempt to create (will succeed for
-                # privileged roles, fail loud for unprivileged ones).
-                await self._execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name}")
-        else:
-            idx_prefix = ""
+        from tollbooth.vaults.schema import prepare_schema
 
-        await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('balances')} ("
-            "    npub TEXT PRIMARY KEY,"
-            "    ledger_json TEXT NOT NULL,"
-            "    version INTEGER NOT NULL DEFAULT 1,"
-            "    last_flush TIMESTAMPTZ NOT NULL DEFAULT now(),"
-            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now()"
-            ")"
-        )
-        await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('transactions')} ("
-            "    id BIGSERIAL PRIMARY KEY,"
-            "    npub TEXT NOT NULL,"
-            "    tx_type TEXT NOT NULL,"
-            "    amount_api_sats INTEGER NOT NULL,"
-            "    tool_name TEXT,"
-            "    invoice_id TEXT,"
-            "    detail TEXT,"
-            "    balance_after INTEGER NOT NULL,"
-            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now()"
-            ")"
-        )
-        await self._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_transactions_npub "
-            f"ON {self._t('transactions')}(npub)"
-        )
-        await self._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_transactions_created "
-            f"ON {self._t('transactions')}(created_at)"
-        )
-        # -- Anchors table (OTS Bitcoin anchoring) --
-        await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('anchors')} ("
-            "    id BIGSERIAL PRIMARY KEY,"
-            "    root_hash TEXT NOT NULL UNIQUE,"
-            "    leaf_count INTEGER NOT NULL,"
-            "    status TEXT NOT NULL DEFAULT 'pending',"
-            "    ots_receipts_json TEXT,"
-            "    snapshot_json TEXT NOT NULL,"
-            "    leaf_hashes_json TEXT NOT NULL,"
-            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-            "    confirmed_at TIMESTAMPTZ"
-            ")"
-        )
-        await self._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_anchors_created "
-            f"ON {self._t('anchors')}(created_at)"
-        )
-        await self._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_anchors_status "
-            f"ON {self._t('anchors')}(status)"
-        )
-        # -- Global demand counters (surge pricing) --
-        await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('tool_demand')} ("
-            "    tool_name TEXT NOT NULL,"
-            "    window_key TEXT NOT NULL,"
-            "    count INTEGER NOT NULL DEFAULT 0,"
-            "    PRIMARY KEY (tool_name, window_key)"
-            ")"
-        )
-        # -- Authority configuration (curator npub, onboarding state) --
-        await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('authority_config')} ("
-            "    key TEXT PRIMARY KEY,"
-            "    value TEXT NOT NULL,"
-            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()"
-            ")"
-        )
-        # -- Operator pricing models (runtime-configurable tool pricing) --
-        await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('operator_pricing_models')} ("
-            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
-            "    operator TEXT NOT NULL,"
-            "    name TEXT NOT NULL,"
-            "    model_json JSONB NOT NULL,"
-            "    is_active BOOLEAN DEFAULT false,"
-            "    created_at TIMESTAMPTZ DEFAULT now(),"
-            "    updated_at TIMESTAMPTZ DEFAULT now()"
-            ")"
-        )
-        await self._execute(
-            f"CREATE UNIQUE INDEX IF NOT EXISTS {idx_prefix}one_active_per_operator "
-            f"ON {self._t('operator_pricing_models')} (operator) WHERE is_active = true"
-        )
-        await self._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_pricing_models_operator "
-            f"ON {self._t('operator_pricing_models')} (operator)"
-        )
-        # -- Coupons (operator-owned discount offers) --
-        await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('coupons')} ("
-            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
-            "    operator TEXT NOT NULL,"
-            "    name TEXT NOT NULL,"
-            "    discount_percent NUMERIC(5,2) NOT NULL,"
-            "    valid_from TIMESTAMPTZ NOT NULL,"
-            "    valid_until TIMESTAMPTZ NOT NULL,"
-            "    uses_per_patron INTEGER,"
-            "    total_uses INTEGER,"
-            "    times_redeemed INTEGER NOT NULL DEFAULT 0,"
-            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-            "    UNIQUE (operator, name)"
-            ")"
-        )
-        await self._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_coupons_operator "
-            f"ON {self._t('coupons')}(operator)"
-        )
-        await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('patron_coupons')} ("
-            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
-            f"    coupon_id UUID NOT NULL REFERENCES {self._t('coupons')}(id) ON DELETE CASCADE,"
-            "    npub TEXT NOT NULL,"
-            "    use_count INTEGER NOT NULL DEFAULT 0,"
-            "    redeemed_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-            "    UNIQUE (coupon_id, npub)"
-            ")"
-        )
-        await self._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_patron_coupons_npub "
-            f"ON {self._t('patron_coupons')}(npub)"
-        )
-        # -- Claim-check async jobs (slow tools return a claim check; a
-        #    companion tool redeems it — see tollbooth/async_jobs.py) --
-        await self._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('async_jobs')} ("
-            "    claim UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
-            "    npub TEXT NOT NULL,"
-            "    kind TEXT NOT NULL,"
-            "    tool_id TEXT NOT NULL,"
-            "    params JSONB NOT NULL,"
-            "    status TEXT NOT NULL DEFAULT 'pending',"
-            "    attempts INTEGER NOT NULL DEFAULT 0,"
-            "    max_runtime_seconds INTEGER NOT NULL,"
-            "    expected_seconds INTEGER NOT NULL DEFAULT 0,"
-            "    result_ttl_seconds INTEGER NOT NULL,"
-            "    result JSONB,"
-            "    error TEXT,"
-            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-            "    started_at TIMESTAMPTZ,"
-            "    completed_at TIMESTAMPTZ,"
-            "    expires_at TIMESTAMPTZ,"
-            "    run_handle TEXT"
-            ")"
-        )
-        # Retrofit run_handle onto operators provisioned before the detached
-        # executor landed — CREATE TABLE IF NOT EXISTS never adds columns.
-        await self._execute(
-            f"ALTER TABLE {self._t('async_jobs')} "
-            "ADD COLUMN IF NOT EXISTS run_handle TEXT"
-        )
-        # Retrofit expected_seconds (author-declared time budget; drives the
-        # 75%-then-tighten poll cadence) onto operators provisioned earlier.
-        await self._execute(
-            f"ALTER TABLE {self._t('async_jobs')} "
-            "ADD COLUMN IF NOT EXISTS expected_seconds INTEGER NOT NULL DEFAULT 0"
-        )
-        # Retrofit charged_sats: what the request was ACTUALLY debited, so a
-        # runner refunding minutes later in another process gives back that
-        # rather than the list price. Without it a patron on a discount was
-        # refunded more than they paid.
-        await self._execute(
-            f"ALTER TABLE {self._t('async_jobs')} "
-            "ADD COLUMN IF NOT EXISTS charged_sats INTEGER NOT NULL DEFAULT 0"
-        )
-        await self._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_async_jobs_npub "
-            f"ON {self._t('async_jobs')}(npub)"
-        )
-        await self._execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_prefix}idx_async_jobs_open "
-            f"ON {self._t('async_jobs')}(status) WHERE status IN ('pending','running')"
-        )
+        return await prepare_schema(self)
 
     # -- Global demand counters (surge pricing) --------------------------------
 
@@ -717,8 +546,9 @@ class NeonCredentialVault:
     credential persistence.  Shares the httpx client and ``_execute()``
     helper from a ``NeonVault`` instance — no new connections or config.
 
-    Schema: ``credentials`` table with composite PK ``(service, npub)``.
-    Call ``ensure_schema()`` at startup alongside ``NeonVault.ensure_schema()``.
+    Schema: ``credentials`` table with composite PK ``(service, npub)`` and
+    ``session_bindings``; prepared by ``tollbooth.vaults.schema`` with every
+    other concern (``credential_schema_statements`` below).
     """
 
     def __init__(self, *, neon_vault: NeonVault) -> None:
@@ -727,19 +557,6 @@ class NeonCredentialVault:
     def _t(self, table: str) -> str:
         """Schema-qualified table name, delegated to the underlying NeonVault."""
         return self._neon._t(table)
-
-    async def ensure_schema(self) -> None:
-        """Create the ``credentials`` and ``session_bindings`` tables if they don't exist."""
-        await self._neon._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('credentials')} ("
-            "    service TEXT NOT NULL,"
-            "    npub TEXT NOT NULL,"
-            "    encrypted_blob TEXT NOT NULL,"
-            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-            "    PRIMARY KEY (service, npub)"
-            ")"
-        )
-        await self.ensure_session_bindings_schema()
 
     async def store_credentials(
         self, service: str, npub: str, encrypted_blob: str,
@@ -778,18 +595,6 @@ class NeonCredentialVault:
 
     # -- SessionBindingBackend implementation --------------------------------
 
-    async def ensure_session_bindings_schema(self) -> None:
-        """Create the ``session_bindings`` table if it doesn't exist."""
-        await self._neon._execute(
-            f"CREATE TABLE IF NOT EXISTS {self._t('session_bindings')} ("
-            "    caller_id TEXT NOT NULL,"
-            "    service TEXT NOT NULL,"
-            "    npub TEXT NOT NULL,"
-            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-            "    PRIMARY KEY (caller_id, service)"
-            ")"
-        )
-
     async def store_session_binding(
         self, caller_id: str, service: str, npub: str,
     ) -> None:
@@ -825,3 +630,101 @@ class NeonCredentialVault:
             [caller_id, service],
         )
         return (result.get("rowCount", 0) or 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# DDL owned by this module — assembled by ``tollbooth.vaults.schema``.
+# Changing any statement here means bumping ``schema.SCHEMA_VERSION``.
+# ---------------------------------------------------------------------------
+
+
+def ledger_schema_statements(t: Any, idx: str) -> list[str]:
+    """Balances, the transaction journal, demand counters and actor config."""
+    return [
+        (
+            f"CREATE TABLE IF NOT EXISTS {t('balances')} ("
+            "    npub TEXT PRIMARY KEY,"
+            "    ledger_json TEXT NOT NULL,"
+            "    version INTEGER NOT NULL DEFAULT 1,"
+            "    last_flush TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now()"
+            ")"
+        ),
+        (
+            f"CREATE TABLE IF NOT EXISTS {t('transactions')} ("
+            "    id BIGSERIAL PRIMARY KEY,"
+            "    npub TEXT NOT NULL,"
+            "    tx_type TEXT NOT NULL,"
+            "    amount_api_sats INTEGER NOT NULL,"
+            "    tool_name TEXT,"
+            "    invoice_id TEXT,"
+            "    detail TEXT,"
+            "    balance_after INTEGER NOT NULL,"
+            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now()"
+            ")"
+        ),
+        f"CREATE INDEX IF NOT EXISTS {idx}idx_transactions_npub ON {t('transactions')}(npub)",
+        f"CREATE INDEX IF NOT EXISTS {idx}idx_transactions_created ON {t('transactions')}(created_at)",
+        # Global demand counters (surge pricing).
+        (
+            f"CREATE TABLE IF NOT EXISTS {t('tool_demand')} ("
+            "    tool_name TEXT NOT NULL,"
+            "    window_key TEXT NOT NULL,"
+            "    count INTEGER NOT NULL DEFAULT 0,"
+            "    PRIMARY KEY (tool_name, window_key)"
+            ")"
+        ),
+        # Actor configuration (curator npub, proven-npub cache, onboarding state).
+        (
+            f"CREATE TABLE IF NOT EXISTS {t('authority_config')} ("
+            "    key TEXT PRIMARY KEY,"
+            "    value TEXT NOT NULL,"
+            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()"
+            ")"
+        ),
+    ]
+
+
+def notarization_schema_statements(t: Any, idx: str) -> list[str]:
+    """OTS Bitcoin anchors of the ledger's Merkle root."""
+    return [
+        (
+            f"CREATE TABLE IF NOT EXISTS {t('anchors')} ("
+            "    id BIGSERIAL PRIMARY KEY,"
+            "    root_hash TEXT NOT NULL UNIQUE,"
+            "    leaf_count INTEGER NOT NULL,"
+            "    status TEXT NOT NULL DEFAULT 'pending',"
+            "    ots_receipts_json TEXT,"
+            "    snapshot_json TEXT NOT NULL,"
+            "    leaf_hashes_json TEXT NOT NULL,"
+            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    confirmed_at TIMESTAMPTZ"
+            ")"
+        ),
+        f"CREATE INDEX IF NOT EXISTS {idx}idx_anchors_created ON {t('anchors')}(created_at)",
+        f"CREATE INDEX IF NOT EXISTS {idx}idx_anchors_status ON {t('anchors')}(status)",
+    ]
+
+
+def credential_schema_statements(t: Any, idx: str) -> list[str]:
+    """Secure Courier credentials and session bindings."""
+    return [
+        (
+            f"CREATE TABLE IF NOT EXISTS {t('credentials')} ("
+            "    service TEXT NOT NULL,"
+            "    npub TEXT NOT NULL,"
+            "    encrypted_blob TEXT NOT NULL,"
+            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    PRIMARY KEY (service, npub)"
+            ")"
+        ),
+        (
+            f"CREATE TABLE IF NOT EXISTS {t('session_bindings')} ("
+            "    caller_id TEXT NOT NULL,"
+            "    service TEXT NOT NULL,"
+            "    npub TEXT NOT NULL,"
+            "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    PRIMARY KEY (caller_id, service)"
+            ")"
+        ),
+    ]

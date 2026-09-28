@@ -292,3 +292,42 @@ class AsyncJobStore:
             "AND created_at < now() - interval '24 hours')"
         )
         return int(result.get("rowCount") or 0)
+
+
+def schema_statements(t: Any, idx: str) -> list[str]:
+    """Claim-check jobs: slow tools return a claim; a companion tool redeems it."""
+    return [
+        (
+            f"CREATE TABLE IF NOT EXISTS {t('async_jobs')} ("
+            "    claim UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            "    npub TEXT NOT NULL,"
+            "    kind TEXT NOT NULL,"
+            "    tool_id TEXT NOT NULL,"
+            "    params JSONB NOT NULL,"
+            "    status TEXT NOT NULL DEFAULT 'pending',"
+            "    attempts INTEGER NOT NULL DEFAULT 0,"
+            "    max_runtime_seconds INTEGER NOT NULL,"
+            "    expected_seconds INTEGER NOT NULL DEFAULT 0,"
+            "    result_ttl_seconds INTEGER NOT NULL,"
+            "    result JSONB,"
+            "    error TEXT,"
+            "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            "    started_at TIMESTAMPTZ,"
+            "    completed_at TIMESTAMPTZ,"
+            "    expires_at TIMESTAMPTZ,"
+            "    run_handle TEXT"
+            ")"
+        ),
+        # Columns added after operators were already provisioned — CREATE TABLE
+        # IF NOT EXISTS never adds columns to a table that exists.
+        f"ALTER TABLE {t('async_jobs')} ADD COLUMN IF NOT EXISTS run_handle TEXT",
+        f"ALTER TABLE {t('async_jobs')} ADD COLUMN IF NOT EXISTS expected_seconds INTEGER NOT NULL DEFAULT 0",
+        # What the request was actually debited, so a refund minutes later in
+        # another process gives back that and not the list price.
+        f"ALTER TABLE {t('async_jobs')} ADD COLUMN IF NOT EXISTS charged_sats INTEGER NOT NULL DEFAULT 0",
+        f"CREATE INDEX IF NOT EXISTS {idx}idx_async_jobs_npub ON {t('async_jobs')}(npub)",
+        (
+            f"CREATE INDEX IF NOT EXISTS {idx}idx_async_jobs_open "
+            f"ON {t('async_jobs')}(status) WHERE status IN ('pending','running')"
+        ),
+    ]

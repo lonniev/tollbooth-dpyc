@@ -67,17 +67,12 @@ def _sample_model() -> PricingModel:
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureSchema:
-    @pytest.mark.asyncio
-    async def test_creates_table_and_indexes(self) -> None:
-        vault = _vault()
-        vault._client.post = AsyncMock(
-            return_value=_response(200, _sql_result(rows=[], command="CREATE"))
-        )
-        store = _store(vault)
-        await store.ensure_schema()
-        # 1 CREATE TABLE + 2 CREATE INDEX
-        assert vault._client.post.call_count == 3
+class TestSchemaStatements:
+    def test_the_table_and_its_two_indexes(self) -> None:
+        from tollbooth.pricing_store import schema_statements
+        sql = schema_statements(lambda n: n, "")
+        assert len(sql) == 3
+        assert "operator_pricing_models" in sql[0] and "one_active_per_operator" in sql[1]
 
 
 # ---------------------------------------------------------------------------
