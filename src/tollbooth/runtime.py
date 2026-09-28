@@ -571,7 +571,7 @@ class OperatorRuntime:
             await resolver._ensure_fresh()
             self._warm_log = {**self._warm_log, "state": "done", "total_s": round(_time.monotonic() - t0, 2)}
             logger.info("Warm-up: vault and pricing ready in %.2fs", _time.monotonic() - t0)
-        except BaseException as exc:  # noqa: BLE001 — a warm-up is a head start, never a verdict
+        except BaseException as exc:
             self._warm_log = {"state": "failed", "error": f"{type(exc).__name__}: {str(exc)[:80]}",
                               "after_s": round(_time.monotonic() - t0, 2)}
             logger.info("Warm-up did not finish (%s: %s); the first call will retry.", type(exc).__name__, exc)
