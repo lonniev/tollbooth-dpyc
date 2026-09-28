@@ -257,6 +257,7 @@ class OperatorRuntime:
         import uuid as _uuid
         self._instance = _uuid.uuid4().hex[:8]
         self._warm_log: dict[str, Any] = {"state": "never"}
+        self._beat: dict[str, Any] = {}
         self._ledger_cache: Any | None = None
         self._courier: Any | None = None
         self._cashier: Any | None = None
@@ -544,6 +545,20 @@ class OperatorRuntime:
         logger.info("Vault bootstrapped from Authority (encrypted)")
         return vault
 
+    def _start_heartbeat(self) -> None:
+        """EXPERIMENT: tick every 100 ms, to see whether the process runs between requests."""
+        if self._beat:
+            return
+        import time as _time
+        self._beat = {"started": _time.monotonic(), "ticks": 0}
+
+        async def _tick() -> None:
+            while True:
+                await asyncio.sleep(0.1)
+                self._beat["ticks"] += 1
+
+        self._beat["task"] = asyncio.get_running_loop().create_task(_tick())
+
     def warm(self) -> None:
         """Start opening the vault and loading the pricing model, in the background.
 
@@ -553,6 +568,10 @@ class OperatorRuntime:
         the same attempt through ``_vault_lock``. A failed warm-up is forgotten,
         so the next connection — or the first real call — tries again.
         """
+        try:
+            self._start_heartbeat()
+        except RuntimeError:
+            pass
         if self._vault is not None or self._warm_task is not None:
             return
         try:
@@ -4607,6 +4626,11 @@ def register_standard_tools(
         status["patron_auth"] = rt.patron_auth_block()
         status["instance"] = rt._instance  # EXPERIMENT
         status["warm_seen"] = warm_seen  # EXPERIMENT
+        if rt._beat:  # EXPERIMENT: ticks expected at 10/s if the process never freezes
+            import time as _t
+            _el = _t.monotonic() - rt._beat["started"]
+            status["heartbeat"] = {"elapsed_s": round(_el, 1), "ticks": rt._beat["ticks"],
+                                   "expected": int(_el * 10)}
         # Durable long-runner diagnostics: the non-secret key_id names the
         # operator's Prefect Secret block (dpyc-closure-key-<key_id>), and
         # whether a detached executor is currently installed. Helps an operator
