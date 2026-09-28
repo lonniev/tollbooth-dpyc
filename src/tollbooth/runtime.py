@@ -249,6 +249,9 @@ class OperatorRuntime:
 
         # Lazy singletons
         self._vault: Any | None = None
+        # One bootstrap at a time: the warm-up and the first real call join it.
+        self._vault_lock = asyncio.Lock()
+        self._warm_task: asyncio.Task[None] | None = None
         self._ledger_cache: Any | None = None
         self._courier: Any | None = None
         self._cashier: Any | None = None
@@ -481,7 +484,13 @@ class OperatorRuntime:
         """
         if self._vault is not None:
             return self._vault
+        async with self._vault_lock:
+            if self._vault is None:
+                self._vault = await self._open_vault()
+        return self._vault
 
+    async def _open_vault(self) -> Any:
+        """Build and schema-check the vault. Called once, under ``_vault_lock``."""
         import os
 
         from tollbooth.vaults import NeonVault
@@ -499,11 +508,11 @@ class OperatorRuntime:
             # plaintext column let Neon/DB admins read balances. Existing
             # plaintext rows migrate to ciphertext on their next write via the
             # vault's plaintext-read bridge.
-            self._vault = NeonVault(
+            vault = NeonVault(
                 database_url=neon_url,
                 encryption_nsec_hex=self._get_nsec_hex(),
             )
-            await self._vault.ensure_schema()
+            await vault.ensure_schema()
             # Self-provisioning actors skip the certified-operator bootstrap that seeds
             # the relay cache (see the "authority" branch below). Seed it here, from this
             # async context, or the synchronous Secure Courier get_relays() reaches the
@@ -511,7 +520,7 @@ class OperatorRuntime:
             from tollbooth.relay_registry import ensure_relays_seeded
             await ensure_relays_seeded()
             logger.info("Vault initialized from NEON_DATABASE_URL (vault_source=env, encrypted)")
-            return self._vault
+            return vault
 
         # Certified operators: bootstrap from Authority relay DM.
         from tollbooth.bootstrap import ensure_bootstrapped
@@ -522,13 +531,41 @@ class OperatorRuntime:
                 "Operator may not be registered with an Authority."
             )
 
-        self._vault = NeonVault(
+        vault = NeonVault(
             database_url=result.neon_database_url,
             encryption_nsec_hex=result.encryption_nsec_hex,
         )
-        await self._vault.ensure_schema()
+        await vault.ensure_schema()
         logger.info("Vault bootstrapped from Authority (encrypted)")
-        return self._vault
+        return vault
+
+    def warm(self) -> None:
+        """Start opening the vault and loading the pricing model, in the background.
+
+        Called when a client connects, so the bootstrap overlaps the MCP
+        handshake and the client's think time instead of starting with the
+        first paid call. Never blocks, never raises; the first real call joins
+        the same attempt through ``_vault_lock``. A failed warm-up is forgotten,
+        so the next connection — or the first real call — tries again.
+        """
+        if self._vault is not None or self._warm_task is not None:
+            return
+        try:
+            self._warm_task = asyncio.get_running_loop().create_task(self._warm())
+        except RuntimeError:
+            return  # no running loop: nothing to overlap with
+
+    async def _warm(self) -> None:
+        import time as _time
+
+        t0 = _time.monotonic()
+        try:
+            resolver = await self.pricing_resolver()
+            await resolver._ensure_fresh()
+            logger.info("Warm-up: vault and pricing ready in %.2fs", _time.monotonic() - t0)
+        except Exception as exc:  # noqa: BLE001 — a warm-up is a head start, never a verdict
+            logger.info("Warm-up did not finish (%s: %s); the first call will retry.", type(exc).__name__, exc)
+            self._warm_task = None
 
     async def ledger_cache(self) -> Any:
         """Return the LedgerCache, bootstrapping if needed."""
@@ -4102,6 +4139,15 @@ def register_standard_tools(
     rt._mcp = mcp
     rt._tool = tool
     rt._mcp_name_cache.clear()  # invalidate any cached names
+
+    # Start the bootstrap when a client connects, not when it first pays: the
+    # vault and pricing load overlap the handshake and the client's think time.
+    try:
+        from tollbooth.warm_start import WarmOnInitialize
+        if hasattr(mcp, "add_middleware"):
+            mcp.add_middleware(WarmOnInitialize(rt))
+    except Exception as exc:  # noqa: BLE001 — never block server construction
+        logger.warning("Warm-on-connect not installed: %s", exc)
 
     # Rescue arguments a client serialised one time too many: a value the tool
     # declared as an object arriving as a JSON string. FastMCP does no such
