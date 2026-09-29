@@ -59,7 +59,7 @@ async def test_invalid_npub_rejected():
 @pytest.mark.asyncio
 async def test_dpop_token_shaped_token_without_cache_gives_refresh_feedback():
     # S4 / #267: a phrase-shaped token is never a credential — refresh guidance.
-    r = await require_proof(NPUB, DPOP_TOKEN, "tool", proven_cache=None)
+    r = await require_proof(NPUB, DPOP_TOKEN, "tool", revocations=None)
     assert r["error_code"] == ErrorCode.PROOF_REFRESH_NEEDED
     assert r["next_steps"]
 
@@ -72,7 +72,7 @@ async def test_phrase_alone_never_authorizes_even_with_cache_hit():
         is_proven=AsyncMock(return_value=True),
         is_grant_revoked=AsyncMock(return_value=False),
     )
-    r = await require_proof(NPUB, DPOP_TOKEN, "tool", proven_cache=cache)
+    r = await require_proof(NPUB, DPOP_TOKEN, "tool", revocations=cache)
     assert r is not None
     assert r["error_code"] == ErrorCode.PROOF_REFRESH_NEEDED
     cache.is_proven.assert_not_awaited()
@@ -81,7 +81,7 @@ async def test_phrase_alone_never_authorizes_even_with_cache_hit():
 @pytest.mark.asyncio
 async def test_cached_dpop_token_miss_gives_refresh_feedback():
     cache = SimpleNamespace(is_proven=AsyncMock(return_value=False))
-    r = await require_proof(NPUB, DPOP_TOKEN, "tool", proven_cache=cache)
+    r = await require_proof(NPUB, DPOP_TOKEN, "tool", revocations=cache)
     assert r["error_code"] == ErrorCode.PROOF_REFRESH_NEEDED
 
 

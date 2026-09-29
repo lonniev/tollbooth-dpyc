@@ -29,9 +29,9 @@ A bare ``alpha-beta-42`` phrase is always refused — it must never
 unlock a proof on its own (clean break from the pre-grant cache).
 
 The gate is actor-agnostic — Operators, Authorities, and any future
-runtime use the same function. Callers may pass ``proven_cache`` for
-grant-revocation tombstones and ``operator_hex`` so only this
-Operator's grants authorize here.
+runtime use the same function. A runtime that accepts grants passes its
+own ``operator_hex`` (only its grants authorize here) and its
+``revocations`` store (a patron's ``forget_credentials`` watermark).
 
 Dependencies: ``pynostr`` (available via ``tollbooth-dpyc[nostr]``).
 """
@@ -46,7 +46,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from tollbooth.proven_npub import ProvenNpubCache
+    from tollbooth.proven_npub import ProofGrantRevocations
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,12 @@ PROOF_REASON_GRANT_NOT_GRANT = "not_proof_grant"
 PROOF_REASON_GRANT_OPERATOR = "operator_mismatch"
 PROOF_REASON_GRANT_MALFORMED = "malformed"
 PROOF_REASON_GRANT_MISSING_NONCE = "missing_nonce"
+PROOF_REASON_GRANT_OPERATOR_UNKNOWN = "operator_unknown"
+"""This runtime could not establish its own identity, so it cannot tell its
+grants from a stranger's. A server-side fault — never authorize past it."""
+PROOF_REASON_REVOCATIONS_UNAVAILABLE = "revocations_unavailable"
+"""The revocation store could not be read; whether the patron revoked is
+unknown, so the gate refuses. Retryable."""
 
 DEFAULT_WINDOW_SECONDS = 60
 """Maximum age (in seconds) of a valid proof event."""
@@ -660,7 +666,33 @@ _GRANT_REASON_MESSAGES = {
         "Pass the dpop_token envelope returned by receive_npub_proof "
         '({\"grant\": ..., \"nonce\": \"...\"}).'
     ),
+    PROOF_REASON_GRANT_OPERATOR_UNKNOWN: (
+        "This service could not establish its own identity, so it cannot "
+        "verify who issued your proof grant. That is a fault on the "
+        "service side, not yours — report it to the operator."
+    ),
+    PROOF_REASON_REVOCATIONS_UNAVAILABLE: (
+        "Could not check whether this proof grant was revoked because the "
+        "service's persistence layer did not answer. Retry shortly."
+    ),
 }
+
+
+def _grant_denial(reason: str) -> dict[str, Any]:
+    """Structured refusal of a proof grant, one line per reason, no key material."""
+    return {
+        "success": False,
+        "error_code": _error_codes().PROOF_INVALID,
+        "reason": reason,
+        "error": _GRANT_REASON_MESSAGES.get(reason, f"Invalid proof grant: {reason}."),
+    }
+
+
+def _error_codes() -> Any:
+    # Lazy: constants imports nothing from here, but keep the dependency one-way.
+    from tollbooth.constants import ErrorCode
+
+    return ErrorCode
 
 
 async def require_proof(
@@ -668,7 +700,7 @@ async def require_proof(
     dpop_token: str,
     tool_name: str,
     *,
-    proven_cache: ProvenNpubCache | None = None,
+    revocations: ProofGrantRevocations | None = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
     operator_hex: str | None = None,
 ) -> dict[str, Any] | None:
@@ -701,8 +733,10 @@ async def require_proof(
     Grants are tool-agnostic (bearer for the patron at this Operator).
 
     Actor-agnostic — Operators, Authorities, and any future runtime
-    use the same gate. Pass ``proven_cache`` for revocation tombstones and
-    ``operator_hex`` so only this Operator's grants authorize here.
+    use the same gate. A grant is accepted only when ``operator_hex`` is
+    known (a grant from a stranger, or from a runtime that cannot name
+    itself, never authorizes) and, when ``revocations`` is supplied, only
+    if the grant post-dates the patron's last ``forget_credentials``.
     """
     # Lazy import — constants is leaf-y, but identity_proof is too;
     # keep the dep one-way to be safe.
@@ -763,12 +797,12 @@ async def require_proof(
     if grant_parsed is not None:
         grant_json, nonce = grant_parsed
         if not nonce:
-            return {
-                "success": False,
-                "error_code": ErrorCode.PROOF_INVALID,
-                "reason": PROOF_REASON_GRANT_MISSING_NONCE,
-                "error": _GRANT_REASON_MESSAGES[PROOF_REASON_GRANT_MISSING_NONCE],
-            }
+            return _grant_denial(PROOF_REASON_GRANT_MISSING_NONCE)
+        # Fail closed: a runtime that cannot name itself cannot tell its own
+        # grants from a stranger's, and must not guess.
+        if not operator_hex:
+            return _grant_denial(PROOF_REASON_GRANT_OPERATOR_UNKNOWN)
+
         import hashlib as _hashlib
 
         challenge_hash = _hashlib.sha256(nonce.encode()).hexdigest()
@@ -785,28 +819,20 @@ async def require_proof(
                 expected_operator_hex=operator_hex,
             )
         except IdentityCredentialError as exc:
-            reason = str(exc) or PROOF_REASON_GRANT_MALFORMED
-            return {
-                "success": False,
-                "error_code": ErrorCode.PROOF_INVALID,
-                "reason": reason,
-                "error": _GRANT_REASON_MESSAGES.get(
-                    reason, f"Invalid proof grant: {reason}."
-                ),
-            }
+            return _grant_denial(str(exc) or PROOF_REASON_GRANT_MALFORMED)
 
-        # Revocation tombstone (forget_credentials / revoke_proof).
-        if proven_cache is not None and hasattr(proven_cache, "is_grant_revoked"):
+        # Revocation: the patron's forget_credentials watermark. Unknown is
+        # not "not revoked" — if the store cannot answer, refuse and say why.
+        if revocations is not None:
+            from tollbooth.proven_npub import RevocationStoreUnavailable
+
             try:
-                if await proven_cache.is_grant_revoked(claims["jti"]):
-                    return {
-                        "success": False,
-                        "error_code": ErrorCode.PROOF_INVALID,
-                        "reason": PROOF_REASON_GRANT_REVOKED,
-                        "error": _GRANT_REASON_MESSAGES[PROOF_REASON_GRANT_REVOKED],
-                    }
-            except Exception:
-                logger.debug("grant revocation check failed", exc_info=True)
+                revoked = await revocations.is_revoked(npub, claims["created_at"])
+            except RevocationStoreUnavailable as exc:
+                logger.warning("proof-grant revocation check unavailable: %s", exc)
+                return _grant_denial(PROOF_REASON_REVOCATIONS_UNAVAILABLE)
+            if revoked:
+                return _grant_denial(PROOF_REASON_GRANT_REVOKED)
 
         return None
 

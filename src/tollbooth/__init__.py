@@ -96,14 +96,13 @@ try:
         create_proof,
         verify_proof,
     )
-    from tollbooth.proven_npub import ProvenNpub, ProvenNpubCache
+    from tollbooth.proven_npub import ProofGrantRevocations
 except ImportError:
     verify_proof = None  # type: ignore[assignment,misc]
     create_proof = None  # type: ignore[assignment,misc]
     PROOF_EVENT_KIND = None  # type: ignore[assignment,misc]
     OWNERSHIP_SENTINEL = None  # type: ignore[assignment,misc]
-    ProvenNpubCache = None  # type: ignore[assignment,misc]
-    ProvenNpub = None  # type: ignore[assignment,misc]
+    ProofGrantRevocations = None  # type: ignore[assignment,misc]
 
 try:
     from tollbooth.credential_templates import (
@@ -262,8 +261,6 @@ __all__ = [
     "IDENTITY_CREDENTIAL_KIND",
     "IDENTITY_CREDENTIAL_LABEL",
     "IDENTITY_CREDENTIAL_TAG",
-    "PROOF_GRANT_LABEL",
-    "PROOF_GRANT_TAG",
     "LOW_BALANCE_FLOOR_API_SATS",
     "MAX_INVOICE_SATS",
     "NOSTR_CERT_KIND",
@@ -271,6 +268,8 @@ __all__ = [
     "OPERATOR_OBSOLETE_PRACTICES",
     "OWNERSHIP_SENTINEL",
     "PROOF_EVENT_KIND",
+    "PROOF_GRANT_LABEL",
+    "PROOF_GRANT_TAG",
     "STANDARD_IDENTITIES",
     "UNDERSTOOD_PROTOCOLS",
     # Actor Protocols
@@ -345,8 +344,7 @@ __all__ = [
     "PricingModel",
     "PricingModelStore",
     "PricingResolver",
-    "ProvenNpub",
-    "ProvenNpubCache",
+    "ProofGrantRevocations",
     "RegistryError",
     "RelayRegistry",
     "RelayRegistryError",
@@ -406,9 +404,9 @@ __all__ = [
     "verify_credential_chain",
     "verify_identity_credential",
     "verify_nostr_certificate",
-    "verify_proof_grant",
     # Operator Proof & Npub Ownership
     "verify_proof",
+    "verify_proof_grant",
     "web_fetch_tool",
     "web_search_tool",
     "x402_wallet_template",

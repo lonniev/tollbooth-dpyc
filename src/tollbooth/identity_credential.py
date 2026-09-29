@@ -270,7 +270,7 @@ def sign_proof_grant(
     *,
     challenge_hash: str,
     patron_sig: str,
-    patron_event_id: str = "",
+    patron_event_id: str,
     ttl_seconds: int = DEFAULT_CREDENTIAL_TTL_SECONDS,
 ) -> str:
     """Sign a kind-30080 Operator proof grant for an nsec-less agent.
@@ -286,16 +286,18 @@ def sign_proof_grant(
         t: dpyc-proof-grant
         L: dpyc.proof_grant
         challenge: sha256(nonce) hex
-        patron_sig: the patron's Schnorr signature from the verified reply
-        patron_event_id: optional event id of that reply
+        patron_sig: the patron's Schnorr signature on the verified reply
+            (the NIP-17 seal, or the NIP-04 event)
+        patron_event_id: id of that signed reply event
         expiration: unix ts (patron-chosen duration, capped by caller)
 
     Args:
         patron_npub: Patron's bech32 npub the grant is issued for.
         operator_nsec: Operator's bech32 nsec (or hex) for signing.
         challenge_hash: ``sha256(nonce).hexdigest()`` — never the raw nonce.
-        patron_sig: Patron reply signature the Operator verified.
-        patron_event_id: Optional id of the verified reply event.
+        patron_sig: The patron's Schnorr signature the Operator verified on
+            the reply (never a placeholder — no verified signature, no grant).
+        patron_event_id: Id of that verified reply event.
         ttl_seconds: Validity window in seconds.
 
     Returns:
@@ -317,6 +319,8 @@ def sign_proof_grant(
         raise IdentityCredentialError("challenge_hash is required.")
     if not patron_sig or not isinstance(patron_sig, str):
         raise IdentityCredentialError("patron_sig is required.")
+    if not patron_event_id or not isinstance(patron_event_id, str):
+        raise IdentityCredentialError("patron_event_id is required.")
 
     try:
         if operator_nsec.startswith("nsec1"):
@@ -357,9 +361,8 @@ def sign_proof_grant(
         ["challenge", challenge_hash],
         ["patron_sig", patron_sig],
         ["expiration", str(expiration)],
+        ["patron_event_id", patron_event_id],
     ]
-    if patron_event_id:
-        tags.append(["patron_event_id", patron_event_id])
 
     event = Event(
         kind=IDENTITY_CREDENTIAL_KIND,
@@ -463,9 +466,9 @@ def verify_proof_grant(
         raise IdentityCredentialError("challenge_mismatch")
 
     patron_sig = _get_tag_value(event.tags, "patron_sig") or ""
-    if not patron_sig:
-        raise IdentityCredentialError("malformed")
     patron_event_id = _get_tag_value(event.tags, "patron_event_id") or ""
+    if not patron_sig or not patron_event_id:
+        raise IdentityCredentialError("malformed")
 
     try:
         expected_patron_hex = _npub_to_hex(expected_patron_npub)
@@ -499,6 +502,7 @@ def verify_proof_grant(
         "operator_npub": operator_npub,
         "operator_hex": event.pubkey,
         "issued_at": claims.get("issued_at", ""),
+        "created_at": int(event.created_at),
         "jti": jti,
         "expiration": expiration,
         "challenge": challenge,

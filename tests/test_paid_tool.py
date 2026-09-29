@@ -83,18 +83,15 @@ def _make_runtime(tool_costs: dict[str, int] | None = None) -> OperatorRuntime:
     )
     # Inject fake pricing resolver and proven npub cache (avoids vault bootstrap)
     rt._pricing_resolver = FakePricingResolver(resolver_costs)
-    rt._proven_npub_cache = FakeProvenNpubCache()
+    rt._proof_grant_revocations = FakeRevocations()
     return rt
 
 
-class FakeProvenNpubCache:
-    """Stub proven npub cache — always forces inline proof verification."""
+class FakeRevocations:
+    """Stub revocation store — nothing is ever revoked."""
 
-    async def is_proven(self, session_id: str, npub: str) -> bool:
+    async def is_revoked(self, npub: str, grant_created_at: int) -> bool:
         return False
-
-    async def mark_proven(self, session_id: str, npub: str) -> None:
-        pass
 
 
 class FakeLedgerCache:
@@ -304,7 +301,7 @@ class TestPaidToolDecorator:
             costs={identity.tool_id: 0},
             priced={identity.tool_id: False},
         )
-        rt._proven_npub_cache = FakeProvenNpubCache()
+        rt._proof_grant_revocations = FakeRevocations()
 
         @rt.paid_tool(identity.tool_id)
         async def unpriced(npub: str = "", dpop_token: str = "") -> dict:
@@ -324,7 +321,7 @@ class TestPaidToolDecorator:
             costs={identity.tool_id: 0},
             priced={identity.tool_id: True},
         )
-        rt._proven_npub_cache = FakeProvenNpubCache()
+        rt._proof_grant_revocations = FakeRevocations()
         rt._ledger_cache = FakeLedgerCache()
 
         @rt.paid_tool(identity.tool_id)
@@ -414,7 +411,7 @@ class TestErrorCodeMapping:
             costs={identity.tool_id: 0},
             priced={identity.tool_id: False},
         )
-        rt._proven_npub_cache = FakeProvenNpubCache()
+        rt._proof_grant_revocations = FakeRevocations()
 
         @rt.paid_tool(identity.tool_id)
         async def unpriced(npub: str = "", dpop_token: str = "") -> dict:

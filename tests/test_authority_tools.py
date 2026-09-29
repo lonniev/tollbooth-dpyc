@@ -128,7 +128,8 @@ def _fake_runtime(fee=20):
         paid_tool=_passthrough_paid_tool,
         operator_npub=MagicMock(return_value="npub1self"),
         runtime_name=MagicMock(side_effect=lambda cap: f"authority_{cap}"),
-        proven_npub_cache=AsyncMock(return_value=MagicMock()),
+        proof_grant_revocations=AsyncMock(return_value=MagicMock()),
+        operator_pubkey_hex=MagicMock(return_value="ab" * 32),
         vault=AsyncMock(return_value=SimpleNamespace(_cipher=None)),
     )
 

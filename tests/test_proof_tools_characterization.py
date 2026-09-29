@@ -35,6 +35,12 @@ def _delimited(**fields) -> str:
     return "\n".join(f"{k} = @@@{v}@@@" for k, v in fields.items())
 
 
+# What the real courier stamps on a candidate once it has verified the sender's
+# signed layer (NIP-17 seal / NIP-04 event). The fake decrypt below does not,
+# so candidates carry it up front; the no-signature case sets them to "".
+SIGNED = {"_sender_sig": "ab" * 64, "_sender_event_id": "seal1"}
+
+
 class FakeExchange:
     """Drives receive_npub_proof's drain loop with canned candidates."""
 
@@ -90,14 +96,9 @@ def _runtime_with_exchange(exchange, *, on_proven=None):
     rt._nsec = PrivateKey().bech32()
     # Stub persistence the drain doesn't exercise.
     rt.load_patron_session = AsyncMock(return_value=({}, ""))  # no challenge_ts
-    record = SimpleNamespace(verified_at=1000.0, expires_at=1000.0 + 7200)
-    cache = SimpleNamespace(
-        mark_proven=AsyncMock(return_value=record),
-        is_grant_revoked=AsyncMock(return_value=False),
-        proof_status=AsyncMock(return_value={"status": "unknown", "expires_in_seconds": 0}),
-    )
-    rt.proven_npub_cache = AsyncMock(return_value=cache)
-    return rt, cache
+    revocations = SimpleNamespace(is_revoked=AsyncMock(return_value=False))
+    rt.proof_grant_revocations = AsyncMock(return_value=revocations)
+    return rt, revocations
 
 
 def _register(rt):
@@ -124,28 +125,32 @@ def patron():
 async def test_match_marks_proven_and_returns_token(patron):
     dpop_token = "bold-hawk-42"
     ex = FakeExchange(candidates=[{
-        "id": "e1", "sig": "ab" * 32, "_relay": PIN,
+        "id": "e1", "_relay": PIN, **SIGNED,
         "_plaintext": _delimited(dpop_token=dpop_token),
     }])
-    rt, cache = _runtime_with_exchange(ex)
+    rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
     r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
 
     assert r["success"] is True
     assert r["proven_npub"] == patron
-    # #267: dpop_token is now the grant envelope {grant, nonce}, not the bare phrase.
+    # #267: dpop_token is the grant envelope {grant, nonce}, not the bare phrase.
     assert r["nonce"] == dpop_token
+    import hashlib
     import json
     envelope = json.loads(r["dpop_token"])
     assert envelope["nonce"] == dpop_token
-    assert envelope["grant"]["kind"] == 30080
-    assert r["grant"]
-    # proven-npub cache written with sha256(dpop_token) hash
-    import hashlib
-    expected_hash = hashlib.sha256(dpop_token.encode()).hexdigest()
-    assert cache.mark_proven.await_args.args[0] == expected_hash
-    assert cache.mark_proven.await_args.args[1] == patron
+    grant = envelope["grant"]
+    assert grant["kind"] == 30080
+    tags = {t[0]: t[1] for t in grant["tags"]}
+    # The grant binds the challenge hash and the VERIFIED reply signature —
+    # never the raw nonce, never a placeholder.
+    assert tags["challenge"] == hashlib.sha256(dpop_token.encode()).hexdigest()
+    assert tags["patron_sig"] == SIGNED["_sender_sig"]
+    assert tags["patron_event_id"] == SIGNED["_sender_event_id"]
+    assert dpop_token not in json.dumps(grant)
+    assert r["expires_in_seconds"] == 7200  # default consent window
     # matched DM popped without a NACK; confirmation DM sent
     assert ex.popped == [("e1", False)]
     assert ex.sent_dms and "confirmed" in ex.sent_dms[0]
@@ -155,7 +160,7 @@ async def test_match_marks_proven_and_returns_token(patron):
 async def test_on_npub_proven_callback_fires_on_match(patron):
     dpop_token = "bold-hawk-42"
     cb = AsyncMock()
-    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, "_plaintext": _delimited(dpop_token=dpop_token)}])
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(dpop_token=dpop_token)}])
     rt, _ = _runtime_with_exchange(ex, on_proven=cb)
     tools = _register(rt)
 
@@ -167,7 +172,7 @@ async def test_on_npub_proven_callback_fires_on_match(patron):
 @pytest.mark.asyncio
 async def test_wrong_dpop_token_nacks_and_reports_not_found(patron):
     ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, "_plaintext": _delimited(dpop_token="WRONG")}])
-    rt, cache = _runtime_with_exchange(ex)
+    rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
     r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token="bold-hawk-42")
@@ -176,7 +181,7 @@ async def test_wrong_dpop_token_nacks_and_reports_not_found(patron):
     assert r["error_code"] == ErrorCode.COURIER_NOT_FOUND
     assert "wrong token" in r["error"]
     assert ex.popped == [("e1", True)]      # NACK'd
-    cache.mark_proven.assert_not_awaited()
+    assert "dpop_token" not in r
 
 
 @pytest.mark.asyncio
@@ -237,38 +242,61 @@ async def test_old_timestamp_dm_with_correct_dpop_token_matches(patron):
     # scoping mechanism now, so an old-but-correct reply MUST match.
     dpop_token = "bold-hawk-42"
     ex = FakeExchange(candidates=[
-        {"id": "old", "_relay": PIN, "created_at": 100,
+        {"id": "old", "_relay": PIN, "created_at": 100, **SIGNED,
          "_plaintext": _delimited(dpop_token=dpop_token)},
     ])
-    rt, cache = _runtime_with_exchange(ex)
+    rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
     r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
     assert r["success"] is True
     assert r["proven_npub"] == patron
     assert ex.popped == [("old", False)]  # matched, popped without NACK
-    cache.mark_proven.assert_awaited_once()
+    assert r["dpop_token"]
 
 
 @pytest.mark.asyncio
 async def test_cache_duration_overrides_ttl(patron):
     dpop_token = "bold-hawk-42"
     ex = FakeExchange(candidates=[
-        {"id": "e1", "_relay": PIN,
+        {"id": "e1", "_relay": PIN, **SIGNED,
          "_plaintext": _delimited(dpop_token=dpop_token, cache_duration="1 day")},
     ])
-    rt, cache = _runtime_with_exchange(ex)
+    rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
-    # patron-chosen duration parsed and passed as ttl_override (not UNSET)
-    assert cache.mark_proven.await_args.kwargs["ttl_override"] == 86400
+    r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
+    # The patron's stated consent window is the grant's lifetime.
+    import json
+    import time as _t
+    tags = {t[0]: t[1] for t in json.loads(r["grant"])["tags"]}
+    assert r["expires_in_seconds"] == 86400
+    assert abs(int(tags["expiration"]) - (_t.time() + 86400)) < 5
+
+
+@pytest.mark.asyncio
+async def test_reply_without_a_verified_signature_issues_no_grant(patron):
+    # The grant attests the patron's verified signature; if the courier could
+    # not surface one, there is nothing to attest and no grant is minted.
+    dpop_token = "bold-hawk-42"
+    ex = FakeExchange(candidates=[
+        {"id": "e1", "_relay": PIN, "_sender_sig": "", "_sender_event_id": "",
+         "_plaintext": _delimited(dpop_token=dpop_token)},
+    ])
+    rt, _ = _runtime_with_exchange(ex)
+    tools = _register(rt)
+
+    r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
+    assert r["success"] is False
+    assert r["error_code"] == ErrorCode.PROOF_INVALID
+    assert "dpop_token" not in r and "grant" not in r
+    assert "no verifiable patron signature" in r["error"]
 
 
 @pytest.mark.asyncio
 async def test_match_clears_channel_state(patron):
     dpop_token = "bold-hawk-42"
-    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, "_plaintext": _delimited(dpop_token=dpop_token)}])
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(dpop_token=dpop_token)}])
     rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
@@ -349,18 +377,14 @@ async def test_request_propagates_open_channel_failure(patron):
 async def test_check_proof_status_phrase_needs_refresh(patron):
     # #267: a bare phrase is never a credential — status is refresh_needed.
     rt = OperatorRuntime(tool_registry={}, service_name="Test")
-    cache = SimpleNamespace(proof_status=AsyncMock(
-        return_value={"status": "valid", "expires_in_seconds": 123},
-    ))
-    rt.proven_npub_cache = AsyncMock(return_value=cache)
+    rt.proof_grant_revocations = AsyncMock(side_effect=AssertionError("no store for a phrase"))
     tools = _register(rt)
 
     r = await tools["check_proof_status"](patron_npub=patron, dpop_token="bold-hawk-42")
     assert r["success"] is True
     assert r["status"] == "refresh_needed"
+    assert r["expires_in_seconds"] == 0
     assert "nonce alone is not a credential" in r["message"]
-    import hashlib
-    assert cache.proof_status.await_args.args[0] == hashlib.sha256(b"bold-hawk-42").hexdigest()
 
 
 # ── event loop not blocked by the relay drain (to_thread follow-up) ────
@@ -371,7 +395,7 @@ async def test_receive_drain_does_not_block_event_loop(patron):
     # Slow relay fetch: if it ran inline, a concurrent coroutine couldn't run
     # until it finished. With asyncio.to_thread the loop stays responsive.
     ex = FakeExchange(
-        candidates=[{"id": "e1", "_relay": PIN, "_plaintext": _delimited(dpop_token=dpop_token)}],
+        candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(dpop_token=dpop_token)}],
         fetch_delay=0.25,
     )
     rt, _ = _runtime_with_exchange(ex)

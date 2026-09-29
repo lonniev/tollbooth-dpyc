@@ -141,15 +141,24 @@ def _make_nip04_event(
     ct_b64 = base64.b64encode(ciphertext).decode()
     iv_b64 = base64.b64encode(iv).decode()
 
-    return {
-        "id": "event_nip04_test",
-        "kind": _KIND_ENCRYPTED_DM,
-        "pubkey": sender_privkey.public_key.hex(),
-        "content": f"{ct_b64}?iv={iv_b64}",
-        "tags": [["p", recipient_pubkey_hex]],
-        "created_at": created_at or int(time.time()),
-        "sig": "fake_sig",
-    }
+    # A real signature: the courier verifies the sender's signed layer and a
+    # proof grant later attests it, so the fixture must sign like a client.
+    return _signed_event(
+        sender_privkey,
+        kind=_KIND_ENCRYPTED_DM,
+        content=f"{ct_b64}?iv={iv_b64}",
+        tags=[["p", recipient_pubkey_hex]],
+        created_at=created_at or int(time.time()),
+    )
+
+
+def _signed_event(privkey: PrivateKey, *, kind: int, content: str, tags: list, created_at: int) -> dict:
+    """A genuinely signed Nostr event dict, as a client would publish it."""
+    from pynostr.event import Event
+
+    event = Event(kind=kind, content=content, tags=tags, pubkey=privkey.public_key.hex(), created_at=created_at)
+    event.sign(privkey.hex())
+    return event.to_dict()
 
 
 def _make_gift_wrap_event(
@@ -188,13 +197,10 @@ def _make_gift_wrap_event(
         sender_privkey.hex(),
         recipient_pubkey_hex,
     )
-    seal_event = {
-        "kind": _KIND_SEAL,
-        "content": seal_content,
-        "pubkey": sender_privkey.public_key.hex(),
-        "created_at": now,
-        "tags": [],
-    }
+    # The seal is the layer the SENDER signs — the courier verifies it.
+    seal_event = _signed_event(
+        sender_privkey, kind=_KIND_SEAL, content=seal_content, tags=[], created_at=now,
+    )
 
     # Layer 1: Gift wrap — Seal encrypted to recipient with random key
     random_key = PrivateKey()
@@ -204,15 +210,10 @@ def _make_gift_wrap_event(
         recipient_pubkey_hex,
     )
 
-    return {
-        "id": "event_giftwrap_test",
-        "kind": _KIND_GIFT_WRAP,
-        "content": wrap_content,
-        "pubkey": random_key.public_key.hex(),
-        "created_at": now,
-        "tags": [["p", recipient_pubkey_hex]],
-        "sig": "fake_sig",
-    }
+    return _signed_event(
+        random_key, kind=_KIND_GIFT_WRAP, content=wrap_content,
+        tags=[["p", recipient_pubkey_hex]], created_at=now,
+    )
 
 
 # ── Initialization Tests ─────────────────────────────────────────────
@@ -2961,3 +2962,86 @@ class TestStrictPinnedRelayDrain:
         )
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.DPOP_TOKEN_MISSING
+
+
+class TestSignedLayerSurfaced:
+    """The courier verifies the SENDER's signature on a DM and surfaces it (#267).
+
+    For NIP-17 that is the kind-13 seal — the wrap is signed by a throwaway
+    key — and for NIP-04 the kind-4 event itself. A proof grant later attests
+    exactly this signature, so it must be the patron's and it must verify.
+    """
+
+    def _wrap_from(self, ex, sender, text="dpop_token = @@@bold-hawk-42@@@"):
+        message = ex._build_gift_wrap_with(
+            sender.hex(), sender.public_key.hex(), ex._pubkey_hex, text,
+        )
+        return json.loads(message)[1]
+
+    def test_gift_wrap_surfaces_the_seal_signature_not_the_wrap_signature(self):
+        ex = _make_exchange()
+        patron = PrivateKey()
+        wrap = self._wrap_from(ex, patron)
+
+        plaintext = ex._unwrap_gift_wrap(wrap, patron.public_key.hex())
+
+        assert "bold-hawk-42" in plaintext
+        assert wrap["_sender_sig"] != wrap["sig"]  # never the throwaway key's
+        # Cross-check against the seal the wrap actually carries.
+        from tollbooth.nip44 import decrypt as nip44_decrypt
+        seal = json.loads(nip44_decrypt(wrap["content"], ex._privkey_hex, wrap["pubkey"]))
+        assert wrap["_sender_sig"] == seal["sig"]
+        assert wrap["_sender_event_id"] == seal["id"]
+        assert seal["pubkey"] == patron.public_key.hex()
+
+    def test_gift_wrap_with_a_forged_seal_signature_is_refused(self):
+        ex = _make_exchange()
+        patron = PrivateKey()
+        impostor = PrivateKey()
+        # Build a seal that CLAIMS the patron's pubkey but is signed by the
+        # impostor, then wrap it exactly as a client would.
+        from pynostr.event import Event
+
+        from tollbooth.nostr_credentials import _KIND_GIFT_WRAP, _KIND_PRIVATE_DM, _KIND_SEAL
+        rumor = {"kind": _KIND_PRIVATE_DM, "content": "x", "tags": [],
+                 "pubkey": patron.public_key.hex(), "created_at": int(time.time())}
+        seal = Event(kind=_KIND_SEAL, content=nip44_encrypt(json.dumps(rumor), impostor.hex(), ex._pubkey_hex),
+                     tags=[], pubkey=impostor.public_key.hex(), created_at=int(time.time()))
+        seal.sign(impostor.hex())
+        seal_dict = seal.to_dict()
+        seal_dict["pubkey"] = patron.public_key.hex()  # the lie
+        ephemeral = PrivateKey()
+        wrap = Event(kind=_KIND_GIFT_WRAP,
+                     content=nip44_encrypt(json.dumps(seal_dict), ephemeral.hex(), ex._pubkey_hex),
+                     tags=[["p", ex._pubkey_hex]], pubkey=ephemeral.public_key.hex(),
+                     created_at=int(time.time()))
+        wrap.sign(ephemeral.hex())
+
+        with pytest.raises(CourierValidationError, match="signature"):
+            ex._unwrap_gift_wrap(wrap.to_dict(), patron.public_key.hex())
+
+    def test_nip04_surfaces_the_event_signature(self):
+        ex = _make_exchange()
+        patron = PrivateKey()
+        message = ex._build_nip04_dm_with(
+            patron.hex(), patron.public_key.hex(), ex._pubkey_hex, "hello",
+        )
+        event = json.loads(message)[1]
+
+        plaintext = ex._decrypt_nip04_dm(event, patron.public_key.hex())
+
+        assert plaintext == "hello"
+        assert event["_sender_sig"] == event["sig"]
+        assert event["_sender_event_id"] == event["id"]
+
+    def test_nip04_with_a_bad_signature_is_refused(self):
+        ex = _make_exchange()
+        patron = PrivateKey()
+        message = ex._build_nip04_dm_with(
+            patron.hex(), patron.public_key.hex(), ex._pubkey_hex, "hello",
+        )
+        event = json.loads(message)[1]
+        event["sig"] = "00" * 64
+
+        with pytest.raises(CourierValidationError, match="signature"):
+            ex._decrypt_nip04_dm(event, patron.public_key.hex())

@@ -200,7 +200,6 @@ class OperatorRuntime:
         purchase_mode: str = "certified",
         vault_source: str = "authority",
         credential_validator: Any | None = None,
-        proven_npub_ttl_seconds: int = 3600,
         npub_proof_field: str = "confirm",
         npub_proof_greeting: str = "",
         on_npub_proven: Any | None = None,
@@ -260,8 +259,8 @@ class OperatorRuntime:
         # to in-flight fire-and-forget tasks so they aren't GC'd mid-send.
         self._last_quota_alert_at: float = 0.0
         self._quota_alert_tasks: set[Any] = set()
-        self._proven_npub_ttl = proven_npub_ttl_seconds
-        self._proven_npub_cache: Any | None = None  # lazy ProvenNpubCache
+        self._proof_grant_revocations: Any | None = None  # lazy ProofGrantRevocations
+        self._operator_pubkey_hex: str | None = None
         self._npub_proof_field = npub_proof_field
         self._npub_proof_greeting = npub_proof_greeting
         self._on_npub_proven = on_npub_proven  # async callback(npub, payload)
@@ -366,6 +365,27 @@ class OperatorRuntime:
             pk = PrivateKey(bytes.fromhex(nsec))
         self._operator_npub = pk.public_key.bech32()
         return self._operator_npub
+
+    def operator_pubkey_hex(self) -> str | None:
+        """This operator's public key as hex, or ``None`` if it cannot be derived.
+
+        The proof gate treats ``None`` as "cannot name myself" and refuses
+        every proof grant — fail closed, never fail open.
+        """
+        if self._operator_pubkey_hex is not None:
+            return self._operator_pubkey_hex
+        try:
+            from pynostr.key import PrivateKey  # type: ignore[import-untyped]
+            nsec = self._get_nsec()
+            if nsec.startswith("nsec1"):
+                pk = PrivateKey.from_nsec(nsec)
+            else:
+                pk = PrivateKey(bytes.fromhex(nsec))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("operator pubkey could not be derived: %s", exc)
+            return None
+        self._operator_pubkey_hex = pk.public_key.hex()
+        return self._operator_pubkey_hex
 
     def _get_nsec(self) -> str:
         if self._nsec is not None:
@@ -783,20 +803,10 @@ class OperatorRuntime:
         dict to return verbatim.
         """
         from tollbooth.constants import ErrorCode
-        op_hex = None
-        try:
-            from pynostr.key import PrivateKey  # type: ignore[import-untyped]
-            nsec = self._get_nsec()
-            if nsec.startswith("nsec1"):
-                op_hex = PrivateKey.from_nsec(nsec).public_key.hex()
-            else:
-                op_hex = PrivateKey(bytes.fromhex(nsec)).public_key.hex()
-        except Exception:  # noqa: BLE001
-            op_hex = None
         err = await require_proof(
             npub, dpop_token, self.runtime_name(capability),
-            proven_cache=await self.proven_npub_cache(),
-            operator_hex=op_hex,
+            revocations=await self.proof_grant_revocations(),
+            operator_hex=self.operator_pubkey_hex(),
         )
         # When the caller has not yet proven ownership, tell them — right in
         # the denial — whether this operator ALSO needs patron credentials or
@@ -884,16 +894,12 @@ class OperatorRuntime:
     # Proven npub ownership cache
     # ------------------------------------------------------------------
 
-    async def proven_npub_cache(self) -> Any:
-        """Lazy accessor for the ProvenNpubCache (vault-backed)."""
-        if self._proven_npub_cache is None:
-            from tollbooth.proven_npub import ProvenNpubCache
-            v = await self.vault()
-            self._proven_npub_cache = ProvenNpubCache(
-                ttl_seconds=self._proven_npub_ttl,
-                vault=v,
-            )
-        return self._proven_npub_cache
+    async def proof_grant_revocations(self) -> Any:
+        """Lazy accessor for the per-npub proof-grant revocation store (vault-backed)."""
+        if self._proof_grant_revocations is None:
+            from tollbooth.proven_npub import ProofGrantRevocations
+            self._proof_grant_revocations = ProofGrantRevocations(vault=await self.vault())
+        return self._proof_grant_revocations
 
     @staticmethod
     def _get_session_id() -> str:
@@ -990,22 +996,12 @@ class OperatorRuntime:
                 }
 
             proof_npub = self.operator_npub() if category == "restricted" else resolved
-            op_hex = None
-            try:
-                from pynostr.key import PrivateKey  # type: ignore[import-untyped]
-                nsec = self._get_nsec()
-                if nsec.startswith("nsec1"):
-                    op_hex = PrivateKey.from_nsec(nsec).public_key.hex()
-                else:
-                    op_hex = PrivateKey(bytes.fromhex(nsec)).public_key.hex()
-            except Exception:  # noqa: BLE001
-                op_hex = None
             if err := await require_proof(
                 proof_npub,
                 dpop_token,
                 name,
-                proven_cache=await self.proven_npub_cache(),
-                operator_hex=op_hex,
+                revocations=await self.proof_grant_revocations(),
+                operator_hex=self.operator_pubkey_hex(),
             ):
                 return err
 
@@ -5263,15 +5259,15 @@ def register_standard_tools(
         Do NOT poll or retry — each ``receive_npub_proof`` call
         destructively drains the relay mailbox.
 
-        **Returns** a ``dpop_token`` — the demonstrated-proof-of-possession
-        token that the calling application MUST remember and pass as the
-        ``dpop_token`` parameter on every subsequent paid tool call. The MCP
-        does not retain this value across restarts.
+        **Returns** a ``dpop_token`` — the one-time challenge nonce shown in
+        the DM. Pass it to ``receive_npub_proof`` to collect the reply. It
+        is a matching token, not a credential: on its own it authorizes
+        nothing.
 
-        **Lifecycle:** The cached proof expires after the patron's
-        chosen duration. When it expires, call ``request_npub_proof``
-        again for a fresh challenge, then wait for the user, then
-        call ``receive_npub_proof``.
+        **Lifecycle:** ``receive_npub_proof`` returns the proof grant, which
+        expires after the duration the patron named in their reply. When it
+        expires, call ``request_npub_proof`` again for a fresh challenge,
+        then wait for the user, then call ``receive_npub_proof``.
 
         Free.
 
@@ -5317,11 +5313,12 @@ def register_standard_tools(
         their message will never be found. Do NOT poll, loop, or retry.
 
         The signed DM itself proves npub ownership (the patron's nsec
-        signed it). On success, returns the ``dpop_token`` — the same
-        token. The calling application MUST remember it and pass it as the
-        ``dpop_token`` parameter on every subsequent paid tool call. The
-        proof (a hash of the token) is stored in the vault keyed by that
-        hash — the MCP never stores the raw token itself. Free.
+        signed it). On success, returns a new ``dpop_token``: an
+        Operator-signed **proof grant envelope** ``{"grant": …, "nonce": …}``
+        bound to the patron, this challenge, and the duration the patron
+        named. The calling application MUST remember that whole string and
+        pass it as ``dpop_token`` on every subsequent paid tool call. The
+        grant is self-verifying; nothing about it is stored here. Free.
 
         Args:
             patron_npub: Required. The patron's npub to receive proof from.
@@ -5335,18 +5332,20 @@ def register_standard_tools(
         patron_npub: str = "",
         dpop_token: str = "",
     ) -> dict[str, Any]:
-        """Check whether a previously-cached dpop_token is still valid.
+        """Check whether a proof grant is still valid.
 
         Mirrors ``check_oauth_status`` for the npub-proof flow: a calling
         agent can ask "will my next paid call accept this dpop_token?"
-        before burning credits on a guaranteed failure.
+        before burning credits on a guaranteed failure. Expiry is read from
+        the grant itself; the only store consulted is the patron's
+        revocation watermark.
 
-        Free, no side effects — does not evict the cache or touch relays.
+        Free, no side effects — touches no relay.
 
         Args:
             patron_npub: Required. The patron's npub (npub1...).
-            dpop_token: Required. The dpop_token phrase returned by
-                ``request_npub_proof`` / ``receive_npub_proof``.
+            dpop_token: Required. The grant envelope returned by
+                ``receive_npub_proof``.
         """
         from tollbooth.tools.proof import check_proof_status_tool
         return await check_proof_status_tool(rt, patron_npub, dpop_token)
@@ -5579,15 +5578,15 @@ def register_standard_tools(
         """
         if not dpop_token:
             return {"success": False, "error": "Only the operator can request adoption — provide proof."}
-        # Verify the caller's proof INLINE only (proven_cache=None). The vault-
-        # backed proven-npub cache would force an operator bootstrap, but an
-        # un-adopted orphan has no vault yet — bootstrapping is precisely what
-        # adoption provisions. The caller holds the operator nsec and signs an
-        # inline kind-27235 proof; require_proof verifies it with no cache.
+        # Verify the caller's proof INLINE only: no revocation store and no
+        # operator_hex, so a proof grant can never pass here — only a fresh
+        # kind-27235 signed with the operator nsec. The vault-backed store
+        # would force an operator bootstrap, but an un-adopted orphan has no
+        # vault yet; bootstrapping is precisely what adoption provisions.
         from tollbooth.identity_proof import require_proof
         err = await require_proof(
             rt.operator_npub(), dpop_token, rt.runtime_name("request_adoption"),
-            proven_cache=None,
+            revocations=None,
         )
         if err:
             return err

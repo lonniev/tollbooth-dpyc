@@ -21,8 +21,8 @@ class ErrorCode:
     NPUB_MISSING = "npub_missing"
     NPUB_INVALID = "npub_invalid"
 
-    # Npub ownership proof (from request_npub_proof / receive_npub_proof
-    # → cached as dpop_token_hash in ProvenNpubCache).
+    # Npub ownership proof (request_npub_proof / receive_npub_proof → an
+    # Operator-signed proof grant the caller presents; or an inline kind-27235).
     PROOF_MISSING = "proof_missing"          # parameter empty
     PROOF_REQUIRED = "proof_required"        # restricted-tool path requiring inline Schnorr
     PROOF_INVALID = "proof_invalid"          # signature does not verify
