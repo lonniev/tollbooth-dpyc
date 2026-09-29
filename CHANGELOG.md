@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.97.0] — 2026-09-29
 
 ### Changed — the challenge nonce selects a proof; it never unlocks one (#267)
 
