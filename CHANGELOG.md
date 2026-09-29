@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed — an operator spreads its own thinly held bootstrap config
+
+Six operators' configs lived on one relay (nos.lol), most untouched since June:
+the Authority's weekly refresh is a background task that Horizon's freeze
+rarely lets finish. `receive_bootstrap_config` now returns a `ConfigRead` with
+the winning signed event and the relays that served it; when fewer than three
+hold it, `bootstrap()` re-broadcasts that event, unchanged, to the rest — in the
+background, after bootstrap already has its answer. `send_bootstrap_config`
+publishes through the same `broadcast_signed_event`.
+
 ## [0.94.0] — 2026-09-28
 
 ### Changed — bootstrap asks the Oracle both questions at once on one connection

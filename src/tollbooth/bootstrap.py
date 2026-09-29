@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from tollbooth.bootstrap_relay import ConfigRead
     from tollbooth.oracle_client import OracleClient
 
 logger = logging.getLogger(__name__)
@@ -144,6 +145,42 @@ async def ensure_bootstrapped(
                 result.error,
             )
         return result
+
+
+# Strong refs, so a spread outlives the request that started it.
+_spreads: set[asyncio.Task[None]] = set()
+
+
+def _spread_in_background(read: ConfigRead, relays: list[str]) -> None:
+    """Re-broadcast a thinly held config event to the relays that lack it.
+
+    The operator protects itself: a config on one relay is one outage from a
+    process that cannot start, and the Authority's own refresh is a background
+    task that Horizon's freeze rarely lets finish. Bootstrap already has its
+    answer, so nothing waits on this. Horizon may freeze it between requests;
+    it resumes on the next, and a process recycled first tries again on its
+    next cold start — re-sending a signed event is harmless.
+    """
+    from tollbooth.bootstrap_relay import broadcast_signed_event
+
+    event = read.event
+    missing = [r for r in relays if r not in read.holders]
+    if event is None or not missing:
+        return
+
+    async def spread() -> None:
+        try:
+            result = await asyncio.to_thread(broadcast_signed_event, event, missing)
+            logger.info(
+                "Bootstrap config was on %d relay(s); re-broadcast to %d more (%d refused).",
+                len(read.holders), result.accepted, result.rejected,
+            )
+        except Exception as exc:  # noqa: BLE001 — healing is never load-bearing
+            logger.info("Bootstrap config re-broadcast failed: %s", exc)
+
+    task = asyncio.create_task(spread())
+    _spreads.add(task)
+    task.add_done_callback(_spreads.discard)
 
 
 class BootstrapClient:
@@ -288,13 +325,16 @@ class BootstrapClient:
         # every other session on this process keeps moving while we read.
         config = author_hex = diag = None
         for attempt, pause in enumerate(ladder, start=1):
-            config, author_hex, diag = await asyncio.to_thread(
+            read = await asyncio.to_thread(
                 receive_bootstrap_config,
                 operator_nsec=self._nsec_hex,
                 relays=relays,
                 expected_authority_hex=expected_authority_hex,
             )
+            config, author_hex, diag = read.config, read.author_hex, read.diag
             if config is not None:
+                if read.thin:
+                    _spread_in_background(read, relays)
                 if attempt > 1:
                     logger.info("Bootstrap config found on relay attempt %d", attempt)
                 break

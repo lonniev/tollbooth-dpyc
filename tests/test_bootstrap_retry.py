@@ -20,6 +20,7 @@ import pytest
 
 import tollbooth.bootstrap as bs
 from tollbooth.bootstrap import BootstrapClient, BootstrapResult, ensure_bootstrapped
+from tollbooth.bootstrap_relay import ConfigRead
 
 # Captured at import, BEFORE the fixture patches it — reloading the module to
 # read it back would undo every patch and let later tests hit real relays.
@@ -61,9 +62,9 @@ class TestTheRelayPollIsRetried:
     @pytest.mark.asyncio
     async def test_a_flap_on_the_first_pass_does_not_end_it(self):
         """The 2026-08-23 shape: down, then serving moments later."""
-        polls = [(None, None, "relays=2, events=0"),
-                 (None, None, "relays=2, events=0"),
-                 (CONFIG, "c" * 64, "relays=2, events=1")]
+        polls = [ConfigRead(None, None, "relays=2, events=0"),
+                 ConfigRead(None, None, "relays=2, events=0"),
+                 ConfigRead(CONFIG, "c" * 64, "relays=2, events=1")]
         with patch("tollbooth.bootstrap_relay.receive_bootstrap_config",
                    side_effect=polls) as poll, \
              patch("tollbooth.oracle_client.default_oracle_client", return_value=_oracle()):
@@ -77,7 +78,7 @@ class TestTheRelayPollIsRetried:
     async def test_a_first_pass_hit_costs_no_extra_polls(self):
         """The common case must not pay for the retry ladder."""
         with patch("tollbooth.bootstrap_relay.receive_bootstrap_config",
-                   return_value=(CONFIG, "c" * 64, "ok")) as poll, \
+                   return_value=ConfigRead(CONFIG, "c" * 64, "ok")) as poll, \
              patch("tollbooth.oracle_client.default_oracle_client", return_value=_oracle()):
             result = await _client().bootstrap()
         assert result.success is True and poll.call_count == 1
@@ -85,7 +86,7 @@ class TestTheRelayPollIsRetried:
     @pytest.mark.asyncio
     async def test_the_ladder_is_bounded_and_the_failure_is_marked_transient(self):
         with patch("tollbooth.bootstrap_relay.receive_bootstrap_config",
-                   return_value=(None, None, "relays=2, events=0")) as poll, \
+                   return_value=ConfigRead(None, None, "relays=2, events=0")) as poll, \
              patch("tollbooth.oracle_client.default_oracle_client", return_value=_oracle()):
             result = await _client().bootstrap()
 
