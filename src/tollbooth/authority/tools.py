@@ -601,7 +601,7 @@ async def _require_authority_consent(
         authority_npub,
         authority_proof,
         tool_name,
-        proven_cache=await runtime.proven_npub_cache(),
+        revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex(),
     )
     if err is None:
         return None
@@ -933,7 +933,7 @@ def register_authority_tools(
 
         Next step: Call purchase_credits to fund your credit balance.
         """
-        err = await require_proof(npub, dpop_token, runtime.runtime_name("register_operator"), proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, dpop_token, runtime.runtime_name("register_operator"), revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex())
         if err:
             return err
         err = await _require_authority_consent(
@@ -969,7 +969,7 @@ def register_authority_tools(
           Operator's nsec could redirect their own ``service_url`` under
           this Authority's signature without the Authority's awareness.
         """
-        err = await require_proof(npub, dpop_token, runtime.runtime_name("update_operator"), proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, dpop_token, runtime.runtime_name("update_operator"), revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex())
         if err:
             return err
         err = await _require_authority_consent(
@@ -1020,7 +1020,7 @@ def register_authority_tools(
           Operator's public npub and held its nsec could remove themselves
           from this Authority's roster without the Authority noticing.
         """
-        err = await require_proof(npub, dpop_token, runtime.runtime_name("deregister_operator"), proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, dpop_token, runtime.runtime_name("deregister_operator"), revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex())
         if err:
             return err
         err = await _require_authority_consent(
@@ -1052,7 +1052,7 @@ def register_authority_tools(
 
         Gated by Schnorr signature proving ownership of the requested npub.
         """
-        err = await require_proof(npub, dpop_token, runtime.runtime_name("get_operator_config"), proven_cache=await runtime.proven_npub_cache())
+        err = await require_proof(npub, dpop_token, runtime.runtime_name("get_operator_config"), revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex())
         if err:
             return err
 
@@ -1092,7 +1092,7 @@ def register_authority_tools(
         inspection is always allowed).
         """
         if npub:
-            err = await require_proof(npub, dpop_token, runtime.runtime_name("operator_status"), proven_cache=await runtime.proven_npub_cache())
+            err = await require_proof(npub, dpop_token, runtime.runtime_name("operator_status"), revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex())
             if err:
                 return err
         user_id = _resolve_npub_or_operator(npub)

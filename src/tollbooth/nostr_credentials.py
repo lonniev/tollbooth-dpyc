@@ -264,6 +264,32 @@ def _courier_resolve_error(error_code: str, request_tool: str) -> str:
     return template.replace("{request_tool}", request_tool)
 
 
+_SIGNED_EVENT_FIELDS = ("id", "pubkey", "created_at", "kind", "tags", "content", "sig")
+
+
+def _verify_signed_layer(event: dict[str, Any], label: str) -> str:
+    """Verify a Nostr event's Schnorr signature and return the id it covers.
+
+    ``event`` may carry courier bookkeeping keys (``_relay`` …); only the
+    seven protocol fields are fed to the verifier. The id is recomputed from
+    the signed fields — that, not whatever ``event["id"]`` says, is the event
+    the signature attests, so it is what a proof grant records. A DM whose
+    signed layer does not verify is malformed, whatever it decrypts to.
+    """
+    if not _HAS_PYNOSTR:
+        raise CourierValidationError(
+            f"Cannot verify the {label} signature: pynostr is not installed."
+        )
+    try:
+        signed = Event.from_dict({k: event[k] for k in _SIGNED_EVENT_FIELDS})
+        ok = signed.verify()
+    except Exception as exc:
+        raise CourierValidationError(f"{label} signature is malformed: {exc}") from exc
+    if not ok:
+        raise CourierValidationError(f"{label} signature does not verify.")
+    return str(signed.id)
+
+
 def _npub_to_hex(npub: str) -> str:
     """Convert npub bech32 to 32-byte hex pubkey."""
     if not _HAS_PYNOSTR:
@@ -2372,6 +2398,9 @@ class NostrCredentialExchange:
                 f"NIP-04 decryption failed: {exc}"
             ) from exc
 
+        # A kind-4 DM is signed by the sender directly; verify and surface it.
+        event["_sender_event_id"] = _verify_signed_layer(event, "DM")
+        event["_sender_sig"] = event["sig"]
         event["encryption"] = "nip04"
         logger.info(
             "Received NIP-04 DM (legacy). Consider upgrading to a "
@@ -2443,6 +2472,12 @@ class NostrCredentialExchange:
                 f"does not match expected sender. "
                 f"DM may be from a different npub."
             )
+
+        # The seal is the one layer the SENDER signed (the wrap is signed by
+        # a throwaway key). Verify that signature and surface it: it is the
+        # patron's proof of possession that a proof grant later attests.
+        event["_sender_event_id"] = _verify_signed_layer(seal, "seal")
+        event["_sender_sig"] = seal["sig"]
 
         # Layer 3: Decrypt seal content with our privkey + sender pubkey
         try:

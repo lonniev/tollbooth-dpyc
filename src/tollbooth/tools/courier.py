@@ -214,6 +214,21 @@ async def forget_credentials_tool(
         result = await courier.forget(target_npub, service)
         if service == rt.operator_credential_service:
             rt._cashier = None
+        # Forgetting a patron revokes every proof grant issued to them: the
+        # watermark refuses any grant minted up to now. The vault write is
+        # authoritative — say so if it did not take, never pretend it did.
+        if result.get("success"):
+            try:
+                await (await rt.proof_grant_revocations()).revoke_all(target_npub)
+                result["proof_grants_revoked"] = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("proof-grant revocation on forget failed: %s", exc)
+                result["proof_grants_revoked"] = False
+                result["proof_grant_revocation_error"] = (
+                    "Credentials were forgotten, but the revocation of proof "
+                    "grants could not be persisted; call forget_credentials "
+                    "again once the persistence layer answers."
+                )
         # Fire on_forget callback so operators can clear caches
         if rt._on_forget and result.get("success"):
             try:

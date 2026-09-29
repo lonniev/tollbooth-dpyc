@@ -32,6 +32,13 @@ IDENTITY_CREDENTIAL_KIND = 30080
 IDENTITY_CREDENTIAL_TAG = "dpyc-identity"
 IDENTITY_CREDENTIAL_LABEL = "dpyc.identity"
 
+# Proof-grant subtype of kind 30080 — Operator-signed bearer for nsec-less agents.
+# Distinct tags so a citizen identity credential cannot be mistaken for a proof
+# grant (and vice versa). The challenge nonce only *selects* this grant; it never
+# unlocks one on its own.
+PROOF_GRANT_TAG = "dpyc-proof-grant"
+PROOF_GRANT_LABEL = "dpyc.proof_grant"
+
 # Default credential TTL: 30 days
 DEFAULT_CREDENTIAL_TTL_SECONDS = 30 * 24 * 3600
 
@@ -254,6 +261,253 @@ def verify_identity_credential(
         "issued_at": claims.get("issued_at", ""),
         "jti": jti,
         "expiration": expiration,
+    }
+
+
+def sign_proof_grant(
+    patron_npub: str,
+    operator_nsec: str,
+    *,
+    challenge_hash: str,
+    patron_sig: str,
+    patron_event_id: str,
+    ttl_seconds: int = DEFAULT_CREDENTIAL_TTL_SECONDS,
+) -> str:
+    """Sign a kind-30080 Operator proof grant for an nsec-less agent.
+
+    The grant attests that the Operator verified a patron-signed reply over a
+    specific challenge nonce. The raw nonce never appears in the grant — only
+    ``sha256(nonce)`` — so the nonce may later *select* the grant without being
+    able to authorize alone.
+
+    Tags:
+        d: jti
+        p: patron hex pubkey
+        t: dpyc-proof-grant
+        L: dpyc.proof_grant
+        challenge: sha256(nonce) hex
+        patron_sig: the patron's Schnorr signature on the verified reply
+            (the NIP-17 seal, or the NIP-04 event)
+        patron_event_id: id of that signed reply event
+        expiration: unix ts (patron-chosen duration, capped by caller)
+
+    Args:
+        patron_npub: Patron's bech32 npub the grant is issued for.
+        operator_nsec: Operator's bech32 nsec (or hex) for signing.
+        challenge_hash: ``sha256(nonce).hexdigest()`` — never the raw nonce.
+        patron_sig: The patron's Schnorr signature the Operator verified on
+            the reply (never a placeholder — no verified signature, no grant).
+        patron_event_id: Id of that verified reply event.
+        ttl_seconds: Validity window in seconds.
+
+    Returns:
+        JSON string of the signed kind-30080 event.
+
+    Raises:
+        IdentityCredentialError: On signing failure.
+    """
+    try:
+        from pynostr.event import Event  # type: ignore[import-untyped]
+        from pynostr.key import PrivateKey  # type: ignore[import-untyped]
+    except ImportError as e:
+        raise IdentityCredentialError(
+            f"Missing dependency for proof-grant signing: {e}. "
+            "Install with: pip install tollbooth-dpyc[nostr]"
+        ) from e
+
+    if not challenge_hash or not isinstance(challenge_hash, str):
+        raise IdentityCredentialError("challenge_hash is required.")
+    if not patron_sig or not isinstance(patron_sig, str):
+        raise IdentityCredentialError("patron_sig is required.")
+    if not patron_event_id or not isinstance(patron_event_id, str):
+        raise IdentityCredentialError("patron_event_id is required.")
+
+    try:
+        if operator_nsec.startswith("nsec1"):
+            private_key = PrivateKey.from_nsec(operator_nsec)
+        else:
+            private_key = PrivateKey(bytes.fromhex(operator_nsec))
+        operator_hex = private_key.public_key.hex()
+        operator_npub = private_key.public_key.bech32()
+    except Exception as e:
+        raise IdentityCredentialError(f"Invalid operator nsec: {e}") from e
+
+    try:
+        patron_hex = _npub_to_hex(patron_npub)
+    except Exception as e:
+        raise IdentityCredentialError(f"Invalid patron npub: {e}") from e
+
+    now = int(time.time())
+    # Allow non-positive ttl so callers/tests can mint already-expired grants;
+    # verify_proof_grant rejects those via the expiration check.
+    expiration = now + int(ttl_seconds)
+    jti = str(uuid.uuid4())
+
+    content = json.dumps(
+        {
+            "patron_npub": patron_npub,
+            "operator_npub": operator_npub,
+            "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "challenge": challenge_hash,
+        },
+        separators=(",", ":"),
+    )
+
+    tags = [
+        ["d", jti],
+        ["p", patron_hex],
+        ["t", PROOF_GRANT_TAG],
+        ["L", PROOF_GRANT_LABEL],
+        ["challenge", challenge_hash],
+        ["patron_sig", patron_sig],
+        ["expiration", str(expiration)],
+        ["patron_event_id", patron_event_id],
+    ]
+
+    event = Event(
+        kind=IDENTITY_CREDENTIAL_KIND,
+        content=content,
+        tags=tags,
+        pubkey=operator_hex,
+        created_at=now,
+    )
+    event.sign(private_key.hex())
+    return json.dumps(event.to_dict())
+
+
+def verify_proof_grant(
+    event_json: str,
+    *,
+    expected_patron_npub: str,
+    challenge_hash: str | None = None,
+    expected_operator_hex: str | None = None,
+) -> dict[str, Any]:
+    """Verify a kind-30080 Operator proof grant.
+
+    Checks Operator Schnorr signature, kind, proof-grant tag, expiration,
+    patron ``p`` tag / content match, optional challenge binding, and optional
+    issuer pubkey match. Does **not** consult the vault — the grant is
+    self-verifying on the hot path.
+
+    Args:
+        event_json: JSON string of the signed grant event.
+        expected_patron_npub: The npub the caller claims to act as.
+        challenge_hash: When provided, must equal the grant's ``challenge`` tag
+            (``sha256(nonce)``). Omit only for status-style reads that already
+            hold the grant.
+        expected_operator_hex: When provided, the grant signer must equal this
+            Operator pubkey (hex). Used by the gate so a foreign Operator's
+            grant cannot authorize here.
+
+    Returns:
+        Dict with claims: patron_npub, operator_npub, operator_hex, jti,
+        expiration, challenge, patron_sig, patron_event_id.
+
+    Raises:
+        IdentityCredentialError: On any verification failure. The exception
+            message is a stable machine-readable reason code when possible
+            (``expired``, ``wrong_npub``, ``challenge_mismatch``,
+            ``revoked`` is reserved for the gate's tombstone check,
+            ``bad_signature``, ``wrong_kind``, ``not_proof_grant``,
+            ``operator_mismatch``, ``malformed``).
+    """
+    try:
+        from pynostr.event import Event  # type: ignore[import-untyped]
+    except ImportError as e:
+        raise IdentityCredentialError(
+            f"Missing dependency for proof-grant verification: {e}. "
+            "Install with: pip install tollbooth-dpyc[nostr]"
+        ) from e
+
+    try:
+        event_dict = json.loads(event_json)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise IdentityCredentialError("malformed") from e
+
+    try:
+        event = Event.from_dict(event_dict)
+    except Exception as e:
+        raise IdentityCredentialError("malformed") from e
+
+    try:
+        if not event.verify():
+            raise IdentityCredentialError("bad_signature")
+    except IdentityCredentialError:
+        raise
+    except Exception as e:
+        raise IdentityCredentialError("bad_signature") from e
+
+    if event.kind != IDENTITY_CREDENTIAL_KIND:
+        raise IdentityCredentialError("wrong_kind")
+
+    tag_t = _get_tag_value(event.tags, "t")
+    if tag_t != PROOF_GRANT_TAG:
+        # A plain identity credential (or anything else) is not a proof grant.
+        raise IdentityCredentialError("not_proof_grant")
+
+    expiration_str = _get_tag_value(event.tags, "expiration")
+    if not expiration_str:
+        raise IdentityCredentialError("malformed")
+    try:
+        expiration = int(expiration_str)
+    except (ValueError, TypeError) as e:
+        raise IdentityCredentialError("malformed") from e
+    if expiration < time.time():
+        raise IdentityCredentialError("expired")
+
+    jti = _get_tag_value(event.tags, "d")
+    if not jti:
+        raise IdentityCredentialError("malformed")
+
+    challenge = _get_tag_value(event.tags, "challenge") or ""
+    if not challenge:
+        raise IdentityCredentialError("malformed")
+    if challenge_hash is not None and challenge != challenge_hash:
+        raise IdentityCredentialError("challenge_mismatch")
+
+    patron_sig = _get_tag_value(event.tags, "patron_sig") or ""
+    patron_event_id = _get_tag_value(event.tags, "patron_event_id") or ""
+    if not patron_sig or not patron_event_id:
+        raise IdentityCredentialError("malformed")
+
+    try:
+        expected_patron_hex = _npub_to_hex(expected_patron_npub)
+    except Exception as e:
+        raise IdentityCredentialError("wrong_npub") from e
+
+    p_tag = _get_tag_value(event.tags, "p")
+    if p_tag != expected_patron_hex:
+        raise IdentityCredentialError("wrong_npub")
+
+    try:
+        claims = json.loads(event.content) if event.content else {}
+    except (json.JSONDecodeError, TypeError):
+        claims = {}
+    content_patron = claims.get("patron_npub", "")
+    if content_patron and content_patron != expected_patron_npub:
+        raise IdentityCredentialError("wrong_npub")
+
+    if expected_operator_hex and event.pubkey != expected_operator_hex:
+        raise IdentityCredentialError("operator_mismatch")
+
+    operator_npub = claims.get("operator_npub", "")
+    if not operator_npub:
+        try:
+            operator_npub = _hex_to_npub(event.pubkey)
+        except Exception:  # noqa: BLE001
+            operator_npub = ""
+
+    return {
+        "patron_npub": expected_patron_npub,
+        "operator_npub": operator_npub,
+        "operator_hex": event.pubkey,
+        "issued_at": claims.get("issued_at", ""),
+        "created_at": int(event.created_at),
+        "jti": jti,
+        "expiration": expiration,
+        "challenge": challenge,
+        "patron_sig": patron_sig,
+        "patron_event_id": patron_event_id,
     }
 
 

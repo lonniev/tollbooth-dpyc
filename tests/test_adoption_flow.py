@@ -41,7 +41,7 @@ def _rt():
         operator_npub=MagicMock(return_value="npub1auth"),
         runtime_name=MagicMock(side_effect=lambda c: f"authority_{c}"),
         vault=AsyncMock(return_value=SimpleNamespace(_cipher=None)),
-        proven_npub_cache=AsyncMock(return_value=MagicMock()),
+        proof_grant_revocations=AsyncMock(return_value=MagicMock()),
         paid_tool=_passthrough_paid_tool,
     )
 
@@ -235,13 +235,13 @@ async def test_request_adoption_requires_proof():
 
 async def test_request_adoption_verifies_proof_inline_without_vault():
     # Regression: request_adoption verifies the caller's proof INLINE
-    # (proven_cache=None) so an un-adopted orphan — which has no vault — can
-    # still request adoption. Previously it went through the vault-backed
-    # proven-npub cache, forcing a bootstrap that an orphan cannot complete.
+    # (no revocation store, no operator_hex — so only a fresh kind-27235 can
+    # pass) so an un-adopted orphan — which has no vault — can still request
+    # adoption. The vault-backed store would force a bootstrap it cannot complete.
     captured: dict = {}
 
-    async def fake_require_proof(npub, dpop_token, tool_name, *, proven_cache=None, **kw):
-        captured["proven_cache_is_none"] = proven_cache is None
+    async def fake_require_proof(npub, dpop_token, tool_name, *, revocations=None, operator_hex=None, **kw):
+        captured["inline_only"] = revocations is None and operator_hex is None
 
     tools = _register_operator_tools(_operator_rt())
     with patch("tollbooth.identity_proof.require_proof", side_effect=fake_require_proof):
@@ -249,7 +249,7 @@ async def test_request_adoption_verifies_proof_inline_without_vault():
         # proof check — proving the gate was passed without the remote leg.
         r = await tools["request_adoption"](authority_npub="not-an-npub", dpop_token="p")
 
-    assert captured.get("proven_cache_is_none") is True
+    assert captured.get("inline_only") is True
     assert r["success"] is False and "valid npub1" in r["error"]
 
 

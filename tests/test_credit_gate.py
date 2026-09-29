@@ -124,7 +124,7 @@ def _runtime(registry, *, balance=1000, resolver=None, gate=None, operator_npub=
     rt = OperatorRuntime(tool_registry=registry, nsec_env_var="__UNUSED__")
     rt._pricing_resolver = resolver if resolver is not None else FakeResolver()
     rt._ledger_cache = FakeLedgerCache(balance)
-    rt._proven_npub_cache = MagicMock()
+    rt._proof_grant_revocations = MagicMock()
     rt._operator_npub = operator_npub
     rt.get_global_demand = AsyncMock(return_value={})
     rt.resolve_tranche_lifetime = AsyncMock(return_value=None)

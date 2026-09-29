@@ -19,10 +19,14 @@ from tollbooth.identity_credential import (
     IDENTITY_CREDENTIAL_KIND,
     IDENTITY_CREDENTIAL_LABEL,
     IDENTITY_CREDENTIAL_TAG,
+    PROOF_GRANT_LABEL,
+    PROOF_GRANT_TAG,
     IdentityCredentialError,
     sign_identity_credential,
+    sign_proof_grant,
     verify_credential_chain,
     verify_identity_credential,
+    verify_proof_grant,
 )
 from tollbooth.ledger import InvoiceRecord, ToolUsage, Tranche, UserLedger
 from tollbooth.ledger_cache import LedgerCache
@@ -92,14 +96,13 @@ try:
         create_proof,
         verify_proof,
     )
-    from tollbooth.proven_npub import ProvenNpub, ProvenNpubCache
+    from tollbooth.proven_npub import ProofGrantRevocations
 except ImportError:
     verify_proof = None  # type: ignore[assignment,misc]
     create_proof = None  # type: ignore[assignment,misc]
     PROOF_EVENT_KIND = None  # type: ignore[assignment,misc]
     OWNERSHIP_SENTINEL = None  # type: ignore[assignment,misc]
-    ProvenNpubCache = None  # type: ignore[assignment,misc]
-    ProvenNpub = None  # type: ignore[assignment,misc]
+    ProofGrantRevocations = None  # type: ignore[assignment,misc]
 
 try:
     from tollbooth.credential_templates import (
@@ -265,6 +268,8 @@ __all__ = [
     "OPERATOR_OBSOLETE_PRACTICES",
     "OWNERSHIP_SENTINEL",
     "PROOF_EVENT_KIND",
+    "PROOF_GRANT_LABEL",
+    "PROOF_GRANT_TAG",
     "STANDARD_IDENTITIES",
     "UNDERSTOOD_PROTOCOLS",
     # Actor Protocols
@@ -339,8 +344,7 @@ __all__ = [
     "PricingModel",
     "PricingModelStore",
     "PricingResolver",
-    "ProvenNpub",
-    "ProvenNpubCache",
+    "ProofGrantRevocations",
     "RegistryError",
     "RelayRegistry",
     "RelayRegistryError",
@@ -391,6 +395,7 @@ __all__ = [
     "resolve_route",
     # Identity Credential
     "sign_identity_credential",
+    "sign_proof_grant",
     "situation_response_from_row",
     "upstream_payment_situation",
     "validate_operator_tools",
@@ -401,6 +406,7 @@ __all__ = [
     "verify_nostr_certificate",
     # Operator Proof & Npub Ownership
     "verify_proof",
+    "verify_proof_grant",
     "web_fetch_tool",
     "web_search_tool",
     "x402_wallet_template",

@@ -1,19 +1,27 @@
-"""Proven npub cache — dpop_token-keyed npub ownership proof.
+"""Proof-grant revocation — a per-npub watermark, vault-backed.
 
-The proof is bound to the dpop_token phrase that the calling application
-received during the ``request_npub_proof`` / ``receive_npub_proof``
-exchange. The application remembers the raw dpop_token; the MCP stores
-only ``sha256(dpop_token):npub`` — never the raw dpop_token itself.
+A proof grant (``identity_credential.sign_proof_grant``) is self-verifying:
+the gate checks the Operator's signature, the patron binding, the challenge
+hash and the expiry with no server-side state. The one thing a self-verifying
+bearer cannot carry is *revocation*, so this module holds the single fact the
+gate still needs from storage: **the moment a patron last revoked every grant
+issued to them**. A grant created at or before that moment is refused.
 
-Cache key: ``"{dpop_token_hash}:{npub}"``.
+Why a watermark and not per-grant tombstones: grants are bearer tokens the
+caller holds, so ``forget_credentials`` cannot enumerate them. One timestamp
+per npub covers every grant ever issued to that patron, needs no enumeration,
+and costs one vault row per npub.
 
-On ``mark_proven``, the record is written to both the in-memory
-cache and the Neon vault (encrypted by the operator's nsec).
-On ``is_proven`` cache miss, the vault is checked before rejecting —
-surviving serverless cold starts that wipe in-memory state.
+Hot-path cost: the watermark is held in memory per npub and re-read from the
+vault only after ``refresh_seconds``; a paid call does not touch the vault
+once the npub is warm. The vault write on revoke is authoritative — if it
+fails, the revoke fails loudly rather than pretending.
 
-Security: a vault compromise yields only hashed dpop_tokens — useless
-without the raw values held exclusively by the calling application.
+Fail-closed: when the vault cannot be read at all, the gate cannot know
+whether the patron revoked, so ``revoked_before`` raises
+``RevocationStoreUnavailable`` and the gate refuses with a situation the
+caller can retry. Authorizing on a guess is the one thing this store must
+never do.
 """
 
 from __future__ import annotations
@@ -22,21 +30,26 @@ import json
 import logging
 import re
 import time
-from dataclasses import asdict, dataclass
 from typing import Any
-
-from tollbooth.session_cache import SessionCache
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PROVEN_TTL = 7200  # 2 hours
-MAX_PROVEN_TTL = 2592000  # 30 days — hard cap, patron cannot exceed
+DEFAULT_PROVEN_TTL = 7200  # 2 hours — default grant lifetime when the patron names none
+MAX_PROVEN_TTL = 2592000  # 30 days — hard cap on any grant, patron cannot exceed
 
-# Sentinel: "patron did not specify a duration"
-UNSET: Any = object()
+DEFAULT_REFRESH_SECONDS = 60.0
+"""How long a per-npub watermark read stays good before the vault is re-read."""
+
+_VAULT_KEY_PREFIX = "proof_grant_revoked_before:"
+
+
+class RevocationStoreUnavailable(Exception):
+    """The vault could not answer whether a patron revoked their grants."""
+
 
 # ---------------------------------------------------------------------------
-# Human-friendly duration parser
+# Human-friendly duration parser (the patron names their consent window in
+# the DM reply: ``cache_duration = @@@two weeks@@@``)
 # ---------------------------------------------------------------------------
 
 _WORD_NUMBERS: dict[str, int] = {
@@ -49,22 +62,21 @@ _WORD_NUMBERS: dict[str, int] = {
 _UNIT_SECONDS: dict[str, int] = {
     "s": 1, "sec": 1, "second": 1, "seconds": 1,
     "m": 60, "min": 60, "minute": 60, "minutes": 60,
-    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "h": 3600, "hr": 3600, "hour": 3600, "hours": 3600,
     "d": 86400, "day": 86400, "days": 86400,
-    "w": 604800, "week": 604800, "weeks": 604800,
+    "w": 604800, "wk": 604800, "week": 604800, "weeks": 604800,
 }
 
 _DURATION_RE = re.compile(
-    r"^\s*(\d+|[a-z]+)\s*(s|sec|seconds?|m|min|minutes?|h|hr|hrs|hours?|d|days?|w|weeks?)\s*$",
-    re.IGNORECASE,
+    r"^\s*(\d+|" + "|".join(_WORD_NUMBERS) + r")\s*([a-zA-Z]+)\s*$"
 )
 
 
 def parse_duration(text: str) -> int | None:
     """Parse a human-friendly duration string into seconds.
 
-    Returns ``None`` for unlimited/never-expiring. Raises ``ValueError``
-    for unrecognizable input.
+    Returns ``None`` for unlimited/never-expiring (the caller clamps that to
+    ``MAX_PROVEN_TTL``). Raises ``ValueError`` for unrecognizable input.
 
     Examples::
 
@@ -93,225 +105,89 @@ def parse_duration(text: str) -> int | None:
     unit_secs = _UNIT_SECONDS.get(unit_str)
     if unit_secs is None:
         raise ValueError(f"Unknown time unit: {unit_str!r} in {text!r}")
-    result = amount * unit_secs
-    result = min(result, MAX_PROVEN_TTL)
-    return result
-
-_VAULT_KEY_PREFIX = "proven_npub:"
+    return min(amount * unit_secs, MAX_PROVEN_TTL)
 
 
-def _cache_key(dpop_token_hash: str, npub: str) -> str:
-    return f"{dpop_token_hash}:{npub}"
+def grant_ttl_seconds(raw_duration: str) -> int:
+    """The grant lifetime a patron asked for, clamped to the cap.
+
+    Empty → ``DEFAULT_PROVEN_TTL``; unparseable → the default as well (the
+    reply is human-typed, and a typo must not strand the patron); unlimited or
+    above the cap → ``MAX_PROVEN_TTL``.
+    """
+    raw = (raw_duration or "").strip()
+    if not raw:
+        return DEFAULT_PROVEN_TTL
+    try:
+        parsed = parse_duration(raw)
+    except ValueError:
+        return DEFAULT_PROVEN_TTL
+    if parsed is None or parsed > MAX_PROVEN_TTL:
+        return MAX_PROVEN_TTL
+    return max(int(parsed), 1)
 
 
-def _vault_key(dpop_token_hash: str, npub: str) -> str:
-    return f"{_VAULT_KEY_PREFIX}{dpop_token_hash}:{npub}"
+def _vault_key(npub: str) -> str:
+    return f"{_VAULT_KEY_PREFIX}{npub}"
 
 
-@dataclass(frozen=True)
-class ProvenNpub:
-    """Record that an npub owner proved ownership via a dpop_token phrase."""
-
-    dpop_token_hash: str
-    npub: str
-    verified_at: float
-    expires_at: float
-
-    def to_json(self) -> str:
-        return json.dumps(asdict(self))
-
-    @classmethod
-    def from_json(cls, raw: str) -> ProvenNpub:
-        return cls(**json.loads(raw))
-
-
-class ProvenNpubCache:
-    """Dpop_token-keyed npub ownership cache with vault persistence.
-
-    In-memory ``SessionCache`` for hot lookups.  On cache miss,
-    falls back to the Neon vault (encrypted at rest) so proofs
-    survive serverless cold starts.
-
-    Keyed by ``(dpop_token_hash, npub)`` — the calling application holds
-    the raw dpop_token phrase and supplies it on each paid tool call.
-    The MCP never stores the raw dpop_token.
+class ProofGrantRevocations:
+    """Per-npub revocation watermark for proof grants.
 
     Args:
-        ttl_seconds: How long a proven npub stays valid (default 2h).
-        vault: Optional NeonVault for durable storage.
+        vault: Optional NeonVault. Without one the watermark is in-memory
+            only — fine for tests and for runtimes with no persistence.
+        refresh_seconds: How long a read watermark stays good before the
+            vault is consulted again.
     """
 
     def __init__(
-        self, ttl_seconds: int = DEFAULT_PROVEN_TTL, vault: Any | None = None, **_: Any
+        self, vault: Any | None = None, *, refresh_seconds: float = DEFAULT_REFRESH_SECONDS,
     ) -> None:
-        self._ttl = ttl_seconds
-        # SessionCache's global TTL must accommodate the longest possible
-        # per-entry TTL.  Real expiry is checked in is_proven() using the
-        # ProvenNpub.expires_at field, so the cache itself just needs to
-        # avoid evicting entries before their patron-chosen duration.
-        self._cache: SessionCache[ProvenNpub] = SessionCache(ttl_seconds=MAX_PROVEN_TTL)
         self._vault = vault
+        self._refresh = refresh_seconds
+        # npub → (watermark or None, read_at)
+        self._marks: dict[str, tuple[int | None, float]] = {}
 
-    async def is_proven(self, dpop_token_hash: str, npub: str) -> bool:
-        """Check if an npub is proven via the given dpop_token hash."""
-        key = _cache_key(dpop_token_hash, npub)
-        record = self._cache.get(key)
+    async def revoke_all(self, npub: str) -> int:
+        """Refuse every grant issued to ``npub`` up to now. Returns the watermark.
 
-        if record is not None:
-            if time.time() > record.expires_at:
-                logger.warning(
-                    "Proof cache EXPIRED for dpop_token_hash=%s npub=%s — "
-                    "verified_at=%.0f expires_at=%.0f now=%.0f (%.0fs overdue)",
-                    dpop_token_hash[:16], npub[:20],
-                    record.verified_at, record.expires_at,
-                    time.time(), time.time() - record.expires_at,
-                )
-                self._cache.clear(key)
-                return False
-            remaining = record.expires_at - time.time()
-            logger.debug(
-                "Proof cache HIT for dpop_token_hash=%s npub=%s (%.0fs remaining)",
-                dpop_token_hash[:16], npub[:20], remaining,
-            )
-            return True
-
-        # In-memory miss — try vault restore
-        if self._vault:
-            record = await self._vault_fetch(dpop_token_hash, npub)
-            if record is not None and time.time() < record.expires_at:
-                self._cache.set(key, record)
-                remaining = record.expires_at - time.time()
-                logger.info(
-                    "Proof cache RESTORED from vault for dpop_token_hash=%s npub=%s (%.0fs remaining)",
-                    dpop_token_hash[:16], npub[:20], remaining,
-                )
-                return True
-            if record is not None:
-                logger.info(
-                    "Vault proof expired for dpop_token_hash=%s npub=%s — cleaning up",
-                    dpop_token_hash[:16], npub[:20],
-                )
-                await self._vault_delete(dpop_token_hash, npub)
-
-        cached_keys = list(self._cache._entries.keys())
-        logger.warning(
-            "Proof cache MISS for dpop_token_hash=%s npub=%s — "
-            "key=%s not found. %d entries in cache: %s",
-            dpop_token_hash[:16], npub[:20], key[:40],
-            len(cached_keys),
-            [k[:40] for k in cached_keys],
-        )
-        return False
-
-    async def mark_proven(
-        self, dpop_token_hash: str, npub: str, ttl_override: Any = UNSET,
-    ) -> ProvenNpub:
-        """Cache an npub as ownership-proven via a dpop_token phrase.
-
-        Writes to both in-memory cache and vault (if configured).
-        The TTL is capped at ``MAX_PROVEN_TTL`` (30 days) regardless
-        of what the patron requests.
-
-        Args:
-            dpop_token_hash: SHA-256 hex digest of the raw dpop_token phrase.
-            npub: The patron's npub (bech32).
-            ttl_override: Seconds until expiry. ``None`` or values
-                exceeding the cap are clamped to ``MAX_PROVEN_TTL``.
-                Omit (or pass ``UNSET``) to use the cache default.
-
-        Returns:
-            The cached ``ProvenNpub`` record.
+        The vault write is authoritative: a failure raises so the caller can
+        report that the revoke did not take, instead of a silent in-memory-only
+        revoke that a cold start would forget.
         """
-        ttl = self._ttl if ttl_override is UNSET else ttl_override
-        if ttl is None or ttl > MAX_PROVEN_TTL:
-            ttl = MAX_PROVEN_TTL
+        watermark = int(time.time())
+        if self._vault is not None:
+            payload = json.dumps({"npub": npub, "revoked_before": watermark})
+            await self._vault.set_config(_vault_key(npub), self._vault._encrypt(payload))
+        self._marks[npub] = (watermark, time.time())
+        logger.info("Proof grants revoked for %s… (before %d)", npub[:20], watermark)
+        return watermark
+
+    async def revoked_before(self, npub: str) -> int | None:
+        """The patron's revocation watermark, or ``None`` if they never revoked.
+
+        Served from memory while fresh; otherwise read from the vault. Raises
+        ``RevocationStoreUnavailable`` when the vault cannot answer — the
+        caller must fail closed.
+        """
         now = time.time()
-        expires_at = now + ttl
-        record = ProvenNpub(
-            dpop_token_hash=dpop_token_hash,
-            npub=npub,
-            verified_at=now,
-            expires_at=expires_at,
-        )
-        self._cache.set(_cache_key(dpop_token_hash, npub), record)
-        label = f"{ttl}s" if ttl is not None else "unlimited"
-        logger.info(
-            "Cached proven npub %s with dpop_token_hash %s (expires in %s)",
-            npub[:20], dpop_token_hash[:12], label,
-        )
-
-        if self._vault:
-            await self._vault_store(record)
-
-        return record
-
-    def invalidate(self, dpop_token_hash: str, npub: str) -> None:
-        """Remove a proven npub from the cache."""
-        self._cache.clear(_cache_key(dpop_token_hash, npub))
-
-    async def proof_status(self, dpop_token_hash: str, npub: str) -> dict[str, Any]:
-        """Read-only lookup of a proof's current state.
-
-        Mirrors :meth:`is_proven` but does NOT mutate cache state.
-        Used by the ``check_proof_status`` standard tool so calling
-        agents can ask "is this dpop_token still going to work?"
-        without burning credits on a guaranteed failure.
-
-        Returns a dict with ``status`` (``"valid"`` | ``"expired"`` |
-        ``"unknown"``) and ``expires_in_seconds`` (the remaining TTL,
-        runtime-derived from the stored ``ProvenNpub.expires_at``).
-        """
-        key = _cache_key(dpop_token_hash, npub)
-        record = self._cache.get(key)
-
-        if record is None and self._vault is not None:
-            # Try vault — but do NOT delete on expiry (read-only path)
-            record = await self._vault_fetch(dpop_token_hash, npub)
-
-        if record is None:
-            return {"status": "unknown", "expires_in_seconds": 0}
-
-        remaining = int(record.expires_at - time.time())
-        if remaining <= 0:
-            return {"status": "expired", "expires_in_seconds": 0}
-        return {"status": "valid", "expires_in_seconds": remaining}
-
-    # -- Vault helpers --------------------------------------------------------
-
-    async def _vault_store(self, record: ProvenNpub) -> None:
+        cached = self._marks.get(npub)
+        if cached is not None and now - cached[1] < self._refresh:
+            return cached[0]
         if self._vault is None:
-            return
+            return cached[0] if cached is not None else None
         try:
-            encrypted = self._vault._encrypt(record.to_json())
-            await self._vault.set_config(
-                _vault_key(record.dpop_token_hash, record.npub), encrypted,
-            )
-            logger.debug(
-                "Proof persisted to vault for dpop_token_hash=%s npub=%s",
-                record.dpop_token_hash[:12], record.npub[:20],
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Vault store for proven npub failed (non-fatal): %s", exc)
+            raw = await self._vault.get_config(_vault_key(npub))
+            watermark: int | None = None
+            if raw:
+                watermark = int(json.loads(self._vault._decrypt(raw))["revoked_before"])
+        except Exception as exc:
+            raise RevocationStoreUnavailable(str(exc)) from exc
+        self._marks[npub] = (watermark, now)
+        return watermark
 
-    async def _vault_fetch(self, dpop_token_hash: str, npub: str) -> ProvenNpub | None:
-        if self._vault is None:
-            return None
-        try:
-            raw = await self._vault.get_config(_vault_key(dpop_token_hash, npub))
-            if raw is None:
-                return None
-            decrypted = self._vault._decrypt(raw)
-            return ProvenNpub.from_json(decrypted)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Vault fetch for proven npub failed (non-fatal): %s", exc)
-            return None
-
-    async def _vault_delete(self, dpop_token_hash: str, npub: str) -> None:
-        if self._vault is None:
-            return
-        try:
-            await self._vault.set_config(_vault_key(dpop_token_hash, npub), "")
-        except Exception:
-            logger.debug(
-                "best-effort proven-npub vault delete failed", exc_info=True,
-            )
+    async def is_revoked(self, npub: str, grant_created_at: int) -> bool:
+        """True when a grant minted at ``grant_created_at`` falls under the watermark."""
+        watermark = await self.revoked_before(npub)
+        return watermark is not None and int(grant_created_at) <= watermark

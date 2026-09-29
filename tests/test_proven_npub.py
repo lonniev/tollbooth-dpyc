@@ -1,170 +1,167 @@
-"""Tests for the dpop_token-keyed proven npub ownership cache."""
+"""Proof-grant revocation — the per-npub watermark (#267).
 
-import hashlib
+A grant is self-verifying; the only thing the gate still reads from storage
+is whether the patron revoked. These tests pin: the vault write is
+authoritative, reads are cached per npub for ``refresh_seconds``, an
+unreadable vault raises (the gate fails closed), and the patron's stated
+consent window is clamped to the cap.
+"""
+
+from __future__ import annotations
+
+import json
 import time
+from unittest.mock import AsyncMock
 
 import pytest
 
 from tollbooth.proven_npub import (
+    DEFAULT_PROVEN_TTL,
     MAX_PROVEN_TTL,
-    ProvenNpub,
-    ProvenNpubCache,
+    ProofGrantRevocations,
+    RevocationStoreUnavailable,
+    grant_ttl_seconds,
     parse_duration,
 )
 
-VALID_NPUB = "npub1l94pd4qu4eszrl6ek032ftcnsu3tt9a7xvq2zp7eaxeklp6mrpzssmq8pf"
-DPOP_TOKEN_A = "bold-hawk-42"
-DPOP_TOKEN_B = "calm-reef-77"
-HASH_A = hashlib.sha256(DPOP_TOKEN_A.encode()).hexdigest()
-HASH_B = hashlib.sha256(DPOP_TOKEN_B.encode()).hexdigest()
+NPUB = "npub1" + "q" * 58
 
 
-@pytest.mark.asyncio
-async def test_mark_proven_and_is_proven():
-    cache = ProvenNpubCache(ttl_seconds=3600)
-    record = await cache.mark_proven(HASH_A, VALID_NPUB)
-    assert isinstance(record, ProvenNpub)
-    assert record.dpop_token_hash == HASH_A
-    assert record.npub == VALID_NPUB
-    assert await cache.is_proven(HASH_A, VALID_NPUB)
+class FakeVault:
+    """set_config/get_config over a dict; encryption is identity for the test."""
 
+    def __init__(self) -> None:
+        self.rows: dict[str, str] = {}
+        self.set_config = AsyncMock(side_effect=self._set)
+        self.get_config = AsyncMock(side_effect=self._get)
 
-@pytest.mark.asyncio
-async def test_is_proven_false_initially():
-    cache = ProvenNpubCache(ttl_seconds=3600)
-    assert not await cache.is_proven(HASH_A, VALID_NPUB)
+    async def _set(self, key: str, value: str) -> None:
+        self.rows[key] = value
 
+    async def _get(self, key: str) -> str | None:
+        return self.rows.get(key)
 
-@pytest.mark.asyncio
-async def test_different_dpop_token_not_proven():
-    """Proof with dpop_token A does not extend to dpop_token B."""
-    cache = ProvenNpubCache(ttl_seconds=3600)
-    await cache.mark_proven(HASH_A, VALID_NPUB)
-    assert await cache.is_proven(HASH_A, VALID_NPUB)
-    assert not await cache.is_proven(HASH_B, VALID_NPUB)
+    def _encrypt(self, s: str) -> str:
+        return s
 
-
-@pytest.mark.asyncio
-async def test_invalidate_clears_cache():
-    cache = ProvenNpubCache(ttl_seconds=3600)
-    await cache.mark_proven(HASH_A, VALID_NPUB)
-    cache.invalidate(HASH_A, VALID_NPUB)
-    assert not await cache.is_proven(HASH_A, VALID_NPUB)
-
-
-@pytest.mark.asyncio
-async def test_expiry_removes_proven():
-    cache = ProvenNpubCache(ttl_seconds=1)
-    await cache.mark_proven(HASH_A, VALID_NPUB)
-    assert await cache.is_proven(HASH_A, VALID_NPUB)
-
-    # Backdate the ProvenNpub record's expires_at to force expiry.
-    key = f"{HASH_A}:{VALID_NPUB}"
-    entry = cache._cache._entries.get(key)
-    if entry is not None:
-        expired_record = ProvenNpub(
-            dpop_token_hash=entry[0].dpop_token_hash,
-            npub=entry[0].npub,
-            verified_at=entry[0].verified_at,
-            expires_at=time.time() - 10,
-        )
-        cache._cache._entries[key] = (expired_record, entry[1])
-    assert not await cache.is_proven(HASH_A, VALID_NPUB)
-
-
-@pytest.mark.asyncio
-async def test_record_has_dpop_token_hash():
-    cache = ProvenNpubCache(ttl_seconds=3600)
-    record = await cache.mark_proven(HASH_A, VALID_NPUB)
-    assert record.dpop_token_hash == HASH_A
-    assert record.npub == VALID_NPUB
-    assert record.expires_at > record.verified_at
-
-
-@pytest.mark.asyncio
-async def test_json_round_trip():
-    record = ProvenNpub(
-        dpop_token_hash=HASH_A,
-        npub=VALID_NPUB,
-        verified_at=time.time(),
-        expires_at=time.time() + 3600,
-    )
-    restored = ProvenNpub.from_json(record.to_json())
-    assert restored == record
-
-
-@pytest.mark.asyncio
-async def test_proof_status_unknown_when_no_record():
-    cache = ProvenNpubCache(ttl_seconds=3600)
-    info = await cache.proof_status(HASH_A, VALID_NPUB)
-    assert info["status"] == "unknown"
-    assert info["expires_in_seconds"] == 0
-
-
-@pytest.mark.asyncio
-async def test_proof_status_valid_returns_remaining_ttl():
-    cache = ProvenNpubCache(ttl_seconds=3600)
-    await cache.mark_proven(HASH_A, VALID_NPUB)
-    info = await cache.proof_status(HASH_A, VALID_NPUB)
-    assert info["status"] == "valid"
-    # Runtime-derived — within a small epsilon of the configured TTL
-    assert 3590 < info["expires_in_seconds"] <= 3600
-
-
-@pytest.mark.asyncio
-async def test_proof_status_expired_does_not_evict():
-    """proof_status is read-only — must not mutate cache state on expiry."""
-    cache = ProvenNpubCache(ttl_seconds=3600)
-    await cache.mark_proven(HASH_A, VALID_NPUB)
-
-    # Backdate the record's expires_at without going through is_proven
-    key = f"{HASH_A}:{VALID_NPUB}"
-    entry = cache._cache._entries.get(key)
-    assert entry is not None
-    expired_record = ProvenNpub(
-        dpop_token_hash=entry[0].dpop_token_hash,
-        npub=entry[0].npub,
-        verified_at=entry[0].verified_at,
-        expires_at=time.time() - 10,
-    )
-    cache._cache._entries[key] = (expired_record, entry[1])
-
-    info = await cache.proof_status(HASH_A, VALID_NPUB)
-    assert info["status"] == "expired"
-    assert info["expires_in_seconds"] == 0
-    # Record must still be in the cache — proof_status is read-only
-    assert cache._cache._entries.get(key) is not None
+    def _decrypt(self, s: str) -> str:
+        return s
 
 
 # ---------------------------------------------------------------------------
-# Delegation cap — patrons may choose their own duration up to 30 days.
+# watermark
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_never_revoked_is_none_and_not_revoked():
+    rev = ProofGrantRevocations()
+    assert await rev.revoked_before(NPUB) is None
+    assert not await rev.is_revoked(NPUB, int(time.time()))
+
+
+@pytest.mark.asyncio
+async def test_revoke_all_refuses_grants_up_to_now_and_admits_later_ones():
+    rev = ProofGrantRevocations()
+    mark = await rev.revoke_all(NPUB)
+    assert await rev.is_revoked(NPUB, mark)          # same second: refused
+    assert await rev.is_revoked(NPUB, mark - 3600)   # earlier: refused
+    assert not await rev.is_revoked(NPUB, mark + 1)  # minted after: admitted
+
+
+@pytest.mark.asyncio
+async def test_revoke_all_writes_the_vault_authoritatively():
+    vault = FakeVault()
+    rev = ProofGrantRevocations(vault=vault)
+    mark = await rev.revoke_all(NPUB)
+    key = f"proof_grant_revoked_before:{NPUB}"
+    assert json.loads(vault.rows[key]) == {"npub": NPUB, "revoked_before": mark}
+
+
+@pytest.mark.asyncio
+async def test_revoke_all_raises_when_the_vault_write_fails():
+    vault = FakeVault()
+    vault.set_config = AsyncMock(side_effect=RuntimeError("neon down"))
+    rev = ProofGrantRevocations(vault=vault)
+    with pytest.raises(RuntimeError):
+        await rev.revoke_all(NPUB)
+    # Nothing was recorded in memory either — no half-revoke.
+    assert await rev.revoked_before(NPUB) is None
+
+
+@pytest.mark.asyncio
+async def test_cold_start_reads_the_watermark_from_the_vault():
+    vault = FakeVault()
+    await ProofGrantRevocations(vault=vault).revoke_all(NPUB)
+    fresh = ProofGrantRevocations(vault=vault)  # new process, empty memory
+    assert await fresh.is_revoked(NPUB, int(time.time()) - 10)
+
+
+@pytest.mark.asyncio
+async def test_reads_are_served_from_memory_within_refresh_window():
+    vault = FakeVault()
+    rev = ProofGrantRevocations(vault=vault, refresh_seconds=60)
+    await rev.revoked_before(NPUB)
+    await rev.revoked_before(NPUB)
+    await rev.is_revoked(NPUB, 1)
+    assert vault.get_config.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reads_go_back_to_the_vault_after_refresh_window():
+    vault = FakeVault()
+    rev = ProofGrantRevocations(vault=vault, refresh_seconds=0.0)
+    await rev.revoked_before(NPUB)
+    await rev.revoked_before(NPUB)
+    assert vault.get_config.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unreadable_vault_raises_so_the_gate_fails_closed():
+    vault = FakeVault()
+    vault.get_config = AsyncMock(side_effect=RuntimeError("neon down"))
+    rev = ProofGrantRevocations(vault=vault)
+    with pytest.raises(RevocationStoreUnavailable):
+        await rev.is_revoked(NPUB, int(time.time()))
+
+
+# ---------------------------------------------------------------------------
+# the patron's consent window
 # ---------------------------------------------------------------------------
 
 
 def test_cap_is_thirty_days():
-    assert MAX_PROVEN_TTL == 2592000
+    assert MAX_PROVEN_TTL == 30 * 24 * 3600
 
 
-def test_parse_duration_honors_thirty_days():
-    """A 30-day delegation sits exactly at the cap and is honored verbatim."""
-    assert parse_duration("30 days") == MAX_PROVEN_TTL
+@pytest.mark.parametrize("text,seconds", [
+    ("2h", 7200), ("two days", 172800), ("  30  min ", 1800),
+    ("1w", 604800), ("30 days", MAX_PROVEN_TTL),
+])
+def test_parse_duration(text, seconds):
+    assert parse_duration(text) == seconds
+
+
+def test_parse_duration_unlimited_is_none():
+    assert parse_duration("forever") is None
 
 
 def test_parse_duration_clamps_above_cap():
-    """Durations beyond the cap clamp down rather than erroring."""
-    assert parse_duration("60 days") == MAX_PROVEN_TTL
-    assert parse_duration("10 weeks") == MAX_PROVEN_TTL
+    assert parse_duration("45 days") == MAX_PROVEN_TTL
 
 
-def test_parse_duration_under_cap_unchanged():
-    """A sub-cap duration (e.g. a multi-day editorial session) is exact."""
-    assert parse_duration("7 days") == 7 * 86400
+def test_parse_duration_rejects_garbage():
+    with pytest.raises(ValueError):
+        parse_duration("soonish")
 
 
-@pytest.mark.asyncio
-async def test_mark_proven_clamps_ttl_override_to_cap():
-    cache = ProvenNpubCache(ttl_seconds=3600)
-    before = time.time()
-    record = await cache.mark_proven(HASH_A, VALID_NPUB, ttl_override=MAX_PROVEN_TTL * 5)
-    # Clamped: expiry lands at ~now + cap, not now + 5×cap.
-    assert record.expires_at - before == pytest.approx(MAX_PROVEN_TTL, abs=5)
+@pytest.mark.parametrize("raw,expected", [
+    ("", DEFAULT_PROVEN_TTL),
+    ("   ", DEFAULT_PROVEN_TTL),
+    ("garbage", DEFAULT_PROVEN_TTL),  # a typo must not strand the patron
+    ("2h", 7200),
+    ("forever", MAX_PROVEN_TTL),
+    ("90 days", MAX_PROVEN_TTL),
+])
+def test_grant_ttl_seconds(raw, expected):
+    assert grant_ttl_seconds(raw) == expected

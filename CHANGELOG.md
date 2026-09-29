@@ -3,6 +3,41 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed — the challenge nonce selects a proof; it never unlocks one (#267)
+
+Since 0.15.5 the Secure Courier challenge phrase (`bold-hawk-42`) doubled as the
+session credential: `receive_npub_proof` cached `sha256(phrase):npub` and the
+gate accepted the bare phrase on every paid call for up to thirty days — a
+~16-bit bearer with the npub public and no throttle. The phrase was designed as
+a matching token and the welcome DM says so. Clean break, no shim:
+
+- **`receive_npub_proof` returns a proof grant.** `dpop_token` is now an
+  envelope `{"grant": <kind-30080 event>, "nonce": "<phrase>"}`. The grant is
+  Operator-signed over the patron's **verified** reply signature (the NIP-17
+  seal or the NIP-04 event — the courier now verifies that signature and
+  surfaces it), the challenge hash, and the duration the patron named. It is
+  self-verifying: no vault read on the hot path.
+- **A bare phrase is refused everywhere** with `proof_refresh_needed`. The
+  `ProvenNpubCache`, its vault rows, and `check_proof_status`'s cache lookup
+  are gone.
+- **The gate fails closed.** A grant is accepted only when the runtime can
+  name its own pubkey (`OperatorRuntime.operator_pubkey_hex()`, one helper
+  replacing three inline derivations); a runtime that cannot refuses with
+  `operator_unknown`. A grant from another Operator is `operator_mismatch`.
+- **`forget_credentials` revokes every grant.** `ProofGrantRevocations` keeps
+  one per-npub watermark (`proof_grant_revoked_before:{npub}`); grants minted at
+  or before it are refused. Held in memory per npub, re-read from the vault
+  every 60 s; an unreadable store refuses with `revocations_unavailable`
+  rather than guessing. `require_proof(..., revocations=, operator_hex=)`
+  replaces `proven_cache=`; `rt.proof_grant_revocations()` replaces
+  `rt.proven_npub_cache()`.
+- Inline kind-27235 proofs (keyed callers) are byte-for-byte unchanged.
+
+Every live nsec-less patron re-proves once. Patent as-built: dpyc-community
+`docs/patent/REVISIONS.md` Revision 2 (elements 634, 636, 638).
+
 ## [0.96.0] — 2026-09-29
 
 ### Changed — the Authority's bootstrap-config refresh is a weekly foreground audit

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
 from datetime import UTC
 from typing import Any
 
@@ -344,6 +345,7 @@ async def receive_npub_proof_tool(
     # encrypted to the ephemeral agent npub, so decrypt with the agent key
     # (restored by the resolver) and fall back to the operator nsec.
     matched_payload = None
+    matched_candidate: dict[str, Any] | None = None
     last_failure = None
     popped = 0
     nacks_sent = 0
@@ -378,6 +380,7 @@ async def receive_npub_proof_tool(
 
         if nack_reason is None and payload is not None:
             matched_payload = payload
+            matched_candidate = candidate
             exchange._pop_event(event_id)
             popped += 1
             break  # stop-at-match
@@ -414,29 +417,61 @@ async def receive_npub_proof_tool(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("on_npub_proven callback failed: %s", exc)
 
-        cache = await rt.proven_npub_cache()
-
-        # Compute dpop_token hash — the caller-supplied proof token for future paid
-        # calls. The raw dpop_token is returned to the caller but never stored.
+        # Challenge hash — the nonce selects the grant; it never unlocks alone.
         import hashlib as _hashlib
-        dpop_token_hash = _hashlib.sha256(
-            expected_phrase.encode(),
-        ).hexdigest()
+        dpop_token_hash = _hashlib.sha256(expected_phrase.encode()).hexdigest()
 
-        # Parse patron's chosen cache duration (default: 2h)
-        raw_duration = (matched_payload or {}).get("cache_duration", "").strip()
-        ttl_seconds: int | None = None
-        if raw_duration:
-            try:
-                from tollbooth.proven_npub import parse_duration
-                ttl_seconds = parse_duration(raw_duration)
-            except ValueError:
-                pass  # unparseable → use cache default
+        # The patron's consent window, from their own reply (default 2 h).
+        from tollbooth.proven_npub import grant_ttl_seconds
+        grant_ttl = grant_ttl_seconds((matched_payload or {}).get("cache_duration", ""))
 
-        from tollbooth.proven_npub import UNSET
-        record = await cache.mark_proven(dpop_token_hash, resolved, ttl_override=ttl_seconds if raw_duration else UNSET)
+        # The signature the courier verified on the reply's signed layer (the
+        # NIP-17 seal, or the NIP-04 event). No verified signature, no grant:
+        # the grant attests exactly this proof of possession.
+        patron_sig = str((matched_candidate or {}).get("_sender_sig") or "")
+        patron_event_id = str((matched_candidate or {}).get("_sender_event_id") or "")
+        if not patron_sig or not patron_event_id:
+            return {
+                "success": False,
+                "error_code": _EC.PROOF_INVALID,
+                "popped_dms": popped,
+                "error": (
+                    "The reply matched the challenge but carried no verifiable "
+                    "patron signature, so no proof grant was issued. Ask the "
+                    "patron to reply again from a Nostr client that signs DMs."
+                ),
+            }
 
-        ttl_display = int(record.expires_at - record.verified_at)
+        # Mint the Operator-signed kind-30080 proof grant. The agent presents
+        # the envelope {grant, nonce} as dpop_token; the nonce only selects.
+        from tollbooth.identity_credential import sign_proof_grant
+        try:
+            grant_json = sign_proof_grant(
+                patron_npub=resolved,
+                operator_nsec=rt._get_nsec(),
+                challenge_hash=dpop_token_hash,
+                patron_sig=patron_sig,
+                patron_event_id=patron_event_id,
+                ttl_seconds=grant_ttl,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("proof-grant issuance failed: %s", exc)
+            return {
+                "success": False,
+                "error": f"Failed to issue proof grant: {exc}",
+                "popped_dms": popped,
+            }
+
+        import json as _json
+        dpop_envelope = _json.dumps(
+            {"grant": _json.loads(grant_json), "nonce": expected_phrase},
+            separators=(",", ":"),
+        )
+
+        issued_at = int(_time.time())
+        expires_at_ts = issued_at + grant_ttl
+
+        ttl_display = grant_ttl
         hours = ttl_display / 3600
         if hours >= 1:
             duration_human = f"{hours:.0f} hour{'s' if hours != 1 else ''}"
@@ -444,7 +479,7 @@ async def receive_npub_proof_tool(
             duration_human = f"{ttl_display // 60} minute{'s' if ttl_display >= 120 else ''}"
 
         from datetime import datetime
-        expires_dt = datetime.fromtimestamp(record.expires_at, tz=UTC)
+        expires_dt = datetime.fromtimestamp(expires_at_ts, tz=UTC)
         expires_str = expires_dt.strftime("%Y-%m-%d %H:%M UTC")
 
         npub_short = resolved[:16] + "..." if len(resolved) > 20 else resolved
@@ -467,7 +502,11 @@ async def receive_npub_proof_tool(
         return {
             "success": True,
             "proven_npub": resolved,
-            "dpop_token": expected_phrase,
+            # Grant envelope — pass this whole string as dpop_token on paid calls.
+            "dpop_token": dpop_envelope,
+            # Nonce alone selects the grant; never authorizes by itself.
+            "nonce": expected_phrase,
+            "grant": grant_json,
             "popped_dms": popped,
             "expires_in_seconds": ttl_display,
             "expires_at": expires_str,
@@ -497,7 +536,12 @@ async def check_proof_status_tool(
     patron_npub: str,
     dpop_token: str,
 ) -> dict[str, Any]:
-    """Report whether a cached dpop_token is still valid (no side effects)."""
+    """Report whether a proof grant is still valid (no side effects).
+
+    Status and expiry are read from the grant itself; the only store consulted
+    is the patron's revocation watermark. A bare challenge phrase is never a
+    credential and reports ``refresh_needed``.
+    """
     err = rt.npub_validation_error(patron_npub, param="patron_npub")
     if err is not None:
         return err
@@ -507,29 +551,94 @@ async def check_proof_status_tool(
     resolved = rt.resolve_npub(patron_npub)
 
     import hashlib as _hashlib
-    dpop_token_hash = _hashlib.sha256(dpop_token.encode()).hexdigest()
-    cache = await rt.proven_npub_cache()
-    info = await cache.proof_status(dpop_token_hash, resolved)
 
-    status = info["status"]
-    if status == "valid":
-        message = (
-            "Proof is valid. Pass dpop_token as the dpop_token parameter "
-            "on paid tool calls."
+    from tollbooth.identity_proof import _DPOP_TOKEN_RE, _parse_grant_envelope
+
+    grant_parsed = _parse_grant_envelope(dpop_token)
+    if grant_parsed is not None:
+        grant_json, nonce = grant_parsed
+        challenge_hash = _hashlib.sha256(nonce.encode()).hexdigest() if nonce else None
+
+        from tollbooth.identity_credential import (
+            IdentityCredentialError,
+            verify_proof_grant,
         )
-    elif status == "expired":
-        message = (
-            "Proof has expired. Call request_npub_proof and "
-            "receive_npub_proof to refresh."
-        )
-    else:
-        message = (
-            "No proof record found for this (patron_npub, dpop_token). "
-            "Call request_npub_proof and receive_npub_proof first."
-        )
+        try:
+            claims = verify_proof_grant(
+                grant_json,
+                expected_patron_npub=resolved,
+                challenge_hash=challenge_hash,
+                expected_operator_hex=rt.operator_pubkey_hex(),
+            )
+        except IdentityCredentialError as exc:
+            reason = str(exc) or "malformed"
+            status = "expired" if reason == "expired" else "invalid"
+            return {
+                "success": True,
+                "status": status,
+                "expires_in_seconds": 0,
+                "reason": reason,
+                "message": (
+                    f"Proof grant is {status} ({reason}). Call request_npub_proof "
+                    "and receive_npub_proof for a fresh grant."
+                ),
+            }
+
+        from tollbooth.proven_npub import RevocationStoreUnavailable
+        try:
+            revoked = await (await rt.proof_grant_revocations()).is_revoked(
+                resolved, claims["created_at"],
+            )
+        except RevocationStoreUnavailable as exc:
+            return {
+                "success": False,
+                "error_code": _EC_MODULE.WARMING_UP,
+                "error": (
+                    "Could not read the revocation store, so the grant's status "
+                    f"is unknown right now. Retry shortly. ({exc})"
+                ),
+            }
+        if revoked:
+            return {
+                "success": True,
+                "status": "revoked",
+                "expires_in_seconds": 0,
+                "reason": "revoked",
+                "message": (
+                    "Proof grant was revoked by forget_credentials. Call "
+                    "request_npub_proof and receive_npub_proof for a fresh grant."
+                ),
+            }
+
+        remaining = max(0, int(claims["expiration"] - _time.time()))
+        return {
+            "success": True,
+            "status": "valid",
+            "expires_in_seconds": remaining,
+            "jti": claims["jti"],
+            "message": (
+                "Proof grant is valid. Pass the grant envelope as the "
+                "dpop_token parameter on paid tool calls."
+            ),
+        }
+
+    if _DPOP_TOKEN_RE.match(dpop_token):
+        return {
+            "success": True,
+            "status": "refresh_needed",
+            "expires_in_seconds": 0,
+            "message": (
+                "A challenge nonce alone is not a credential. Call "
+                "receive_npub_proof for an Operator-signed grant envelope."
+            ),
+        }
+
     return {
         "success": True,
-        "status": status,
-        "expires_in_seconds": info["expires_in_seconds"],
-        "message": message,
+        "status": "unknown",
+        "expires_in_seconds": 0,
+        "message": (
+            "No proof grant recognized for this dpop_token. Call "
+            "request_npub_proof and receive_npub_proof first."
+        ),
     }
