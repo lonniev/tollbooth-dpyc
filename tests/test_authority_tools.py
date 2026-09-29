@@ -93,7 +93,6 @@ def _authority_tools(runtime, *, settings, signer, replay, registry):
         _get_nostr_signer=MagicMock(return_value=signer),
         _get_replay_tracker=MagicMock(return_value=replay),
         _get_dpyc_registry=MagicMock(return_value=registry),
-        _maybe_refresh_bootstrap_dm=AsyncMock(),
     ):
         os.environ.pop("NEON_DATABASE_URL", None)
         at.register_authority_tools(MagicMock(), runtime)

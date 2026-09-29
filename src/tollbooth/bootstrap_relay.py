@@ -3,8 +3,10 @@
 The Authority publishes the operator's Neon URL as a NIP-33 parameterized-
 replaceable event (kind 30078, NIP-04-encrypted content), scoped by a
 per-operator ``d`` tag. Relays keep only the latest replaceable per
-(author, kind, ``d``), but free public relays still drop events under load, so
-the Authority re-publishes weekly on tool traffic. The operator reads it on
+(author, kind, ``d``), but free public relays still drop events, so a weekly
+audit (``audit_bootstrap_configs``, run by a GitHub Action) has the Authority
+republish any config held too thinly or too long ago, and an operator spreads
+its own config when it finds it thin. The operator reads it on
 cold start using only its nsec — no OAuth, no MCP-to-MCP calls, no additional
 env vars.
 
@@ -45,7 +47,7 @@ _READ_BUDGET_SECONDS = 6.0
 _SETTLE_SECONDS = 1.5
 # A config held by fewer relays than this is one relay outage away from an
 # operator that cannot start (six were on nos.lol alone, 2026-09-28).
-_THIN_BELOW = 3
+MIN_HOLDERS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +67,7 @@ class ConfigRead:
 
     @property
     def thin(self) -> bool:
-        return self.event is not None and len(self.holders) < _THIN_BELOW
+        return self.event is not None and len(self.holders) < MIN_HOLDERS
 
 
 def _config_d_tag(op_pubkey_hex: str) -> str:
@@ -118,7 +120,7 @@ def send_bootstrap_config(
     kind-4 DMs does. Content is NIP-04-encrypted so only the operator can read
     it (infrastructure config, not a personal credential).
 
-    Publishes via :func:`relay_fanout.fan_out` so the weekly refresh finishes
+    Publishes via :func:`relay_fanout.fan_out` so the weekly audit finishes
     inside one request instead of a serial 10 s-per-relay walk.
 
     Returns a :class:`PublishResult` (``accepted``, ``rejected``). Falsy when
@@ -355,6 +357,57 @@ def receive_bootstrap_config(
 
     holders = tuple(r for r, eid in served if best_event and eid == best_event["id"])
     return ConfigRead(best_config, best_author, diag, best_event, holders)
+
+
+def config_coverage(
+    authority_hex: str,
+    operator_hexes: list[str],
+    relays: list[str],
+) -> dict[str, tuple[str, ...]]:
+    """Which relays hold this Authority's config event for each operator.
+
+    One subscription per relay, all relays at once. The ``authors`` clause
+    means a copy signed by anyone else never counts. Nothing is decrypted:
+    this measures where the events are, not what they say.
+    """
+    wanted = {_config_d_tag(h): h for h in operator_hexes}
+    sub_filter = {"kinds": [30078], "authors": [authority_hex], "#d": list(wanted)}
+    outcomes = fan_out(
+        relays,
+        lambda url: _held_on(url, sub_filter),
+        deadline=_READ_BUDGET_SECONDS,
+    )
+    holders: dict[str, list[str]] = {h: [] for h in operator_hexes}
+    for o in outcomes:
+        if o.state != "ok":
+            continue
+        for d_tag in o.value:
+            if d_tag in wanted:
+                holders[wanted[d_tag]].append(o.relay)
+    return {h: tuple(rs) for h, rs in holders.items()}
+
+
+def _held_on(relay_url: str, sub_filter: dict[str, Any]) -> set[str]:
+    """The ``d`` tags one relay holds for this filter, read to EOSE."""
+    import websocket  # type: ignore[import-untyped]
+
+    t0 = time.monotonic()
+    ws = websocket.create_connection(relay_url, timeout=_READ_BUDGET_SECONDS)
+    found: set[str] = set()
+    try:
+        sub_id = f"coverage-{int(time.time())}"
+        ws.send(json.dumps(["REQ", sub_id, sub_filter]))
+        while (remaining := _READ_BUDGET_SECONDS - (time.monotonic() - t0)) > 0:
+            ws.settimeout(remaining)
+            msg = json.loads(ws.recv())
+            if msg[0] == "EOSE":
+                break
+            if msg[0] == "EVENT" and len(msg) >= 3:
+                found.update(t[1] for t in msg[2].get("tags", []) if t[:1] == ["d"] and len(t) > 1)
+        ws.send(json.dumps(["CLOSE", sub_id]))
+    finally:
+        ws.close()
+    return found
 
 
 @dataclass(frozen=True, slots=True)

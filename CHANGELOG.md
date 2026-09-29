@@ -3,6 +3,26 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed — the Authority's bootstrap-config refresh is a weekly foreground audit
+
+On 2026-09-29 nos.lol dropped months-old config events and left four operators
+with no copy on any relay. The Authority's refresh had been a background task
+started from `operator_status` and `certify_credits`; Horizon freezes a process
+between requests, so it rarely finished (most configs went unrefreshed from June).
+
+- New free Authority tool `audit_bootstrap_configs`. It measures every
+  operator's coverage (`bootstrap_relay.config_coverage` — one subscription per
+  relay, the Authority's own events only, nothing decrypted), republishes any
+  config held by fewer than `MIN_HOLDERS` (3) relays or last sent more than six
+  days ago, measures again, and reports counts and npub prefixes — before it
+  answers. A weekly GitHub Action in dpyc-community calls it on every Authority.
+- Removed the background refresh (`_maybe_refresh_bootstrap_dm`,
+  `_schedule_bootstrap_dm_refresh`, the fleet sweep and its throttles) and its
+  calls in `operator_status` and `certify_credits`.
+- `bootstrap_relay._THIN_BELOW` is now the public `MIN_HOLDERS`.
+
 ## [0.95.0] — 2026-09-28
 
 ### Fixed — an operator spreads its own thinly held bootstrap config

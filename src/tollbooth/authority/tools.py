@@ -136,6 +136,8 @@ REPAIR_OPERATOR_SCHEMA_UUID   = "b626ee48-dcd7-5ef2-93dd-0be12364acbb"
 RECEIVE_NEON_402_ALERT_UUID   = "bdb94fb1-454a-5804-8885-42ba93f1446d"
 LIST_NEON_ALERTS_UUID         = "b8079cbd-bc1e-579c-86fa-897a0a0641bd"
 NETWORK_PERSISTENCE_HEALTH_UUID     = "07706702-fac9-50d0-b69d-d706a71b9101"
+# Bootstrap config propagation — the weekly foreground audit
+AUDIT_BOOTSTRAP_CONFIGS_UUID  = "4fde55a7-fbe3-533c-a338-1e7a58482712"
 
 
 AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
@@ -258,6 +260,12 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         capability="network_persistence_health",
         category="restricted",
         intent="Owner view: proactive per-project Neon compute-quota posture + reactive alerts.",
+    ),
+    ToolIdentity(
+        tool_id=AUDIT_BOOTSTRAP_CONFIGS_UUID,
+        capability="audit_bootstrap_configs",
+        category="free",
+        intent="Weekly audit: republish any operator bootstrap config held too thinly or too long ago.",
     ),
 ]
 
@@ -611,26 +619,14 @@ async def _require_authority_consent(
     }
 
 
-# Bootstrap config is a NIP-33 replaceable (kind 30078), but free public
-# relays still drop replaceables under load and a one-shot publish leaves
-# every pre-widening operator one-relay deep. Re-send whenever the last
-# publication is older than this — opportunistically, on Authority tool
-# traffic (the OTS pattern).
-_BOOTSTRAP_DM_REFRESH_SECONDS = 7 * 24 * 3600
-# In-process throttle so high-traffic tools don't re-check the vault stamp
-# on every call. Armed only after a successful check — a swallowed vault
-# error must not silence the npub for an hour (2026-09-27 field report).
-_BOOTSTRAP_DM_CHECK_INTERVAL = 3600.0
-_bootstrap_dm_last_check: dict[str, float] = {}
-# Strong refs to in-flight refresh tasks. An unreferenced create_task is
-# eligible for GC mid-flight (asyncio docs); the publish inside can take
-# seconds, and a serverless host idles the process the moment the response
-# returns. Same pattern as OperatorRuntime._quota_alert_tasks.
-_bootstrap_dm_tasks: set[asyncio.Task[Any]] = set()
-# One fleet-wide sweep per process, so a recycle after this fix re-covers
-# every operator that registered before the write set widened — without
-# waiting a week for each one's opportunistic refresh.
-_bootstrap_fleet_sweep_started = False
+# Bootstrap config is a NIP-33 replaceable (kind 30078), but free public relays
+# still drop events — nos.lol purged months-old configs on 2026-09-29 and left
+# four operators with no copy anywhere. The weekly audit (a GitHub Action calls
+# ``audit_bootstrap_configs``) republishes any config held too thinly or last
+# sent longer ago than this, so every run refreshes ``created_at``.
+_BOOTSTRAP_REFRESH_AFTER_SECONDS = 6 * 24 * 3600
+# Publishes in flight at once during an audit; each already fans out to every relay.
+_AUDIT_CONCURRENCY = 4
 
 
 async def _resend_bootstrap_dm(npub: str) -> bool:
@@ -678,105 +674,80 @@ async def _resend_bootstrap_dm(npub: str) -> bool:
         return False
 
 
-async def _maybe_refresh_bootstrap_dm(npub: str) -> None:
-    """Re-publish the operator's bootstrap config if the last send has aged.
+async def _audit_bootstrap_configs() -> dict[str, Any]:
+    """Measure every operator's config coverage, republish what needs it, measure again.
 
-    Called opportunistically from Authority tool traffic. Cheap by
-    design: an in-process throttle gates the vault read, and the
-    publish itself runs only when the stored stamp is older than
-    ``_BOOTSTRAP_DM_REFRESH_SECONDS``. Never raises.
+    Runs in the foreground: Horizon freezes a process between requests, so a
+    background sweep rarely finishes (most configs went unrefreshed from June to
+    September). An operator is republished when fewer than three relays hold its
+    config, or when it was last sent more than six days ago. The report carries
+    counts and npub prefixes only — never a config value.
     """
-    now = time.monotonic()
-    # Missing key = never checked. Do NOT default to 0.0: monotonic() is
-    # seconds since an arbitrary epoch (often boot), so on a host younger
-    # than the check interval a missing-key default of 0 would throttle
-    # every first call and the weekly refresh would never fire.
-    last_check = _bootstrap_dm_last_check.get(npub)
-    if last_check is not None and now - last_check < _BOOTSTRAP_DM_CHECK_INTERVAL:
-        return
-    try:
-        vault = await _get_runtime().vault()
-        from tollbooth.authority.tenant_provisioner import get_operator_config_value
+    from pynostr.key import PublicKey  # type: ignore[import-untyped]
+
+    from tollbooth.authority.tenant_provisioner import get_operator_config_value
+    from tollbooth.bootstrap_relay import MIN_HOLDERS, config_coverage
+    from tollbooth.relay_registry import get_relays
+
+    vault = await _get_runtime().vault()
+    t = vault._t if hasattr(vault, "_t") else (lambda x: x)
+    result = await vault._execute(
+        f"SELECT DISTINCT npub FROM {t('bootstrap_config')} "
+        "WHERE key = 'neon_database_url'"
+    )
+    npubs = [
+        (row[0] if isinstance(row, list) else row.get("npub", ""))
+        for row in result.get("rows", [])
+    ]
+    npubs = [n for n in npubs if n]
+    hexes = {n: PublicKey.from_npub(n).hex() for n in npubs}
+    authority_hex = _get_nostr_signer().pubkey_hex
+    relays = get_relays()
+
+    def coverage() -> dict[str, tuple[str, ...]]:
+        return config_coverage(authority_hex, list(hexes.values()), relays)
+
+    before = await asyncio.to_thread(coverage)
+    now = time.time()
+    due: dict[str, str] = {}
+    for npub in npubs:
+        if len(before[hexes[npub]]) < MIN_HOLDERS:
+            due[npub] = "thin"
+            continue
         stamp = await get_operator_config_value(vault, npub, "bootstrap_dm_sent_at")
-        sent_at = int(stamp) if stamp else 0
-        # Arm the throttle only after the vault answered — a failure here
-        # must leave the npub free to retry on the next call.
-        _bootstrap_dm_last_check[npub] = now
-        if time.time() - sent_at >= _BOOTSTRAP_DM_REFRESH_SECONDS:
-            published = await _resend_bootstrap_dm(npub)
-            if not published:
-                logger.warning(
-                    "Bootstrap DM refresh due for %s but did not publish",
-                    npub[:16],
-                )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Bootstrap DM refresh check failed for %s: %s", npub[:16], exc,
-        )
+        if now - (int(stamp) if stamp else 0) >= _BOOTSTRAP_REFRESH_AFTER_SECONDS:
+            due[npub] = "stale"
 
+    gate = asyncio.Semaphore(_AUDIT_CONCURRENCY)
 
-def _schedule_bootstrap_dm_refresh(npub: str) -> None:
-    """Fire-and-forget refresh that keeps a strong ref until the task ends."""
-    try:
-        task = asyncio.create_task(_maybe_refresh_bootstrap_dm(npub))
-    except RuntimeError:
-        # No running loop (unusual on these async tool paths) — skip.
-        return
-    _bootstrap_dm_tasks.add(task)
-    task.add_done_callback(_bootstrap_dm_tasks.discard)
+    async def republish(npub: str) -> bool:
+        async with gate:
+            return await _resend_bootstrap_dm(npub)
 
+    sent = dict(zip(due, await asyncio.gather(*(republish(n) for n in due)), strict=True))
+    after = await asyncio.to_thread(coverage) if due else before
 
-async def _fleet_resend_bootstrap_dms() -> None:
-    """One-shot: republish every registered operator's bootstrap config.
-
-    Idempotent. Enumerates ``bootstrap_config`` the same way role migration
-    does. Runs once per process after the first Authority tool traffic so a
-    deploy of this fix re-covers operators left one-relay deep without a
-    manual ``get_operator_config`` per npub.
-    """
-    try:
-        vault = await _get_runtime().vault()
-        t = vault._t if hasattr(vault, "_t") else (lambda x: x)
-        result = await vault._execute(
-            f"SELECT DISTINCT npub FROM {t('bootstrap_config')} "
-            "WHERE key = 'neon_database_url'"
-        )
-        rows = result.get("rows", [])
-        npubs: list[str] = []
-        for row in rows:
-            if isinstance(row, list):
-                npubs.append(row[0])
-            else:
-                npubs.append(row.get("npub", ""))
-        ok = fail = 0
-        for npub in npubs:
-            if not npub:
-                continue
-            if await _resend_bootstrap_dm(npub):
-                ok += 1
-            else:
-                fail += 1
-        logger.info(
-            "Bootstrap fleet republish complete: %d sent, %d failed, %d operators",
-            ok, fail, len(npubs),
-        )
-    except Exception as exc:  # noqa: BLE001 — never break tool traffic
-        logger.warning("Bootstrap fleet republish failed: %s", exc)
-
-
-def _schedule_fleet_bootstrap_sweep() -> None:
-    """Kick the one-shot fleet republish at most once per process."""
-    global _bootstrap_fleet_sweep_started
-    if _bootstrap_fleet_sweep_started:
-        return
-    _bootstrap_fleet_sweep_started = True
-    try:
-        task = asyncio.create_task(_fleet_resend_bootstrap_dms())
-    except RuntimeError:
-        _bootstrap_fleet_sweep_started = False
-        return
-    _bootstrap_dm_tasks.add(task)
-    task.add_done_callback(_bootstrap_dm_tasks.discard)
+    operators = [
+        {
+            "operator": f"{npub[:16]}...",
+            "holders_before": len(before[hexes[npub]]),
+            "holders_after": len(after[hexes[npub]]),
+            "republished": sent.get(npub, False),
+            "reason": due.get(npub, ""),
+        }
+        for npub in npubs
+    ]
+    thin = [f"{n[:16]}..." for n in npubs if len(after[hexes[n]]) < MIN_HOLDERS]
+    logger.info(
+        "Bootstrap config audit: %d operators, %d due, %d republished, %d still thin",
+        len(npubs), len(due), sum(sent.values()), len(thin),
+    )
+    return {
+        "success": True,
+        "relays": len(relays),
+        "operators": operators,
+        "still_thin": thin,
+    }
 
 
 async def _provision_operator(
@@ -1149,12 +1120,6 @@ def register_authority_tools(
         result["vault_backend"] = "neon" if s.neon_database_url else "unconfigured"
         result["cache_health"] = cache.health()
 
-        # Opportunistic bootstrap config refresh for the inspected operator.
-        # Strong-ref the task so it survives past the response (2026-09-27).
-        if npub:
-            _schedule_bootstrap_dm_refresh(user_id)
-        _schedule_fleet_bootstrap_sweep()
-
         return result
 
     # ------------------------------------------------------------------
@@ -1241,13 +1206,6 @@ def register_authority_tools(
         # made it log "Failed to persist fee debit" about a fee that was, in
         # fact, persisted.
 
-        # Opportunistic bootstrap config refresh (the OTS pattern): keep
-        # this operator's config alive on the back of its own certification
-        # traffic. Fire and forget with a strong ref — certification latency
-        # must not pay for relay I/O, but the task must outlive the response.
-        _schedule_bootstrap_dm_refresh(npub)
-        _schedule_fleet_bootstrap_sweep()
-
         return {
             "success": True,
             "certificate": nostr_event_json,
@@ -1257,6 +1215,17 @@ def register_authority_tools(
             "net_sats": net_sats,
             "expires_at": expiration,
         }
+
+    @tool
+    async def audit_bootstrap_configs() -> dict[str, Any]:
+        """Audit every operator's bootstrap config on the relays, and republish what needs it.
+
+        Republishes a config when fewer than three relays hold it, or when it was
+        last sent more than six days ago; then measures again. A GitHub Action
+        runs this weekly. Free and unauthenticated: it reveals only relay counts
+        anyone can take, and re-sending the Authority's own config is idempotent.
+        """
+        return await _audit_bootstrap_configs()
 
     # ------------------------------------------------------------------
     # DPYC membership diagnostic
