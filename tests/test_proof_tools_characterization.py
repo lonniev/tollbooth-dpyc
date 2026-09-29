@@ -86,10 +86,16 @@ def _runtime_with_exchange(exchange, *, on_proven=None):
     rt = OperatorRuntime(tool_registry={}, service_name="Test Operator")
     rt._courier = SimpleNamespace(_exchange=exchange)
     rt._on_npub_proven = on_proven
+    # Operator nsec so receive_npub_proof can mint a kind-30080 grant.
+    rt._nsec = PrivateKey().bech32()
     # Stub persistence the drain doesn't exercise.
     rt.load_patron_session = AsyncMock(return_value=({}, ""))  # no challenge_ts
     record = SimpleNamespace(verified_at=1000.0, expires_at=1000.0 + 7200)
-    cache = SimpleNamespace(mark_proven=AsyncMock(return_value=record))
+    cache = SimpleNamespace(
+        mark_proven=AsyncMock(return_value=record),
+        is_grant_revoked=AsyncMock(return_value=False),
+        proof_status=AsyncMock(return_value={"status": "unknown", "expires_in_seconds": 0}),
+    )
     rt.proven_npub_cache = AsyncMock(return_value=cache)
     return rt, cache
 
@@ -117,15 +123,24 @@ def patron():
 @pytest.mark.asyncio
 async def test_match_marks_proven_and_returns_token(patron):
     dpop_token = "bold-hawk-42"
-    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, "_plaintext": _delimited(dpop_token=dpop_token)}])
+    ex = FakeExchange(candidates=[{
+        "id": "e1", "sig": "ab" * 32, "_relay": PIN,
+        "_plaintext": _delimited(dpop_token=dpop_token),
+    }])
     rt, cache = _runtime_with_exchange(ex)
     tools = _register(rt)
 
     r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
 
     assert r["success"] is True
-    assert r["dpop_token"] == dpop_token
     assert r["proven_npub"] == patron
+    # #267: dpop_token is now the grant envelope {grant, nonce}, not the bare phrase.
+    assert r["nonce"] == dpop_token
+    import json
+    envelope = json.loads(r["dpop_token"])
+    assert envelope["nonce"] == dpop_token
+    assert envelope["grant"]["kind"] == 30080
+    assert r["grant"]
     # proven-npub cache written with sha256(dpop_token) hash
     import hashlib
     expected_hash = hashlib.sha256(dpop_token.encode()).hexdigest()
@@ -331,25 +346,19 @@ async def test_request_propagates_open_channel_failure(patron):
 # ── check_proof_status ────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status,frag", [
-    ("valid", "Proof is valid"),
-    ("expired", "Proof has expired"),
-    ("missing", "No proof record found"),
-])
-async def test_check_proof_status_messages(patron, status, frag):
+async def test_check_proof_status_phrase_needs_refresh(patron):
+    # #267: a bare phrase is never a credential — status is refresh_needed.
     rt = OperatorRuntime(tool_registry={}, service_name="Test")
     cache = SimpleNamespace(proof_status=AsyncMock(
-        return_value={"status": status, "expires_in_seconds": 123},
+        return_value={"status": "valid", "expires_in_seconds": 123},
     ))
     rt.proven_npub_cache = AsyncMock(return_value=cache)
     tools = _register(rt)
 
     r = await tools["check_proof_status"](patron_npub=patron, dpop_token="bold-hawk-42")
     assert r["success"] is True
-    assert r["status"] == status
-    assert r["expires_in_seconds"] == 123
-    assert frag in r["message"]
-    # queried by sha256(dpop_token)
+    assert r["status"] == "refresh_needed"
+    assert "nonce alone is not a credential" in r["message"]
     import hashlib
     assert cache.proof_status.await_args.args[0] == hashlib.sha256(b"bold-hawk-42").hexdigest()
 

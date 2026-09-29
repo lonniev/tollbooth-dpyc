@@ -214,6 +214,18 @@ async def forget_credentials_tool(
         result = await courier.forget(target_npub, service)
         if service == rt.operator_credential_service:
             rt._cashier = None
+        # Drop in-memory proven rows for this npub. Grant JTIs the caller still
+        # holds must be revoked explicitly (revoke_grant) when known; clearing
+        # the legacy cache stops any residual phrase-keyed rows.
+        if result.get("success"):
+            try:
+                cache = await rt.proven_npub_cache()
+                if hasattr(cache, "revoke_all_for_npub"):
+                    await cache.revoke_all_for_npub(target_npub)
+            except Exception:
+                logger.debug(
+                    "best-effort proven-npub clear on forget failed", exc_info=True,
+                )
         # Fire on_forget callback so operators can clear caches
         if rt._on_forget and result.get("success"):
             try:

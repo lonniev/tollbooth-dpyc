@@ -19,10 +19,14 @@ from tollbooth.identity_credential import (
     IDENTITY_CREDENTIAL_KIND,
     IDENTITY_CREDENTIAL_LABEL,
     IDENTITY_CREDENTIAL_TAG,
+    PROOF_GRANT_LABEL,
+    PROOF_GRANT_TAG,
     IdentityCredentialError,
     sign_identity_credential,
+    sign_proof_grant,
     verify_credential_chain,
     verify_identity_credential,
+    verify_proof_grant,
 )
 from tollbooth.ledger import InvoiceRecord, ToolUsage, Tranche, UserLedger
 from tollbooth.ledger_cache import LedgerCache
@@ -258,6 +262,8 @@ __all__ = [
     "IDENTITY_CREDENTIAL_KIND",
     "IDENTITY_CREDENTIAL_LABEL",
     "IDENTITY_CREDENTIAL_TAG",
+    "PROOF_GRANT_LABEL",
+    "PROOF_GRANT_TAG",
     "LOW_BALANCE_FLOOR_API_SATS",
     "MAX_INVOICE_SATS",
     "NOSTR_CERT_KIND",
@@ -391,6 +397,7 @@ __all__ = [
     "resolve_route",
     # Identity Credential
     "sign_identity_credential",
+    "sign_proof_grant",
     "situation_response_from_row",
     "upstream_payment_situation",
     "validate_operator_tools",
@@ -399,6 +406,7 @@ __all__ = [
     "verify_credential_chain",
     "verify_identity_credential",
     "verify_nostr_certificate",
+    "verify_proof_grant",
     # Operator Proof & Npub Ownership
     "verify_proof",
     "web_fetch_tool",

@@ -17,16 +17,21 @@ caller chooses based on what credentials it has on hand:
            "sig": "<schnorr_signature>"
        }
 
-2. **Cached dpop_token phrase** (format ``alpha-beta-42``): the
-   ``dpop_token`` returned by a prior ``request_npub_proof`` →
-   ``receive_npub_proof`` DM round-trip. Works when the caller holds
-   only the dpop_token and not the nsec (e.g., a remote AI agent that's
-   already proven ownership in this session). The gate hashes it and
-   looks up the proven-npub cache supplied by the caller.
+2. **Operator-signed proof grant** (kind 30080, envelope): the
+   ``dpop_token`` returned by ``receive_npub_proof`` is a JSON envelope
+   ``{"grant": <kind-30080 event>, "nonce": "<phrase>"}``. The grant is
+   self-verifying (Operator sig, patron binding, expiry, challenge =
+   sha256(nonce)). The challenge nonce *selects* the grant; a
+   phrase-shaped token alone is never a credential
+   (``PROOF_REFRESH_NEEDED``).
+
+A bare ``alpha-beta-42`` phrase is always refused — it must never
+unlock a proof on its own (clean break from the pre-grant cache).
 
 The gate is actor-agnostic — Operators, Authorities, and any future
-runtime use the same function. Callers pass their own
-``proven_cache`` (or omit it to disable tactic 2).
+runtime use the same function. Callers may pass ``proven_cache`` for
+grant-revocation tombstones and ``operator_hex`` so only this
+Operator's grants authorize here.
 
 Dependencies: ``pynostr`` (available via ``tollbooth-dpyc[nostr]``).
 """
@@ -47,10 +52,24 @@ logger = logging.getLogger(__name__)
 
 # Dpop_token phrases produced by request_npub_proof have the shape
 # ``<word>-<word>-<n>`` — three lowercase letters/digits segments.
+# These are challenge nonces that *select* a proof grant; they never
+# authorize on their own.
 _DPOP_TOKEN_RE = re.compile(r"^[a-z]+-[a-z]+-\d+$")
 
 PROOF_EVENT_KIND = 27235
 """NIP-98 HTTP Auth event kind, repurposed for MCP identity proofs."""
+
+# Machine-readable grant-rejection reasons (surfaced on PROOF_INVALID).
+PROOF_REASON_GRANT_EXPIRED = "expired"
+PROOF_REASON_GRANT_WRONG_NPUB = "wrong_npub"
+PROOF_REASON_GRANT_CHALLENGE = "challenge_mismatch"
+PROOF_REASON_GRANT_REVOKED = "revoked"
+PROOF_REASON_GRANT_BAD_SIGNATURE = "bad_signature"
+PROOF_REASON_GRANT_WRONG_KIND = "wrong_kind"
+PROOF_REASON_GRANT_NOT_GRANT = "not_proof_grant"
+PROOF_REASON_GRANT_OPERATOR = "operator_mismatch"
+PROOF_REASON_GRANT_MALFORMED = "malformed"
+PROOF_REASON_GRANT_MISSING_NONCE = "missing_nonce"
 
 DEFAULT_WINDOW_SECONDS = 60
 """Maximum age (in seconds) of a valid proof event."""
@@ -562,6 +581,88 @@ def verify_proof(
     return _verify_proof_reason(proof_json, expected_npub, tool_name, window_seconds) is None
 
 
+def _parse_grant_envelope(dpop_token: str) -> tuple[str, str | None] | None:
+    """Parse a proof-grant envelope or bare kind-30080 grant from ``dpop_token``.
+
+    Returns ``(grant_json, nonce_or_none)`` when the payload is grant-shaped,
+    else ``None`` so the caller can try Tactic-2 (kind 27235).
+
+    Accepted shapes:
+      - envelope ``{"grant": <event dict|json str>, "nonce": "<phrase>"}``
+      - bare kind-30080 event JSON (nonce required separately — returns
+        ``nonce=None`` so the gate can demand it)
+    """
+    if not isinstance(dpop_token, str) or not dpop_token or dpop_token[0] not in "{[":
+        return None
+    if len(dpop_token) > MAX_PROOF_JSON_BYTES:
+        return None
+    try:
+        payload = json.loads(dpop_token)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    # Envelope: grant + nonce (the receive_npub_proof return shape).
+    if "grant" in payload:
+        grant = payload["grant"]
+        if isinstance(grant, dict):
+            grant_json = json.dumps(grant, separators=(",", ":"))
+        elif isinstance(grant, str):
+            grant_json = grant
+        else:
+            return None
+        nonce = payload.get("nonce")
+        if nonce is not None and not isinstance(nonce, str):
+            nonce = str(nonce) if nonce else None
+        return grant_json, nonce
+
+    # Bare kind-30080 event.
+    kind = payload.get("kind")
+    if kind == 30080:
+        return dpop_token, None
+    return None
+
+
+_GRANT_REASON_MESSAGES = {
+    PROOF_REASON_GRANT_EXPIRED: (
+        "Invalid proof grant: the grant has expired. Call request_npub_proof "
+        "and receive_npub_proof for a fresh grant."
+    ),
+    PROOF_REASON_GRANT_WRONG_NPUB: (
+        "Invalid proof grant: the grant is not bound to the npub you claimed."
+    ),
+    PROOF_REASON_GRANT_CHALLENGE: (
+        "Invalid proof grant: the nonce does not select this grant "
+        "(sha256(nonce) ≠ challenge)."
+    ),
+    PROOF_REASON_GRANT_REVOKED: (
+        "Invalid proof grant: this grant was revoked. Call request_npub_proof "
+        "and receive_npub_proof for a fresh grant."
+    ),
+    PROOF_REASON_GRANT_BAD_SIGNATURE: (
+        "Invalid proof grant: the Operator Schnorr signature did not verify."
+    ),
+    PROOF_REASON_GRANT_WRONG_KIND: (
+        "Invalid proof grant: the event kind must be 30080."
+    ),
+    PROOF_REASON_GRANT_NOT_GRANT: (
+        "Invalid proof grant: the event is not a dpyc-proof-grant."
+    ),
+    PROOF_REASON_GRANT_OPERATOR: (
+        "Invalid proof grant: the grant was issued by a different Operator."
+    ),
+    PROOF_REASON_GRANT_MALFORMED: (
+        "Invalid proof grant: the payload is malformed."
+    ),
+    PROOF_REASON_GRANT_MISSING_NONCE: (
+        "Invalid proof grant: a nonce is required to select the grant. "
+        "Pass the dpop_token envelope returned by receive_npub_proof "
+        '({\"grant\": ..., \"nonce\": \"...\"}).'
+    ),
+}
+
+
 async def require_proof(
     npub: str,
     dpop_token: str,
@@ -569,6 +670,7 @@ async def require_proof(
     *,
     proven_cache: ProvenNpubCache | None = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
+    operator_hex: str | None = None,
 ) -> dict[str, Any] | None:
     """Canonical proof-of-ownership gate. Returns ``None`` on success
     (caller proceeds) or a structured error dict to return verbatim.
@@ -582,22 +684,25 @@ async def require_proof(
 
     **Tactics accepted, in this order:**
 
-    1. **Cached dpop_token phrase** — when ``proof`` matches the
-       ``<word>-<word>-<n>`` shape and ``proven_cache`` is supplied,
-       hash it (sha256) and check ``cache.is_proven(hash, npub)``. A
-       hit means a prior ``receive_npub_proof`` saw a valid signed-DM
-       reply from this npub.
+    1. **Operator-signed proof grant** — JSON envelope
+       ``{"grant": <kind-30080 event>, "nonce": "<phrase>"}`` returned by
+       ``receive_npub_proof``. Self-verifying; the nonce selects the grant
+       via ``sha256(nonce) == challenge``. A phrase alone is never accepted.
     2. **Inline Schnorr proof** — JSON-encoded kind-27235 event with
        ``tool_name`` in the ``u`` tag, signed by ``npub``, no older
        than ``window_seconds``. Works for any caller that holds the
        nsec; no cache needed.
 
-    Bound to ``tool_name``: a proof issued for one tool will not pass
-    for another, preventing replay across the public tool surface.
+    Phrase-shaped ``dpop_token`` values always yield
+    ``PROOF_REFRESH_NEEDED`` (clean break — the nonce selects, never unlocks).
+
+    Bound to ``tool_name`` for Tactic 2: a proof issued for one tool will
+    not pass for another, preventing replay across the public tool surface.
+    Grants are tool-agnostic (bearer for the patron at this Operator).
 
     Actor-agnostic — Operators, Authorities, and any future runtime
-    use the same gate. Pass the cache appropriate to that runtime
-    (``await rt.proven_npub_cache()`` for both).
+    use the same gate. Pass ``proven_cache`` for revocation tombstones and
+    ``operator_hex`` so only this Operator's grants authorize here.
     """
     # Lazy import — constants is leaf-y, but identity_proof is too;
     # keep the dep one-way to be safe.
@@ -627,61 +732,83 @@ async def require_proof(
                 "recommended to avoid same-second event-id collisions."),
                 ("Or: call request_npub_proof, reply to the DM challenge from "
                 "your Nostr client, then call receive_npub_proof — pass the "
-                "returned dpop_token as `dpop_token` on every subsequent call."),
+                "returned dpop_token (grant envelope) as `dpop_token` on every "
+                "subsequent call."),
             ],
         }
 
-    # Tactic 1: cached dpop_token phrase
-    if proven_cache is not None and _DPOP_TOKEN_RE.match(dpop_token):
-        # Lazy import to avoid identity_proof ↔ runtime circular dependency.
-        from tollbooth.runtime import resolve_npub as _resolve_npub
-        try:
-            resolved = _resolve_npub(npub)
-        except Exception:  # noqa: BLE001
-            resolved = npub
-
-        import hashlib as _hashlib
-        dpop_token_hash = _hashlib.sha256(dpop_token.encode()).hexdigest()
-        if await proven_cache.is_proven(dpop_token_hash, resolved):
-            return None
-        return {
-            "success": False,
-            "error_code": ErrorCode.PROOF_REFRESH_NEEDED,
-            "error": (
-                "Your npub-proof cache entry is no longer valid. This is "
-                "routine — sign a fresh DM challenge and you're back."
-            ),
-            "next_steps": [
-                "request_npub_proof(patron_npub=<patron_npub>)",
-                "Reply to the DM challenge from your Nostr client",
-                ("receive_npub_proof(patron_npub=<patron_npub>) to cache a "
-                "fresh dpop_token"),
-            ],
-        }
-
-    # S4: a dpop_token-shaped token reaching here was NOT accepted as a cached
-    # proof (this runtime wired no proven_cache, or the cache-miss branch above
-    # already returned). It is definitely not an inline Schnorr event (those are
-    # JSON and never match _DPOP_TOKEN_RE), so don't fall through to a confusing
-    # "malformed Schnorr" error — tell the caller their token isn't valid here
-    # and how to refresh. This changes only the denial message, never what is
-    # accepted.
+    # Clean break: a phrase-shaped token is a challenge nonce, never a credential.
+    # Refuse every phrase-shaped dpop_token with PROOF_REFRESH_NEEDED — no cache
+    # lookup, no unlock path. (Issue #267 / Secure Courier proof grant.)
     if _DPOP_TOKEN_RE.match(dpop_token):
         return {
             "success": False,
             "error_code": ErrorCode.PROOF_REFRESH_NEEDED,
             "error": (
-                "That looks like a dpop_token, but it isn't a currently-valid "
-                "cached proof here. Refresh it, or pass an inline kind-27235 "
-                "Schnorr proof instead."
+                "That looks like a challenge nonce, not a proof grant. The "
+                "nonce selects a proof; it never authorizes on its own. Call "
+                "receive_npub_proof for an Operator-signed grant envelope, or "
+                "pass an inline kind-27235 Schnorr proof."
             ),
             "next_steps": [
                 "request_npub_proof(patron_npub=<patron_npub>)",
                 "Reply to the DM challenge from your Nostr client",
-                ("receive_npub_proof(patron_npub=<patron_npub>) to cache a "
-                "fresh dpop_token"),
+                ("receive_npub_proof(patron_npub=<patron_npub>, dpop_token=<nonce>) "
+                "and pass the returned grant envelope as dpop_token"),
             ],
         }
+
+    # Tactic 1: Operator-signed kind-30080 proof grant (+ nonce selector).
+    grant_parsed = _parse_grant_envelope(dpop_token)
+    if grant_parsed is not None:
+        grant_json, nonce = grant_parsed
+        if not nonce:
+            return {
+                "success": False,
+                "error_code": ErrorCode.PROOF_INVALID,
+                "reason": PROOF_REASON_GRANT_MISSING_NONCE,
+                "error": _GRANT_REASON_MESSAGES[PROOF_REASON_GRANT_MISSING_NONCE],
+            }
+        import hashlib as _hashlib
+
+        challenge_hash = _hashlib.sha256(nonce.encode()).hexdigest()
+        from tollbooth.identity_credential import (
+            IdentityCredentialError,
+            verify_proof_grant,
+        )
+
+        try:
+            claims = verify_proof_grant(
+                grant_json,
+                expected_patron_npub=npub,
+                challenge_hash=challenge_hash,
+                expected_operator_hex=operator_hex,
+            )
+        except IdentityCredentialError as exc:
+            reason = str(exc) or PROOF_REASON_GRANT_MALFORMED
+            return {
+                "success": False,
+                "error_code": ErrorCode.PROOF_INVALID,
+                "reason": reason,
+                "error": _GRANT_REASON_MESSAGES.get(
+                    reason, f"Invalid proof grant: {reason}."
+                ),
+            }
+
+        # Revocation tombstone (forget_credentials / revoke_proof).
+        if proven_cache is not None and hasattr(proven_cache, "is_grant_revoked"):
+            try:
+                if await proven_cache.is_grant_revoked(claims["jti"]):
+                    return {
+                        "success": False,
+                        "error_code": ErrorCode.PROOF_INVALID,
+                        "reason": PROOF_REASON_GRANT_REVOKED,
+                        "error": _GRANT_REASON_MESSAGES[PROOF_REASON_GRANT_REVOKED],
+                    }
+            except Exception:
+                logger.debug("grant revocation check failed", exc_info=True)
+
+        return None
 
     # Tactic 2: inline Schnorr-signed kind-27235 event
     reason = _verify_proof_reason(

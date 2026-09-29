@@ -783,9 +783,20 @@ class OperatorRuntime:
         dict to return verbatim.
         """
         from tollbooth.constants import ErrorCode
+        op_hex = None
+        try:
+            from pynostr.key import PrivateKey  # type: ignore[import-untyped]
+            nsec = self._get_nsec()
+            if nsec.startswith("nsec1"):
+                op_hex = PrivateKey.from_nsec(nsec).public_key.hex()
+            else:
+                op_hex = PrivateKey(bytes.fromhex(nsec)).public_key.hex()
+        except Exception:  # noqa: BLE001
+            op_hex = None
         err = await require_proof(
             npub, dpop_token, self.runtime_name(capability),
             proven_cache=await self.proven_npub_cache(),
+            operator_hex=op_hex,
         )
         # When the caller has not yet proven ownership, tell them — right in
         # the denial — whether this operator ALSO needs patron credentials or
@@ -979,11 +990,22 @@ class OperatorRuntime:
                 }
 
             proof_npub = self.operator_npub() if category == "restricted" else resolved
+            op_hex = None
+            try:
+                from pynostr.key import PrivateKey  # type: ignore[import-untyped]
+                nsec = self._get_nsec()
+                if nsec.startswith("nsec1"):
+                    op_hex = PrivateKey.from_nsec(nsec).public_key.hex()
+                else:
+                    op_hex = PrivateKey(bytes.fromhex(nsec)).public_key.hex()
+            except Exception:  # noqa: BLE001
+                op_hex = None
             if err := await require_proof(
                 proof_npub,
                 dpop_token,
                 name,
                 proven_cache=await self.proven_npub_cache(),
+                operator_hex=op_hex,
             ):
                 return err
 

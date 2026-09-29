@@ -58,19 +58,24 @@ async def test_invalid_npub_rejected():
 
 @pytest.mark.asyncio
 async def test_dpop_token_shaped_token_without_cache_gives_refresh_feedback():
-    # S4: no proven_cache wired, but the token looks like a dpop_token. Must
-    # not fall through to "Invalid identity proof" — give refresh guidance.
+    # S4 / #267: a phrase-shaped token is never a credential — refresh guidance.
     r = await require_proof(NPUB, DPOP_TOKEN, "tool", proven_cache=None)
     assert r["error_code"] == ErrorCode.PROOF_REFRESH_NEEDED
-    assert "dpop_token" in r["error"]
     assert r["next_steps"]
 
 
 @pytest.mark.asyncio
-async def test_cached_dpop_token_hit_passes():
-    cache = SimpleNamespace(is_proven=AsyncMock(return_value=True))
+async def test_phrase_alone_never_authorizes_even_with_cache_hit():
+    # #267 clean break: the challenge nonce selects a grant; it never unlocks.
+    # A cache hit on the legacy phrase row must still be refused.
+    cache = SimpleNamespace(
+        is_proven=AsyncMock(return_value=True),
+        is_grant_revoked=AsyncMock(return_value=False),
+    )
     r = await require_proof(NPUB, DPOP_TOKEN, "tool", proven_cache=cache)
-    assert r is None  # success → caller proceeds
+    assert r is not None
+    assert r["error_code"] == ErrorCode.PROOF_REFRESH_NEEDED
+    cache.is_proven.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -98,6 +98,7 @@ def parse_duration(text: str) -> int | None:
     return result
 
 _VAULT_KEY_PREFIX = "proven_npub:"
+_REVOCATION_KEY_PREFIX = "proof_grant_revoked:"
 
 
 def _cache_key(dpop_token_hash: str, npub: str) -> str:
@@ -106,6 +107,10 @@ def _cache_key(dpop_token_hash: str, npub: str) -> str:
 
 def _vault_key(dpop_token_hash: str, npub: str) -> str:
     return f"{_VAULT_KEY_PREFIX}{dpop_token_hash}:{npub}"
+
+
+def _revocation_vault_key(jti: str) -> str:
+    return f"{_REVOCATION_KEY_PREFIX}{jti}"
 
 
 @dataclass(frozen=True)
@@ -151,6 +156,11 @@ class ProvenNpubCache:
         # avoid evicting entries before their patron-chosen duration.
         self._cache: SessionCache[ProvenNpub] = SessionCache(ttl_seconds=MAX_PROVEN_TTL)
         self._vault = vault
+        # In-memory set of revoked proof-grant JTIs. Vault-backed so cold
+        # starts still honor forget_credentials / revoke_proof tombstones.
+        # Grants are self-verifying on the hot path; this set is the only
+        # vault read the gate still needs for the grant tactic.
+        self._revoked_jtis: set[str] = set()
 
     async def is_proven(self, dpop_token_hash: str, npub: str) -> bool:
         """Check if an npub is proven via the given dpop_token hash."""
@@ -260,6 +270,9 @@ class ProvenNpubCache:
         Returns a dict with ``status`` (``"valid"`` | ``"expired"`` |
         ``"unknown"``) and ``expires_in_seconds`` (the remaining TTL,
         runtime-derived from the stored ``ProvenNpub.expires_at``).
+
+        Prefer :meth:`grant_status` for Operator-signed proof grants —
+        those carry their own expiry and need no vault row on the hot path.
         """
         key = _cache_key(dpop_token_hash, npub)
         record = self._cache.get(key)
@@ -275,6 +288,77 @@ class ProvenNpubCache:
         if remaining <= 0:
             return {"status": "expired", "expires_in_seconds": 0}
         return {"status": "valid", "expires_in_seconds": remaining}
+
+    async def revoke_grant(self, jti: str, *, expires_at: float | None = None) -> None:
+        """Write a revocation tombstone for a proof-grant JTI.
+
+        Called by ``forget_credentials`` (and a future ``revoke_proof``) so a
+        previously-issued grant stops authorizing even though it is still
+        unexpired and self-verifying. The tombstone may outlive the grant;
+        ``is_grant_revoked`` ignores expiry (once revoked, always revoked for
+        that jti's lifetime — JTIs are UUIDs and not reused).
+        """
+        if not jti:
+            return
+        self._revoked_jtis.add(jti)
+        if self._vault is not None:
+            try:
+                payload = json.dumps({
+                    "jti": jti,
+                    "revoked_at": time.time(),
+                    "expires_at": expires_at,
+                })
+                encrypted = self._vault._encrypt(payload)
+                await self._vault.set_config(_revocation_vault_key(jti), encrypted)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Vault store for grant revocation failed (non-fatal): %s", exc,
+                )
+
+    async def is_grant_revoked(self, jti: str) -> bool:
+        """Return True if ``jti`` has a revocation tombstone."""
+        if not jti:
+            return False
+        if jti in self._revoked_jtis:
+            return True
+        if self._vault is None:
+            return False
+        try:
+            raw = await self._vault.get_config(_revocation_vault_key(jti))
+            if raw is None or raw == "":
+                return False
+            # Any present tombstone counts — decrypt only to confirm it's ours.
+            try:
+                self._vault._decrypt(raw)
+            except Exception:
+                # Corrupt row still blocks; safer than accepting a revoked grant.
+                logger.debug(
+                    "grant revocation tombstone decrypt failed; treating as revoked",
+                    exc_info=True,
+                )
+            self._revoked_jtis.add(jti)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Vault fetch for grant revocation failed (non-fatal): %s", exc,
+            )
+            return False
+
+    async def revoke_all_for_npub(self, npub: str) -> int:
+        """Best-effort: drop in-memory proven rows for ``npub``.
+
+        Grant JTIs are not enumerated here (grants are bearer tokens the
+        caller holds). Callers that know a jti should call
+        :meth:`revoke_grant` directly. Returns the number of in-memory
+        proven-cache keys cleared.
+        """
+        cleared = 0
+        suffix = f":{npub}"
+        for key in list(self._cache._entries.keys()):
+            if key.endswith(suffix):
+                self._cache.clear(key)
+                cleared += 1
+        return cleared
 
     # -- Vault helpers --------------------------------------------------------
 
