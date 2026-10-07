@@ -124,7 +124,7 @@ async def test_a_coupon_authored_in_the_chain_and_bound_on_the_row_applies_once(
     authored = PipelineStep(id="s1", type="coupon", params={"coupon_id": CID})
     coupons = FakeCoupons([_coupon([tid], percent=50.0)])
     rt = _runtime(registry, resolver=FakeResolver(cost=20, chain=[authored]), coupons=coupons)
-    chain, _ = await rt._effective_chain(tid, "read_tool", PATRON)
+    chain, _, _ = await rt._effective_chain(tid, "read_tool", PATRON)
     assert [s.id for s in chain] == ["s1"], "the authored step is where the operator put it; no second one"
     with _PASS_PROOF:
         assert await rt.debit_or_deny(tid, PATRON, dpop_token="p") == 10  # 50 % once, not 75 %

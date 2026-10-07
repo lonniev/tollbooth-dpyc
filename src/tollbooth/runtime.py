@@ -1167,7 +1167,7 @@ class OperatorRuntime:
         tool_id: str,
         name: str,
         npub: str,
-    ) -> tuple[list[Any], Any]:
+    ) -> tuple[list[Any], Any, Any]:
         """The chain the gate walks for one call: authored steps plus the bound coupons.
 
         The pricing model's ``tools[].chain`` holds what the operator
@@ -1178,8 +1178,9 @@ class OperatorRuntime:
         unless the authored chain already names that coupon (then it is
         applied once, where the operator put it).
 
-        Returns ``(chain, coupon_map)``; the map pre-loads this patron's
-        redemptions for every coupon step so the walk stays synchronous.
+        Returns ``(chain, coupon_map, gate)``; the map pre-loads this
+        patron's redemptions for every coupon step so the walk stays
+        synchronous, and the gate is the one that walks it.
         ``check_price`` previews with exactly this, so the preview and
         the charge cannot disagree.
         """
@@ -1211,7 +1212,7 @@ class OperatorRuntime:
                 coupon_map = CouponRedemptionMap(entries=tuple(redemptions.items()))
             except Exception as ce:  # noqa: BLE001
                 logger.warning("Coupon redemption pre-load failed for %s: %s", name, ce)
-        return chain, coupon_map
+        return chain, coupon_map, gate
 
     async def _bound_coupons(self) -> list[Any]:
         """This operator's coupons that name at least one tool, held for the pricing TTL.
@@ -1262,12 +1263,12 @@ class OperatorRuntime:
         effective_cost = cost
         consumed_coupon_ids: list[str] = []
         try:
-            chain, coupon_map = await self._effective_chain(tool_id, name, npub)
+            chain, coupon_map, gate = await self._effective_chain(tool_id, name, npub)
             if chain:
                 cache = await self.ledger_cache()
                 ledger = await cache.get(npub)
                 demand = await self.get_global_demand(name)
-                denial, effective_signed, consumed_coupon_ids = self._constraint_gate.evaluate_chain(
+                denial, effective_signed, consumed_coupon_ids = gate.evaluate_chain(
                     chain=chain,
                     tool_name=name,
                     base_cost=cost,
@@ -5928,9 +5929,9 @@ def register_standard_tools(
                 resolved = resolve_npub(npub) if npub else ""
             except ValueError:
                 resolved = ""
-            chain, coupon_map = await rt._effective_chain(tool_id, name, resolved)
+            chain, coupon_map, gate = await rt._effective_chain(tool_id, name, resolved)
         else:
-            chain, coupon_map = [], None
+            chain, coupon_map, gate = [], None, None
         if chain:
             result["constraints_enabled"] = True
             try:
@@ -5939,7 +5940,7 @@ def register_standard_tools(
                 cache = await rt.ledger_cache()
                 ledger = await cache.get(resolved)
                 demand = await rt.get_global_demand(name)
-                denial, effective, _consumed = rt._constraint_gate.evaluate_chain(
+                denial, effective, _consumed = gate.evaluate_chain(
                     chain=chain,
                     tool_name=name,
                     base_cost=int(base_cost),
