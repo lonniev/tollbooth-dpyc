@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.98.0] — 2026-10-07
 
 ### Changed — a coupon owns its binding; re-pricing cannot drop a discount
 
