@@ -12,6 +12,7 @@ concern by ``tollbooth.vaults.schema``.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -21,6 +22,7 @@ from tollbooth.coupons.models import (
     CouponRedemption,
     PatronCoupon,
     _to_iso,
+    _tool_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,8 +54,10 @@ class CouponsVault:
 
     _SELECT = (
         "id, operator, name, discount_percent, valid_from, valid_until, "
-        "uses_per_patron, total_uses, times_redeemed, created_at, updated_at"
+        "uses_per_patron, total_uses, times_redeemed, created_at, updated_at, tool_ids"
     )
+    #: A ``TEXT[]`` bound as JSON text, so the HTTP driver needs no array binding.
+    _ARRAY = "ARRAY(SELECT jsonb_array_elements_text(${n}::jsonb))"
 
     async def mint(
         self,
@@ -65,6 +69,7 @@ class CouponsVault:
         valid_until: datetime,
         uses_per_patron: int | None = 1,
         total_uses: int | None = None,
+        tool_ids: list[str] | None = None,
     ) -> Coupon:
         """Insert a new coupon row.  Raises ``CouponAlreadyExists`` on
         the ``UNIQUE(operator, name)`` collision."""
@@ -74,8 +79,9 @@ class CouponsVault:
             result = await self._neon._execute(
                 f"INSERT INTO {self._t('coupons')} "
                 "(operator, name, discount_percent, valid_from, valid_until, "
-                " uses_per_patron, total_uses) "
-                "VALUES ($1, $2, $3, $4::timestamptz, $5::timestamptz, $6, $7) "
+                " uses_per_patron, total_uses, tool_ids) "
+                "VALUES ($1, $2, $3, $4::timestamptz, $5::timestamptz, $6, $7, "
+                f"{self._ARRAY.format(n=8)}) "
                 f"RETURNING {self._SELECT}",
                 [
                     operator,
@@ -85,6 +91,7 @@ class CouponsVault:
                     _to_iso(valid_until),
                     uses_per_patron,
                     total_uses,
+                    json.dumps(list(tool_ids or [])),
                 ],
             )
         except NeonQueryError as exc:
@@ -145,6 +152,7 @@ class CouponsVault:
         valid_until: datetime | None = None,
         uses_per_patron: int | None = _UNSET,  # sentinel for "leave alone"
         total_uses: int | None = _UNSET,
+        tool_ids: list[str] | None = None,  # None = leave alone; [] = unbind every tool
     ) -> Coupon:
         """Patch a coupon's editable fields.  Operator-scoped — refuses
         to touch another operator's row."""
@@ -169,6 +177,9 @@ class CouponsVault:
         if total_uses is not _UNSET:
             params.append(total_uses)
             sets.append(f"total_uses = ${len(params)}")
+        if tool_ids is not None:
+            params.append(json.dumps(list(tool_ids)))
+            sets.append(f"tool_ids = {self._ARRAY.format(n=len(params))}")
 
         if not sets:
             existing = await self.get(coupon_id, operator=operator)
@@ -209,6 +220,20 @@ class CouponsVault:
             [coupon_id, operator],
         )
         return int(result.get("rowCount") or 0) > 0
+
+    async def bound_for_operator(self, operator: str) -> list[Coupon]:
+        """Every coupon of this operator that names at least one tool.
+
+        The gate derives a coupon step for each of these at evaluation
+        time; a coupon naming no tool discounts nothing, however redeemed.
+        """
+        result = await self._neon._execute(
+            f"SELECT {self._SELECT} FROM {self._t('coupons')} "
+            "WHERE operator = $1 AND cardinality(tool_ids) > 0 "
+            "ORDER BY created_at",
+            [operator],
+        )
+        return [Coupon.from_row(r) for r in result.get("rows", [])]
 
     # -- Patron flow ------------------------------------------------------
 
@@ -252,7 +277,7 @@ class CouponsVault:
         sql = (
             f"SELECT c.id, c.name, c.discount_percent, c.valid_from, "
             f"c.valid_until, c.uses_per_patron, c.total_uses, "
-            f"c.times_redeemed, pc.use_count "
+            f"c.times_redeemed, pc.use_count, c.tool_ids "
             f"FROM {self._t('patron_coupons')} pc "
             f"JOIN {self._t('coupons')} c ON c.id = pc.coupon_id "
             "WHERE pc.npub = $1"
@@ -291,7 +316,7 @@ class CouponsVault:
         sql = (
             f"SELECT c.id, c.name, c.discount_percent, c.valid_from, "
             f"c.valid_until, c.uses_per_patron, c.total_uses, "
-            f"c.times_redeemed, pc.use_count "
+            f"c.times_redeemed, pc.use_count, c.tool_ids "
             f"FROM {self._t('patron_coupons')} pc "
             f"JOIN {self._t('coupons')} c ON c.id = pc.coupon_id "
             f"WHERE pc.npub = $1 AND c.id IN ({placeholders})"
@@ -356,6 +381,7 @@ class CouponsVault:
             ),
             times_redeemed=int(row.get("times_redeemed") or 0),
             use_count=int(row.get("use_count") or 0),
+            tool_ids=tuple(_tool_ids(row.get("tool_ids"))),
         )
 
     @staticmethod
@@ -384,6 +410,9 @@ def schema_statements(t: Any, idx: str) -> list[str]:
             ")"
         ),
         f"CREATE INDEX IF NOT EXISTS {idx}idx_coupons_operator ON {t('coupons')}(operator)",
+        # The coupon's own binding — added after the table shipped, so it
+        # arrives as an ALTER on operators that already hold coupons.
+        f"ALTER TABLE {t('coupons')} ADD COLUMN IF NOT EXISTS tool_ids TEXT[] NOT NULL DEFAULT '{{}}'",
         (
             f"CREATE TABLE IF NOT EXISTS {t('patron_coupons')} ("
             "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"

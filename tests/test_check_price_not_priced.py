@@ -41,6 +41,9 @@ class _Resolver:
     async def _ensure_fresh(self) -> None:
         pass
 
+    async def get_chain(self, tool_id: str) -> list:
+        return []
+
     async def has_tool(self, tool_id: str) -> bool:
         return self._has
 

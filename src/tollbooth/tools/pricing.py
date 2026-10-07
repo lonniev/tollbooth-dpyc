@@ -12,9 +12,16 @@ from tollbooth.pricing_model import PricingModel
 logger = logging.getLogger(__name__)
 
 
+#: Constraint types a client may author into a tool's chain. ``coupon`` is
+#: not one: a coupon binds itself to tools (``mint_coupon`` / ``update_coupon``
+#: ``tool_ids``) and the gate derives its step, so a price push cannot lose it.
+#: An authored ``coupon`` step still evaluates; it is simply not offered.
+NOT_AUTHORABLE = frozenset({"coupon"})
+
+
 def list_constraint_types() -> list[dict[str, Any]]:
-    """Return schema dicts for all registered constraint types."""
-    return [s.to_dict() for s in get_all_schemas()]
+    """Return schema dicts for every constraint type a client may author."""
+    return [s.to_dict() for s in get_all_schemas() if s.type not in NOT_AUTHORABLE]
 
 
 def build_pricing_preview(
@@ -203,6 +210,10 @@ async def set_pricing_model_tool(
     validation_errors = _validate_tool_chains(model)
     if validation_errors:
         return {"status": "error", "error": "Tool chain validation failed", "details": validation_errors}
+    # Coupons bind themselves to tools; a coupon step authored into a chain
+    # still evaluates, but the count is reported so a client can see it is
+    # carrying bindings a price push could lose.
+    coupon_steps = sum(1 for t in model.tools for step in t.chain if step.type == "coupon")
 
     try:
         # Check if this is an update to an existing model
@@ -215,6 +226,7 @@ async def set_pricing_model_tool(
                     "status": "ok",
                     "model_id": model.model_id,
                     "tools_count": len(model.tools),
+                    "coupon_steps_in_model": coupon_steps,
                     "action": "updated",
                 }
 
@@ -228,6 +240,7 @@ async def set_pricing_model_tool(
             "status": "ok",
             "model_id": new_id,
             "tools_count": len(model.tools),
+            "coupon_steps_in_model": coupon_steps,
             "action": "created",
         }
     except Exception as e:

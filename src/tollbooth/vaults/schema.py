@@ -33,9 +33,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 # sha256 of every concern's statements rendered for the test schema "op_test".
-SCHEMA_DIGEST = "120a45e6a83e7001d400df9d464578af34af920b45def013e04d1629f0e3f1f6"
+SCHEMA_DIGEST = "0d36fb0d481cd85e9508d64c7303d787a432e29ec564808d4dcf5b64d6158c63"
 
 Statements = Callable[[Callable[[str], str], str], list[str]]
 
