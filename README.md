@@ -440,7 +440,7 @@ Operators configure constraints in the pricing model's `pipeline` array. Each st
 | `temporal_window` | Time-of-day / day-of-week access windows |
 | `finite_supply` | Total call quotas (per patron or global) |
 | `periodic_refresh` | Rate limiting with ISO-8601 refresh windows |
-| `coupon` | Code-based discounts with expiration |
+| `coupon` | Code-based discounts with expiration — bound by the coupon itself (`mint_coupon` / `update_coupon` `tool_ids`), never authored into a chain |
 | `loyalty_discount` | Spend-based tiered discounts |
 | `bulk_bonus` | Volume bonuses on credit purchases |
 | `patron_proof` | Require per-call Schnorr proof for high-value tools |

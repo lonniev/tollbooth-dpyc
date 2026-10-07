@@ -3,6 +3,45 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed — a coupon owns its binding; re-pricing cannot drop a discount
+
+A coupon used to reach its tools through a `coupon` step authored into the
+pricing model's `tools[].chain`, and `set_pricing_model` replaces the whole
+model — so any push built without the chains (a Studio save from a stale
+copy, an agent pricing a new tool) silently unbound every coupon, and every
+paid call went out at list price with nothing to say so. Seen twice: the
+Bee's Knees sim stall of 2026-09-09 and a Good Earth patron on 2026-10-07
+who paid 1000 sats on a redeemed 100 % coupon.
+
+Chains are owned by the coupon, not by the tool prices. Now:
+
+- `coupons.tool_ids TEXT[]` — the coupon names the tools it discounts
+  (tool ids or MCP names), or `["*"]` for every tool priced above zero.
+  `mint_coupon` and `update_coupon` take `tool_ids`; `[]` unbinds; an id
+  nobody exposes is refused at the write with its name. `list_coupons` and
+  `list_my_coupons` say what each coupon `applies_to`. Schema version 2 —
+  the column arrives as an `ALTER … ADD COLUMN IF NOT EXISTS` on operators
+  that already hold coupons.
+- The gate derives one `coupon` step per bound coupon at evaluation time
+  (`OperatorRuntime._effective_chain`), after the operator's authored
+  steps, skipping any coupon the chain already names so nothing applies
+  twice. Bound coupons are read once per pricing TTL and forgotten the
+  moment a coupon is minted, updated or deleted in this process.
+- `check_price` previews with exactly the chain the debit walks, so the
+  preview and the charge can no longer disagree — the probe that found
+  the bug now reports a bound coupon.
+- `coupon` leaves the authorable catalogue (`list_constraint_types`): a
+  coupon step already in a chain still evaluates, but Studio no longer
+  offers to author one. `set_pricing_model` reports
+  `coupon_steps_in_model` so a client can see what it is carrying.
+
+**Operators:** a coupon bound the old way keeps working; bind it once with
+`update_coupon(coupon_id, tool_ids=["*"])` (or the list) and it survives
+every re-pricing from then on. Studio gains an *Applies to* picker in its
+next release.
+
 ## [0.97.0] — 2026-09-29
 
 ### Changed — the challenge nonce selects a proof; it never unlocks one (#267)
