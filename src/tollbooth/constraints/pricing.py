@@ -22,10 +22,13 @@ from tollbooth.constraints.temporal import TemporalWindowConstraint
 class CouponConstraint(ToolConstraint):
     """Apply the discount on a previously-redeemed coupon, if any.
 
-    The coupon itself (name, discount %, window, caps) is an
-    operator-owned row in the ``coupons`` table; this constraint just
-    references it by ``coupon_id``.  The patron redeems once via
-    ``redeem_coupon`` — subsequent paid tool calls auto-apply the
+    The coupon itself (name, discount %, window, caps, and the tools it
+    binds to) is an operator-owned row in the ``coupons`` table; this
+    constraint just references it by ``coupon_id``. The runtime derives
+    one of these steps per coupon bound to the tool
+    (``OperatorRuntime._effective_chain``) — it is not authored into the
+    pricing model, so re-pricing cannot drop it. The patron redeems once
+    via ``redeem_coupon`` — subsequent paid tool calls auto-apply the
     discount until uses-per-patron or the window are exhausted.
 
     Evaluation reads ``context.coupon_redemptions`` (loaded by the

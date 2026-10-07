@@ -37,6 +37,7 @@ def _coupon(**over):
         "uses_per_patron": 1,
         "total_uses": None,
         "times_redeemed": 0,
+        "tool_ids": [],
     }
     base.update(over)
     ns = SimpleNamespace(**base)
@@ -368,7 +369,7 @@ async def test_list_my_coupons_status_mapping():
         return SimpleNamespace(
             coupon_id="c-1", name="A", discount_percent=10.0,
             valid_from=_NOW, valid_until=_NOW + timedelta(days=1),
-            uses_per_patron=2, use_count=1, total_uses=None,
+            uses_per_patron=2, use_count=1, total_uses=None, tool_ids=("*",),
             is_usable=lambda now, u=usable, r=reason: (u, r),
             uses_remaining=lambda: 1, total_remaining=lambda: None,
         )

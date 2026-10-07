@@ -47,6 +47,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from collections.abc import Callable
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
@@ -252,6 +253,9 @@ class OperatorRuntime:
         self._courier: Any | None = None
         self._cashier: Any | None = None
         self._coupons_vault: Any | None = None  # lazy CouponsVault
+        # The operator's bound coupons, memoised for the pricing TTL.
+        self._bound_coupons_memo: tuple[float, list[Any]] | None = None
+        self._bound_coupons_ttl: float = 300.0
         self._operator_npub: str | None = None
         self._nsec: str | None = None
         self._reconciled_npubs: set[str] = set()  # dedup auto-reconciliation
@@ -1158,6 +1162,84 @@ class OperatorRuntime:
         pricing = await resolver.get_tool_pricing(tool_id)
         return pricing.compute(**(tool_kwargs or {})), None
 
+    async def _effective_chain(
+        self,
+        tool_id: str,
+        name: str,
+        npub: str,
+    ) -> tuple[list[Any], Any]:
+        """The chain the gate walks for one call: authored steps plus the bound coupons.
+
+        The pricing model's ``tools[].chain`` holds what the operator
+        authored for the tool — windows, caps, surcharges. Coupons are not
+        in it: a coupon names the tools it applies to on its own row, so
+        re-pricing a tool cannot drop the discount. Each bound coupon
+        becomes one synthetic ``coupon`` step after the authored ones,
+        unless the authored chain already names that coupon (then it is
+        applied once, where the operator put it).
+
+        Returns ``(chain, coupon_map)``; the map pre-loads this patron's
+        redemptions for every coupon step so the walk stays synchronous.
+        ``check_price`` previews with exactly this, so the preview and
+        the charge cannot disagree.
+        """
+        from tollbooth.constraints.gate import ConstraintGate
+        from tollbooth.pricing_model import PipelineStep
+
+        resolver = await self.pricing_resolver()
+        chain = list(await resolver.get_chain(tool_id))
+        gate = self._constraint_gate
+        if gate is None:
+            gate = ConstraintGate()
+            gate.attach_resolver(resolver)
+            self._constraint_gate = gate
+
+        authored = set(gate.collect_coupon_ids(chain))
+        for coupon in await self._bound_coupons():
+            if coupon.applies_to(tool_id) and coupon.id not in authored:
+                chain.append(PipelineStep(
+                    id=f"coupon:{coupon.id}", type="coupon", params={"coupon_id": coupon.id},
+                ))
+
+        coupon_map = None
+        coupon_ids = gate.collect_coupon_ids(chain)
+        if coupon_ids and npub:
+            try:
+                cv = await self.coupons_vault()
+                redemptions = await cv.fetch_redemptions_for_chain(npub, coupon_ids)
+                from tollbooth.coupons import CouponRedemptionMap
+                coupon_map = CouponRedemptionMap(entries=tuple(redemptions.items()))
+            except Exception as ce:  # noqa: BLE001
+                logger.warning("Coupon redemption pre-load failed for %s: %s", name, ce)
+        return chain, coupon_map
+
+    async def _bound_coupons(self) -> list[Any]:
+        """This operator's coupons that name at least one tool, held for the pricing TTL.
+
+        One query per TTL, not one per paid call; a coupon written through
+        this process drops the memo at once (``_forget_bound_coupons``), so
+        a binding is live on the next call.
+        """
+        now = time.monotonic()
+        memo = self._bound_coupons_memo
+        if memo is not None and now - memo[0] < self._bound_coupons_ttl:
+            return memo[1]
+        try:
+            cv = await self.coupons_vault()
+            bound = list(await cv.bound_for_operator(self.operator_npub()))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bound coupons could not be read: %s", exc)
+            bound = memo[1] if memo is not None else []
+        self._bound_coupons_memo = (now, bound)
+        return bound
+
+    def _forget_bound_coupons(self) -> None:
+        self._bound_coupons_memo = None
+
+    def _known_tools(self) -> dict[str, str]:
+        """Every tool id the wheel exposes, with its MCP name — what a binding may name."""
+        return {tid: self.mcp_name_for(tid) for tid in self._tool_registry}
+
     async def _evaluate_constraints(
         self,
         tool_id: str,
@@ -1168,8 +1250,8 @@ class OperatorRuntime:
     ) -> tuple[int, list[str], dict[str, Any] | None]:
         """Constraint stage of ``debit_or_deny``.
 
-        Walks the tool's per-tool constraint chain (if any): steps can deny
-        access (temporal windows, supply caps) or transform the price
+        Walks the tool's effective chain (``_effective_chain``): steps can
+        deny access (temporal windows, supply caps) or transform the price
         (discounts, surcharges, even drive it negative into a credit).
         Returns ``(effective_cost, consumed_coupon_ids, denial_or_None)``. A
         chain-evaluation exception falls through with the base cost — it never
@@ -1180,38 +1262,12 @@ class OperatorRuntime:
         effective_cost = cost
         consumed_coupon_ids: list[str] = []
         try:
-            resolver = await self.pricing_resolver()
-            chain = await resolver.get_chain(tool_id)
+            chain, coupon_map = await self._effective_chain(tool_id, name, npub)
             if chain:
                 cache = await self.ledger_cache()
                 ledger = await cache.get(npub)
                 demand = await self.get_global_demand(name)
-                gate = self._constraint_gate
-                if gate is None:
-                    from tollbooth.constraints.gate import ConstraintGate
-                    gate = ConstraintGate()
-                    gate.attach_resolver(resolver)
-                    self._constraint_gate = gate
-                # Pre-load coupon redemptions for any coupon steps so
-                # the chain walk stays synchronous.
-                coupon_map = None
-                coupon_ids = gate.collect_coupon_ids(chain)
-                if coupon_ids:
-                    try:
-                        cv = await self.coupons_vault()
-                        redemptions = await cv.fetch_redemptions_for_chain(
-                            npub, coupon_ids,
-                        )
-                        from tollbooth.coupons import CouponRedemptionMap
-                        coupon_map = CouponRedemptionMap(
-                            entries=tuple(redemptions.items()),
-                        )
-                    except Exception as ce:  # noqa: BLE001
-                        logger.warning(
-                            "Coupon redemption pre-load failed for %s: %s",
-                            name, ce,
-                        )
-                denial, effective_signed, consumed_coupon_ids = gate.evaluate_chain(
+                denial, effective_signed, consumed_coupon_ids = self._constraint_gate.evaluate_chain(
                     chain=chain,
                     tool_name=name,
                     base_cost=cost,
@@ -5864,46 +5920,26 @@ def register_standard_tools(
         result = build_pricing_preview(tool_id, name, pricing, parsed_kwargs)
 
         base_cost = result.get("base_cost_api_sats") or 0
-        # Preview the chain for this tool, if it has one.  The cached
-        # model is already warmed by the resolver.get_tool_pricing call
-        # above, so chain_for is a synchronous in-memory lookup.
-        chain = (
-            resolver._cached_model.chain_for(tool_id)
-            if resolver._cached_model is not None
-            else []
-        )
-        if chain and base_cost != 0:
+        # Preview with the chain the debit will walk — authored steps plus
+        # the coupons bound to this tool — so the preview cannot say one
+        # thing and the charge another. Nothing is burned here.
+        if base_cost != 0:
+            try:
+                resolved = resolve_npub(npub) if npub else ""
+            except ValueError:
+                resolved = ""
+            chain, coupon_map = await rt._effective_chain(tool_id, name, resolved)
+        else:
+            chain, coupon_map = [], None
+        if chain:
             result["constraints_enabled"] = True
             try:
-                resolved = resolve_npub(npub)
+                if not resolved:
+                    raise ValueError("npub required")
                 cache = await rt.ledger_cache()
                 ledger = await cache.get(resolved)
                 demand = await rt.get_global_demand(name)
-                gate = rt._constraint_gate
-                if gate is None:
-                    from tollbooth.constraints.gate import ConstraintGate
-                    gate = ConstraintGate()
-                    gate.attach_resolver(resolver)
-                    rt._constraint_gate = gate
-                # Preview: pre-load redemptions so a coupon-discounted
-                # price shows accurately, but don't burn any uses.
-                coupon_map = None
-                coupon_ids = gate.collect_coupon_ids(chain)
-                if coupon_ids and resolved:
-                    try:
-                        cv = await rt.coupons_vault()
-                        redemptions = await cv.fetch_redemptions_for_chain(
-                            resolved, coupon_ids,
-                        )
-                        from tollbooth.coupons import CouponRedemptionMap
-                        coupon_map = CouponRedemptionMap(
-                            entries=tuple(redemptions.items()),
-                        )
-                    except Exception as ce:  # noqa: BLE001
-                        logger.warning(
-                            "check_price coupon pre-load failed: %s", ce,
-                        )
-                denial, effective, _consumed = gate.evaluate_chain(
+                denial, effective, _consumed = rt._constraint_gate.evaluate_chain(
                     chain=chain,
                     tool_name=name,
                     base_cost=int(base_cost),
@@ -5950,9 +5986,14 @@ def register_standard_tools(
         valid_until: str,
         uses_per_patron: int | None = 1,
         total_uses: int | None = None,
+        tool_ids: list[str] | None = None,
         dpop_token: str = "",
     ) -> dict[str, Any]:
         """Create a new operator-owned discount coupon.
+
+        The coupon owns its binding: ``tool_ids`` names the tools it
+        discounts, and re-pricing a tool never touches it. A coupon bound
+        to no tool discounts nothing, however many patrons redeem it.
 
         Args:
             name: The catchy code patrons type to redeem
@@ -5965,6 +6006,8 @@ def register_standard_tools(
                 within the window).
             total_uses: Aggregate cap across all patrons (default None =
                 unlimited).
+            tool_ids: The tools this coupon discounts — tool ids or MCP
+                tool names, or ``["*"]`` for every tool priced above zero.
 
         Returns the new coupon row. RESTRICTED to operator — requires
         proof (nsec-signed kind-27235 or cached dpop_token token).
@@ -5982,7 +6025,7 @@ def register_standard_tools(
 
         from tollbooth.tools import coupons as _coupons
         cv = await rt.coupons_vault()
-        return await _coupons.mint_coupon_tool(
+        result = await _coupons.mint_coupon_tool(
             cv, rt.operator_npub(),
             name=name,
             discount_percent=discount_percent,
@@ -5990,7 +6033,11 @@ def register_standard_tools(
             valid_until=valid_until,
             uses_per_patron=uses_per_patron,
             total_uses=total_uses,
+            tool_ids=tool_ids,
+            known_tools=rt._known_tools(),
         )
+        rt._forget_bound_coupons()
+        return result
 
     @tool
     async def list_coupons(dpop_token: str = "") -> dict[str, Any]:
@@ -6026,6 +6073,7 @@ def register_standard_tools(
         total_uses: int | None = None,
         clear_uses_per_patron: bool = False,
         clear_total_uses: bool = False,
+        tool_ids: list[str] | None = None,
         dpop_token: str = "",
     ) -> dict[str, Any]:
         """Patch a coupon's editable fields.
@@ -6034,6 +6082,8 @@ def register_standard_tools(
         unlimited (NULL in the schema), pass ``clear_uses_per_patron=true``
         or ``clear_total_uses=true``.  Renaming the code is allowed —
         existing patron redemption rows survive (they key on coupon id).
+        ``tool_ids`` replaces the coupon's binding — tool ids or MCP tool
+        names, ``["*"]`` for every paid tool, ``[]`` to unbind it.
 
         RESTRICTED to operator — requires proof.
         """
@@ -6050,7 +6100,7 @@ def register_standard_tools(
 
         from tollbooth.tools import coupons as _coupons
         cv = await rt.coupons_vault()
-        return await _coupons.update_coupon_tool(
+        result = await _coupons.update_coupon_tool(
             cv, rt.operator_npub(), coupon_id,
             name=name,
             discount_percent=discount_percent,
@@ -6060,7 +6110,11 @@ def register_standard_tools(
             total_uses=total_uses,
             clear_uses_per_patron=clear_uses_per_patron,
             clear_total_uses=clear_total_uses,
+            tool_ids=tool_ids,
+            known_tools=rt._known_tools(),
         )
+        rt._forget_bound_coupons()
+        return result
 
     @tool
     async def delete_coupon(coupon_id: str, dpop_token: str = "") -> dict[str, Any]:
@@ -6085,7 +6139,9 @@ def register_standard_tools(
 
         from tollbooth.tools import coupons as _coupons
         cv = await rt.coupons_vault()
-        return await _coupons.delete_coupon_tool(cv, rt.operator_npub(), coupon_id)
+        result = await _coupons.delete_coupon_tool(cv, rt.operator_npub(), coupon_id)
+        rt._forget_bound_coupons()
+        return result
 
     @tool
     async def redeem_coupon(npub: str, code: str, dpop_token: str = "") -> dict[str, Any]:

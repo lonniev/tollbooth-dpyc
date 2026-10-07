@@ -10,8 +10,11 @@ runtime or FastMCP — mirroring ``tools/credits.py``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
+
+from tollbooth.coupons.models import EVERY_PAID_TOOL
 
 
 def _format_coupon(c: Any) -> dict[str, Any]:
@@ -21,7 +24,48 @@ def _format_coupon(c: Any) -> dict[str, Any]:
         d["progress"] = f"{c.times_redeemed} / {c.total_uses}"
     else:
         d["progress"] = f"{c.times_redeemed} / ∞"
+    d["applies_to"] = _applies_to(c.tool_ids)
     return d
+
+
+def _applies_to(tool_ids: list[str]) -> str:
+    """What a binding means, in words: the operator reads this, not the array."""
+    if EVERY_PAID_TOOL in tool_ids:
+        return "every paid tool"
+    if not tool_ids:
+        return "no tool — it discounts nothing until bound"
+    return f"{len(tool_ids)} tool{'s' if len(tool_ids) != 1 else ''}"
+
+
+def resolve_tool_ids(
+    tool_ids: Any, known: Mapping[str, str],
+) -> tuple[list[str], str | None]:
+    """The binding as tool UUIDs, or why it was refused.
+
+    ``known`` maps every tool id the wheel exposes to its MCP name, so a
+    binding may name tools either way. ``["*"]`` is every paid tool.
+    Tool input is adversarial: an id nobody exposes is refused with its
+    name, not stored to discount nothing.
+    """
+    if not isinstance(tool_ids, list) or not all(isinstance(t, str) for t in tool_ids):
+        return [], "tool_ids must be a list of tool ids or MCP tool names."
+    wanted = [t.strip() for t in tool_ids if t.strip()]
+    if EVERY_PAID_TOOL in wanted:
+        if len(wanted) != 1:
+            return [], 'tool_ids: "*" stands alone — it already means every paid tool.'
+        return [EVERY_PAID_TOOL], None
+    by_name = {name: tid for tid, name in known.items()}
+    out: list[str] = []
+    unknown: list[str] = []
+    for t in wanted:
+        tid = t if t in known else by_name.get(t)
+        if tid is None:
+            unknown.append(t)
+        elif tid not in out:
+            out.append(tid)
+    if unknown:
+        return [], f"tool_ids names tools this operator does not expose: {', '.join(unknown)}"
+    return out, None
 
 
 def _parse_window(value: str, label: str) -> datetime:
@@ -50,10 +94,17 @@ async def mint_coupon_tool(
     valid_until: str,
     uses_per_patron: int | None,
     total_uses: int | None,
+    tool_ids: Any = None,
+    known_tools: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Validate inputs and mint a new operator-owned coupon."""
     if not name or not name.strip():
         return {"success": False, "error": "name is required and must be non-empty."}
+    bound: list[str] = []
+    if tool_ids is not None:
+        bound, why = resolve_tool_ids(tool_ids, known_tools or {})
+        if why:
+            return {"success": False, "error": why}
     if not (0 < float(discount_percent) <= 100):
         return {"success": False, "error": "discount_percent must be in (0, 100]."}
 
@@ -88,6 +139,7 @@ async def mint_coupon_tool(
             valid_until=vu,
             uses_per_patron=int(uses_per_patron) if uses_per_patron is not None else None,
             total_uses=int(total_uses) if total_uses is not None else None,
+            tool_ids=bound,
         )
     except CouponAlreadyExists as exc:
         return {"success": False, "error": str(exc)}
@@ -124,10 +176,22 @@ async def update_coupon_tool(
     total_uses: int | None,
     clear_uses_per_patron: bool,
     clear_total_uses: bool,
+    tool_ids: Any = None,
+    known_tools: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Patch a coupon's editable fields; pass clear_* to set a cap unlimited."""
+    """Patch a coupon's editable fields; pass clear_* to set a cap unlimited.
+
+    ``tool_ids`` replaces the coupon's binding: ``["*"]`` for every paid
+    tool, ``[]`` to unbind it, omitted to leave it alone.
+    """
     if not coupon_id:
         return {"success": False, "error": "coupon_id is required."}
+    binding: dict[str, Any] = {}
+    if tool_ids is not None:
+        bound, why = resolve_tool_ids(tool_ids, known_tools or {})
+        if why:
+            return {"success": False, "error": why}
+        binding["tool_ids"] = bound
     if discount_percent is not None and not (0 < float(discount_percent) <= 100):
         return {"success": False, "error": "discount_percent must be in (0, 100]."}
 
@@ -171,6 +235,7 @@ async def update_coupon_tool(
             valid_from=vf,
             valid_until=vu,
             **cap_kwargs,
+            **binding,
         )
     except CouponAlreadyExists as exc:
         return {"success": False, "error": str(exc)}
@@ -275,6 +340,7 @@ async def list_my_coupons_tool(
             "total_uses": v.total_uses,
             "total_remaining": v.total_remaining(),
             "status": "active" if ok else reason,
+            "applies_to": _applies_to(v.tool_ids),
         })
 
     return {"success": True, "count": len(rows), "coupons": rows}

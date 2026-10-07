@@ -25,9 +25,18 @@ def _to_iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
 
 
+#: In ``tool_ids``, the one entry that means every tool priced above zero.
+EVERY_PAID_TOOL = "*"
+
+
 @dataclass
 class Coupon:
-    """Operator-owned discount coupon row."""
+    """Operator-owned discount coupon row.
+
+    ``tool_ids`` is the coupon's own binding: the tools it discounts, or
+    ``["*"]`` for every tool priced above zero. The binding lives here and
+    not in the pricing model's chains, so re-pricing a tool cannot drop it.
+    """
 
     id: str
     operator: str
@@ -40,6 +49,10 @@ class Coupon:
     times_redeemed: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    tool_ids: list[str] = field(default_factory=list)
+
+    def applies_to(self, tool_id: str) -> bool:
+        return EVERY_PAID_TOOL in self.tool_ids or tool_id in self.tool_ids
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -52,6 +65,7 @@ class Coupon:
             "uses_per_patron": self.uses_per_patron,
             "total_uses": self.total_uses,
             "times_redeemed": self.times_redeemed,
+            "tool_ids": list(self.tool_ids),
         }
         if self.created_at is not None:
             d["created_at"] = _to_iso(self.created_at)
@@ -79,7 +93,18 @@ class Coupon:
             times_redeemed=int(row.get("times_redeemed") or 0),
             created_at=_parse_dt(row["created_at"]) if row.get("created_at") else None,
             updated_at=_parse_dt(row["updated_at"]) if row.get("updated_at") else None,
+            tool_ids=_tool_ids(row.get("tool_ids")),
         )
+
+
+def _tool_ids(value: Any) -> list[str]:
+    """A ``TEXT[]`` column as Neon returns it: a list, or a ``{a,b}`` literal, or nothing."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        inner = value.strip().strip("{}")
+        return [v.strip().strip('"') for v in inner.split(",") if v.strip()]
+    return [str(v) for v in value]
 
 
 @dataclass
@@ -132,6 +157,7 @@ class CouponRedemption:
     total_uses: int | None
     times_redeemed: int
     use_count: int  # this patron's use_count
+    tool_ids: tuple[str, ...] = ()
 
     def is_usable(self, now: datetime) -> tuple[bool, str]:
         """Return ``(True, "")`` if the redemption can apply right now.

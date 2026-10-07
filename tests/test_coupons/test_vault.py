@@ -66,9 +66,10 @@ class TestSchemaStatements:
     def test_coupons_then_redemptions_each_indexed(self) -> None:
         from tollbooth.coupons.vault import schema_statements
         sql = schema_statements(lambda n: f"op_test.{n}", "op_test_")
-        assert len(sql) == 4
+        assert len(sql) == 5
         assert "op_test.coupons" in sql[0] and "op_test_idx_coupons_operator" in sql[1]
-        assert "REFERENCES op_test.coupons(id)" in sql[2], "redemptions follow their coupon"
+        assert "ADD COLUMN IF NOT EXISTS tool_ids TEXT[]" in sql[2], "the binding arrives as an ALTER on old tables"
+        assert "REFERENCES op_test.coupons(id)" in sql[3], "redemptions follow their coupon"
 
 
 # ---------------------------------------------------------------------------
@@ -387,3 +388,69 @@ class TestFetchRedemptionsForChain:
             "npub1pat", ["c-uuid"],
         )
         assert out == {}
+
+
+# ---------------------------------------------------------------------------
+# the coupon's own binding
+# ---------------------------------------------------------------------------
+
+
+def _sent_sql(v: NeonVault) -> tuple[str, list]:
+    body = v._client.post.call_args.kwargs.get("json") or v._client.post.call_args.args[1]
+    return body["query"], body["params"]
+
+
+class TestBinding:
+    @pytest.mark.asyncio
+    async def test_mint_binds_the_tools_as_json_text(self) -> None:
+        v = _vault()
+        v._client.post = AsyncMock(
+            return_value=_response(200, {"command": "INSERT", "rows": [_row(tool_ids=["t1", "t2"])]})
+        )
+        c = await _cvault(v).mint(
+            operator="npub1abc", name="FRESHMAN", discount_percent=50.0,
+            valid_from=datetime(2026, 5, 1, tzinfo=UTC), valid_until=datetime(2026, 6, 1, tzinfo=UTC),
+            tool_ids=["t1", "t2"],
+        )
+        assert c.tool_ids == ["t1", "t2"] and c.applies_to("t1") and not c.applies_to("t9")
+        sql, params = _sent_sql(v)
+        assert "jsonb_array_elements_text($8::jsonb)" in sql and params[7] == '["t1", "t2"]'
+
+    @pytest.mark.asyncio
+    async def test_update_leaves_the_binding_alone_unless_given(self) -> None:
+        v = _vault()
+        v._client.post = AsyncMock(
+            return_value=_response(200, {"command": "UPDATE", "rows": [_row(tool_ids=["t1"])]})
+        )
+        await _cvault(v).update("uuid", "npub1abc", discount_percent=75.0)
+        sql, _ = _sent_sql(v)
+        assert "tool_ids" not in sql.split("WHERE")[0]
+
+    @pytest.mark.asyncio
+    async def test_update_with_an_empty_list_unbinds_every_tool(self) -> None:
+        v = _vault()
+        v._client.post = AsyncMock(
+            return_value=_response(200, {"command": "UPDATE", "rows": [_row(tool_ids=[])]})
+        )
+        c = await _cvault(v).update("uuid", "npub1abc", tool_ids=[])
+        sql, params = _sent_sql(v)
+        assert "tool_ids = ARRAY(SELECT jsonb_array_elements_text($1::jsonb))" in sql and params[0] == "[]"
+        assert c.tool_ids == []
+
+    @pytest.mark.asyncio
+    async def test_bound_for_operator_asks_only_for_coupons_naming_a_tool(self) -> None:
+        v = _vault()
+        v._client.post = AsyncMock(
+            return_value=_response(200, {"command": "SELECT", "rows": [_row(tool_ids="{*}")]})
+        )
+        bound = await _cvault(v).bound_for_operator("npub1abc")
+        sql, params = _sent_sql(v)
+        assert "cardinality(tool_ids) > 0" in sql and params == ["npub1abc"]
+        assert bound[0].tool_ids == ["*"] and bound[0].applies_to("anything")
+
+    def test_an_array_literal_or_a_json_array_both_read_as_a_list(self) -> None:
+        from tollbooth.coupons.models import Coupon, _tool_ids
+        assert _tool_ids('{"a-b",c}') == ["a-b", "c"]
+        assert _tool_ids(["a", "b"]) == ["a", "b"]
+        assert _tool_ids(None) == [] and _tool_ids("{}") == []
+        assert Coupon.from_row(_row()).tool_ids == []  # a row minted before the column
