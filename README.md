@@ -204,7 +204,7 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 |------|------|---------|
 | `request_npub_proof` | Free | Send a proof challenge DM to a patron |
 | `receive_npub_proof` | Free | Verify the patron's Schnorr-signed proof response |
-| `check_proof_status` | Free | Read-only check of a dpop_token's remaining validity |
+| `check_proof_status` | Free | Read-only check of a proof grant's remaining validity |
 
 ### Authority Balance
 
@@ -375,7 +375,6 @@ OperatorRuntime(
     ots_calendars=["https://a.pool.opentimestamps.org"],
 
     # Npub proof
-    proven_npub_ttl_seconds=3600, # Default proof cache TTL
     npub_proof_field="confirm",   # Field name in proof DM
     npub_proof_greeting="...",
     on_npub_proven=async_callback, # Called when proof verified
@@ -512,15 +511,11 @@ Every tool that accepts `npub` also requires `proof` — a JSON-serialized Schno
 }
 ```
 
-Inline proofs must be less than 60 seconds old. Cached proofs (via `ProvenNpubCache`) support patron-chosen TTL up to a hard cap of 30 days. Consumed event IDs are tracked to prevent replay.
+Inline proofs must be less than 60 seconds old, and consumed event IDs are tracked to prevent replay. A caller that holds the nsec (an Operator, an agent keyring, the native app) signs one of these per call.
 
-**Poison-keyed proof tokens:** For non-restricted tools, proof is a
-poison phrase (e.g., `bold-hawk-42`) returned by `request_npub_proof` /
-`receive_npub_proof`. The calling application remembers this token and
-passes it as the `proof` parameter on every subsequent paid tool call.
-The MCP stores only `sha256(poison):npub` in the vault — never the raw
-poison. Proofs survive unlimited MCP restarts; duration is patron-chosen
-(up to a 30-day hard cap).
+**Proof grants (for an agent that holds no nsec).** A patron proves ownership once, by signing the challenge DM in their own Nostr client, and `receive_npub_proof` returns a `dpop_token` **envelope** `{"grant": <event>, "nonce": "<phrase>"}`. The grant is an Operator-signed kind-30080 event binding the patron's npub, the hash of the challenge nonce, the patron's verified reply signature, and an expiry the patron chose (up to a 30-day hard cap). The calling application passes that whole envelope as `dpop_token` on every subsequent paid call.
+
+The grant is **self-verifying**: the gate checks the Operator's signature, the npub binding, the nonce, and the expiry with no server-side lookup, so it survives cold starts with no cache. The challenge nonce only *selects* the grant — a bare phrase is never a credential and is refused with `proof_refresh_needed`. `forget_credentials` revokes every grant issued to a patron via a per-npub watermark. (Superseded in 0.97.0: the earlier `sha256(poison):npub` proof cache, where the phrase itself was the credential.)
 
 ---
 
