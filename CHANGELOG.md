@@ -3,6 +3,8 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
+
 ## [0.98.0] — 2026-10-07
 
 ### Changed — a coupon owns its binding; re-pricing cannot drop a discount
@@ -5391,4 +5393,3 @@ design), `check_price` (per-npub pricing nuance), `service_status` (system-level
 ## [0.1.0-prior-art] — 2026-02-18
 
 - Initial scaffold: Python packaging structure for Tollbooth DPYC
-
