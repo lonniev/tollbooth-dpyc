@@ -4136,6 +4136,13 @@ def _dun_self_low_cert_balance(
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _as_plain_dict(value: Any) -> dict[str, Any]:
+    """A plain dict from an MCP model or mapping — ``mcp`` releases differ on which."""
+    if hasattr(value, "model_dump"):
+        return dict(value.model_dump(by_alias=True, exclude_none=True))
+    return dict(value)
+
+
 def register_standard_tools(
     mcp: Any,
     slug: str,
@@ -4683,10 +4690,10 @@ def register_standard_tools(
             ctx = get_context()
             rc = ctx.request_context
             if rc is not None and rc.meta is not None:
-                meta = rc.meta.model_dump(by_alias=True, exclude_none=True)
+                meta = _as_plain_dict(rc.meta)
             params = getattr(ctx.session, "client_params", None)
             if params is not None and params.clientInfo is not None:
-                client_info = params.clientInfo.model_dump(exclude_none=True)
+                client_info = _as_plain_dict(params.clientInfo)
         except (RuntimeError, AttributeError):
             logger.debug("request_echo: no MCP request context", exc_info=True)
 

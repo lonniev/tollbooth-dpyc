@@ -41,6 +41,7 @@ _CLEAR_META_KEYS = frozenset({
     "io.modelcontextprotocol/protocolVersion",
     "io.modelcontextprotocol/clientInfo",
     "io.modelcontextprotocol/clientCapabilities",
+    "io.modelcontextprotocol/logLevel",
 })
 
 _MAX_DEPTH = 6

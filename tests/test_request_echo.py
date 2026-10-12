@@ -91,5 +91,8 @@ async def test_round_trip_over_http_sees_query_cookie_and_meta():
     assert out["url"]["query"] == {"k": fingerprint("probe-k")}
     assert out["cookies"] == {"sid": fingerprint("probe-cookie")}
     assert out["meta"]["com.example/conversation"] == fingerprint("conv-A")
-    assert out["client_info"]["name"]
+    # Older protocols name the client at connect time; 2026-07-28 names it in
+    # every request's _meta instead. Either way it is shown in the clear.
+    info = out["client_info"] or out["meta"]["io.modelcontextprotocol/clientInfo"]
+    assert info["name"]
     assert "probe-k" not in json.dumps(out)
