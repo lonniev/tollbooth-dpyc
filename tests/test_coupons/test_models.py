@@ -228,7 +228,7 @@ class TestParseDt:
         assert _parse_dt(original) == original
 
     def test_naive_datetime_gets_utc(self) -> None:
-        naive = datetime(2026, 6, 1)  # noqa: DTZ001
+        naive = datetime(2026, 6, 1)
         assert _parse_dt(naive).tzinfo == UTC
 
     def test_invalid_raises(self) -> None:

@@ -431,7 +431,7 @@ async def check_balance_tool(
 ) -> dict[str, Any]:
     """Return the user's current credit balance and usage summary."""
     ledger = await cache.get_fresh(user_id)
-    today = date.today().isoformat()  # noqa: DTZ011
+    today = date.today().isoformat()
 
     vault_unavailable = getattr(ledger, "_vault_unavailable", False)
 
@@ -840,7 +840,7 @@ async def account_statement_tool(
     """
     ledger = await cache.get_fresh(user_id)
     now = datetime.now(UTC)
-    today = date.today()  # noqa: DTZ011
+    today = date.today()
 
     # -- Account summary ---------------------------------------------------
     summary: dict[str, Any] = {
