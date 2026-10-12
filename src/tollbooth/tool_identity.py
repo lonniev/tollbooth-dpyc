@@ -210,6 +210,9 @@ ADOPTION_STATUS_UUID                 = "4b966aa3-e1ca-5615-bb2b-33d600ac702d"
 # Field reports — patron-filed GitHub issues on the operator's repo (wheel 0.64.0+)
 REPORT_ISSUE_UUID                    = "49ade49c-884b-5085-8a5b-5e20eb12a8f6"
 
+# Diagnostics
+REQUEST_ECHO_UUID                    = "b1738058-aa8b-50a8-a8c3-10edeea9dd3c"
+
 
 _STANDARD_LIST: list[ToolIdentity] = [
     # -- Credit tools --
@@ -231,6 +234,8 @@ _STANDARD_LIST: list[ToolIdentity] = [
     # -- Service status --
     ToolIdentity(tool_id=SERVICE_STATUS_UUID, capability="service_status", category="free",
                  intent="Check health and configuration of this service."),
+    ToolIdentity(tool_id=REQUEST_ECHO_UUID, capability="request_echo", category="free",
+                 intent="Echo what the client sent with this request, values fingerprinted."),
 
     # -- Onboarding --
     ToolIdentity(tool_id=GET_OPERATOR_ONBOARDING_STATUS_UUID, capability="get_operator_onboarding_status", category="free",

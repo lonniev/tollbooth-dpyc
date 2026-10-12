@@ -327,7 +327,7 @@ class UserLedger:
         no tranche, total or invoice changes."""
         if calls <= 0:
             return
-        today = date.today().isoformat()  # noqa: DTZ011
+        today = date.today().isoformat()
         usage = self.daily_log.setdefault(today, {}).setdefault(tool_name, ToolUsage())
         usage.calls += calls
         usage.api_sats += api_sats
@@ -349,7 +349,7 @@ class UserLedger:
             expires_at=expires_at,
         ))
         self.total_deposited_api_sats += api_sats
-        self.last_deposit_at = date.today().isoformat()  # noqa: DTZ011
+        self.last_deposit_at = date.today().isoformat()
         if invoice_id in self.pending_invoices:
             self.pending_invoices.remove(invoice_id)
         if invoice_id not in self.credited_invoices:
@@ -357,7 +357,7 @@ class UserLedger:
 
     def rotate_daily_log(self, retention_days: int = 30) -> None:
         """Fold daily entries older than ``retention_days`` into ``history``."""
-        cutoff = (date.today() - timedelta(days=retention_days)).isoformat()  # noqa: DTZ011
+        cutoff = (date.today() - timedelta(days=retention_days)).isoformat()
         expired_keys = [d for d in self.daily_log if d < cutoff]
         for day_key in expired_keys:
             del self.daily_log[day_key]

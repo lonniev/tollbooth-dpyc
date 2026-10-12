@@ -178,7 +178,7 @@ class TestUserLedger:
     def test_debit_updates_daily_log(self) -> None:
         ledger = _ledger_with_balance(100)
         ledger.debit("search", 10)
-        today = date.today().isoformat()  # noqa: DTZ011
+        today = date.today().isoformat()
         assert today in ledger.daily_log
         assert ledger.daily_log[today]["search"].calls == 1
         assert ledger.daily_log[today]["search"].api_sats == 10
@@ -221,7 +221,7 @@ class TestUserLedger:
         ledger.credit_deposit(100, "inv-1")
         assert ledger.balance_api_sats == 150
         assert ledger.total_deposited_api_sats == 100
-        assert ledger.last_deposit_at == date.today().isoformat()  # noqa: DTZ011
+        assert ledger.last_deposit_at == date.today().isoformat()
         assert "inv-1" not in ledger.pending_invoices
         assert len(ledger.tranches) == 2  # original + new
 
@@ -273,7 +273,7 @@ class TestUserLedger:
         # Add an old entry
         ledger.daily_log["2020-01-01"] = {"search": ToolUsage(calls=5, api_sats=50)}
         # Add today's entry
-        today = date.today().isoformat()  # noqa: DTZ011
+        today = date.today().isoformat()
         ledger.daily_log[today] = {"search": ToolUsage(calls=1, api_sats=10)}
         ledger.rotate_daily_log(retention_days=30)
         assert "2020-01-01" not in ledger.daily_log
@@ -404,7 +404,7 @@ class TestLedgerSerialization:
         ledger.debit("search", 10)
         ledger.debit("create", 20)
         restored = UserLedger.from_json(ledger.to_json())
-        today = date.today().isoformat()  # noqa: DTZ011
+        today = date.today().isoformat()
         assert restored.daily_log[today]["search"].api_sats == 10
         assert restored.daily_log[today]["create"].api_sats == 20
 

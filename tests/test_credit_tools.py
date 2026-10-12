@@ -995,7 +995,7 @@ class TestAccountStatement:
     async def test_daily_usage_respects_days_param(self) -> None:
         """Daily log only includes entries within the requested window."""
         ledger = _ledger_with_balance(5000)
-        today = date.today()  # noqa: DTZ011
+        today = date.today()
         # Add entries for 3 days
         for offset in (0, 15, 45):
             day = (today - timedelta(days=offset)).isoformat()
