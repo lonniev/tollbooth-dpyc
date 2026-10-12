@@ -1,1 +1,0 @@
-- `request_echo` — a free standard tool that reports what the client sent with the request: URL path and query, headers, cookies and the MCP `_meta`. Every value is a SHA-256 fingerprint, so nothing is repeated back; compare two conversations' replies to see whether a client carries a per-conversation value.

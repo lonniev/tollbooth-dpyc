@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.99.0] — 2026-10-12
+
+### Added
+
+- `request_echo` — a free standard tool that reports what the client sent with the request: URL path and query, headers, cookies and the MCP `_meta`. Every value is a SHA-256 fingerprint, so nothing is repeated back; compare two conversations' replies to see whether a client carries a per-conversation value.
+
 ## [0.98.0] — 2026-10-07
 
 ### Changed — a coupon owns its binding; re-pricing cannot drop a discount
