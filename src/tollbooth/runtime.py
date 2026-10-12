@@ -4648,6 +4648,59 @@ def register_standard_tools(
             }
         return status
 
+    @tool
+    async def request_echo() -> dict[str, Any]:
+        """Echo what the client sent with this request. Free.
+
+        Reports the URL path and query, the headers, the cookies and the MCP
+        request ``_meta``. Values are SHA-256 fingerprints, so nothing a client
+        sends is repeated back; equal fingerprints mean equal values. Call it
+        from two conversations and compare: a value that stays the same within
+        one and changes between them identifies the conversation.
+        """
+        import os
+
+        from fastmcp.server.dependencies import get_context, get_http_request
+
+        from tollbooth.tools.request_echo import build_request_echo
+
+        method, path = "", ""
+        query: list[tuple[str, str]] = []
+        headers: list[tuple[str, str]] = []
+        cookies: dict[str, str] = {}
+        try:
+            request = get_http_request()
+            method, path = request.method, request.url.path
+            query = list(request.query_params.multi_items())
+            headers = list(request.headers.items())
+            cookies = dict(request.cookies)
+        except RuntimeError:
+            pass  # not an HTTP transport — nothing to echo but _meta
+
+        meta: dict[str, Any] | None = None
+        client_info: dict[str, Any] | None = None
+        try:
+            ctx = get_context()
+            rc = ctx.request_context
+            if rc is not None and rc.meta is not None:
+                meta = rc.meta.model_dump(by_alias=True, exclude_none=True)
+            params = getattr(ctx.session, "client_params", None)
+            if params is not None and params.clientInfo is not None:
+                client_info = params.clientInfo.model_dump(exclude_none=True)
+        except (RuntimeError, AttributeError):
+            logger.debug("request_echo: no MCP request context", exc_info=True)
+
+        return build_request_echo(
+            method=method,
+            path=path,
+            query=query,
+            headers=headers,
+            cookies=cookies,
+            meta=meta,
+            client_info=client_info,
+            process_id=os.getpid(),
+        )
+
     # -- Onboarding ----------------------------------------------------
 
     @tool
