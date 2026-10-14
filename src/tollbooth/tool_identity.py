@@ -47,6 +47,53 @@ def capability_uuid(capability: str) -> str:
 
 
 @dataclass(frozen=True)
+class ToolBehavior:
+    """What calling a tool does to the world — MCP's tool annotations.
+
+    An agent reads these to decide how carefully to call a tool: whether it
+    only reads, whether a repeat call is harmless, whether it deletes or
+    overwrites, and whether it reaches past this operator's own store (Nostr
+    relays, Lightning, GitHub, an upstream API). Billing is not a behaviour:
+    a paid read is still a read.
+
+    Attributes:
+        read_only: Changes nothing anywhere.
+        destructive: May delete or overwrite something that existed before.
+        idempotent: Calling again with the same arguments changes nothing more.
+        open_world: Reaches systems beyond this operator's own store.
+    """
+
+    read_only: bool
+    destructive: bool
+    idempotent: bool
+    open_world: bool
+
+    def annotations(self) -> dict[str, bool]:
+        """The MCP ``ToolAnnotations`` hints for this behaviour."""
+        return {
+            "readOnlyHint": self.read_only,
+            "destructiveHint": self.destructive,
+            "idempotentHint": self.idempotent,
+            "openWorldHint": self.open_world,
+        }
+
+
+# The behaviours DPYC tools share, named for what they do.
+READS = ToolBehavior(read_only=True, destructive=False, idempotent=True, open_world=False)
+READS_REMOTE = ToolBehavior(read_only=True, destructive=False, idempotent=True, open_world=True)
+WRITES = ToolBehavior(read_only=False, destructive=False, idempotent=True, open_world=False)
+WRITES_REMOTE = ToolBehavior(read_only=False, destructive=False, idempotent=True, open_world=True)
+CREATES = ToolBehavior(read_only=False, destructive=False, idempotent=False, open_world=False)
+CREATES_REMOTE = ToolBehavior(read_only=False, destructive=False, idempotent=False, open_world=True)
+REPLACES = ToolBehavior(read_only=False, destructive=True, idempotent=True, open_world=False)
+REPLACES_REMOTE = ToolBehavior(read_only=False, destructive=True, idempotent=True, open_world=True)
+DELETES = ToolBehavior(read_only=False, destructive=True, idempotent=True, open_world=False)
+DELETES_REMOTE = ToolBehavior(read_only=False, destructive=True, idempotent=True, open_world=True)
+CONSUMES_REMOTE = ToolBehavior(read_only=False, destructive=True, idempotent=False, open_world=True)
+"""Reads messages from relays and drains them — a second call finds nothing."""
+
+
+@dataclass(frozen=True)
 class ToolIdentity:
     """Declares what a tool IS — not what it costs.
 
@@ -64,6 +111,8 @@ class ToolIdentity:
             without consulting Neon. All others (``"read"``, ``"write"``,
             ``"heavy"``, etc.) require a price entry in Neon.
         intent: Human-readable purpose.
+        title: The tool's display name in plain words (``"Check balance"``).
+        behavior: What calling the tool does — see :class:`ToolBehavior`.
         mcp_name: Full namespace-scoped MCP tool name
             (e.g. ``"taxsort_check_balance"``). Set during
             ``register_standard_tools`` when the slug is known.
@@ -74,6 +123,8 @@ class ToolIdentity:
     tool_id: str
     category: str  # "free" | "read" | "write" | "heavy" | "restricted"
     intent: str
+    title: str
+    behavior: ToolBehavior
     capability: str = ""
     mcp_name: str = ""
 
@@ -217,58 +268,79 @@ REQUEST_ECHO_UUID                    = "b1738058-aa8b-50a8-a8c3-10edeea9dd3c"
 _STANDARD_LIST: list[ToolIdentity] = [
     # -- Credit tools --
     ToolIdentity(tool_id=CHECK_BALANCE_UUID, capability="check_balance", category="free",
+                 title="Check balance", behavior=READS,
                  intent="Check a patron's credit balance."),
     ToolIdentity(tool_id=PURCHASE_CREDITS_UUID, capability="purchase_credits", category="free",
+                 title="Buy credits", behavior=CREATES_REMOTE,
                  intent="Buy credits via Bitcoin Lightning."),
     ToolIdentity(tool_id=CHECK_PAYMENT_UUID, capability="check_payment", category="free",
+                 title="Check payment", behavior=WRITES_REMOTE,
                  intent="Check payment status of a Lightning invoice."),
     ToolIdentity(tool_id=RESTORE_CREDITS_UUID, capability="restore_credits", category="restricted",
+                 title="Restore credits", behavior=WRITES_REMOTE,
                  intent="Operator-only: credit a patron's ledger from a "
                         "BTCPay-settled invoice. Discretionary recovery for "
                         "support escalations and infrastructure incidents."),
     ToolIdentity(tool_id=ACCOUNT_STATEMENT_UUID, capability="account_statement", category="free",
+                 title="Account statement", behavior=READS,
                  intent="Generate a patron's account statement."),
     ToolIdentity(tool_id=ACCOUNT_STATEMENT_INFOGRAPHIC_UUID, capability="account_statement_infographic", category="read",
+                 title="Account statement infographic", behavior=READS,
                  intent="Generate a visual SVG infographic of account statement."),
 
     # -- Service status --
     ToolIdentity(tool_id=SERVICE_STATUS_UUID, capability="service_status", category="free",
+                 title="Service status", behavior=READS,
                  intent="Check health and configuration of this service."),
     ToolIdentity(tool_id=REQUEST_ECHO_UUID, capability="request_echo", category="free",
+                 title="Request echo", behavior=READS,
                  intent="Echo what the client sent with this request, values fingerprinted."),
 
     # -- Onboarding --
     ToolIdentity(tool_id=GET_OPERATOR_ONBOARDING_STATUS_UUID, capability="get_operator_onboarding_status", category="free",
+                 title="Operator onboarding status", behavior=READS,
                  intent="Report operator configuration readiness."),
     ToolIdentity(tool_id=GET_PATRON_ONBOARDING_STATUS_UUID, capability="get_patron_onboarding_status", category="free",
+                 title="Patron onboarding status", behavior=READS,
                  intent="Report a patron's credential readiness."),
     ToolIdentity(tool_id=SESSION_STATUS_UUID, capability="session_status", category="free",
+                 title="Session status", behavior=READS,
                  intent="Check operator lifecycle state and readiness."),
 
     # -- Secure Courier --
     ToolIdentity(tool_id=REQUEST_CREDENTIAL_CHANNEL_UUID, capability="request_credential_channel", category="free",
+                 title="Open credential channel", behavior=CREATES_REMOTE,
                  intent="Open a Secure Courier channel for credential delivery."),
     ToolIdentity(tool_id=RECEIVE_CREDENTIALS_UUID, capability="receive_credentials", category="free",
+                 title="Receive credentials", behavior=CONSUMES_REMOTE,
                  intent="Pick up credentials from the Secure Courier."),
     ToolIdentity(tool_id=FORGET_CREDENTIALS_UUID, capability="forget_credentials", category="free",
+                 title="Forget credentials", behavior=DELETES,
                  intent="Delete vaulted credentials for a service."),
     ToolIdentity(tool_id=REQUEST_PATRON_CREDENTIALS_UUID, capability="request_patron_credentials", category="free",
+                 title="Request patron credentials", behavior=CREATES_REMOTE,
                  intent="Open a Secure Courier channel for patron credentials."),
     ToolIdentity(tool_id=RECEIVE_PATRON_CREDENTIALS_UUID, capability="receive_patron_credentials", category="free",
+                 title="Receive patron credentials", behavior=CONSUMES_REMOTE,
                  intent="Pick up patron credentials from the Secure Courier."),
 
     # -- OAuth2 (conditional — only if oauth_provider is configured) --
     ToolIdentity(tool_id=BEGIN_OAUTH_UUID, capability="begin_oauth", category="free",
+                 title="Begin sign-in", behavior=CREATES_REMOTE,
                  intent="Start OAuth2 authorization flow."),
     ToolIdentity(tool_id=CHECK_OAUTH_STATUS_UUID, capability="check_oauth_status", category="free",
+                 title="Check sign-in status", behavior=WRITES_REMOTE,
                  intent="Check OAuth2 authorization status."),
 
     # -- Npub ownership proof --
     ToolIdentity(tool_id=REQUEST_NPUB_PROOF_UUID, capability="request_npub_proof", category="free",
+                 title="Request npub proof", behavior=CREATES_REMOTE,
                  intent="Request npub ownership proof from patron via DM."),
     ToolIdentity(tool_id=RECEIVE_NPUB_PROOF_UUID, capability="receive_npub_proof", category="free",
+                 title="Receive npub proof", behavior=CONSUMES_REMOTE,
                  intent="Receive and cache npub ownership proof."),
     ToolIdentity(tool_id=CHECK_PROOF_STATUS_UUID, capability="check_proof_status", category="free",
+                 title="Check proof status", behavior=READS,
                  intent="Read-only check of a dpop_token's remaining validity."),
 
     # -- Oracle delegation --
@@ -281,66 +353,89 @@ _STANDARD_LIST: list[ToolIdentity] = [
     # (otherwise Studio's Reconcile keeps offering them as "new tools"
     # on every reset).
     ToolIdentity(tool_id=ORACLE_ABOUT_UUID, capability="oracle_about", category="free",
+                 title="About DPYC", behavior=READS_REMOTE,
                  intent="Describe the DPYC ecosystem via the Oracle."),
     ToolIdentity(tool_id=ORACLE_GET_TAX_RATE_UUID, capability="oracle_get_tax_rate", category="free",
+                 title="DPYC tax rate", behavior=READS_REMOTE,
                  intent="Get the current DPYC certification tax rate."),
     ToolIdentity(tool_id=ORACLE_HOW_TO_JOIN_UUID, capability="oracle_how_to_join", category="free",
+                 title="How to join DPYC", behavior=READS_REMOTE,
                  intent="Get DPYC onboarding instructions from the Oracle."),
     ToolIdentity(tool_id=ORACLE_LOOKUP_MEMBER_UUID, capability="oracle_lookup_member", category="free",
+                 title="Look up a DPYC member", behavior=READS_REMOTE,
                  intent="Look up a DPYC community member by npub."),
     ToolIdentity(tool_id=ORACLE_NETWORK_ADVISORY_UUID, capability="oracle_network_advisory", category="free",
+                 title="Network advisories", behavior=READS_REMOTE,
                  intent="Get active network advisories from the Oracle."),
 
     # -- Authority delegation --
     ToolIdentity(tool_id=CHECK_AUTHORITY_BALANCE_UUID, capability="check_authority_balance", category="free",
+                 title="Authority balance", behavior=READS_REMOTE,
                  intent="Check operator's tax balance at the Authority."),
 
     # -- Pricing CRUD --
     ToolIdentity(tool_id=GET_PRICING_MODEL_UUID, capability="get_pricing_model", category="free",
+                 title="Pricing model", behavior=READS,
                  intent="Get the active pricing model."),
     ToolIdentity(tool_id=SET_PRICING_MODEL_UUID, capability="set_pricing_model", category="restricted",
+                 title="Set pricing model", behavior=REPLACES,
                  intent="Set the active pricing model. Operator only."),
     ToolIdentity(tool_id=RESET_PRICING_MODEL_UUID, capability="reset_pricing_model", category="restricted",
+                 title="Reset pricing model", behavior=DELETES,
                  intent="Delete all pricing models and re-initialize. Operator only."),
     ToolIdentity(tool_id=CHECK_PRICE_UUID, capability="check_price", category="free",
+                 title="Check price", behavior=READS,
                  intent="Preview the effective cost of a tool call."),
     ToolIdentity(tool_id=LIST_CONSTRAINT_TYPES_UUID, capability="list_constraint_types", category="free",
+                 title="Constraint types", behavior=READS,
                  intent="List available constraint types and parameter schemas."),
     ToolIdentity(tool_id=LIST_CANONICAL_IDENTITIES_UUID, capability="list_canonical_identities", category="free",
+                 title="Tool identities", behavior=READS,
                  intent="Return the canonical (tool_id, mcp_name, category, intent) tuples for "
                         "every tool the running wheel exposes. Source of truth for Reconcile."),
     ToolIdentity(tool_id=RESTORE_NEON_SCHEMA_UUID, capability="restore_neon_schema", category="restricted",
+                 title="Restore database schema", behavior=WRITES,
                  intent="Operator-only: re-run ensure_schema on every NeonVault this operator uses."),
     ToolIdentity(tool_id=GET_NOSTR_PROFILE_UUID, capability="get_nostr_profile", category="free",
+                 title="Nostr profile", behavior=READS_REMOTE,
                  intent="Read an npub's public Nostr profile (NIP-01 kind-0 metadata)."),
     ToolIdentity(tool_id=PUBLISH_NOSTR_PROFILE_UUID, capability="publish_nostr_profile", category="free",
+                 title="Publish Nostr profile", behavior=REPLACES_REMOTE,
                  intent="Relay a client-signed kind-0 Nostr profile to public relays."),
 
     # -- Patron credential CRUD --
     ToolIdentity(tool_id=UPDATE_PATRON_CREDENTIAL_UUID, capability="update_patron_credential", category="free",
+                 title="Update patron credential", behavior=WRITES,
                  intent="Add or update a single patron credential field."),
     ToolIdentity(tool_id=DELETE_PATRON_CREDENTIAL_UUID, capability="delete_patron_credential", category="free",
+                 title="Delete patron credential", behavior=DELETES,
                  intent="Remove a single patron credential field."),
     ToolIdentity(tool_id=GET_PATRON_CREDENTIAL_FIELDS_UUID, capability="get_patron_credential_fields", category="free",
+                 title="Patron credential fields", behavior=READS,
                  intent="List stored patron credential field names."),
 
     # -- Operator credential CRUD (field-level) --
     ToolIdentity(tool_id=UPDATE_OPERATOR_CREDENTIAL_UUID, capability="update_operator_credential",
                  category="restricted",
+                 title="Update operator credential", behavior=WRITES,
                  intent="Operator-only: add or update one operator secret field, "
                         "preserving the rest of the bundle."),
     ToolIdentity(tool_id=DELETE_OPERATOR_CREDENTIAL_UUID, capability="delete_operator_credential",
                  category="restricted",
+                 title="Delete operator credential", behavior=DELETES,
                  intent="Operator-only: remove one operator secret field, "
                         "including stored-but-untemplated leftovers, without "
                         "wiping the rest of the bundle."),
 
     # -- OTS notarization --
     ToolIdentity(tool_id=NOTARIZE_LEDGER_UUID, capability="notarize_ledger", category="restricted",
+                 title="Notarize ledger", behavior=CREATES_REMOTE,
                  intent="Submit patron balance Merkle root to Bitcoin via OTS."),
     ToolIdentity(tool_id=GET_NOTARIZATION_PROOF_UUID, capability="get_notarization_proof", category="free",
+                 title="Notarization proof", behavior=READS,
                  intent="Generate a Merkle inclusion proof for a patron balance."),
     ToolIdentity(tool_id=LIST_NOTARIZATIONS_UUID, capability="list_notarizations", category="free",
+                 title="Notarizations", behavior=READS,
                  intent="List recent Bitcoin notarization records."),
 
     # -- Coupon CRUD (wheel 0.41.0+) --
@@ -348,19 +443,26 @@ _STANDARD_LIST: list[ToolIdentity] = [
     # these tools through the Pricing Studio; the wheel verifies an
     # operator-signed kind-27235 proof against the runtime name.
     ToolIdentity(tool_id=MINT_COUPON_UUID, capability="mint_coupon", category="restricted",
+                 title="Mint coupon", behavior=CREATES,
                  intent="Operator-only: mint a new discount coupon."),
     ToolIdentity(tool_id=LIST_COUPONS_UUID, capability="list_coupons", category="restricted",
+                 title="Coupons", behavior=READS,
                  intent="Operator-only: list this operator's coupons."),
     ToolIdentity(tool_id=UPDATE_COUPON_UUID, capability="update_coupon", category="restricted",
+                 title="Update coupon", behavior=WRITES,
                  intent="Operator-only: patch a coupon's editable fields."),
     ToolIdentity(tool_id=DELETE_COUPON_UUID, capability="delete_coupon", category="restricted",
+                 title="Delete coupon", behavior=DELETES,
                  intent="Operator-only: delete a coupon and cascade patron redemptions."),
     # Patron-facing free tools — npub proof against the caller, not the operator.
     ToolIdentity(tool_id=REDEEM_COUPON_UUID, capability="redeem_coupon", category="free",
+                 title="Redeem coupon", behavior=WRITES,
                  intent="Claim a coupon by name; subsequent paid calls apply the discount."),
     ToolIdentity(tool_id=LIST_MY_COUPONS_UUID, capability="list_my_coupons", category="free",
+                 title="My coupons", behavior=READS,
                  intent="List the patron's redeemed coupons on this operator."),
     ToolIdentity(tool_id=FORGET_COUPON_UUID, capability="forget_coupon", category="free",
+                 title="Forget coupon", behavior=DELETES,
                  intent="Remove a coupon from the patron's redemption list."),
 
     # -- Operator adoption (deferred courtship) --
@@ -368,8 +470,10 @@ _STANDARD_LIST: list[ToolIdentity] = [
     # operator's own npub may ask an Authority to adopt this service.
     # adoption_status is a free read of the operator's own request state.
     ToolIdentity(tool_id=REQUEST_ADOPTION_UUID, capability="request_adoption", category="restricted",
+                 title="Request adoption", behavior=CREATES_REMOTE,
                  intent="Operator-only: ask a chosen Authority to adopt this operator."),
     ToolIdentity(tool_id=ADOPTION_STATUS_UUID, capability="adoption_status", category="free",
+                 title="Adoption status", behavior=READS_REMOTE,
                  intent="Check this operator's pending adoption request at a chosen Authority."),
 
     # -- Field reports --
@@ -377,6 +481,7 @@ _STANDARD_LIST: list[ToolIdentity] = [
     # ("balance is the cap") keeps a free write to the operator's issue tracker from
     # being abused. Seeds at 1 sat; the operator can raise it in Pricing Studio.
     ToolIdentity(tool_id=REPORT_ISSUE_UUID, capability="report_issue", category="write",
+                 title="Report an issue", behavior=CREATES_REMOTE,
                  pricing_hint_type="flat", pricing_hint_value=1, pricing_hint_min=1,
                  intent="Patron files a field report as a GitHub issue on the operator's repo."),
 ]

@@ -87,7 +87,7 @@ def _runtime(courier, *, validator=None, on_forget=None):
 def _register(rt):
     tools: dict = {}
 
-    def fake_slug_tool(_mcp, _slug):
+    def fake_slug_tool(_mcp, _slug, _identify):
         def deco(fn):
             tools[fn.__name__] = fn
             return fn

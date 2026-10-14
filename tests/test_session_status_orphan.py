@@ -19,7 +19,7 @@ def _register_tools(rt):
 
     tools: dict = {}
 
-    def fake_slug_tool(_m, _s):
+    def fake_slug_tool(_m, _s, _identify):
         def deco(fn):
             tools[fn.__name__] = fn
             return fn

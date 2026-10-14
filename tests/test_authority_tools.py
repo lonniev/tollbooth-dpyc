@@ -80,7 +80,7 @@ def test_resolve_npub_falls_back_to_operator_on_invalid():
 def _authority_tools(runtime, *, settings, signer, replay, registry):
     tools: dict = {}
 
-    def fake_slug_tool(_m, _s):
+    def fake_slug_tool(_m, _s, _identify):
         def deco(fn):
             tools[fn.__name__] = fn
             return fn
@@ -122,6 +122,7 @@ def _fake_runtime(fee=20):
     # the real cache runs it against fresh vault state.
     cache.mutate = AsyncMock(side_effect=lambda npub, fn: fn(ledger))
     return SimpleNamespace(
+        identity_for=MagicMock(),
         _last_debit_cost=fee,
         rollback_debit=AsyncMock(),
         ledger_cache=AsyncMock(return_value=cache),

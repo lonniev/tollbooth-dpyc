@@ -9,6 +9,7 @@ import pytest
 
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
+from tollbooth.tool_identity import READS
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -409,7 +410,7 @@ class TestPatronToolRegistration:
         # make_slug_tool returns a decorator that just stores the function
         registered_tools = {}
 
-        def fake_slug_tool(m, slug):
+        def fake_slug_tool(m, slug, _identify):
             def decorator(fn):
                 registered_tools[fn.__name__] = fn
                 return fn
@@ -430,7 +431,7 @@ class TestPatronToolRegistration:
         mcp = MagicMock()
         registered_tools = {}
 
-        def fake_slug_tool(m, slug):
+        def fake_slug_tool(m, slug, _identify):
             def decorator(fn):
                 registered_tools[fn.__name__] = fn
                 return fn
@@ -574,7 +575,7 @@ class TestNpubEnforcement:
         identity = ToolIdentity(
             tool_id=capability_uuid("free_tool"),
             capability="free_tool",
-            category="free",
+            category="free", title="Test tool", behavior=READS,
             intent="test",
         )
         rt = OperatorRuntime(
@@ -613,11 +614,11 @@ class TestInitialPricingModel:
 
         search = ToolIdentity(
             tool_id=capability_uuid("search"),
-            capability="search", category="read", intent="Find stuff", mcp_name="test_search",
+            capability="search", category="read", title="Test tool", behavior=READS, intent="Find stuff", mcp_name="test_search",
         )
         create = ToolIdentity(
             tool_id=capability_uuid("create"),
-            capability="create", category="write", intent="Make stuff", mcp_name="test_create",
+            capability="create", category="write", title="Test tool", behavior=READS, intent="Make stuff", mcp_name="test_create",
         )
         rt = OperatorRuntime(
             tool_registry={

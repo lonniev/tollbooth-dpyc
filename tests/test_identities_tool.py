@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from tollbooth.tool_identity import (
     LIST_CANONICAL_IDENTITIES_UUID,
+    READS,
     STANDARD_IDENTITIES,
     capability_uuid,
 )
@@ -144,7 +145,7 @@ async def test_runtime_list_surfaces_paid_tool_not_in_registry():
     registry = {
         seeded_id: ToolIdentity(
             tool_id=seeded_id,
-            category="read",
+            category="read", title="Test tool", behavior=READS,
             intent="Seeded",
             capability="seeded_tool",
         ),

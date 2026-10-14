@@ -20,7 +20,7 @@ from pynostr.key import PrivateKey
 
 from tollbooth.constants import ErrorCode
 from tollbooth.runtime import OperatorRuntime
-from tollbooth.tool_identity import ToolIdentity, capability_uuid
+from tollbooth.tool_identity import READS, ToolIdentity, capability_uuid
 
 PATRON = PrivateKey().public_key.bech32()
 OTHER = PrivateKey().public_key.bech32()
@@ -117,7 +117,7 @@ class FakeLedgerCache:
 
 def _registry(name="read_tool", category="read"):
     tid = capability_uuid(name)
-    return {tid: ToolIdentity(tool_id=tid, capability=name, category=category, intent="t")}, tid
+    return {tid: ToolIdentity(tool_id=tid, capability=name, category=category, title="Test tool", behavior=READS, intent="t")}, tid
 
 
 def _runtime(registry, *, balance=1000, resolver=None, gate=None, operator_npub=PATRON):

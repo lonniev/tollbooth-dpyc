@@ -95,7 +95,7 @@ def _register(rt: OperatorRuntime) -> dict:
     """Capture the registered standard tool closures by function name."""
     registered: dict = {}
 
-    def fake_slug_tool(_mcp, _slug):
+    def fake_slug_tool(_mcp, _slug, _identify):
         def decorator(fn):
             registered[fn.__name__] = fn
             return fn

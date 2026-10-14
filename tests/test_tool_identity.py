@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tollbooth.tool_identity import (
+    READS,
     STANDARD_IDENTITIES,
     ToolIdentity,
     capability_uuid,
@@ -32,7 +33,7 @@ class TestToolIdentity:
         ti = ToolIdentity(
             tool_id="aaaaaaaa-1111-2222-3333-444444444444",
             capability="check_balance",
-            category="free",
+            category="free", title="Test tool", behavior=READS,
             intent="test",
         )
         # Explicit value is preserved verbatim; capability is decorative.
@@ -47,7 +48,7 @@ class TestToolIdentity:
         ti = ToolIdentity(
             tool_id="bbbbbbbb-1111-2222-3333-444444444444",
             capability="x",
-            category="free",
+            category="free", title="Test tool", behavior=READS,
             intent="y",
         )
         try:

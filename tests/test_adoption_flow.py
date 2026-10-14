@@ -38,6 +38,7 @@ def _passthrough_paid_tool(*_a, **_k):
 
 def _rt():
     return SimpleNamespace(
+        identity_for=MagicMock(),
         operator_npub=MagicMock(return_value="npub1auth"),
         runtime_name=MagicMock(side_effect=lambda c: f"authority_{c}"),
         vault=AsyncMock(return_value=SimpleNamespace(_cipher=None)),
@@ -50,7 +51,7 @@ def _rt():
 def _authority_tools(rt):
     tools: dict = {}
 
-    def fake_slug_tool(_m, _s):
+    def fake_slug_tool(_m, _s, _identify):
         def deco(fn):
             tools[fn.__name__] = fn
             return fn
@@ -206,7 +207,7 @@ def _register_operator_tools(rt):
     import tollbooth.runtime as rtmod
     tools: dict = {}
 
-    def fake_slug_tool(_m, _s):
+    def fake_slug_tool(_m, _s, _identify):
         def deco(fn):
             tools[fn.__name__] = fn
             return fn

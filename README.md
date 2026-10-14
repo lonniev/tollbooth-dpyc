@@ -48,20 +48,47 @@ pip install "tollbooth-dpyc[nostr]" fastmcp
 
 ```python
 from fastmcp import FastMCP
-from tollbooth.tool_identity import ToolIdentity, STANDARD_IDENTITIES, capability_uuid
+from mcp.types import Icon
+from tollbooth.tool_identity import READS_REMOTE, STANDARD_IDENTITIES, ToolIdentity
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 
-mcp = FastMCP("My Service")
+VERSION = "1.0.0"
 
-# Domain tools — what your service actually does
+mcp = FastMCP(
+    "my-weather-service",
+    version=VERSION,
+    website_url="https://github.com/you/my-weather-service",
+    icons=[Icon(src="https://example.com/icon.png", mimeType="image/png")],
+    instructions="What this service does, for the agent.",
+)
+
+# Domain tools — what your service actually does. The tool_id is a UUID you
+# pick once and never change (capability_uuid("...") or uuid4() at the REPL).
+GET_WEATHER_UUID = "…"
+GET_FORECAST_UUID = "…"
+
 _DOMAIN_TOOLS = [
-    ToolIdentity(capability="get_weather", category="read", intent="Current weather data"),
-    ToolIdentity(capability="get_forecast", category="read", intent="5-day forecast"),
+    ToolIdentity(
+        tool_id=GET_WEATHER_UUID, capability="get_weather", category="read",
+        intent="Current weather data", title="Current weather",
+        behavior=READS_REMOTE,  # reads, and reaches an upstream weather API
+    ),
+    ToolIdentity(
+        tool_id=GET_FORECAST_UUID, capability="get_forecast", category="read",
+        intent="5-day forecast", title="Weather forecast", behavior=READS_REMOTE,
+    ),
 ]
 
-TOOL_REGISTRY = {t.id: t for t in _DOMAIN_TOOLS}
+TOOL_REGISTRY = {t.tool_id: t for t in _DOMAIN_TOOLS}
 ```
+
+Every tool declares a `title` (its display name) and a `behavior` — whether it
+only reads, overwrites or deletes, is safe to repeat, and reaches beyond your own
+store. Agents read these as MCP tool annotations. `tollbooth.tool_identity`
+names the shared ones (`READS`, `READS_REMOTE`, `WRITES`, `CREATES_REMOTE`,
+`DELETES`, …); build a `ToolBehavior` for anything else. A tool with no
+`ToolIdentity` is refused at registration.
 
 ### 3. Create the Runtime
 
@@ -105,10 +132,16 @@ tool = register_standard_tools(mcp, "weather", runtime,
     service_version="1.0.0",
 )
 
+from tollbooth.params import DpopToken, PatronNpub
+
 @tool
-@runtime.paid_tool(capability_uuid("get_weather"))
-async def get_weather(city: str, npub: str = "", proof: str = "") -> dict:
-    """Get current weather for a city. Costs 1 api_sat."""
+@runtime.paid_tool(GET_WEATHER_UUID)
+async def get_weather(city: str, npub: PatronNpub = "", dpop_token: DpopToken = "") -> dict:
+    """Get current weather for a city.
+
+    Args:
+        city: The city to report on.
+    """
     # Your domain logic here
     return {"city": city, "temp": 72, "conditions": "sunny"}
 ```
@@ -416,9 +449,12 @@ Every tool has a `ToolIdentity` that declares its pricing:
 
 ```python
 ToolIdentity(
+    tool_id=GET_WEATHER_UUID,
     capability="get_weather",
     category="read",          # read, write, heavy, free
     intent="Current weather",
+    title="Current weather",
+    behavior=READS_REMOTE,
     pricing_hint_type="ad_valorem",    # fixed or ad_valorem
     pricing_hint_value=1,              # base cost in sats
     pricing_hint_param="symbols",      # parameter for ad valorem scaling

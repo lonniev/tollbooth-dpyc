@@ -51,6 +51,7 @@ from tollbooth.identity_proof import (
     verify_proof,
 )
 from tollbooth.nostr_diagnostics import resolve_relays as _resolve_relays
+from tollbooth.params import DpopToken
 from tollbooth.registry import (
     DEFAULT_REGISTRY_URL,
     DPYCRegistry,
@@ -60,6 +61,14 @@ from tollbooth.registry import (
 from tollbooth.runtime import OperatorRuntime, resolve_npub
 from tollbooth.slug_tools import make_slug_tool
 from tollbooth.tool_identity import (
+    CONSUMES_REMOTE,
+    CREATES,
+    CREATES_REMOTE,
+    DELETES_REMOTE,
+    READS,
+    READS_REMOTE,
+    WRITES,
+    WRITES_REMOTE,
     ToolIdentity,
     capability_uuid,
 )
@@ -145,6 +154,8 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         tool_id=CERTIFY_CREDITS_UUID,
         capability="certify_credits",
         category="write",
+        title="Certify credits",
+        behavior=CREATES,
         intent="Certify a purchase order with Schnorr-signed certificate.",
         pricing_hint_type="percent",
         pricing_hint_value=2,
@@ -155,54 +166,72 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         tool_id=REGISTER_OPERATOR_UUID,
         capability="register_operator",
         category="free",
+        title="Register operator",
+        behavior=WRITES_REMOTE,
         intent="Provision an operator in the Authority ledger.",
     ),
     ToolIdentity(
         tool_id=UPDATE_OPERATOR_UUID,
         capability="update_operator",
         category="free",
+        title="Update operator",
+        behavior=WRITES_REMOTE,
         intent="Update an operator's community registry entry.",
     ),
     ToolIdentity(
         tool_id=DEREGISTER_OPERATOR_UUID,
         capability="deregister_operator",
         category="free",
+        title="Deregister operator",
+        behavior=DELETES_REMOTE,
         intent="Remove an operator from the DPYC community registry.",
     ),
     ToolIdentity(
         tool_id=GET_OPERATOR_CONFIG_UUID,
         capability="get_operator_config",
         category="restricted",
+        title="Operator config",
+        behavior=READS,
         intent="Retrieve operator bootstrap configuration.",
     ),
     ToolIdentity(
         tool_id=OPERATOR_STATUS_UUID,
         capability="operator_status",
         category="free",
+        title="Operator status",
+        behavior=READS,
         intent="View registration status, balance, and Authority npub.",
     ),
     ToolIdentity(
         tool_id=CHECK_DPYC_MEMBERSHIP_UUID,
         capability="check_dpyc_membership",
         category="free",
+        title="DPYC membership",
+        behavior=READS_REMOTE,
         intent="Look up an npub in the DPYC community registry.",
     ),
     ToolIdentity(
         tool_id=REGISTER_AUTHORITY_NPUB_UUID,
         capability="register_authority_npub",
         category="free",
+        title="Register Authority npub",
+        behavior=CREATES_REMOTE,
         intent="Step 1/3 of Authority onboarding — send DM challenge.",
     ),
     ToolIdentity(
         tool_id=CONFIRM_AUTHORITY_CLAIM_UUID,
         capability="confirm_authority_claim",
         category="free",
+        title="Confirm Authority claim",
+        behavior=CONSUMES_REMOTE,
         intent="Step 2/3 of Authority onboarding — verify candidate DM.",
     ),
     ToolIdentity(
         tool_id=CHECK_AUTHORITY_APPROVAL_UUID,
         capability="check_authority_approval",
         category="free",
+        title="Authority approval",
+        behavior=READS_REMOTE,
         intent="Step 3/3 of Authority onboarding — check parent approval.",
     ),
     # -- Deferred operator adoption --
@@ -210,36 +239,48 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         tool_id=RECEIVE_ADOPTION_REQUEST_UUID,
         capability="receive_adoption_request",
         category="free",
+        title="Receive adoption request",
+        behavior=CREATES,
         intent="Inbound: record an operator's request to be adopted (operator-proof gated).",
     ),
     ToolIdentity(
         tool_id=LIST_ADOPTION_REQUESTS_UUID,
         capability="list_adoption_requests",
         category="restricted",
+        title="Adoption requests",
+        behavior=READS,
         intent="Operator-owner queue: list pending operator-adoption requests.",
     ),
     ToolIdentity(
         tool_id=APPROVE_ADOPTION_UUID,
         capability="approve_adoption",
         category="restricted",
+        title="Approve adoption",
+        behavior=CREATES_REMOTE,
         intent="Approve a pending operator-adoption request and provision the operator.",
     ),
     ToolIdentity(
         tool_id=REJECT_ADOPTION_UUID,
         capability="reject_adoption",
         category="restricted",
+        title="Reject adoption",
+        behavior=WRITES,
         intent="Reject a pending operator-adoption request.",
     ),
     ToolIdentity(
         tool_id=GET_ADOPTION_STATUS_UUID,
         capability="get_adoption_status",
         category="free",
+        title="Adoption request status",
+        behavior=READS,
         intent="Read the status of an operator's adoption request.",
     ),
     ToolIdentity(
         tool_id=REPAIR_OPERATOR_SCHEMA_UUID,
         capability="repair_operator_schema",
         category="restricted",
+        title="Repair operator schema",
+        behavior=WRITES,
         intent="Owner repair: reassign all table ownership in an operator's tenant schema to its own role.",
     ),
     # -- Neon persistence health --
@@ -247,24 +288,32 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         tool_id=RECEIVE_NEON_402_ALERT_UUID,
         capability="receive_neon_402_alert",
         category="free",
+        title="Receive database quota alert",
+        behavior=CREATES,
         intent="Inbound: an operator reports its Neon store is 402-locked (operator-proof gated).",
     ),
     ToolIdentity(
         tool_id=LIST_NEON_ALERTS_UUID,
         capability="list_neon_alerts",
         category="restricted",
+        title="Database quota alerts",
+        behavior=READS,
         intent="Owner queue: list operators that reported a Neon-402 (store locked).",
     ),
     ToolIdentity(
         tool_id=NETWORK_PERSISTENCE_HEALTH_UUID,
         capability="network_persistence_health",
         category="restricted",
+        title="Network persistence health",
+        behavior=READS_REMOTE,
         intent="Owner view: proactive per-project Neon compute-quota posture + reactive alerts.",
     ),
     ToolIdentity(
         tool_id=AUDIT_BOOTSTRAP_CONFIGS_UUID,
         capability="audit_bootstrap_configs",
         category="free",
+        title="Audit bootstrap configs",
+        behavior=WRITES_REMOTE,
         intent="Weekly audit: republish any operator bootstrap config held too thinly or too long ago.",
     ),
 ]
@@ -876,7 +925,7 @@ def register_authority_tools(
         from tollbooth.authority.tenant_provisioner import neon_url_with_schema
         os.environ["NEON_DATABASE_URL"] = neon_url_with_schema(raw_neon_url, "authority")
 
-    tool = make_slug_tool(mcp, slug)
+    tool = make_slug_tool(mcp, slug, runtime.identity_for)
 
     # ------------------------------------------------------------------
     # Operator lifecycle tools
@@ -888,7 +937,7 @@ def register_authority_tools(
             str,
             Field(description="Your Nostr npub (bech32). Get one from the dpyc-oracle's how_to_join() tool."),
         ] = "",
-        dpop_token: str = "",
+        dpop_token: DpopToken = "",
         service_url: Annotated[
             str,
             Field(description="Your MCP endpoint URL (e.g. 'https://my-service.fastmcp.app/mcp')."),
@@ -922,8 +971,8 @@ def register_authority_tools(
         1. ``proof`` — Schnorr proof signed by the candidate operator's
            ``npub``. Proves the requester really controls that npub. The
            operator typically calls ``request_npub_proof`` /
-           ``receive_npub_proof`` against this Authority first to mint
-           a cached dpop_token.
+           ``receive_npub_proof`` against this Authority first to get
+           a proof grant.
         2. ``authority_proof`` — Schnorr proof signed by the Authority's
            own npub. This is the Authority's human consent — only an
            agent with the Authority's nsec on hand can produce it. Apps
@@ -948,7 +997,7 @@ def register_authority_tools(
     @tool
     async def update_operator(
         npub: Annotated[str, Field(description="Nostr npub of the Operator to update.")] = "",
-        dpop_token: str = "",
+        dpop_token: DpopToken = "",
         service_url: Annotated[str, Field(description="New MCP endpoint URL (leave empty to keep current).")] = "",
         display_name: Annotated[str, Field(description="New display name (leave empty to keep current).")] = "",
         authority_proof: Annotated[
@@ -1000,7 +1049,7 @@ def register_authority_tools(
     @tool
     async def deregister_operator(
         npub: Annotated[str, Field(description="Nostr npub of the Operator to deregister.")] = "",
-        dpop_token: str = "",
+        dpop_token: DpopToken = "",
         authority_proof: Annotated[
             str,
             Field(description=(
@@ -1046,7 +1095,7 @@ def register_authority_tools(
     @tool
     async def get_operator_config(
         npub: Annotated[str, Field(description="Your Nostr npub (bech32).")] = "",
-        dpop_token: str = "",
+        dpop_token: DpopToken = "",
     ) -> dict[str, Any]:
         """Retrieve operator bootstrap configuration (Neon URL, schema).
 
@@ -1081,7 +1130,7 @@ def register_authority_tools(
     @tool
     async def operator_status(
         npub: Annotated[str, Field(description="Nostr public key (npub1...). Defaults to operator identity if empty.")] = "",
-        dpop_token: str = "",
+        dpop_token: DpopToken = "",
     ) -> dict[str, Any]:
         """View registration status, balance summary, and the Authority's Nostr npub.
 
@@ -1133,7 +1182,7 @@ def register_authority_tools(
             str,
             Field(description="The operator's DPYC npub (from register_operator response)."),
         ] = "",
-        dpop_token: str = "",
+        dpop_token: DpopToken = "",
         amount_sats: Annotated[
             int,
             Field(description="The total purchase amount in satoshis. Must be positive."),
@@ -1233,7 +1282,11 @@ def register_authority_tools(
 
     @tool
     async def check_dpyc_membership(npub: str) -> dict[str, Any]:
-        """Look up an npub in the DPYC community registry."""
+        """Look up an npub in the DPYC community registry.
+
+        Args:
+            npub: The Nostr public key (npub1...) to look up.
+        """
         s = _get_settings()
         registry = DPYCRegistry(
             url=DEFAULT_REGISTRY_URL,

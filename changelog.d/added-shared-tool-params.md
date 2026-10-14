@@ -1,0 +1,1 @@
+- `tollbooth.params` — `PatronNpub` and `DpopToken`, annotated parameter types that carry one description across the fleet. Operators annotate `npub` / `dpop_token` with them.
