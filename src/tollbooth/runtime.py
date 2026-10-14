@@ -5043,6 +5043,10 @@ def register_standard_tools(
 
             Sends a welcome DM with a credential template to the patron.
             Free.
+
+            Args:
+                sender_npub: The patron's Nostr public key (npub1...); the
+                    welcome DM goes to this npub.
             """
             from tollbooth.tools.courier import request_patron_credentials_tool
             return await request_patron_credentials_tool(rt, sender_npub)
@@ -5061,6 +5065,14 @@ def register_standard_tools(
             Provide an ncred1... credential_card to redeem directly instead
             (dpop_token not required for that path). Do NOT poll or retry.
             Free.
+
+            Args:
+                sender_npub: The patron's Nostr public key (npub1...) that sent
+                    the credential reply.
+                dpop_token: The session phrase from the welcome DM; it names
+                    the reply to collect.
+                credential_card: An ncred1... credential card to redeem instead
+                    of a DM reply.
             """
             from tollbooth.tools.courier import receive_patron_credentials_tool
             return await receive_patron_credentials_tool(

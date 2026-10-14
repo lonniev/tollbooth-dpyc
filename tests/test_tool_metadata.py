@@ -6,6 +6,7 @@ import pytest
 from fastmcp import Client, FastMCP
 
 from tollbooth.authority.tools import AUTHORITY_TOOL_REGISTRY, register_authority_tools
+from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.params import DpopToken, PatronNpub
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
 from tollbooth.tool_identity import READS, STANDARD_IDENTITIES, ToolIdentity
@@ -15,10 +16,16 @@ from tollbooth.tool_identity import READS, STANDARD_IDENTITIES, ToolIdentity
 async def listed_tools(monkeypatch):
     monkeypatch.delenv("NEON_DATABASE_URL", raising=False)
     mcp = FastMCP("metadata-test")
+    # Every conditional tool on: patron credentials and OAuth register their own.
     rt = OperatorRuntime(
         tool_registry={**STANDARD_IDENTITIES, **AUTHORITY_TOOL_REGISTRY},
         nsec_env_var="__UNUSED__",
         ots_enabled=True,
+        patron_credential_template=CredentialTemplate(
+            service="test-patron", version=1, description="Test.",
+            fields={"api_key": FieldSpec(required=True, sensitive=True, description="Key.")},
+        ),
+        oauth_provider=object(),
     )
     register_standard_tools(mcp, "x", rt)
     register_authority_tools(mcp, rt, slug="x")
@@ -28,7 +35,8 @@ async def listed_tools(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_every_tool_has_a_title_and_behavior(listed_tools):
-    assert listed_tools
+    names = {t.name for t in listed_tools}
+    assert {"x_receive_patron_credentials", "x_begin_oauth"} <= names
     for t in listed_tools:
         assert t.title, t.name
         hints = t.annotations
