@@ -19,7 +19,7 @@ Usage::
 
     runtime = OperatorRuntime(
         nsec_env_var="TOLLBOOTH_NOSTR_OPERATOR_NSEC",
-        tool_registry={MY_TOOL_UUID: ToolIdentity(tool_id=MY_TOOL_UUID, capability="my_tool", category="read", intent="...")},
+        tool_registry={MY_TOOL_UUID: ToolIdentity(tool_id=MY_TOOL_UUID, capability="my_tool", category="read", intent="...", title="My tool", behavior=READS)},
         operator_credential_template=CredentialTemplate(
             service="my-operator", ...
         ),
@@ -53,7 +53,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from tollbooth.tool_identity import ToolIdentity
+    from tollbooth.tool_identity import ToolBehavior, ToolIdentity
 
 from datetime import UTC
 
@@ -846,6 +846,27 @@ class OperatorRuntime:
             }
         return {"mode": "none", "patron_credentials_required": False}
 
+    def identity_for(self, func_name: str) -> ToolIdentity:
+        """The ToolIdentity that declares the tool function ``func_name``.
+
+        A paid tool is found by the UUID ``paid_tool`` recorded for it; any
+        other tool by a registry (or standard) identity whose ``capability``
+        is the function name. Raises ``LookupError`` when none declares it, so
+        a tool can never be registered without its title and behaviour.
+        """
+        from tollbooth.tool_identity import STANDARD_IDENTITIES
+
+        for tool_id, name in self._tool_func_names.items():
+            if name == func_name and tool_id in self._tool_registry:
+                return self._tool_registry[tool_id]
+        for identity in (*self._tool_registry.values(), *STANDARD_IDENTITIES.values()):
+            if identity.capability == func_name:
+                return identity
+        raise LookupError(
+            f"No ToolIdentity declares the tool {func_name!r}. Add one to the "
+            "tool registry (with a title and behavior) before registering it."
+        )
+
     def mcp_name_for(self, tool_id: str) -> str:
         """Resolve the full MCP tool name for a tool UUID.
 
@@ -968,7 +989,7 @@ class OperatorRuntime:
         category = identity.category           # set in code, never by the pricing model
 
         # ── Proof verification ────────────────────────────────
-        # Single gate for both tactics (cached dpop_token and inline Schnorr).
+        # Single gate for both tactics (proof grant and inline Schnorr).
         # Restricted tools verify against the operator's npub — the proof
         # must be signed by the operator, regardless of which caller npub
         # is acting. The access check below enforces caller == operator.
@@ -3913,6 +3934,8 @@ class OperatorRuntime:
         name: str,
         param_schema: dict[str, Any],
         runner: Callable[..., Any],
+        title: str,
+        behavior: ToolBehavior,
         intent: str = "",
         category: str = "read",
         uuid: str | None = None,
@@ -3933,7 +3956,8 @@ class OperatorRuntime:
         str) -> dict``. ``name`` must match ``^[a-z][a-z0-9_]*$`` (it becomes
         the ``{slug}_{name}`` wire name). ``uuid`` defaults to a deterministic
         ``capability_uuid("dyn:" + name)`` so the same name always maps to the
-        same pricing identity.
+        same pricing identity. ``title`` and ``behavior`` describe the tool to
+        agents exactly as a static tool's ``ToolIdentity`` does.
 
         Idempotent: re-registering an existing identity replaces the prior
         tool. Returns the full wire tool name. Requires
@@ -3967,6 +3991,7 @@ class OperatorRuntime:
 
         self._tool_registry[tool_id] = ToolIdentity(
             tool_id=tool_id, category=category, intent=intent, capability=name,
+            title=title, behavior=behavior,
         )
         handler = build_dynamic_handler(
             name, param_schema or {}, runner, intent=intent,
@@ -4171,12 +4196,14 @@ def register_standard_tools(
         functions so they register as ``<slug>_<function_name>``.
     """
     from tollbooth.slug_tools import make_slug_tool
-    tool = make_slug_tool(mcp, slug)
+    tool = make_slug_tool(mcp, slug, rt.identity_for)
     # Oracle-delegated tools live under the operator's namespace too —
     # e.g. `schwab_oracle_about` rather than a bare `oracle_about`. This
     # keeps every wire-exposed name under a single slug per operator so
     # downstream clients can derive the slug unambiguously.
-    oracle_tool = make_slug_tool(mcp, f"{slug}_oracle")
+    oracle_tool = make_slug_tool(
+        mcp, f"{slug}_oracle", lambda name: rt.identity_for(f"oracle_{name}"),
+    )
     rt._slug = slug
     # Keep refs so the runtime can synthesize/remove dynamic tools later
     # (register_dynamic_tool / unregister_dynamic_tool).
@@ -4214,11 +4241,9 @@ def register_standard_tools(
 
         Args:
             npub: The Nostr public key (npub1...) whose balance to check.
-            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
-                `u` tag must hold THIS tool's exact name (from tools/list), not
-                the endpoint URL; content:"", created_at within 60s of now, and a
-                random `nonce` tag recommended. Or a cached dpop_token phrase.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "check_balance"):
             return err
@@ -4242,11 +4267,9 @@ def register_standard_tools(
 
         Args:
             npub: The Nostr public key (npub1...) the credits will fund.
-            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
-                `u` tag must hold THIS tool's exact name (from tools/list), not
-                the endpoint URL; content:"", created_at within 60s of now, and a
-                random `nonce` tag recommended. Or a cached dpop_token phrase.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
             amount_sats: Satoshis to purchase (default 1000).
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "purchase_credits"):
@@ -4347,11 +4370,9 @@ def register_standard_tools(
         Args:
             invoice_id: The invoice ID returned by purchase_credits.
             npub: The Nostr public key (npub1...) that purchased the invoice.
-            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
-                `u` tag must hold THIS tool's exact name (from tools/list), not
-                the endpoint URL; content:"", created_at within 60s of now, and a
-                random `nonce` tag recommended. Or a cached dpop_token phrase.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "check_payment"):
             return err
@@ -4409,8 +4430,9 @@ def register_standard_tools(
         Args:
             invoice_id: The BTCPay invoice ID to verify and credit.
             patron_npub: The patron's npub whose ledger receives the grant.
-            dpop_token: A kind-27235 Nostr event signed by the OPERATOR's nsec
-                for this tool. Patron proofs are rejected.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         if not dpop_token:
             return {
@@ -4418,7 +4440,7 @@ def register_standard_tools(
                 "error_code": "operator_proof_required",
                 "error": "Only the operator can restore credits — provide a proof signed by the operator's nsec.",
             }
-        # Accept both inline kind-27235 and cached dpop_token-keyed proof tokens.
+        # Accept both inline kind-27235 proofs and proof grants.
         # The wheel's require_caller_proof checks the cache first (filled by
         # the request/receive_npub_proof handshake) and falls through to
         # inline Schnorr verification.
@@ -4454,11 +4476,9 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
-                `u` tag must hold THIS tool's exact name (from tools/list), not
-                the endpoint URL; content:"", created_at within 60s of now, and a
-                random `nonce` tag recommended. Or a cached dpop_token phrase.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
             days: Number of days of daily usage history to include (default 30).
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "account_statement"):
@@ -4482,11 +4502,9 @@ def register_standard_tools(
 
         Args:
             npub: The Nostr public key (npub1...) whose statement to render.
-            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
-                `u` tag must hold THIS tool's exact name (from tools/list), not
-                the endpoint URL; content:"", created_at within 60s of now, and a
-                random `nonce` tag recommended. Or a cached dpop_token phrase.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
             days: Number of days of daily usage history to include (default 30).
         """
         try:
@@ -4537,11 +4555,9 @@ def register_standard_tools(
 
         Args:
             npub: Your Nostr public key (npub1...); the report's author of record.
-            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
-                `u` tag must hold THIS tool's exact name (from tools/list), not
-                the endpoint URL; content:"", created_at within 60s of now, and a
-                random `nonce` tag recommended. Or a cached dpop_token phrase.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
             title: One-line summary of the problem.
             body: The details — which tool, what was wrong, what you expected.
             tool_name: Optional: the specific tool the report is about
@@ -4732,7 +4748,9 @@ def register_standard_tools(
 
         Args:
             patron_npub: The patron's Nostr public key (npub1...).
-            dpop_token: A kind-27235 Nostr event signed by patron_npub for this tool.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         if err := await rt.require_caller_proof(patron_npub, dpop_token, "get_patron_onboarding_status"):
             return err
@@ -4978,8 +4996,9 @@ def register_standard_tools(
             sender_npub: Required. The npub that sent the credentials.
             service: Required. The credential service name (must match
                 the service used in request_credential_channel).
-            dpop_token: Required. The session phrase returned by
-                request_credential_channel for this exact channel.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
             credential_card: Optional. An ncred1... card to redeem directly
                 (bypasses the relay drain; dpop_token not needed).
         Free.
@@ -5005,11 +5024,9 @@ def register_standard_tools(
         Args:
             service: The credential service to forget.
             npub: The Nostr public key (npub1...) whose credentials to forget.
-            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
-                `u` tag must hold THIS tool's exact name (from tools/list), not
-                the endpoint URL; content:"", created_at within 60s of now, and a
-                random `nonce` tag recommended. Or a cached dpop_token phrase.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         Free.
         """
         from tollbooth.tools.courier import forget_credentials_tool
@@ -5026,6 +5043,10 @@ def register_standard_tools(
 
             Sends a welcome DM with a credential template to the patron.
             Free.
+
+            Args:
+                sender_npub: The patron's Nostr public key (npub1...); the
+                    welcome DM goes to this npub.
             """
             from tollbooth.tools.courier import request_patron_credentials_tool
             return await request_patron_credentials_tool(rt, sender_npub)
@@ -5044,6 +5065,14 @@ def register_standard_tools(
             Provide an ncred1... credential_card to redeem directly instead
             (dpop_token not required for that path). Do NOT poll or retry.
             Free.
+
+            Args:
+                sender_npub: The patron's Nostr public key (npub1...) that sent
+                    the credential reply.
+                dpop_token: The session phrase from the welcome DM; it names
+                    the reply to collect.
+                credential_card: An ncred1... credential card to redeem instead
+                    of a DM reply.
             """
             from tollbooth.tools.courier import receive_patron_credentials_tool
             return await receive_patron_credentials_tool(
@@ -5072,11 +5101,9 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
-                `u` tag must hold THIS tool's exact name (from tools/list), not
-                the endpoint URL; content:"", created_at within 60s of now, and a
-                random `nonce` tag recommended. Or a cached dpop_token phrase.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
             field: The credential field name to set.
             value: The value to store.
         """
@@ -5110,14 +5137,16 @@ def register_standard_tools(
         change, where any field omitted from a courier reply is destroyed.
 
         The value is never echoed back. RESTRICTED to the operator —
-        requires proof (nsec-signed kind-27235 or a cached dpop_token
-        phrase); patron proofs are rejected.
+        requires the operator's proof (a kind-27235 event or a proof grant);
+        patron proofs are rejected.
 
         Args:
             field: The operator credential field to set. Must be declared
                 in the operator's credential template.
             value: The value to store.
-            dpop_token: Operator proof for this tool.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         npub = rt.operator_npub()
         if not npub:
@@ -5164,11 +5193,9 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
-                `u` tag must hold THIS tool's exact name (from tools/list), not
-                the endpoint URL; content:"", created_at within 60s of now, and a
-                random `nonce` tag recommended. Or a cached dpop_token phrase.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
             field: The credential field name to remove.
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "delete_patron_credential"):
@@ -5202,13 +5229,15 @@ def register_standard_tools(
         Stored-but-untemplated fields are first-class: the delete is keyed on
         what is vaulted, not on what the current template declares. Idempotent
         — already-absent fields report ``removed: false`` without rewriting
-        the vault. RESTRICTED to the operator — requires proof (nsec-signed
-        kind-27235 or a cached dpop_token phrase); patron proofs are rejected.
+        the vault. RESTRICTED to the operator — requires the operator's proof
+        (a kind-27235 event or a proof grant); patron proofs are rejected.
         A deletion is as destructive as a write.
 
         Args:
             field: The operator credential field to remove (templated or not).
-            dpop_token: Operator proof for this tool.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         npub = rt.operator_npub()
         if not npub:
@@ -5260,11 +5289,9 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                not base64, not NIP-98 'Authorization: Nostr <b64>' framing. Its
-                `u` tag must hold THIS tool's exact name (from tools/list), not
-                the endpoint URL; content:"", created_at within 60s of now, and a
-                random `nonce` tag recommended. Or a cached dpop_token phrase.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         if err := await rt.require_caller_proof(npub, dpop_token, "get_patron_credential_fields"):
             return err
@@ -5306,12 +5333,9 @@ def register_standard_tools(
 
             Args:
                 npub: Your DPYC patron npub (npub1...).
-                dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                    not base64, not NIP-98 'Authorization: Nostr <b64>' framing.
-                    Its `u` tag must hold THIS tool's exact name (from
-                    tools/list), not the endpoint URL; content:"", created_at
-                    within 60s of now, and a random `nonce` tag recommended. Or a
-                    cached dpop_token phrase.
+                dpop_token: Proof that the caller holds npub: the grant envelope from
+                    receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                    by npub whose `u` tag is this tool's name.
             """
             from tollbooth.tools.oauth import begin_oauth_tool
             return await begin_oauth_tool(rt, npub, dpop_token)
@@ -5333,12 +5357,9 @@ def register_standard_tools(
 
             Args:
                 npub: The same Nostr public key (npub1...) used in begin_oauth.
-                dpop_token: Raw JSON of a kind-27235 Nostr event signed by npub —
-                    not base64, not NIP-98 'Authorization: Nostr <b64>' framing.
-                    Its `u` tag must hold THIS tool's exact name (from
-                    tools/list), not the endpoint URL; content:"", created_at
-                    within 60s of now, and a random `nonce` tag recommended. Or a
-                    cached dpop_token phrase.
+                dpop_token: Proof that the caller holds npub: the grant envelope from
+                    receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                    by npub whose `u` tag is this tool's name.
             """
             from tollbooth.tools.oauth import check_oauth_status_tool
             return await check_oauth_status_tool(rt, npub, dpop_token)
@@ -5439,7 +5460,9 @@ def register_standard_tools(
 
         Args:
             patron_npub: Required. The patron's npub to receive proof from.
-            dpop_token: Required. The dpop_token returned by request_npub_proof.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         from tollbooth.tools.proof import receive_npub_proof_tool
         return await receive_npub_proof_tool(rt, patron_npub, dpop_token)
@@ -5461,8 +5484,9 @@ def register_standard_tools(
 
         Args:
             patron_npub: Required. The patron's npub (npub1...).
-            dpop_token: Required. The grant envelope returned by
-                ``receive_npub_proof``.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         from tollbooth.tools.proof import check_proof_status_tool
         return await check_proof_status_tool(rt, patron_npub, dpop_token)
@@ -5481,7 +5505,11 @@ def register_standard_tools(
 
     @oracle_tool
     async def lookup_member(npub: str) -> dict[str, Any]:
-        """Look up a DPYC community member by npub. Free."""
+        """Look up a DPYC community member by npub. Free.
+
+        Args:
+            npub: The Nostr public key (npub1...) of the member to look up.
+        """
         return await _call_oracle("lookup_member", {"npub": npub})
 
     @oracle_tool
@@ -5552,6 +5580,13 @@ def register_standard_tools(
 
         Requires a valid proof (Schnorr-signed kind-27235 event)
         proving the caller holds the operator's nsec.
+
+        Args:
+            model_json: The complete pricing model as a JSON object; it
+                replaces the active model.
+            dpop_token: Proof that the caller holds the operator's npub: the grant
+                envelope from receive_npub_proof, or the raw JSON of a kind-27235
+                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
         if not dpop_token:
             return {
@@ -5592,13 +5627,18 @@ def register_standard_tools(
         Returns the new model.
 
         RESTRICTED to operator — requires proof (nsec-signed).
+
+        Args:
+            dpop_token: Proof that the caller holds the operator's npub: the grant
+                envelope from receive_npub_proof, or the raw JSON of a kind-27235
+                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
         if not dpop_token:
             return {
                 "success": False,
                 "error": "Only the operator can reset pricing — provide proof.",
             }
-        # Accept both inline kind-27235 and cached dpop_token-keyed proof tokens.
+        # Accept both inline kind-27235 proofs and proof grants.
         err = await rt.require_caller_proof(
             rt.operator_npub(), dpop_token, "reset_pricing_model",
         )
@@ -5689,7 +5729,9 @@ def register_standard_tools(
 
         Args:
             authority_npub: npub of the Authority to request adoption from.
-            dpop_token: operator-npub ownership proof (inline kind-27235 or cached token).
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
             service_url: this operator's MCP endpoint (advertised to the Authority).
             note: optional message for the Authority owner.
         """
@@ -5737,6 +5779,12 @@ def register_standard_tools(
 
         Free. Polls the Authority MCP-to-MCP for the status of this operator's
         request (pending / approved / rejected / provisioned).
+
+        Args:
+            authority_npub: The npub of the Authority the request was sent to.
+            dpop_token: Proof that the caller holds the operator's npub: the grant
+                envelope from receive_npub_proof, or the raw JSON of a kind-27235
+                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
         if not authority_npub.startswith("npub1"):
             return {"success": False, "error": "authority_npub must be a valid npub1..."}
@@ -5760,13 +5808,18 @@ def register_standard_tools(
         inline for any that failed.
 
         RESTRICTED to operator — requires proof (nsec-signed).
+
+        Args:
+            dpop_token: Proof that the caller holds the operator's npub: the grant
+                envelope from receive_npub_proof, or the raw JSON of a kind-27235
+                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
         if not dpop_token:
             return {
                 "success": False,
                 "error": "Only the operator can re-run schema setup — provide proof.",
             }
-        # Accept both inline kind-27235 and cached dpop_token-keyed proof tokens.
+        # Accept both inline kind-27235 proofs and proof grants.
         err = await rt.require_caller_proof(
             rt.operator_npub(), dpop_token, "restore_neon_schema",
         )
@@ -5862,6 +5915,9 @@ def register_standard_tools(
         Free, no proof — the data is already public on relays. Returns the
         latest metadata fields (name, display_name, about, picture, banner,
         nip05, website, lud16) or an empty profile if none is published.
+
+        Args:
+            npub: The Nostr public key (npub1...) whose profile to read.
         """
         if not npub:
             return {"success": False, "error": "npub is required."}
@@ -5911,6 +5967,11 @@ def register_standard_tools(
                 for ad valorem / categorical-multiplier pricing preview
                 (e.g. '{"amount_sats": 5000}' or
                 '{"difficulty": "sovereign", "mode": "live"}').
+            npub: Optional patron npub; with it, the preview includes that
+                patron's coupons and constraint effects.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         identity = rt._tool_registry.get(tool_id)
         # Fallback: caller passed a capability name instead of a UUID.
@@ -6069,9 +6130,11 @@ def register_standard_tools(
                 unlimited).
             tool_ids: The tools this coupon discounts — tool ids or MCP
                 tool names, or ``["*"]`` for every tool priced above zero.
+            dpop_token: Proof that the caller holds the operator's npub: the grant
+                envelope from receive_npub_proof, or the raw JSON of a kind-27235
+                Nostr event signed by the operator whose `u` tag is this tool's name.
 
-        Returns the new coupon row. RESTRICTED to operator — requires
-        proof (nsec-signed kind-27235 or cached dpop_token token).
+        Returns the new coupon row. RESTRICTED to operator — requires proof.
         """
         if not dpop_token:
             return {
@@ -6107,6 +6170,11 @@ def register_standard_tools(
         Each row carries the current ``times_redeemed`` counter — the
         Studio renders a progress bar from this against ``total_uses``.
         RESTRICTED to operator — requires proof.
+
+        Args:
+            dpop_token: Proof that the caller holds the operator's npub: the grant
+                envelope from receive_npub_proof, or the raw JSON of a kind-27235
+                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
         if not dpop_token:
             return {
@@ -6147,6 +6215,22 @@ def register_standard_tools(
         names, ``["*"]`` for every paid tool, ``[]`` to unbind it.
 
         RESTRICTED to operator — requires proof.
+
+        Args:
+            coupon_id: The id of the coupon to change (from list_coupons).
+            name: A new code for patrons to type.
+            discount_percent: A new percentage off the base price (0-100).
+            valid_from: A new ISO-8601 datetime when the coupon becomes active.
+            valid_until: A new ISO-8601 datetime when the coupon expires.
+            uses_per_patron: A new number of discounted calls per patron.
+            total_uses: A new number of redemptions across all patrons.
+            clear_uses_per_patron: True makes discounted calls per patron unlimited.
+            clear_total_uses: True makes total redemptions unlimited.
+            tool_ids: The tools the coupon discounts: tool ids or MCP tool names,
+                ["*"] for every paid tool, [] to unbind it.
+            dpop_token: Proof that the caller holds the operator's npub: the grant
+                envelope from receive_npub_proof, or the raw JSON of a kind-27235
+                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
         if not dpop_token:
             return {
@@ -6186,6 +6270,12 @@ def register_standard_tools(
         Studio surfaces orphan references as warnings.
 
         RESTRICTED to operator — requires proof.
+
+        Args:
+            coupon_id: The id of the coupon to delete (from list_coupons).
+            dpop_token: Proof that the caller holds the operator's npub: the grant
+                envelope from receive_npub_proof, or the raw JSON of a kind-27235
+                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
         if not dpop_token:
             return {
@@ -6216,6 +6306,13 @@ def register_standard_tools(
         Free — no credits required.  Requires proof of ``npub``.
         Idempotent: redeeming the same code twice returns the existing
         redemption.
+
+        Args:
+            npub: The patron's Nostr public key (npub1...).
+            code: The coupon code the operator shared.
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         try:
             resolved = resolve_npub(npub)
@@ -6238,6 +6335,12 @@ def register_standard_tools(
         Returns both active and exhausted redemptions with a per-row
         ``status`` (``active`` / ``window_closed`` / ``patron_limit`` /
         ``total_limit``).  Free — requires proof of ``npub``.
+
+        Args:
+            npub: The patron's Nostr public key (npub1...).
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         try:
             resolved = resolve_npub(npub)
@@ -6260,6 +6363,14 @@ def register_standard_tools(
         Cosmetic only — the coupon itself still exists at the operator,
         and the patron can re-redeem the same code later while the
         window allows.  Free — requires proof of ``npub``.
+
+        Args:
+            npub: The patron's Nostr public key (npub1...).
+            coupon_id: The id of the redeemed coupon to remove (from
+                list_my_coupons).
+            dpop_token: Proof that the caller holds npub: the grant envelope from
+                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
+                by npub whose `u` tag is this tool's name.
         """
         try:
             resolved = resolve_npub(npub)

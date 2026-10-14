@@ -21,7 +21,7 @@ from tollbooth.dynamic_tools import (
 )
 from tollbooth.runtime import OperatorRuntime
 from tollbooth.slug_tools import make_slug_tool
-from tollbooth.tool_identity import capability_uuid
+from tollbooth.tool_identity import READS, READS_REMOTE, capability_uuid
 
 # --------------------------------------------------------------------------
 # Param-schema language
@@ -235,7 +235,7 @@ class _FakeMCP:
         self.registered: dict[str, Any] = {}
         self.removed: list[str] = []
 
-    def tool(self, *, name: str):
+    def tool(self, *, name: str, title: str, annotations: dict):
         def decorator(func):
             self.registered[name] = func
             return func
@@ -251,7 +251,7 @@ def _wired_runtime(slug: str = "cypher") -> tuple[OperatorRuntime, _FakeMCP]:
     fake = _FakeMCP()
     rt._slug = slug
     rt._mcp = fake
-    rt._tool = make_slug_tool(fake, slug)
+    rt._tool = make_slug_tool(fake, slug, rt.identity_for)
     return rt, fake
 
 
@@ -262,7 +262,7 @@ async def _runner(params: dict, npub: str, dpop_token: str) -> dict:
 class TestRegisterDynamicTool:
     def test_registers_typed_unpriced_tool(self) -> None:
         rt, fake = _wired_runtime()
-        name = rt.register_dynamic_tool(
+        name = rt.register_dynamic_tool(title="Query", behavior=READS_REMOTE, 
             name="find_airline_flights", param_schema=SCHEMA, runner=_runner,
             intent="Find flights.",
         )
@@ -279,8 +279,8 @@ class TestRegisterDynamicTool:
 
     def test_idempotent_replace(self) -> None:
         rt, fake = _wired_runtime()
-        rt.register_dynamic_tool(name="q", param_schema={"a": {"type": "string"}}, runner=_runner)
-        rt.register_dynamic_tool(name="q", param_schema={"b": {"type": "int"}}, runner=_runner)
+        rt.register_dynamic_tool(title="Query", behavior=READS_REMOTE, name="q", param_schema={"a": {"type": "string"}}, runner=_runner)
+        rt.register_dynamic_tool(title="Query", behavior=READS_REMOTE, name="q", param_schema={"b": {"type": "int"}}, runner=_runner)
         # one identity, the prior wire tool was removed before re-adding.
         ids = [tid for tid, i in rt._tool_registry.items() if i.capability == "q"]
         assert len(ids) == 1
@@ -307,7 +307,7 @@ class TestRuntimeNameFrozenUuidRename:
         rt._tool_registry[frozen] = ToolIdentity(
             tool_id=frozen,
             capability="network_persistence_health",
-            category="restricted",
+            category="restricted", title="Test tool", behavior=READS,
             intent="Owner persistence health.",
         )
 
@@ -325,7 +325,7 @@ class TestRuntimeNameFrozenUuidRename:
     def test_unrenamed_capability_still_resolves(self) -> None:
         """The common case — capability string == the UUID's seed — is unchanged."""
         rt, _ = _wired_runtime()
-        rt.register_dynamic_tool(
+        rt.register_dynamic_tool(title="Query", behavior=READS_REMOTE, 
             name="find_airline_flights", param_schema=SCHEMA, runner=_runner,
             intent="Find flights.",
         )
@@ -334,23 +334,23 @@ class TestRuntimeNameFrozenUuidRename:
     def test_rejects_bad_name(self) -> None:
         rt, _ = _wired_runtime()
         with pytest.raises(ValueError, match="must match"):
-            rt.register_dynamic_tool(name="Find Flights", param_schema={}, runner=_runner)
+            rt.register_dynamic_tool(title="Query", behavior=READS_REMOTE, name="Find Flights", param_schema={}, runner=_runner)
 
     def test_rejects_bad_schema(self) -> None:
         rt, _ = _wired_runtime()
         with pytest.raises(ValueError, match="invalid param_schema"):
-            rt.register_dynamic_tool(
+            rt.register_dynamic_tool(title="Query", behavior=READS_REMOTE, 
                 name="q", param_schema={"a": {"type": "datetime"}}, runner=_runner,
             )
 
     def test_requires_register_standard_tools(self) -> None:
         rt = OperatorRuntime()  # _mcp / _tool still None
         with pytest.raises(RuntimeError, match="register_standard_tools"):
-            rt.register_dynamic_tool(name="q", param_schema={}, runner=_runner)
+            rt.register_dynamic_tool(title="Query", behavior=READS_REMOTE, name="q", param_schema={}, runner=_runner)
 
     def test_custom_uuid_is_honored(self) -> None:
         rt, _ = _wired_runtime()
-        rt.register_dynamic_tool(
+        rt.register_dynamic_tool(title="Query", behavior=READS_REMOTE, 
             name="q", param_schema={}, runner=_runner, uuid="11111111-1111-5111-8111-111111111111",
         )
         assert "11111111-1111-5111-8111-111111111111" in rt._tool_registry
@@ -359,14 +359,14 @@ class TestRuntimeNameFrozenUuidRename:
 class TestUnregisterDynamicTool:
     def test_removes_by_name(self) -> None:
         rt, fake = _wired_runtime()
-        rt.register_dynamic_tool(name="find_airline_flights", param_schema=SCHEMA, runner=_runner)
+        rt.register_dynamic_tool(title="Query", behavior=READS_REMOTE, name="find_airline_flights", param_schema=SCHEMA, runner=_runner)
         assert rt.unregister_dynamic_tool("find_airline_flights") is True
         assert "cypher_find_airline_flights" in fake.removed
         assert capability_uuid("dyn:find_airline_flights") not in rt._tool_registry
 
     def test_removes_by_uuid(self) -> None:
         rt, _fake = _wired_runtime()
-        rt.register_dynamic_tool(name="q", param_schema={}, runner=_runner)
+        rt.register_dynamic_tool(title="Query", behavior=READS_REMOTE, name="q", param_schema={}, runner=_runner)
         tid = capability_uuid("dyn:q")
         assert rt.unregister_dynamic_tool(tid) is True
         assert tid not in rt._tool_registry

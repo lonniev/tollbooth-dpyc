@@ -19,7 +19,7 @@ from pynostr.key import PrivateKey
 from tollbooth.coupons.models import Coupon, CouponRedemption
 from tollbooth.pricing_model import PipelineStep
 from tollbooth.runtime import OperatorRuntime
-from tollbooth.tool_identity import ToolIdentity, capability_uuid
+from tollbooth.tool_identity import READS, ToolIdentity, capability_uuid
 
 from .test_credit_gate import PATRON, FakeLedgerCache, FakeResolver
 
@@ -33,7 +33,7 @@ def _registry(*names):
     reg = {}
     for n in names:
         tid = capability_uuid(n)
-        reg[tid] = ToolIdentity(tool_id=tid, capability=n, category="read", intent="t")
+        reg[tid] = ToolIdentity(tool_id=tid, capability=n, category="read", title="Test tool", behavior=READS, intent="t")
     return reg
 
 
@@ -201,7 +201,7 @@ async def test_check_price_previews_the_bound_coupon_exactly_as_the_debit_will_c
     rt = _runtime(registry, resolver=FakeResolver(cost=20, chain=[]), coupons=coupons)
     tools: dict = {}
 
-    def fake_slug_tool(_mcp, _slug):
+    def fake_slug_tool(_mcp, _slug, _identify):
         def deco(fn):
             tools[fn.__name__] = fn
             return fn

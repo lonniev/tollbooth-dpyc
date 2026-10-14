@@ -15,11 +15,11 @@ import pytest
 
 from tollbooth.constants import ErrorCode
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
-from tollbooth.tool_identity import ToolIdentity, capability_uuid
+from tollbooth.tool_identity import READS, ToolIdentity, capability_uuid
 
 WIDGET = capability_uuid("widget")
 REGISTRY = {
-    WIDGET: ToolIdentity(tool_id=WIDGET, capability="widget", category="read",
+    WIDGET: ToolIdentity(tool_id=WIDGET, capability="widget", category="read", title="Test tool", behavior=READS,
                          intent="A priced read tool"),
 }
 
@@ -60,7 +60,7 @@ def _check_price_tool(resolver: _Resolver):
     rt._pricing_resolver = resolver
     tools: dict = {}
 
-    def fake_slug_tool(_mcp, _slug):
+    def fake_slug_tool(_mcp, _slug, _identify):
         def deco(fn):
             tools[fn.__name__] = fn
             return fn

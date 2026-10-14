@@ -104,7 +104,7 @@ def _runtime_with_exchange(exchange, *, on_proven=None):
 def _register(rt):
     tools: dict = {}
 
-    def fake_slug_tool(_mcp, _slug):
+    def fake_slug_tool(_mcp, _slug, _identify):
         def deco(fn):
             tools[fn.__name__] = fn
             return fn
