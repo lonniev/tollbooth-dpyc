@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.100.0] — 2026-10-14
+
+### Added
+
+- `tollbooth.params` — `PatronNpub` and `DpopToken`, annotated parameter types that carry one description across the fleet. Operators annotate `npub` / `dpop_token` with them.
+
+### Changed
+
+- **Breaking:** every `ToolIdentity` declares a `title` (its display name) and a `behavior` (`ToolBehavior`: read-only, destructive, idempotent, open-world), and every tool is registered with them as MCP `title` and tool annotations. `tollbooth.tool_identity` names the shared behaviours (`READS`, `READS_REMOTE`, `WRITES`, `CREATES_REMOTE`, `DELETES`, `CONSUMES_REMOTE`, …). `make_slug_tool` takes a resolver from function name to identity; a tool no identity declares is refused at registration. `register_dynamic_tool` takes `title` and `behavior` too.
+- All standard and Authority tools now carry a title, an honest behaviour and a description on every parameter. The `dpop_token` description says what the gate accepts today (a proof grant or an inline kind-27235 event); the retired "cached phrase" wording is gone.
+
 ## [0.99.0] — 2026-10-12
 
 ### Added
