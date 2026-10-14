@@ -24,6 +24,8 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
+from tollbooth.params import DpopToken, PatronNpub
+
 # The param-schema language for dynamic tools (and operator catalogs).
 # A richer language (jsonschema / nested objects) is a later upgrade.
 PYTHON_TYPES: dict[str, type] = {
@@ -229,13 +231,13 @@ def build_dynamic_handler(
             )
         )
         annotations[pname] = ann
-    for extra in ("npub", "dpop_token"):
+    for extra, extra_ann in (("npub", PatronNpub), ("dpop_token", DpopToken)):
         sig_params.append(
             inspect.Parameter(
-                extra, inspect.Parameter.KEYWORD_ONLY, annotation=str, default=""
+                extra, inspect.Parameter.KEYWORD_ONLY, annotation=extra_ann, default=""
             )
         )
-        annotations[extra] = str
+        annotations[extra] = extra_ann
     annotations["return"] = dict
 
     handler.__name__ = name

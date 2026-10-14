@@ -9,7 +9,7 @@ from tollbooth.authority.tools import AUTHORITY_TOOL_REGISTRY, register_authorit
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.params import DpopToken, PatronNpub
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
-from tollbooth.tool_identity import READS, STANDARD_IDENTITIES, ToolIdentity
+from tollbooth.tool_identity import READS, READS_REMOTE, STANDARD_IDENTITIES, ToolIdentity
 
 
 @pytest.fixture
@@ -29,6 +29,15 @@ async def listed_tools(monkeypatch):
     )
     register_standard_tools(mcp, "x", rt)
     register_authority_tools(mcp, rt, slug="x")
+
+    async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+        return {}
+
+    rt.register_dynamic_tool(
+        name="published_query", title="Published query", behavior=READS_REMOTE,
+        param_schema={"city": {"type": "string", "description": "A city."}},
+        runner=runner,
+    )
     async with Client(mcp) as client:
         return await client.list_tools()
 
@@ -36,7 +45,7 @@ async def listed_tools(monkeypatch):
 @pytest.mark.asyncio
 async def test_every_tool_has_a_title_and_behavior(listed_tools):
     names = {t.name for t in listed_tools}
-    assert {"x_receive_patron_credentials", "x_begin_oauth"} <= names
+    assert {"x_receive_patron_credentials", "x_begin_oauth", "x_published_query"} <= names
     for t in listed_tools:
         assert t.title, t.name
         hints = t.annotations
