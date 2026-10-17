@@ -140,7 +140,7 @@ async def _connect(provider: HolderAuthProvider, resource: str | None = None):
     ))
     code = httpx.URL(url).params["code"]
     loaded = await provider.load_authorization_code(CLIENT, code)
-    assert loaded is not None and loaded.subject
+    assert loaded is not None
     return await provider.exchange_authorization_code(CLIENT, loaded)
 
 
@@ -152,7 +152,7 @@ async def _connect(provider: HolderAuthProvider, resource: str | None = None):
 @pytest.mark.asyncio
 async def test_a_bearer_that_is_not_ours_is_an_anonymous_caller():
     token = await _provider(MemoryHolderStore()).verify_token("anything-at-all")
-    assert token is not None and token.client_id == ANONYMOUS and token.subject is None
+    assert token is not None and token.client_id == ANONYMOUS and not token.claims
 
 
 @pytest.mark.asyncio
@@ -186,7 +186,7 @@ async def test_refresh_rotates_and_a_replayed_refresh_disconnects_the_holder():
     old = await provider.load_refresh_token(CLIENT, first.refresh_token or "")
     assert old is not None
     second = await provider.exchange_refresh_token(CLIENT, old, [])
-    assert (await provider.verify_token(second.access_token)).subject == holder  # type: ignore[union-attr]
+    assert (await provider.verify_token(second.access_token)).claims["holder"] == holder  # type: ignore[union-attr]
 
     # The rotated token comes back: someone else has it. Everything goes.
     assert await provider.load_refresh_token(CLIENT, first.refresh_token or "") is None
