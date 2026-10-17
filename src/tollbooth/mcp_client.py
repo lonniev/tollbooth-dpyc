@@ -13,6 +13,13 @@ from typing import Any
 
 ANONYMOUS_BEARER = "anonymous"
 
+# For a raw JSON-RPC POST to another service's /mcp (no MCP client library).
+JSONRPC_POST_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+    "Authorization": f"Bearer {ANONYMOUS_BEARER}",
+}
+
 
 def service_client(url: str) -> Any:
     """A FastMCP client for another DPYC service, carrying the anonymous bearer."""

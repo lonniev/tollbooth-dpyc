@@ -30,6 +30,7 @@ import urllib.parse
 
 import httpx
 
+from tollbooth.mcp_client import JSONRPC_POST_HEADERS
 from tollbooth.shortlinks import _ensure_mcp_path
 
 logger = logging.getLogger(__name__)
@@ -687,10 +688,7 @@ async def retrieve_code_from_collector(
         resp = await http.post(
             url,
             json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
+            headers=JSONRPC_POST_HEADERS,
         )
         if resp.status_code != 200:
             raise OAuthCollectorError(
