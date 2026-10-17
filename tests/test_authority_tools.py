@@ -13,7 +13,7 @@ import asyncio
 import json
 import os
 from contextlib import contextmanager
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,6 +27,7 @@ from tollbooth.authority.replay import ReplayTracker
 from tollbooth.authority.tools import OracleRegistryError, _parse_oracle_commit_url
 from tollbooth.constants import ErrorCode
 from tollbooth.registry import RegistryError
+from tollbooth.runtime import OperatorRuntime
 
 # ── _parse_oracle_commit_url (pure) ───────────────────────────────────
 
@@ -121,7 +122,7 @@ def _fake_runtime(fee=20):
     # fake must answer mutate(); run the fn against the stand-in ledger the way
     # the real cache runs it against fresh vault state.
     cache.mutate = AsyncMock(side_effect=lambda npub, fn: fn(ledger))
-    return SimpleNamespace(
+    rt = SimpleNamespace(
         identity_for=MagicMock(),
         _last_debit_cost=fee,
         rollback_debit=AsyncMock(),
@@ -132,7 +133,11 @@ def _fake_runtime(fee=20):
         proof_grant_revocations=AsyncMock(return_value=MagicMock()),
         operator_pubkey_hex=MagicMock(return_value="ab" * 32),
         vault=AsyncMock(return_value=SimpleNamespace(_cipher=None)),
+        holder_auth_enabled=False,
     )
+    # The real gate, so a patched tollbooth.runtime.require_proof decides.
+    rt.prove_caller = MethodType(OperatorRuntime.prove_caller, rt)
+    return rt
 
 
 def _settings():
@@ -261,7 +266,7 @@ def _tools(signer=None):
 @pytest.mark.asyncio
 async def test_register_operator_blocks_on_bad_proof():
     with _tools() as tools:  # noqa: SIM117
-        with patch.object(at, "require_proof", AsyncMock(return_value={"success": False, "error": "proof required"})):
+        with patch("tollbooth.runtime.require_proof", AsyncMock(return_value={"success": False, "error": "proof required"})):
             r = await tools["register_operator"](npub="npub1op", dpop_token="bad")
     assert r == {"success": False, "error": "proof required"}
 
@@ -269,18 +274,24 @@ async def test_register_operator_blocks_on_bad_proof():
 @pytest.mark.asyncio
 async def test_register_operator_blocks_without_authority_consent():
     with _tools() as tools:  # noqa: SIM117
-        with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
+        with patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_require_authority_consent", AsyncMock(return_value={"success": False, "error": "consent required"})):
             r = await tools["register_operator"](npub="npub1op", dpop_token="p", authority_proof="")
     assert r["error"] == "consent required"
 
 
+@contextmanager
+def _proven(**authority_patches):
+    """The caller's proof passes, with these Authority internals patched too."""
+    with patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None)), \
+            patch.multiple(at, **authority_patches):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_register_operator_happy_provisions_and_registers():
     with _tools() as tools:  # noqa: SIM117
-        with patch.multiple(
-            at,
-            require_proof=AsyncMock(return_value=None),
+        with _proven(
             _require_authority_consent=AsyncMock(return_value=None),
             _resend_bootstrap_dm=AsyncMock(),
             _register_operator_via_oracle=AsyncMock(return_value="https://commit"),
@@ -300,9 +311,7 @@ async def test_register_operator_happy_provisions_and_registers():
 
 def _provision_mocks(oracle):
     """Common provisioning mocks for register_operator, with a stubbed oracle call."""
-    return patch.multiple(
-        at,
-        require_proof=AsyncMock(return_value=None),
+    return _proven(
         _require_authority_consent=AsyncMock(return_value=None),
         _resend_bootstrap_dm=AsyncMock(),
         _register_operator_via_oracle=oracle,
@@ -343,7 +352,7 @@ async def test_register_operator_falls_back_to_short_npub_without_name():
 
 @pytest.mark.asyncio
 async def test_update_operator_nothing_to_update():
-    with _tools() as tools, patch.object(at, "require_proof", AsyncMock(return_value=None)), \
+    with _tools() as tools, patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)):
         r = await tools["update_operator"](npub="npub1op", dpop_token="p", authority_proof="ap")
     assert "Nothing to update" in r["error"]
@@ -352,14 +361,14 @@ async def test_update_operator_nothing_to_update():
 @pytest.mark.asyncio
 async def test_update_operator_happy_and_oracle_failure():
     with _tools() as tools:
-        with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
+        with patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at, "_resend_bootstrap_dm", AsyncMock()), \
              patch.object(at, "_update_operator_via_oracle", AsyncMock(return_value="https://c")):
             ok = await tools["update_operator"](npub="npub1op", dpop_token="p", service_url="https://new", authority_proof="ap")
         assert ok["success"] is True and ok["commit_url"] == "https://c"
 
-        with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
+        with patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at, "_update_operator_via_oracle", AsyncMock(side_effect=RuntimeError("oops"))):
             bad = await tools["update_operator"](npub="npub1op", dpop_token="p", display_name="X", authority_proof="ap")
@@ -369,13 +378,13 @@ async def test_update_operator_happy_and_oracle_failure():
 @pytest.mark.asyncio
 async def test_deregister_operator_happy_and_failure():
     with _tools() as tools:
-        with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
+        with patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at, "_deregister_operator_via_oracle", AsyncMock(return_value="https://c")):
             ok = await tools["deregister_operator"](npub="npub1op", dpop_token="p", authority_proof="ap")
         assert ok["success"] is True and ok["commit_url"] == "https://c"
 
-        with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
+        with patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_require_authority_consent", AsyncMock(return_value=None)), \
              patch.object(at, "_deregister_operator_via_oracle", AsyncMock(side_effect=RuntimeError("x"))):
             bad = await tools["deregister_operator"](npub="npub1op", dpop_token="p", authority_proof="ap")
@@ -385,13 +394,13 @@ async def test_deregister_operator_happy_and_failure():
 @pytest.mark.asyncio
 async def test_get_operator_config_no_config_and_filters_password():
     with _tools() as tools:
-        with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
+        with patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None)), \
              patch("tollbooth.authority.tenant_provisioner.get_all_operator_config", AsyncMock(return_value={})):
             empty = await tools["get_operator_config"](npub="npub1op", dpop_token="p")
         assert empty["success"] is False and "No configuration found" in empty["error"]
 
         cfg = {"schema": "op_s", "role_password": "SECRET", "neon_database_url": "url"}
-        with patch.object(at, "require_proof", AsyncMock(return_value=None)), \
+        with patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None)), \
              patch.object(at, "_resend_bootstrap_dm", AsyncMock()), \
              patch("tollbooth.authority.tenant_provisioner.get_all_operator_config", AsyncMock(return_value=cfg)):
             r = await tools["get_operator_config"](npub="npub1op", dpop_token="p")
@@ -456,10 +465,10 @@ async def test_require_authority_consent_pass_and_fail():
     rt = _fake_runtime()
     rt.operator_npub = MagicMock(return_value="npub1authorityXXXXXXXXX")
     # valid Authority proof → None (caller proceeds)
-    with patch.object(at, "require_proof", AsyncMock(return_value=None)):
+    with patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None)):
         assert await at._require_authority_consent(rt, "ap", "tool") is None
     # missing/invalid proof → structured AUTHORITY_CONSENT_REQUIRED error
-    with patch.object(at, "require_proof", AsyncMock(return_value={"err": 1})):
+    with patch("tollbooth.runtime.require_proof", AsyncMock(return_value={"err": 1})):
         err = await at._require_authority_consent(rt, "", "tool")
     assert err["error_code"] == ErrorCode.AUTHORITY_CONSENT_REQUIRED
     assert err["authority_npub"] == "npub1authorityXXXXXXXXX"

@@ -812,7 +812,7 @@ class OperatorRuntime:
         dict to return verbatim.
         """
         from tollbooth.constants import ErrorCode
-        err = await self._require_proof(npub, dpop_token, self.runtime_name(capability))
+        err = await self.prove_caller(npub, dpop_token, self.runtime_name(capability))
         # When the caller has not yet proven ownership, tell them — right in
         # the denial — whether this operator ALSO needs patron credentials or
         # OAuth, so they don't have to authenticate just to discover the
@@ -939,8 +939,8 @@ class OperatorRuntime:
             self._holder_store = HolderStore(await self.vault())
         return self._holder_store
 
-    async def _require_proof(self, npub: str, dpop_token: str, name: str) -> dict[str, Any] | None:
-        """``require_proof`` with this runtime's revocations and Operator key.
+    async def prove_caller(self, npub: str, dpop_token: str, name: str) -> dict[str, Any] | None:
+        """The one proof gate: ``require_proof`` with this runtime's revocations and key.
 
         A caller that passes no ``dpop_token`` but authenticates as a holder is
         proven by the grant its wallet holds for ``npub`` — the same grant,
@@ -1063,7 +1063,7 @@ class OperatorRuntime:
                 }
 
             proof_npub = self.operator_npub() if category == "restricted" else resolved
-            if err := await self._require_proof(proof_npub, dpop_token, name):
+            if err := await self.prove_caller(proof_npub, dpop_token, name):
                 return err
 
         # ── Access: operator-restricted ───────────────────────

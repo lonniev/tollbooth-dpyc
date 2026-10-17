@@ -47,7 +47,6 @@ from tollbooth.constants import ErrorCode
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.identity_proof import (
     ADOPTION_PROOF_TOOL,
-    require_proof,
     verify_proof,
 )
 from tollbooth.nostr_diagnostics import resolve_relays as _resolve_relays
@@ -646,12 +645,7 @@ async def _require_authority_consent(
     from tollbooth.constants import ErrorCode as _EC
 
     authority_npub = runtime.operator_npub()
-    err = await require_proof(
-        authority_npub,
-        authority_proof,
-        tool_name,
-        revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex(),
-    )
+    err = await runtime.prove_caller(authority_npub, authority_proof, tool_name)
     if err is None:
         return None
     return {
@@ -982,7 +976,7 @@ def register_authority_tools(
 
         Next step: Call purchase_credits to fund your credit balance.
         """
-        err = await require_proof(npub, dpop_token, runtime.runtime_name("register_operator"), revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex())
+        err = await runtime.prove_caller(npub, dpop_token, runtime.runtime_name("register_operator"))
         if err:
             return err
         err = await _require_authority_consent(
@@ -1018,7 +1012,7 @@ def register_authority_tools(
           Operator's nsec could redirect their own ``service_url`` under
           this Authority's signature without the Authority's awareness.
         """
-        err = await require_proof(npub, dpop_token, runtime.runtime_name("update_operator"), revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex())
+        err = await runtime.prove_caller(npub, dpop_token, runtime.runtime_name("update_operator"))
         if err:
             return err
         err = await _require_authority_consent(
@@ -1069,7 +1063,7 @@ def register_authority_tools(
           Operator's public npub and held its nsec could remove themselves
           from this Authority's roster without the Authority noticing.
         """
-        err = await require_proof(npub, dpop_token, runtime.runtime_name("deregister_operator"), revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex())
+        err = await runtime.prove_caller(npub, dpop_token, runtime.runtime_name("deregister_operator"))
         if err:
             return err
         err = await _require_authority_consent(
@@ -1101,7 +1095,7 @@ def register_authority_tools(
 
         Gated by Schnorr signature proving ownership of the requested npub.
         """
-        err = await require_proof(npub, dpop_token, runtime.runtime_name("get_operator_config"), revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex())
+        err = await runtime.prove_caller(npub, dpop_token, runtime.runtime_name("get_operator_config"))
         if err:
             return err
 
@@ -1141,7 +1135,7 @@ def register_authority_tools(
         inspection is always allowed).
         """
         if npub:
-            err = await require_proof(npub, dpop_token, runtime.runtime_name("operator_status"), revocations=await runtime.proof_grant_revocations(), operator_hex=runtime.operator_pubkey_hex())
+            err = await runtime.prove_caller(npub, dpop_token, runtime.runtime_name("operator_status"))
             if err:
                 return err
         user_id = _resolve_npub_or_operator(npub)
