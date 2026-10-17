@@ -264,6 +264,9 @@ REPORT_ISSUE_UUID                    = "49ade49c-884b-5085-8a5b-5e20eb12a8f6"
 # Diagnostics
 REQUEST_ECHO_UUID                    = "b1738058-aa8b-50a8-a8c3-10edeea9dd3c"
 
+# Holder bearer — npubs proven into the calling connection's wallet
+HELD_IDENTITIES_UUID                 = "15c0578e-17bc-5704-9bcc-a4c24b5155df"
+
 
 _STANDARD_LIST: list[ToolIdentity] = [
     # -- Credit tools --
@@ -295,6 +298,9 @@ _STANDARD_LIST: list[ToolIdentity] = [
     ToolIdentity(tool_id=REQUEST_ECHO_UUID, capability="request_echo", category="free",
                  title="Request echo", behavior=READS,
                  intent="Echo what the client sent with this request, values fingerprinted."),
+    ToolIdentity(tool_id=HELD_IDENTITIES_UUID, capability="held_identities", category="free",
+                 title="Held identities", behavior=READS,
+                 intent="List the npubs proven into this connection, with their expiries."),
 
     # -- Onboarding --
     ToolIdentity(tool_id=GET_OPERATOR_ONBOARDING_STATUS_UUID, capability="get_operator_onboarding_status", category="free",

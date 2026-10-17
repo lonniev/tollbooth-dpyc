@@ -33,9 +33,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # sha256 of every concern's statements rendered for the test schema "op_test".
-SCHEMA_DIGEST = "0d36fb0d481cd85e9508d64c7303d787a432e29ec564808d4dcf5b64d6158c63"
+SCHEMA_DIGEST = "c468154150bca501def5fda05e73e758b7da41cca37fff67babe031410779978"
 
 Statements = Callable[[Callable[[str], str], str], list[str]]
 
@@ -62,6 +62,7 @@ def concerns() -> tuple[tuple[str, Statements], ...]:
     from tollbooth.async_jobs import schema_statements as async_jobs
     from tollbooth.coupons.vault import schema_statements as coupons
     from tollbooth.pricing_store import schema_statements as pricing
+    from tollbooth.vaults.holder_store import schema_statements as holders
     from tollbooth.vaults.neon import (
         credential_schema_statements as credentials,
     )
@@ -79,6 +80,7 @@ def concerns() -> tuple[tuple[str, Statements], ...]:
         ("coupons", coupons),
         ("async_jobs", async_jobs),
         ("credentials", credentials),
+        ("holders", holders),
     )
 
 

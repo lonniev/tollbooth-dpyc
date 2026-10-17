@@ -499,18 +499,30 @@ async def receive_npub_proof_tool(
         except Exception:
             logger.debug("proof confirmation DM send failed", exc_info=True)
 
-        return {
+        proven = {
             "success": True,
             "proven_npub": resolved,
+            "popped_dms": popped,
+            "expires_in_seconds": ttl_display,
+            "expires_at": expires_str,
+            "message": confirmation_msg,
+        }
+
+        # A holder keeps the grant in its wallet, so it never enters the
+        # caller's transcript; paid calls then name only the npub.
+        from tollbooth.holder_auth import current_holder
+        holder = current_holder() if rt.holder_auth_enabled else None
+        if holder is not None:
+            await (await rt.holder_store()).hold(holder, resolved, dpop_envelope, expires_at_ts)
+            return {**proven, "held_by_connection": True}
+
+        return {
+            **proven,
             # Grant envelope — pass this whole string as dpop_token on paid calls.
             "dpop_token": dpop_envelope,
             # Nonce alone selects the grant; never authorizes by itself.
             "nonce": expected_phrase,
             "grant": grant_json,
-            "popped_dms": popped,
-            "expires_in_seconds": ttl_display,
-            "expires_at": expires_str,
-            "message": confirmation_msg,
         }
     else:
         # NACKs already went to each mismatched sender during the drain;

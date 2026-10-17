@@ -19,7 +19,8 @@ DpopToken = Annotated[
             "receive_npub_proof returned, or the raw JSON of a kind-27235 Nostr "
             "event signed by npub: content \"\", a `u` tag holding this tool's "
             "exact name from tools/list, created_at within 60 s of now, and a "
-            "random `nonce` tag."
+            "random `nonce` tag. Leave it empty when this connection already "
+            "holds npub (see held_identities)."
         ),
     ),
 ]

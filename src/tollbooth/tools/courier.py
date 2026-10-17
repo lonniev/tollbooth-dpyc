@@ -229,6 +229,13 @@ async def forget_credentials_tool(
                     "grants could not be persisted; call forget_credentials "
                     "again once the persistence layer answers."
                 )
+        # The watermark already refuses every held grant; dropping them from
+        # the wallets is housekeeping, so a failure here changes no answer.
+        if result.get("proof_grants_revoked") and rt.holder_auth_enabled:
+            try:
+                await (await rt.holder_store()).release(target_npub)
+            except Exception:
+                logger.debug("wallet release on forget failed", exc_info=True)
         # Fire on_forget callback so operators can clear caches
         if rt._on_forget and result.get("success"):
             try:
