@@ -1,0 +1,1 @@
+- Operator-only tools (pricing, coupons, `restore_neon_schema`) no longer refuse an empty `dpop_token` before the proof gate, so a holder or a signed request reaches them.

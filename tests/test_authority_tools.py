@@ -134,6 +134,7 @@ def _fake_runtime(fee=20):
         operator_pubkey_hex=MagicMock(return_value="ab" * 32),
         vault=AsyncMock(return_value=SimpleNamespace(_cipher=None)),
         holder_auth_enabled=False,
+        argument_proofs_seen=0,
     )
     # The real gate, so a patched tollbooth.runtime.require_proof decides.
     rt.prove_caller = MethodType(OperatorRuntime.prove_caller, rt)

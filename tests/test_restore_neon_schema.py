@@ -67,5 +67,8 @@ async def test_restore_reports_the_failing_step_inline():
 @pytest.mark.asyncio
 async def test_restore_requires_the_operators_proof():
     rt, _ = _runtime()
+    denial = {"success": False, "error_code": "proof_required", "error": "proof required"}
+    rt.require_caller_proof = AsyncMock(return_value=denial)
     r = await _tools(rt)["restore_neon_schema"](dpop_token="")
-    assert r["success"] is False and "proof" in r["error"]
+    assert r == denial
+    rt.require_caller_proof.assert_awaited_once_with(rt.operator_npub(), "", "restore_neon_schema")

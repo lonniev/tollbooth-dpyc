@@ -55,6 +55,7 @@ class AuthorityCertifier:
         self._certify_tool_name = certify_tool_name
         # The one home for patron-side signing (shared with the agent keyring).
         self._signer = PatronSigner(operator_npub, operator_nsec)
+        self._nsec = operator_nsec
 
     async def certify_credits(self, amount_sats: int) -> dict[str, Any]:
         """Call the Authority's certify_credits tool and return the certificate dict.
@@ -71,7 +72,7 @@ class AuthorityCertifier:
             )
 
         try:
-            async with service_client(self._authority_url) as client:
+            async with service_client(self._authority_url, self._nsec) as client:
                 # The Authority's verify_proof gate binds the proof to the runtime
                 # mcp_name (`<slug>_<func>`, e.g. "authority_certify_credits") since
                 # wheel 0.24.0 — so we sign for the exact wire name we invoke.
@@ -104,7 +105,7 @@ class AuthorityCertifier:
             raise AuthorityCertifyError("fastmcp package required for Authority alerts.")
         tool = "authority_receive_neon_402_alert"
         try:
-            async with service_client(self._authority_url) as client:
+            async with service_client(self._authority_url, self._nsec) as client:
                 result = await client.call_tool(
                     tool, self._signer.authenticate(tool, {"detail": detail[:500]})
                 )
@@ -175,7 +176,7 @@ class AuthorityCertifier:
             raise AuthorityCertifyError("fastmcp package required")
 
         try:
-            async with service_client(self._authority_url) as client:
+            async with service_client(self._authority_url, self._nsec) as client:
                 # The Authority's verify_proof gate binds the proof to the runtime
                 # mcp_name (`<slug>_<func>`, e.g. "authority_check_balance") — so we
                 # sign for the exact wire name we invoke (same rule as certify_credits).

@@ -1,7 +1,7 @@
 """How one DPYC process calls another's MCP endpoint.
 
-A service-to-service call proves itself in its arguments (an inline kind-27235
-proof signed with the caller's key), never with OAuth. It still carries a
+A caller that holds an npub's key signs every request with it (NIP-98), and
+the server acts as that npub. A caller acting as nobody still carries a
 bearer, because an endpoint with holder bearer on refuses a request with no
 ``Authorization`` header; any value the server did not mint is an anonymous
 caller there, so this placeholder is all it needs.
@@ -21,8 +21,16 @@ JSONRPC_POST_HEADERS = {
 }
 
 
-def service_client(url: str) -> Any:
-    """A FastMCP client for another DPYC service, carrying the anonymous bearer."""
+def service_client(url: str, nsec: str | None = None) -> Any:
+    """A FastMCP client for another DPYC service.
+
+    With ``nsec``, every request is signed by that key; without it, the caller
+    is anonymous.
+    """
     from fastmcp import Client
 
+    if nsec:
+        from tollbooth.nostr_auth import NostrRequestAuth
+
+        return Client(url, auth=NostrRequestAuth(nsec))
     return Client(url, auth=ANONYMOUS_BEARER)

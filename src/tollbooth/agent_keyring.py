@@ -64,7 +64,7 @@ def build_keyring(upstream_url: str, npub: str, nsec: str) -> Any:
             forwarded = context.copy(message=params.model_copy(update={"arguments": new_args}))
             return await call_next(forwarded)
 
-    proxy = create_proxy(service_client(upstream_url), name="dpyc-keyring")
+    proxy = create_proxy(service_client(upstream_url, nsec), name="dpyc-keyring")
     proxy.add_middleware(_DpopAuthMiddleware())
     return proxy
 

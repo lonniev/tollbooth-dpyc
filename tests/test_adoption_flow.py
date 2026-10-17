@@ -231,7 +231,7 @@ def _operator_rt():
 async def test_request_adoption_requires_proof():
     tools = _register_operator_tools(_operator_rt())
     r = await tools["request_adoption"](authority_npub="npub1auth", dpop_token="")
-    assert r["success"] is False and "provide proof" in r["error"]
+    assert r["success"] is False and "sign the request" in r["error"]
 
 
 async def test_request_adoption_verifies_proof_inline_without_vault():

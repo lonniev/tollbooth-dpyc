@@ -617,6 +617,18 @@ async def _resolve_own_service_url() -> str:
         await registry.close()
 
 
+def _signed_by(npub: str) -> bool:
+    """True when the request in flight was signed by ``npub``'s own key."""
+    from tollbooth.holder_auth import signed_npub
+    from tollbooth.runtime import resolve_npub
+
+    signer = signed_npub()
+    try:
+        return signer is not None and resolve_npub(signer) == resolve_npub(npub)
+    except ValueError:
+        return False
+
+
 async def _require_authority_consent(
     runtime: OperatorRuntime,
     authority_proof: str,
@@ -1344,8 +1356,11 @@ def register_authority_tools(
         """
         if not operator_npub:
             return {"success": False, "error": "operator_npub is required."}
-        # Verify the operator owns the npub (inline proof bound to the sentinel).
-        if not verify_proof(dpop_token, operator_npub, ADOPTION_PROOF_TOOL):
+        # The operator's own key signed this request, or (while callers move to
+        # the connection) an inline proof bound to the adoption sentinel.
+        if not _signed_by(operator_npub) and not verify_proof(
+            dpop_token, operator_npub, ADOPTION_PROOF_TOOL,
+        ):
             return {
                 "success": False,
                 "error_code": ErrorCode.PROOF_INVALID,
@@ -1452,7 +1467,9 @@ def register_authority_tools(
         """
         if not npub:
             return {"success": False, "error": "npub is required."}
-        if not verify_proof(dpop_token, npub, runtime.runtime_name("receive_neon_402_alert")):
+        if not _signed_by(npub) and not verify_proof(
+            dpop_token, npub, runtime.runtime_name("receive_neon_402_alert"),
+        ):
             return {
                 "success": False,
                 "error_code": ErrorCode.PROOF_INVALID,

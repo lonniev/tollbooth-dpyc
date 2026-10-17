@@ -35,14 +35,21 @@ class PatronProofConstraint(ToolConstraint):
         self.window_seconds = window_seconds
 
     def evaluate(self, context: ConstraintContext) -> ConstraintResult:
+        from tollbooth.holder_auth import signed_npub
+
+        # The patron's own key signed this very request: possession shown.
+        signer = signed_npub()
+        if signer is not None and signer == context.patron.npub:
+            return ConstraintResult(
+                allowed=True, reason="patron_proof", message="Patron identity verified.",
+            )
         if not context.dpop_token:
             return ConstraintResult(
                 allowed=False,
                 reason="patron_proof_required",
                 message=(
-                    "This tool requires patron identity proof. "
-                    "Sign a kind-27235 Nostr event with your nsec "
-                    "and pass it as the dpop_token parameter."
+                    "This tool requires the patron's own key: sign the "
+                    "request with the patron's nsec."
                 ),
             )
 
