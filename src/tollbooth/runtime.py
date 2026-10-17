@@ -5762,8 +5762,7 @@ def register_standard_tools(
 
         Returns the remote tool's structured dict, or raises on failure.
         """
-        from fastmcp import Client
-
+        from tollbooth.mcp_client import service_client
         from tollbooth.oracle_client import default_oracle_client
 
         service = await default_oracle_client().resolve_service(npub=authority_npub)
@@ -5773,7 +5772,7 @@ def register_standard_tools(
             )
         url = service["url"]
 
-        async with Client(url) as client:
+        async with service_client(url) as client:
             tools = await client.list_tools()
             name = next(
                 (t.name for t in tools if t.name.endswith(tool_suffix)), None

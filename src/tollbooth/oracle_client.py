@@ -15,6 +15,8 @@ from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
+from tollbooth.mcp_client import service_client
+
 try:
     from fastmcp import Client  # type: ignore[import-untyped]
 except ImportError:
@@ -53,7 +55,7 @@ class OracleClient:
         async with AsyncExitStack() as stack:
             try:
                 connection = await stack.enter_async_context(
-                    Client(self._oracle_url, auth="oauth")
+                    service_client(self._oracle_url)
                 )
             except Exception as e:
                 raise OracleClientError(
@@ -73,7 +75,7 @@ class OracleClient:
             if self._connection is not None:
                 result = await self._connection.call_tool(tool_name, arguments or {})
             else:
-                async with Client(self._oracle_url, auth="oauth") as client:
+                async with service_client(self._oracle_url) as client:
                     result = await client.call_tool(tool_name, arguments or {})
         except Exception as e:
             raise OracleClientError(

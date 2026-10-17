@@ -40,7 +40,7 @@ async def test_call_tool_success():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+    with patch("tollbooth.oracle_client.service_client", return_value=mock_client):
         client = OracleClient(oracle_url="https://oracle.example.com/mcp")
         result = await client.call_tool("get_tax_rate")
 
@@ -63,7 +63,7 @@ async def test_call_tool_with_arguments():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+    with patch("tollbooth.oracle_client.service_client", return_value=mock_client):
         client = OracleClient(oracle_url="https://oracle.example.com/mcp")
         result = await client.call_tool("lookup_member", {"npub": "npub1abc..."})
 
@@ -85,7 +85,7 @@ async def test_call_tool_connection_failure():
     mock_client.__aenter__ = AsyncMock(side_effect=ConnectionError("refused"))
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+    with patch("tollbooth.oracle_client.service_client", return_value=mock_client):
         client = OracleClient(oracle_url="https://oracle.example.com/mcp")
         with pytest.raises(OracleClientError, match="Failed to connect"):
             await client.call_tool("get_tax_rate")
@@ -113,7 +113,7 @@ async def test_call_tool_calltoolresult_data():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+    with patch("tollbooth.oracle_client.service_client", return_value=mock_client):
         client = OracleClient(oracle_url="https://oracle.example.com/mcp")
         result = await client.call_tool("get_tax_rate")
 
@@ -137,7 +137,7 @@ async def test_call_tool_calltoolresult_content():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+    with patch("tollbooth.oracle_client.service_client", return_value=mock_client):
         client = OracleClient(oracle_url="https://oracle.example.com/mcp")
         result = await client.call_tool("get_tax_rate")
 
@@ -162,7 +162,7 @@ async def test_call_tool_plain_text():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+    with patch("tollbooth.oracle_client.service_client", return_value=mock_client):
         client = OracleClient(oracle_url="https://oracle.example.com/mcp")
         result = await client.call_tool("how_to_join")
 
@@ -185,7 +185,7 @@ async def test_call_tool_plain_text_calltoolresult():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+    with patch("tollbooth.oracle_client.service_client", return_value=mock_client):
         client = OracleClient(oracle_url="https://oracle.example.com/mcp")
         result = await client.call_tool("about")
 
@@ -203,7 +203,7 @@ async def test_call_tool_json_non_dict():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+    with patch("tollbooth.oracle_client.service_client", return_value=mock_client):
         client = OracleClient(oracle_url="https://oracle.example.com/mcp")
         result = await client.call_tool("some_tool")
 
@@ -225,7 +225,7 @@ async def test_call_tool_unexpected_format():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.oracle_client.Client", return_value=mock_client):
+    with patch("tollbooth.oracle_client.service_client", return_value=mock_client):
         client = OracleClient(oracle_url="https://oracle.example.com/mcp")
         with pytest.raises(OracleClientError, match="unexpected response"):
             await client.call_tool("get_tax_rate")
@@ -394,7 +394,7 @@ async def test_a_session_shares_one_connection_across_calls():
     connection.__aenter__ = AsyncMock(return_value=connection)
     connection.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.oracle_client.Client", return_value=connection) as opened:
+    with patch("tollbooth.oracle_client.service_client", return_value=connection) as opened:
         async with OracleClient("https://oracle.example.com/mcp").session() as oracle:
             await oracle.get_relays()
             await oracle.call_tool("resolve_authority_for", {"npub": "npub1x"})
@@ -410,7 +410,7 @@ async def test_a_session_that_cannot_connect_raises_the_client_error():
     connection.__aenter__ = AsyncMock(side_effect=ConnectionError("refused"))
 
     with (
-        patch("tollbooth.oracle_client.Client", return_value=connection),
+        patch("tollbooth.oracle_client.service_client", return_value=connection),
         pytest.raises(OracleClientError, match="refused"),
     ):
         async with OracleClient("https://oracle.example.com/mcp").session():
@@ -424,7 +424,7 @@ async def test_a_failure_inside_a_session_is_not_relabelled_as_the_oracle():
     connection.__aexit__ = AsyncMock(return_value=False)
 
     with (
-        patch("tollbooth.oracle_client.Client", return_value=connection),
+        patch("tollbooth.oracle_client.service_client", return_value=connection),
         pytest.raises(KeyError),
     ):
         async with OracleClient("https://oracle.example.com/mcp").session():
