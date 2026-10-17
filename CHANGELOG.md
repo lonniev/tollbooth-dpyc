@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.102.0] — 2026-10-17
+
+### Added
+
+- Identity on the connection: a request signed with an npub's own key (NIP-98, `Authorization: Nostr <base64 kind-27235>` with `u`, `method` and `payload` tags) acts as that npub with no grant and no argument proof. `prove_caller` asks the connection first — a signer, then a holder's wallet — and honours a `dpop_token` argument only while clients move; `service_status.argument_proofs_seen` counts the ones still arriving. `tollbooth.nostr_auth.NostrRequestAuth` and `service_client(url, nsec)` sign every request; Authority certification, adoption requests and the agent keyring now do.
+- The patron-proof constraint is met by a request the patron's own key signed.
+
+### Fixed
+
+- Operator-only tools (pricing, coupons, `restore_neon_schema`) no longer refuse an empty `dpop_token` before the proof gate, so a holder or a signed request reaches them.
+
 ## [0.101.1] — 2026-10-17
 
 ### Fixed
