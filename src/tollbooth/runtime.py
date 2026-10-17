@@ -205,6 +205,7 @@ class OperatorRuntime:
         npub_proof_greeting: str = "",
         on_npub_proven: Any | None = None,
         oauth_provider: Any | None = None,
+        holder_auth_url: str = "",
     ) -> None:
         self._nsec_env_var = nsec_env_var
         self._credential_validator = credential_validator
@@ -269,6 +270,10 @@ class OperatorRuntime:
         self._npub_proof_greeting = npub_proof_greeting
         self._on_npub_proven = on_npub_proven  # async callback(npub, payload)
         self._oauth_provider = oauth_provider  # OAuthProviderConfig or None
+        # Public base URL when connections authenticate as holders (see
+        # tollbooth.holder_auth); empty keeps today's argument-only proofs.
+        self._holder_auth_url = holder_auth_url.rstrip("/")
+        self._holder_store: Any | None = None  # lazy HolderStore
         # One refresh at a time per (service, patron). A rotating single-use
         # refresh token cannot survive being spent twice at once — see
         # _oauth_refresh_lock.
@@ -807,11 +812,7 @@ class OperatorRuntime:
         dict to return verbatim.
         """
         from tollbooth.constants import ErrorCode
-        err = await require_proof(
-            npub, dpop_token, self.runtime_name(capability),
-            revocations=await self.proof_grant_revocations(),
-            operator_hex=self.operator_pubkey_hex(),
-        )
+        err = await self.prove_caller(npub, dpop_token, self.runtime_name(capability))
         # When the caller has not yet proven ownership, tell them — right in
         # the denial — whether this operator ALSO needs patron credentials or
         # OAuth, so they don't have to authenticate just to discover the
@@ -926,6 +927,51 @@ class OperatorRuntime:
             self._proof_grant_revocations = ProofGrantRevocations(vault=await self.vault())
         return self._proof_grant_revocations
 
+    @property
+    def holder_auth_enabled(self) -> bool:
+        """True when connections authenticate as holders (``holder_auth_url`` set)."""
+        return bool(self._holder_auth_url)
+
+    async def holder_store(self) -> Any:
+        """Lazy accessor for the holder store: OAuth clients, tokens, grant wallets."""
+        if self._holder_store is None:
+            from tollbooth.vaults.holder_store import HolderStore
+            self._holder_store = HolderStore(await self.vault())
+        return self._holder_store
+
+    async def prove_caller(self, npub: str, dpop_token: str, name: str) -> dict[str, Any] | None:
+        """The one proof gate: ``require_proof`` with this runtime's revocations and key.
+
+        A caller that passes no ``dpop_token`` but authenticates as a holder is
+        proven by the grant its wallet holds for ``npub`` — the same grant,
+        checked the same way, only carried by the connection instead of the
+        argument.
+        """
+        if not dpop_token and self.holder_auth_enabled:
+            try:
+                dpop_token = await self._held_envelope(npub)
+            except Exception as exc:  # noqa: BLE001 — unknown is not "not held"
+                logger.warning("holder wallet unavailable: %s", type(exc).__name__)
+                return _holder_store_unavailable()
+        return await require_proof(
+            npub, dpop_token, name,
+            revocations=await self.proof_grant_revocations(),
+            operator_hex=self.operator_pubkey_hex(),
+        )
+
+    async def _held_envelope(self, npub: str) -> str:
+        """The grant envelope the calling holder holds for npub, or "" if none."""
+        from tollbooth.holder_auth import current_holder
+
+        holder = current_holder()
+        if holder is None:
+            return ""
+        try:
+            resolved = resolve_npub(npub)
+        except ValueError:
+            return ""
+        return await (await self.holder_store()).envelope(holder, resolved) or ""
+
     @staticmethod
     def _get_session_id() -> str:
         """Get the MCP transport session ID from FastMCP context."""
@@ -1021,13 +1067,7 @@ class OperatorRuntime:
                 }
 
             proof_npub = self.operator_npub() if category == "restricted" else resolved
-            if err := await require_proof(
-                proof_npub,
-                dpop_token,
-                name,
-                revocations=await self.proof_grant_revocations(),
-                operator_hex=self.operator_pubkey_hex(),
-            ):
+            if err := await self.prove_caller(proof_npub, dpop_token, name):
                 return err
 
         # ── Access: operator-restricted ───────────────────────
@@ -4168,6 +4208,16 @@ def _as_plain_dict(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
+def _holder_store_unavailable() -> dict[str, Any]:
+    """The wallet could not be read: a retry, never a claim that nothing is held."""
+    from tollbooth.constants import ErrorCode
+    return {
+        "success": False,
+        "error_code": ErrorCode.WARMING_UP,
+        "error": "This connection's identities could not be read just now. Retry in 10-15 seconds.",
+    }
+
+
 def register_standard_tools(
     mcp: Any,
     slug: str,
@@ -4211,6 +4261,12 @@ def register_standard_tools(
     rt._tool = tool
     rt._mcp_name_cache.clear()  # invalidate any cached names
 
+    # Connections authenticate as holders: FastMCP reads `auth` when it builds
+    # the HTTP app, after module import, so installing it here is in time.
+    if rt.holder_auth_enabled:
+        from tollbooth.holder_auth import HolderAuthProvider
+        mcp.auth = HolderAuthProvider(rt.holder_store, base_url=rt._holder_auth_url)
+
     # Rescue arguments a client serialised one time too many: a value the tool
     # declared as an object arriving as a JSON string. FastMCP does no such
     # coercion, so those reach pydantic and fail as `dict_type` — a message that
@@ -4228,7 +4284,7 @@ def register_standard_tools(
     # -- Credit tools --------------------------------------------------
 
     @tool
-    async def check_balance(npub: str, dpop_token: str) -> dict[str, Any]:
+    async def check_balance(npub: str, dpop_token: str = "") -> dict[str, Any]:
         """Check a patron's credit balance at this operator.
 
         This is the patron's spending balance — credits purchased via
@@ -4256,7 +4312,7 @@ def register_standard_tools(
         return await credits.check_balance_tool(cache, npub)
 
     @tool
-    async def purchase_credits(npub: str, dpop_token: str, amount_sats: int = 1000) -> dict[str, Any]:
+    async def purchase_credits(npub: str, dpop_token: str = "", amount_sats: int = 1000) -> dict[str, Any]:
         """Buy credits via Bitcoin Lightning.
 
         Creates a Lightning invoice. Pay it with any Lightning wallet,
@@ -4359,7 +4415,7 @@ def register_standard_tools(
             return {"success": False, "error": str(e)}
 
     @tool
-    async def check_payment(invoice_id: str, npub: str, dpop_token: str) -> dict[str, Any]:
+    async def check_payment(invoice_id: str, npub: str, dpop_token: str = "") -> dict[str, Any]:
         """Check the payment status of a Lightning invoice.
 
         Call after paying the invoice from purchase_credits.
@@ -4411,7 +4467,7 @@ def register_standard_tools(
         return result
 
     @tool
-    async def restore_credits(invoice_id: str, patron_npub: str, dpop_token: str) -> dict[str, Any]:
+    async def restore_credits(invoice_id: str, patron_npub: str, dpop_token: str = "") -> dict[str, Any]:
         """Credit a patron's ledger from a BTCPay-settled invoice.
 
         **RESTRICTED to the operator** — the operator owns the books and is
@@ -4463,7 +4519,7 @@ def register_standard_tools(
         )
 
     @tool
-    async def account_statement(npub: str, dpop_token: str, days: int = 30) -> dict[str, Any]:
+    async def account_statement(npub: str, dpop_token: str = "", days: int = 30) -> dict[str, Any]:
         """Generate a patron's account statement at this operator.
 
         Returns the patron's purchase history, active credit tranches,
@@ -4492,7 +4548,7 @@ def register_standard_tools(
         return await credits.account_statement_tool(cache, npub, days=days)
 
     @tool
-    async def account_statement_infographic(npub: str, dpop_token: str, days: int = 30) -> dict[str, Any]:
+    async def account_statement_infographic(npub: str, dpop_token: str = "", days: int = 30) -> dict[str, Any]:
         """Generate a visual SVG infographic of your account statement.
 
         Returns the same data as account_statement, rendered as a dark-themed
@@ -4536,10 +4592,10 @@ def register_standard_tools(
     @tool
     async def report_issue(
         npub: str,
-        dpop_token: str,
         title: str,
         body: str,
         tool_name: str = "",
+        dpop_token: str = "",
     ) -> dict[str, Any]:
         """File a field report about this service as a GitHub issue on the operator's repo.
 
@@ -4672,6 +4728,34 @@ def register_standard_tools(
         return status
 
     @tool
+    async def held_identities() -> dict[str, Any]:
+        """List the npubs this connection holds, with when each proof expires. Free.
+
+        A connection that authenticates with a holder bearer keeps every npub
+        proven through it; a paid call then needs only `npub`. Nothing secret
+        is returned.
+        """
+        from tollbooth.holder_auth import current_holder
+
+        holder = current_holder() if rt.holder_auth_enabled else None
+        if holder is None:
+            return {
+                "success": True,
+                "holder": False,
+                "identities": [],
+                "message": (
+                    "This connection holds no identities; pass dpop_token on "
+                    "each call."
+                ),
+            }
+        try:
+            identities = await (await rt.holder_store()).holdings(holder)
+        except Exception as exc:  # noqa: BLE001 — never surface the SQL
+            logger.warning("holder wallet unavailable: %s", type(exc).__name__)
+            return _holder_store_unavailable()
+        return {"success": True, "holder": True, "identities": identities}
+
+    @tool
     async def request_echo() -> dict[str, Any]:
         """Echo what the client sent with this request. Free.
 
@@ -4737,7 +4821,7 @@ def register_standard_tools(
         return await rt.onboarding_status()
 
     @tool
-    async def get_patron_onboarding_status(patron_npub: str, dpop_token: str) -> dict[str, Any]:
+    async def get_patron_onboarding_status(patron_npub: str, dpop_token: str = "") -> dict[str, Any]:
         """Report a patron's credential readiness for this operator.
 
         For set-once services (eXcalibur, TheBrain), shows which patron
@@ -5013,7 +5097,7 @@ def register_standard_tools(
     async def forget_credentials(
         service: str,
         npub: str,
-        dpop_token: str,
+        dpop_token: str = "",
     ) -> dict[str, Any]:
         """Delete vaulted credentials for a specific service and npub.
 
@@ -5089,7 +5173,7 @@ def register_standard_tools(
 
     @tool
     async def update_patron_credential(
-        npub: str, dpop_token: str, field: str, value: str,
+        npub: str, field: str, value: str, dpop_token: str = "",
     ) -> dict[str, Any]:
         """Add or update a single patron credential field.
 
@@ -5126,7 +5210,7 @@ def register_standard_tools(
 
     @tool
     async def update_operator_credential(
-        field: str, value: str, dpop_token: str,
+        field: str, value: str, dpop_token: str = "",
     ) -> dict[str, Any]:
         """Add or update a single operator secret field.
 
@@ -5183,7 +5267,7 @@ def register_standard_tools(
 
     @tool
     async def delete_patron_credential(
-        npub: str, dpop_token: str, field: str,
+        npub: str, field: str, dpop_token: str = "",
     ) -> dict[str, Any]:
         """Remove a single patron credential field.
 
@@ -5215,7 +5299,7 @@ def register_standard_tools(
 
     @tool
     async def delete_operator_credential(
-        field: str, dpop_token: str,
+        field: str, dpop_token: str = "",
     ) -> dict[str, Any]:
         """Remove a single operator secret field.
 
@@ -5275,7 +5359,7 @@ def register_standard_tools(
 
     @tool
     async def get_patron_credential_fields(
-        npub: str, dpop_token: str,
+        npub: str, dpop_token: str = "",
     ) -> dict[str, Any]:
         """List stored patron credential field names (not values).
 
@@ -5316,7 +5400,7 @@ def register_standard_tools(
         # Tool bodies live in tollbooth.tools.oauth (they read rt._oauth_provider).
 
         @tool
-        async def begin_oauth(npub: str, dpop_token: str) -> dict[str, Any]:
+        async def begin_oauth(npub: str, dpop_token: str = "") -> dict[str, Any]:
             """Start the OAuth2 authorization flow.
 
             Returns an authorization URL. Open it in a browser to log in
@@ -5341,7 +5425,7 @@ def register_standard_tools(
             return await begin_oauth_tool(rt, npub, dpop_token)
 
         @tool
-        async def check_oauth_status(npub: str, dpop_token: str) -> dict[str, Any]:
+        async def check_oauth_status(npub: str, dpop_token: str = "") -> dict[str, Any]:
             """Check whether the OAuth2 authorization flow has completed.
 
             Call after opening the authorization URL from ``begin_oauth``

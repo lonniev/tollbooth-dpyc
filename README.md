@@ -553,6 +553,8 @@ Inline proofs must be less than 60 seconds old, and consumed event IDs are track
 
 The grant is **self-verifying**: the gate checks the Operator's signature, the npub binding, the nonce, and the expiry with no server-side lookup, so it survives cold starts with no cache. The challenge nonce only *selects* the grant — a bare phrase is never a credential and is refused with `proof_refresh_needed`. `forget_credentials` revokes every grant issued to a patron via a per-npub watermark. (Superseded in 0.97.0: the earlier `sha256(poison):npub` proof cache, where the phrase itself was the credential.)
 
+**Holder bearer (opt-in: `OperatorRuntime(holder_auth_url="https://<your-host>")`).** The connection carries the grants instead of the tool arguments. A client authenticates with `Authorization: Bearer` as the MCP authorization spec describes; the Operator is its own OAuth 2.1 authorization server, and connecting asks the person nothing, because the token names a *holder* with no identity of its own. Each `receive_npub_proof` made over that connection puts the grant in the holder's wallet and leaves it out of the reply, so many npubs can share one connection and a paid call passes only `npub`. The grant is checked by the same gate, so it never enters the model's transcript. Any bearer value the Operator did not mint is an anonymous caller, which proves itself with `dpop_token` as above; a client without OAuth sends a placeholder such as `Bearer anonymous`. `held_identities` lists what a connection holds.
+
 ---
 
 ## Architecture
