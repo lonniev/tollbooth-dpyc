@@ -41,7 +41,7 @@ async def test_report_neon_quota_signs_for_wire_name():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
@@ -61,7 +61,7 @@ async def test_report_neon_quota_raises_on_transport_failure():
     failing = AsyncMock()
     failing.__aenter__ = AsyncMock(side_effect=RuntimeError("relay down"))
     failing.__aexit__ = AsyncMock(return_value=False)
-    with patch("tollbooth.authority_client.Client", return_value=failing):
+    with patch("tollbooth.authority_client.service_client", return_value=failing):
         certifier = AuthorityCertifier("https://a.example/mcp", "npub1operator")
         with pytest.raises(AuthorityCertifyError):
             await certifier.report_neon_quota_exceeded("boom")

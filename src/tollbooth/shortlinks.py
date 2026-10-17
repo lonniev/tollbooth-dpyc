@@ -7,6 +7,8 @@ import logging
 
 import httpx
 
+from tollbooth.mcp_client import JSONRPC_POST_HEADERS
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,10 +60,7 @@ async def create_shortlink(url: str, slug: str | None = None) -> str | None:
                     },
                     "id": 1,
                 },
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
+                headers=JSONRPC_POST_HEADERS,
                 timeout=10,
             )
 
