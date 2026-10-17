@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.101.0] — 2026-10-17
+
+### Added
+
+- Holder bearer (opt-in, `OperatorRuntime(holder_auth_url=...)`): connections authenticate with `Authorization: Bearer` per the MCP authorization spec. The operator is its own OAuth 2.1 authorization server (dynamic client registration, PKCE, rotating refresh tokens, a replayed refresh token disconnects the holder). Each npub proven through `receive_npub_proof` goes into the connection's wallet instead of the reply, so paid calls pass only `npub` and the grant never enters the transcript. Any other bearer value is an anonymous caller that proves itself with `dpop_token` as before. New free tool `held_identities`.
+- `dpop_token` is optional on every standard tool; a holder connection omits it.
+- Every proof check, the Authority tools included, now goes through one gate (`OperatorRuntime.prove_caller`), so a holder connection works everywhere a `dpop_token` did.
+
 ## [0.100.0] — 2026-10-14
 
 ### Added
