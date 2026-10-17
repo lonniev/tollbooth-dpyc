@@ -341,3 +341,81 @@ async def test_forgetting_an_npub_drops_it_from_every_wallet():
 
     assert result["proof_grants_revoked"] is True
     assert set(store.wallet) == {("h2", "npub1b")}
+
+
+# ---------------------------------------------------------------------------
+# Hardening
+# ---------------------------------------------------------------------------
+
+
+def test_the_store_refuses_a_vault_without_a_cipher():
+    from tollbooth.vaults.holder_store import HolderStoreUnavailable
+
+    with pytest.raises(HolderStoreUnavailable):
+        HolderStore(SimpleNamespace(_cipher=None))
+
+
+@pytest.mark.asyncio
+async def test_a_verified_token_is_read_once_a_minute_not_per_request():
+    store = MemoryHolderStore()
+    provider = _provider(store)
+    tokens = await _connect(provider)
+    store.token = AsyncMock(wraps=store.token)  # type: ignore[method-assign]
+
+    for _ in range(3):
+        assert await provider.verify_token(tokens.access_token) is not None
+    assert store.token.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_store_that_cannot_answer_is_a_retry_never_a_401():
+    from starlette.testclient import TestClient
+
+    from tollbooth.holder_auth import _AnswerUnavailable
+    from tollbooth.vaults.holder_store import HolderStoreUnavailable
+
+    store = MemoryHolderStore()
+    store.token = AsyncMock(side_effect=RuntimeError("neon asleep"))  # type: ignore[method-assign]
+    with pytest.raises(HolderStoreUnavailable):
+        await _provider(store).verify_token("dpyc_ha_x")
+
+    async def failing(scope, receive, send):
+        raise HolderStoreUnavailable("neon asleep")
+
+    response = TestClient(_AnswerUnavailable(failing)).get("/mcp")
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "10"
+    assert "neon" not in response.text
+
+
+def test_client_registration_is_metered_per_caller():
+    from starlette.responses import PlainTextResponse
+    from starlette.testclient import TestClient
+
+    from tollbooth.holder_auth import REGISTRATIONS_PER_HOUR, _LimitRegistration
+
+    client = TestClient(_LimitRegistration(PlainTextResponse("registered")))
+    codes = [
+        client.post("/register", headers={"X-Forwarded-For": "203.0.113.9, 10.0.0.1"}).status_code
+        for _ in range(REGISTRATIONS_PER_HOUR + 1)
+    ]
+    assert codes[:-1] == [200] * REGISTRATIONS_PER_HOUR and codes[-1] == 429
+    assert client.post("/register", headers={"X-Forwarded-For": "198.51.100.7"}).status_code == 200
+    assert client.get("/mcp", headers={"X-Forwarded-For": "203.0.113.9"}).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_authorizing_clears_lapsed_codes():
+    store = MemoryHolderStore()
+    await store.put_token("dpyc_hc_old", "code", holder_id="h", client_id="c1", expires_at=1, meta={})
+    await _connect(_provider(store))
+    assert await store.token("dpyc_hc_old", "code") is None
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_wallet_is_warming_up_never_proof_required():
+    rt = OperatorRuntime(nsec_env_var="__UNUSED__", holder_auth_url="https://op.example")
+    rt.holder_store = AsyncMock(side_effect=RuntimeError("neon asleep"))  # type: ignore[method-assign]
+    with patch("tollbooth.holder_auth.current_holder", return_value="h1"):
+        denial = await rt.prove_caller(PrivateKey().public_key.bech32(), "", "check_balance")
+    assert denial is not None and denial["error_code"] == ErrorCode.WARMING_UP

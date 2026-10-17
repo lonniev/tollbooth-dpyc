@@ -21,6 +21,10 @@ from typing import Any, Literal
 TokenKind = Literal["code", "access", "refresh"]
 
 
+class HolderStoreUnavailable(Exception):
+    """The holder store cannot answer; the caller should retry, never assume."""
+
+
 def token_hash(token: str) -> str:
     """The only form in which a token is ever stored."""
     return hashlib.sha256(token.encode()).hexdigest()
@@ -83,6 +87,9 @@ class HolderStore:
     """Neon-backed store for holders. All state lives in Postgres."""
 
     def __init__(self, vault: Any) -> None:
+        # Envelopes and client records are bearer secrets: no cipher, no store.
+        if getattr(vault, "_cipher", None) is None:
+            raise HolderStoreUnavailable("the vault has no cipher; holder secrets would be stored in the clear")
         self._vault = vault
 
     def _t(self, table: str) -> str:

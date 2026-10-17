@@ -948,7 +948,11 @@ class OperatorRuntime:
         argument.
         """
         if not dpop_token and self.holder_auth_enabled:
-            dpop_token = await self._held_envelope(npub)
+            try:
+                dpop_token = await self._held_envelope(npub)
+            except Exception as exc:  # noqa: BLE001 — unknown is not "not held"
+                logger.warning("holder wallet unavailable: %s", type(exc).__name__)
+                return _holder_store_unavailable()
         return await require_proof(
             npub, dpop_token, name,
             revocations=await self.proof_grant_revocations(),
@@ -4204,6 +4208,16 @@ def _as_plain_dict(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
+def _holder_store_unavailable() -> dict[str, Any]:
+    """The wallet could not be read: a retry, never a claim that nothing is held."""
+    from tollbooth.constants import ErrorCode
+    return {
+        "success": False,
+        "error_code": ErrorCode.WARMING_UP,
+        "error": "This connection's identities could not be read just now. Retry in 10-15 seconds.",
+    }
+
+
 def register_standard_tools(
     mcp: Any,
     slug: str,
@@ -4734,11 +4748,12 @@ def register_standard_tools(
                     "each call."
                 ),
             }
-        return {
-            "success": True,
-            "holder": True,
-            "identities": await (await rt.holder_store()).holdings(holder),
-        }
+        try:
+            identities = await (await rt.holder_store()).holdings(holder)
+        except Exception as exc:  # noqa: BLE001 — never surface the SQL
+            logger.warning("holder wallet unavailable: %s", type(exc).__name__)
+            return _holder_store_unavailable()
+        return {"success": True, "holder": True, "identities": identities}
 
     @tool
     async def request_echo() -> dict[str, Any]:

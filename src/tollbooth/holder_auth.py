@@ -43,13 +43,28 @@ from mcp.server.auth.provider import (
     construct_redirect_uri,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from starlette.middleware import Middleware
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-from tollbooth.vaults.holder_store import HolderStore, TokenKind, TokenRow
+from tollbooth.vaults.holder_store import (
+    HolderStore,
+    HolderStoreUnavailable,
+    TokenKind,
+    TokenRow,
+    token_hash,
+)
 
 ANONYMOUS = "anonymous"
 
 PREFIX: dict[TokenKind, str] = {"code": "dpyc_hc_", "access": "dpyc_ha_", "refresh": "dpyc_hr_"}
 TTL_SECONDS: dict[TokenKind, int] = {"code": 5 * 60, "access": 60 * 60, "refresh": 30 * 24 * 3600}
+
+# A verified access token is trusted from memory this long, so a busy
+# connection costs one Neon read a minute rather than one per request.
+VERIFIED_CACHE_SECONDS = 60
+# Client registrations per caller address per hour, per process.
+REGISTRATIONS_PER_HOUR = 20
 
 
 def current_holder() -> str | None:
@@ -77,6 +92,18 @@ class HolderAuthProvider(OAuthProvider):
             revocation_options=RevocationOptions(enabled=True),
         )
         self._store = store
+        self._verified: dict[str, tuple[AccessToken, float]] = {}
+
+    def get_middleware(self) -> list:
+        return [
+            Middleware(_AnswerUnavailable),  # type: ignore[arg-type]
+            Middleware(_LimitRegistration),  # type: ignore[arg-type]
+            *super().get_middleware(),
+        ]
+
+    async def _forget_holder(self, holder_id: str) -> None:
+        await (await self._store()).forget_holder(holder_id)
+        self._verified = {k: v for k, v in self._verified.items() if v[0].subject != holder_id}
 
     # -- Token mechanics: one way in, one way out --------------------------
 
@@ -124,6 +151,9 @@ class HolderAuthProvider(OAuthProvider):
     # -- Authorization Code -------------------------------------------------
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
+        # Authorizing needs no credential, so it also clears what has lapsed:
+        # unredeemed codes cannot pile up between token issues.
+        await (await self._store()).purge_expired()
         code, _ = await self._issue(
             "code", str(uuid.uuid4()), str(client.client_id),
             {
@@ -171,7 +201,7 @@ class HolderAuthProvider(OAuthProvider):
         if row.spent:
             # A rotated refresh token came back: whoever holds it is not the
             # client that rotated it. Disconnect the holder.
-            await store.forget_holder(row.holder_id)
+            await self._forget_holder(row.holder_id)
             return None
         if not row.live:
             return None
@@ -198,7 +228,18 @@ class HolderAuthProvider(OAuthProvider):
         """Every bearer that is not ours is an anonymous caller, proven by its arguments."""
         if not token.startswith(PREFIX["access"]):
             return AccessToken(token=token, client_id=ANONYMOUS, scopes=[])
-        return await self.load_access_token(token)
+        key, now = token_hash(token), time.time()
+        cached = self._verified.get(key)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+        try:
+            verified = await self.load_access_token(token)
+        except Exception as exc:
+            raise HolderStoreUnavailable(str(exc)) from exc
+        if verified is not None:
+            until = min(now + VERIFIED_CACHE_SECONDS, verified.expires_at or now)
+            self._verified[key] = (verified, until)
+        return verified
 
     async def load_access_token(self, token: str) -> AccessToken | None:  # type: ignore[override]
         row = await (await self._store()).token(token, "access")
@@ -222,4 +263,62 @@ class HolderAuthProvider(OAuthProvider):
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:  # type: ignore[override]
         if token.subject:
-            await (await self._store()).forget_holder(token.subject)
+            await self._forget_holder(token.subject)
+
+
+class _AnswerUnavailable:
+    """A holder store that cannot answer is a retry, never a 500 or a 401.
+
+    A 401 would send the client to refresh, then to reconnect — asking a
+    person to sign in again because the database was waking up.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await self.app(scope, receive, send)
+        except HolderStoreUnavailable:
+            await JSONResponse(
+                {
+                    "error": "temporarily_unavailable",
+                    "error_description": (
+                        "The service is warming up after idle. Retry in 10-15 seconds."
+                    ),
+                },
+                status_code=503,
+                headers={"Retry-After": "10"},
+            )(scope, receive, send)
+
+
+class _LimitRegistration:
+    """Client registration needs no credential, so it is metered per caller address."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self._seen: dict[str, list[float]] = {}
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["path"] == "/register" and scope["method"] == "POST":
+            now = time.time()
+            address = _caller_address(scope)
+            recent = [t for t in self._seen.get(address, []) if t > now - 3600]
+            if len(recent) >= REGISTRATIONS_PER_HOUR:
+                await JSONResponse(
+                    {"error": "slow_down", "error_description": "Too many client registrations."},
+                    status_code=429,
+                    headers={"Retry-After": "3600"},
+                )(scope, receive, send)
+                return
+            self._seen[address] = [*recent, now]
+        await self.app(scope, receive, send)
+
+
+def _caller_address(scope: Scope) -> str:
+    """The first hop of X-Forwarded-For, else the socket peer."""
+    for name, value in scope.get("headers", []):
+        if name == b"x-forwarded-for":
+            return value.decode("latin-1").split(",")[0].strip()
+    client = scope.get("client")
+    return str(client[0]) if client else ""
