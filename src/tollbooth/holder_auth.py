@@ -89,7 +89,7 @@ def current_holder() -> str | None:
     token = _request_token()
     if token is None or token.client_id in (ANONYMOUS, SIGNED):
         return None
-    return token.subject
+    return str((token.claims or {}).get("holder") or "") or None
 
 
 def signed_npub() -> str | None:
@@ -128,7 +128,9 @@ class HolderAuthProvider(OAuthProvider):
 
     async def _forget_holder(self, holder_id: str) -> None:
         await (await self._store()).forget_holder(holder_id)
-        self._verified = {k: v for k, v in self._verified.items() if v[0].subject != holder_id}
+        self._verified = {
+            k: v for k, v in self._verified.items() if (v[0].claims or {}).get("holder") != holder_id
+        }
 
     # -- Token mechanics: one way in, one way out --------------------------
 
@@ -200,7 +202,6 @@ class HolderAuthProvider(OAuthProvider):
         return AuthorizationCode(
             code=authorization_code,
             client_id=row.client_id,
-            subject=row.holder_id,
             expires_at=row.expires_at,
             **row.meta,
         )
@@ -233,7 +234,6 @@ class HolderAuthProvider(OAuthProvider):
         return RefreshToken(
             token=refresh_token,
             client_id=row.client_id,
-            subject=row.holder_id,
             expires_at=row.expires_at,
             scopes=row.meta.get("scopes", []),
         )
@@ -271,13 +271,15 @@ class HolderAuthProvider(OAuthProvider):
         resource = row.meta.get("resource") if row else None
         if row is None or not row.live or not self._audience_ok(resource):
             return None
+        # The holder rides in `claims`: every mcp version's AccessToken carries
+        # them, where `subject` arrived only in mcp 1.28.
         return AccessToken(
             token=token,
             client_id=row.client_id,
-            subject=row.holder_id,
             expires_at=row.expires_at,
             resource=resource,
             scopes=row.meta.get("scopes", []),
+            claims={"holder": row.holder_id},
         )
 
     def _audience_ok(self, resource: str | None) -> bool:
@@ -287,8 +289,10 @@ class HolderAuthProvider(OAuthProvider):
         return resource.rstrip("/") == str(self._resource_url).rstrip("/")
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:  # type: ignore[override]
-        if token.subject:
-            await self._forget_holder(token.subject)
+        kind: TokenKind = "refresh" if isinstance(token, RefreshToken) else "access"
+        row = await (await self._store()).token(token.token, kind)
+        if row is not None:
+            await self._forget_holder(row.holder_id)
 
 
 class _AnswerUnavailable:
