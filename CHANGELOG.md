@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.101.1] — 2026-10-17
+
+### Fixed
+
+- Service-to-service MCP calls (Authority certification and alerts, Oracle lookups and operator registration, adoption requests, shortlinks, the OAuth2 collector, the agent keyring proxy) carry `Authorization: Bearer anonymous` via one helper, `tollbooth.mcp_client.service_client`, instead of `auth="oauth"`. Against a server with holder bearer on, `auth="oauth"` would have started a browser OAuth flow inside a server process; they prove themselves with signed arguments, as before.
+
 ## [0.101.0] — 2026-10-17
 
 ### Added
