@@ -509,14 +509,13 @@ async def _register_operator_via_oracle(
     service_url: str,
     authority_npub: str,
 ) -> str:
-    from fastmcp import Client
-
+    from tollbooth.mcp_client import service_client
     from tollbooth.registry import resolve_oracle_service
 
     signer = _get_nostr_signer()
     oracle_info = await resolve_oracle_service(signer.npub)
 
-    async with Client(oracle_info["url"]) as client:
+    async with service_client(oracle_info["url"]) as client:
         result = await client.call_tool(
             "register_operator",
             {
@@ -535,8 +534,7 @@ async def _update_operator_via_oracle(
     display_name: str,
     authority_npub: str,
 ) -> str:
-    from fastmcp import Client
-
+    from tollbooth.mcp_client import service_client
     from tollbooth.registry import resolve_oracle_service
 
     signer = _get_nostr_signer()
@@ -548,7 +546,7 @@ async def _update_operator_via_oracle(
     if display_name:
         args["display_name"] = display_name
 
-    async with Client(oracle_info["url"]) as client:
+    async with service_client(oracle_info["url"]) as client:
         result = await client.call_tool("update_operator", args)
         return _parse_oracle_commit_url(result)
 
@@ -557,14 +555,13 @@ async def _deregister_operator_via_oracle(
     operator_npub: str,
     authority_npub: str,
 ) -> str:
-    from fastmcp import Client
-
+    from tollbooth.mcp_client import service_client
     from tollbooth.registry import resolve_oracle_service
 
     signer = _get_nostr_signer()
     oracle_info = await resolve_oracle_service(signer.npub)
 
-    async with Client(oracle_info["url"]) as client:
+    async with service_client(oracle_info["url"]) as client:
         result = await client.call_tool(
             "deregister_operator",
             {"operator_npub": operator_npub, "authority_npub": authority_npub},
@@ -578,14 +575,13 @@ async def _register_via_oracle(
     service_url: str,
     upstream_authority_npub: str,
 ) -> str:
-    from fastmcp import Client
-
+    from tollbooth.mcp_client import service_client
     from tollbooth.registry import resolve_oracle_service
 
     signer = _get_nostr_signer()
     oracle_info = await resolve_oracle_service(signer.npub)
 
-    async with Client(oracle_info["url"]) as client:
+    async with service_client(oracle_info["url"]) as client:
         result = await client.call_tool(
             "register_authority",
             {

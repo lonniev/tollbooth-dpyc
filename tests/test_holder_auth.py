@@ -35,6 +35,7 @@ from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 from tollbooth.constants import ErrorCode
 from tollbooth.holder_auth import ANONYMOUS, HolderAuthProvider
 from tollbooth.identity_credential import sign_proof_grant
+from tollbooth.mcp_client import service_client
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
 from tollbooth.tools.courier import forget_credentials_tool
 from tollbooth.vaults.holder_store import HolderStore, TokenKind, TokenRow, token_hash
@@ -243,6 +244,9 @@ async def test_connect_then_act_as_held_npubs_over_http():
     async with run_server_async(mcp, port=port), httpx.AsyncClient(base_url=base) as http:
         # No header: 401, which is what starts a connector's Authorization Code connect.
         assert (await http.post("/mcp", json={})).status_code == 401
+        # Another DPYC service gets in with the anonymous bearer, and no OAuth.
+        async with service_client(f"{base}/mcp") as peer:
+            assert any(t.name == "test_held_identities" for t in await peer.list_tools())
 
         # Connect: register, authorize (no consent page), redeem with PKCE.
         reg = (await http.post("/register", json={

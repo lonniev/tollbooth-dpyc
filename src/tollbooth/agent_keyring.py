@@ -51,6 +51,8 @@ def build_keyring(upstream_url: str, npub: str, nsec: str) -> Any:
     from fastmcp.server import create_proxy
     from fastmcp.server.middleware import Middleware
 
+    from tollbooth.mcp_client import service_client
+
     signer = PatronSigner(npub, nsec)  # one signing hand for this keyring
 
     class _DpopAuthMiddleware(Middleware):
@@ -62,7 +64,7 @@ def build_keyring(upstream_url: str, npub: str, nsec: str) -> Any:
             forwarded = context.copy(message=params.model_copy(update={"arguments": new_args}))
             return await call_next(forwarded)
 
-    proxy = create_proxy(upstream_url, name="dpyc-keyring")
+    proxy = create_proxy(service_client(upstream_url), name="dpyc-keyring")
     proxy.add_middleware(_DpopAuthMiddleware())
     return proxy
 

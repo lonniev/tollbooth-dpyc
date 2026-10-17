@@ -44,7 +44,7 @@ async def test_certify_success():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
@@ -77,7 +77,7 @@ async def test_certify_authority_refuses():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
@@ -102,7 +102,7 @@ async def test_certify_propagates_error_code():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
@@ -123,7 +123,7 @@ async def test_certify_error_code_empty_when_absent():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
@@ -146,7 +146,7 @@ async def test_certify_connection_failure():
     mock_client.__aenter__ = AsyncMock(side_effect=ConnectionError("refused"))
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
@@ -178,7 +178,7 @@ async def test_certify_custom_tool_name():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
@@ -206,7 +206,7 @@ async def test_certify_sends_dpop_token_not_proof():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
@@ -246,7 +246,7 @@ async def test_certify_calltoolresult_data():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
@@ -280,7 +280,7 @@ async def test_certify_calltoolresult_content():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
@@ -307,7 +307,7 @@ async def test_certify_unexpected_format():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
@@ -346,7 +346,7 @@ async def test_check_balance_signs_for_wire_tool_name():
         "dpop_token": "",
     }
 
-    with patch("tollbooth.authority_client.Client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
