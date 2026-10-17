@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.102.1] — 2026-10-17
+
+### Fixed
+
+- Holder connections work on every mcp version: the holder rides in the access token's `claims`, not `subject` (which arrived only in mcp 1.28). On operators locked to mcp 1.26–1.27 a holder could not act at all (`AccessToken` has no `subject`).
+
 ## [0.102.0] — 2026-10-17
 
 ### Added
