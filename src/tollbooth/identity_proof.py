@@ -107,15 +107,12 @@ def _npub_to_hex(npub: str) -> str:
     return PublicKey.from_npub(npub).hex()
 
 
-def create_proof(nsec: str, tool_name: str) -> str:
-    """Create a signed kind-27235 identity proof.
+def _signed_proof_event(nsec: str, tags: list[list[str]]) -> str:
+    """A kind-27235 event over ``tags`` plus a per-proof nonce, signed by ``nsec``.
 
-    Args:
-        nsec: Nostr private key (bech32 nsec1... or hex).
-        tool_name: The MCP tool name to embed in the ``u`` tag.
-
-    Returns:
-        JSON string of the signed Nostr event.
+    The nonce keeps two proofs minted in the same wall-clock second from being
+    byte-identical: their ids would collide and the replay guard would refuse
+    the second. It is signed but otherwise inert.
     """
     from pynostr.event import Event  # type: ignore[import-untyped]
     from pynostr.key import PrivateKey  # type: ignore[import-untyped]
@@ -130,15 +127,40 @@ def create_proof(nsec: str, tool_name: str) -> str:
         kind=PROOF_EVENT_KIND,
         content="",
         created_at=int(time.time()),
-        # A per-call nonce so two proofs for the same tool within the same wall-clock
-        # second are never byte-identical. Without it their event ids collide and the
-        # verifier's replay guard rejects the second as already-seen (rapid same-tool
-        # callers — a seed loop, an agent keyring — would spuriously fail). The nonce is
-        # signed but otherwise inert: verify_proof reads only the ``u`` tag.
-        tags=[["u", tool_name], ["nonce", secrets.token_hex(16)]],
+        tags=[*tags, ["nonce", secrets.token_hex(16)]],
     )
     event.sign(pk.hex())
     return json.dumps(event.to_dict())
+
+
+def create_proof(nsec: str, tool_name: str) -> str:
+    """Create a signed kind-27235 identity proof for one tool.
+
+    Args:
+        nsec: Nostr private key (bech32 nsec1... or hex).
+        tool_name: The MCP tool name to embed in the ``u`` tag.
+
+    Returns:
+        JSON string of the signed Nostr event.
+    """
+    return _signed_proof_event(nsec, [["u", tool_name]])
+
+
+def sign_request(nsec: str, *, method: str, url: str, body: bytes) -> str:
+    """The ``Authorization`` value for one request signed by ``nsec`` (NIP-98).
+
+    The event names the method, the URL and the hex sha256 of the body, so it
+    authorizes this request and nothing else.
+    """
+    import base64
+    import hashlib
+
+    event = _signed_proof_event(nsec, [
+        ["u", url],
+        ["method", method.upper()],
+        ["payload", hashlib.sha256(body).hexdigest()],
+    ])
+    return "Nostr " + base64.b64encode(event.encode()).decode()
 
 
 def create_ownership_proof(nsec: str) -> str:
@@ -431,6 +453,8 @@ PROOF_REASON_REPLAYED = "replayed"
 """This event id was already consumed within the window."""
 PROOF_REASON_PYNOSTR_MISSING = "pynostr_missing"
 """pynostr is not installed — proof cannot be verified (environment fault)."""
+PROOF_REASON_REQUEST_MISMATCH = "request_mismatch"
+"""A signed request's method, URL path or body hash did not match the request."""
 
 # Human-readable one-liners for each rejection reason, safe to hand to the
 # caller. Each says *what* was wrong without revealing key material, the event,
@@ -472,7 +496,103 @@ _PROOF_REASON_MESSAGES = {
         "Cannot verify identity proof: proof verification is unavailable on "
         "this server."
     ),
+    PROOF_REASON_REQUEST_MISMATCH: (
+        "Invalid request signature: its method, URL path or body hash does not "
+        "match this request."
+    ),
 }
+
+
+def _check_proof_event(
+    proof_json: str,
+    *,
+    expected_npub: str | None,
+    binds: Any,
+    mismatch_reason: str,
+    window_seconds: int,
+) -> tuple[str | None, str]:
+    """The checks every kind-27235 proof passes, in order: shape, signature,
+    kind, signer, binding, freshness, single use.
+
+    ``expected_npub`` is the npub the event must be signed by, or ``None`` when
+    the signer IS the identity being proven (a signed request). ``binds(event)``
+    says whether the event is bound to what is being authorized — a tool name
+    for an inline proof, the method, path and body of a signed request.
+
+    Returns ``(reason, signer_hex)``: ``reason`` is ``None`` when the proof is
+    good, else one of the ``PROOF_REASON_*`` constants. Do not loosen any check.
+    """
+    try:
+        from pynostr.event import Event  # type: ignore[import-untyped]
+    except ImportError:
+        logger.warning("pynostr not installed — cannot verify identity proof")
+        return PROOF_REASON_PYNOSTR_MISSING, ""
+
+    if not isinstance(proof_json, str) or len(proof_json) > MAX_PROOF_JSON_BYTES:
+        logger.debug(
+            "identity_proof: rejecting oversized/invalid payload (%s bytes)",
+            len(proof_json) if isinstance(proof_json, str) else "non-str",
+        )
+        return PROOF_REASON_MALFORMED_JSON, ""
+
+    try:
+        event_dict = json.loads(proof_json)
+    except (json.JSONDecodeError, TypeError):
+        logger.debug("identity_proof: invalid JSON")
+        return PROOF_REASON_MALFORMED_JSON, ""
+
+    try:
+        event = Event.from_dict(event_dict)
+    except Exception:  # noqa: BLE001
+        logger.debug("identity_proof: invalid Nostr event structure")
+        return PROOF_REASON_BAD_EVENT, ""
+
+    try:
+        if not event.verify():
+            logger.debug("identity_proof: signature verification failed")
+            return PROOF_REASON_SIGNATURE_INVALID, ""
+    except Exception:  # noqa: BLE001
+        logger.debug("identity_proof: signature verification error")
+        return PROOF_REASON_SIGNATURE_INVALID, ""
+
+    if event.kind != PROOF_EVENT_KIND:
+        logger.debug("identity_proof: wrong kind %d (expected %d)", event.kind, PROOF_EVENT_KIND)
+        return PROOF_REASON_WRONG_KIND, ""
+
+    if expected_npub is not None:
+        try:
+            expected_hex = _npub_to_hex(expected_npub)
+        except Exception:  # noqa: BLE001
+            logger.debug("identity_proof: invalid expected npub")
+            return PROOF_REASON_NPUB_MISMATCH, ""
+        if event.pubkey != expected_hex:
+            logger.debug("identity_proof: pubkey mismatch")
+            return PROOF_REASON_NPUB_MISMATCH, ""
+
+    if not binds(event):
+        logger.debug("identity_proof: event not bound to this request (%s)", mismatch_reason)
+        return mismatch_reason, ""
+
+    now = time.time()
+    age = abs(now - event.created_at)
+    if age > window_seconds:
+        logger.debug("identity_proof: expired (age=%.1fs, window=%ds)", age, window_seconds)
+        return PROOF_REASON_EXPIRED, ""
+
+    # Replay protection: reject reused proof event IDs
+    _cleanup_consumed()
+    event_id = getattr(event, "id", None) or event_dict.get("id", "")
+    if event_id and event_id in _consumed_proofs:
+        logger.debug("identity_proof: replay rejected (event_id=%s)", event_id[:16])
+        return PROOF_REASON_REPLAYED, ""
+    if event_id:
+        _record_consumed(event_id, now + window_seconds)
+
+    return None, event.pubkey
+
+
+def _tag_values(event: Any, name: str) -> list[str]:
+    return [tag[1] for tag in event.tags if len(tag) >= 2 and tag[0] == name]
 
 
 def _verify_proof_reason(
@@ -484,82 +604,69 @@ def _verify_proof_reason(
     """Verify an inline kind-27235 proof, returning the rejection *reason*.
 
     The single source of truth for Tactic-2 accept/reject — ``verify_proof``
-    (bool) and ``require_proof`` (structured denial) both delegate here. The
-    accept/reject logic is byte-for-byte identical to the historical
-    ``verify_proof``; this only *surfaces* the reason instead of discarding it
-    at DEBUG. Do not loosen any check here.
+    (bool) and ``require_proof`` (structured denial) both delegate here.
 
     Returns ``None`` when the proof is valid, otherwise one of the
     ``PROOF_REASON_*`` constants.
     """
-    try:
-        from pynostr.event import Event  # type: ignore[import-untyped]
-    except ImportError:
-        logger.warning("pynostr not installed — cannot verify identity proof")
-        return PROOF_REASON_PYNOSTR_MISSING
+    reason, _ = _check_proof_event(
+        proof_json,
+        expected_npub=expected_npub,
+        binds=lambda event: tool_name in _tag_values(event, "u"),
+        mismatch_reason=PROOF_REASON_TOOL_MISMATCH,
+        window_seconds=window_seconds,
+    )
+    return reason
 
-    if not isinstance(proof_json, str) or len(proof_json) > MAX_PROOF_JSON_BYTES:
-        logger.debug(
-            "identity_proof: rejecting oversized/invalid payload (%s bytes)",
-            len(proof_json) if isinstance(proof_json, str) else "non-str",
+
+def verify_request_signature(
+    authorization: str,
+    *,
+    method: str,
+    path: str,
+    body_sha256: str,
+    window_seconds: int = DEFAULT_WINDOW_SECONDS,
+) -> tuple[str | None, str | None]:
+    """Verify a NIP-98 signed request: who signed THIS request, if anyone.
+
+    ``authorization`` is the value after ``Nostr `` — base64 of a kind-27235
+    event whose ``method`` tag is the HTTP method, whose ``u`` tag is the
+    request URL and whose ``payload`` tag is the hex sha256 of the body. The
+    URL's path must match; its host may differ, because a site's same-origin
+    proxy forwards a request signed for the site to the operator, and the body
+    already names the operator's slug-prefixed tool.
+
+    Returns ``(npub, None)`` for a good signature, else ``(None, reason)``.
+    """
+    import base64
+    from urllib.parse import urlparse
+
+    try:
+        proof_json = base64.b64decode(authorization.strip(), validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None, PROOF_REASON_MALFORMED_JSON
+
+    def binds(event: Any) -> bool:
+        urls = _tag_values(event, "u")
+        return (
+            _tag_values(event, "method") == [method.upper()]
+            and _tag_values(event, "payload") == [body_sha256]
+            and len(urls) == 1
+            and urlparse(urls[0]).path.rstrip("/") == path.rstrip("/")
         )
-        return PROOF_REASON_MALFORMED_JSON
 
-    try:
-        event_dict = json.loads(proof_json)
-    except (json.JSONDecodeError, TypeError):
-        logger.debug("identity_proof: invalid JSON")
-        return PROOF_REASON_MALFORMED_JSON
+    reason, signer_hex = _check_proof_event(
+        proof_json,
+        expected_npub=None,
+        binds=binds,
+        mismatch_reason=PROOF_REASON_REQUEST_MISMATCH,
+        window_seconds=window_seconds,
+    )
+    if reason is not None:
+        return None, reason
+    from tollbooth.nostr_credentials import _hex_to_npub
 
-    try:
-        event = Event.from_dict(event_dict)
-    except Exception:  # noqa: BLE001
-        logger.debug("identity_proof: invalid Nostr event structure")
-        return PROOF_REASON_BAD_EVENT
-
-    try:
-        if not event.verify():
-            logger.debug("identity_proof: signature verification failed")
-            return PROOF_REASON_SIGNATURE_INVALID
-    except Exception:  # noqa: BLE001
-        logger.debug("identity_proof: signature verification error")
-        return PROOF_REASON_SIGNATURE_INVALID
-
-    if event.kind != PROOF_EVENT_KIND:
-        logger.debug("identity_proof: wrong kind %d (expected %d)", event.kind, PROOF_EVENT_KIND)
-        return PROOF_REASON_WRONG_KIND
-
-    try:
-        expected_hex = _npub_to_hex(expected_npub)
-    except Exception:  # noqa: BLE001
-        logger.debug("identity_proof: invalid expected npub")
-        return PROOF_REASON_NPUB_MISMATCH
-
-    if event.pubkey != expected_hex:
-        logger.debug("identity_proof: pubkey mismatch")
-        return PROOF_REASON_NPUB_MISMATCH
-
-    u_values = [tag[1] for tag in event.tags if len(tag) >= 2 and tag[0] == "u"]
-    if tool_name not in u_values:
-        logger.debug("identity_proof: tool_name %r not in u tags %r", tool_name, u_values)
-        return PROOF_REASON_TOOL_MISMATCH
-
-    now = time.time()
-    age = abs(now - event.created_at)
-    if age > window_seconds:
-        logger.debug("identity_proof: expired (age=%.1fs, window=%ds)", age, window_seconds)
-        return PROOF_REASON_EXPIRED
-
-    # Replay protection: reject reused proof event IDs
-    _cleanup_consumed()
-    event_id = getattr(event, "id", None) or event_dict.get("id", "")
-    if event_id and event_id in _consumed_proofs:
-        logger.debug("identity_proof: replay rejected (event_id=%s)", event_id[:16])
-        return PROOF_REASON_REPLAYED
-    if event_id:
-        _record_consumed(event_id, now + window_seconds)
-
-    return None
+    return _hex_to_npub(signer_hex), None
 
 
 def verify_proof(
@@ -757,7 +864,12 @@ async def require_proof(
             "error_code": ErrorCode.PROOF_REQUIRED,
             "error": "dpop_token is required.",
             "next_steps": [
-                ("Either: sign a kind-27235 Nostr event with your nsec and pass "
+                ("Best: prove npub on the connection — sign each HTTP request with "
+                "npub's key (NIP-98, `Authorization: Nostr <base64 kind-27235>` "
+                "with u, method and payload tags), or connect with OAuth and prove "
+                "npub once by DM (request_npub_proof / receive_npub_proof); then "
+                "pass only npub."),
+                ("Or: sign a kind-27235 Nostr event with your nsec and pass "
                 "it as `dpop_token` (one-shot, no relay round-trip). Shape: "
                 "RAW JSON (not base64, not NIP-98 'Authorization: Nostr <b64>'), "
                 "kind:27235, content:\"\", a `u` tag holding THIS tool's exact "

@@ -1,20 +1,18 @@
-"""Holder bearer: the MCP authorization spec as the carrier of DPYC proof grants.
+"""Identity on the connection: who a request may act as, carried in its header.
 
-A connection authenticates as a *holder* with ``Authorization: Bearer`` — the
-way the MCP authorization spec intends — so a proof grant never has to ride in
-a tool argument, where it lands in the model's transcript. The holder carries
-no identity of its own. Each npub is proven into the holder's wallet with the
-ordinary Secure Courier exchange, and every call names the npub it acts as;
-the gate then checks that npub's grant exactly as it checks one passed inline.
+Every tool call names the npub it acts as; the ``Authorization`` header says
+whether the connection may:
 
-Three kinds of bearer reach ``verify_token``:
-
-- a holder access token (``dpyc_ha_…``): the holder, or ``None`` when it is
-  unknown or expired, which answers 401 so the client refreshes;
-- anything else: an *anonymous* caller, which proves itself with the
-  ``dpop_token`` argument as before — a client with no OAuth sends any
-  placeholder value;
-- no header at all: FastMCP answers 401, which is what starts a client's
+- ``Nostr <event>`` — the request is signed by the npub's own key (NIP-98).
+  Whoever holds the key needs no grant; the signature is the proof, bound to
+  this request's method, path and body.
+- ``Bearer dpyc_ha_…`` — a *holder*: a connection with no identity of its own,
+  into whose wallet npubs are proven one Secure Courier exchange at a time.
+  It acts as any npub its wallet holds, by that npub's grant. Unknown or
+  expired, it answers 401 so the client refreshes.
+- any other bearer — an anonymous caller, which acts as no npub (a client
+  with no OAuth sends any placeholder value);
+- no header at all — FastMCP answers 401, which is what starts a client's
   Authorization Code connect.
 
 Connecting asks nothing of the person: a holder holds no npub until one is
@@ -35,6 +33,8 @@ from fastmcp.server.auth.auth import (
     OAuthProvider,
     RevocationOptions,
 )
+from mcp.server.auth.middleware.auth_context import AuthContextMiddleware
+from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from mcp.server.auth.provider import (
     AuthorizationCode,
     AuthorizationParams,
@@ -43,9 +43,12 @@ from mcp.server.auth.provider import (
     construct_redirect_uri,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from starlette.authentication import AuthCredentials, AuthenticationBackend
 from starlette.middleware import Middleware
+from starlette.middleware.authentication import AuthenticationMiddleware
+from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tollbooth.vaults.holder_store import (
     HolderStore,
@@ -56,6 +59,7 @@ from tollbooth.vaults.holder_store import (
 )
 
 ANONYMOUS = "anonymous"
+SIGNED = "nostr-signed"
 
 PREFIX: dict[TokenKind, str] = {"code": "dpyc_hc_", "access": "dpyc_ha_", "refresh": "dpyc_hr_"}
 TTL_SECONDS: dict[TokenKind, int] = {"code": 5 * 60, "access": 60 * 60, "refresh": 30 * 24 * 3600}
@@ -65,16 +69,32 @@ TTL_SECONDS: dict[TokenKind, int] = {"code": 5 * 60, "access": 60 * 60, "refresh
 VERIFIED_CACHE_SECONDS = 60
 # Client registrations per caller address per hour, per process.
 REGISTRATIONS_PER_HOUR = 20
+# The largest request body a signed request may carry: its hash is what the
+# signature binds, so the body is read whole before the request is admitted.
+MAX_SIGNED_BODY_BYTES = 32 * 1024 * 1024
+_BODY_SHA256 = "dpyc.body_sha256"
+
+
+def _request_token() -> AccessToken | None:
+    from fastmcp.server.dependencies import get_access_token
+
+    return get_access_token()
 
 
 def current_holder() -> str | None:
-    """The holder behind the request in flight, or None for an anonymous caller."""
-    from fastmcp.server.dependencies import get_access_token
-
-    token = get_access_token()
-    if token is None or token.client_id == ANONYMOUS:
+    """The holder behind the request in flight, or None when it is not a holder."""
+    token = _request_token()
+    if token is None or token.client_id in (ANONYMOUS, SIGNED):
         return None
     return token.subject
+
+
+def signed_npub() -> str | None:
+    """The npub whose key signed the request in flight, or None."""
+    token = _request_token()
+    if token is None or token.client_id != SIGNED:
+        return None
+    return str((token.claims or {}).get("npub") or "") or None
 
 
 class HolderAuthProvider(OAuthProvider):
@@ -98,7 +118,9 @@ class HolderAuthProvider(OAuthProvider):
         return [
             Middleware(_AnswerUnavailable),  # type: ignore[arg-type]
             Middleware(_LimitRegistration),  # type: ignore[arg-type]
-            *super().get_middleware(),
+            Middleware(_HashSignedBody),  # type: ignore[arg-type]
+            Middleware(AuthenticationMiddleware, backend=_ConnectionIdentity(self)),  # type: ignore[arg-type]
+            Middleware(AuthContextMiddleware),  # type: ignore[arg-type]
         ]
 
     async def _forget_holder(self, holder_id: str) -> None:
@@ -322,3 +344,79 @@ def _caller_address(scope: Scope) -> str:
             return value.decode("latin-1").split(",")[0].strip()
     client = scope.get("client")
     return str(client[0]) if client else ""
+
+
+class _ConnectionIdentity(AuthenticationBackend):
+    """Reads who a request may act as from its ``Authorization`` header."""
+
+    def __init__(self, provider: HolderAuthProvider) -> None:
+        self._provider = provider
+
+    async def authenticate(self, conn: HTTPConnection) -> tuple[AuthCredentials, AuthenticatedUser] | None:
+        scheme, _, value = (conn.headers.get("authorization") or "").partition(" ")
+        if scheme.lower() == "bearer":
+            token = await self._provider.verify_token(value.strip())
+        elif scheme.lower() == "nostr":
+            token = _signed_request_token(conn, value)
+        else:
+            return None
+        if token is None or (token.expires_at and token.expires_at < int(time.time())):
+            return None
+        return AuthCredentials(token.scopes), AuthenticatedUser(token)
+
+
+def _signed_request_token(conn: HTTPConnection, value: str) -> AccessToken | None:
+    import hashlib
+
+    from tollbooth.identity_proof import verify_request_signature
+
+    npub, _ = verify_request_signature(
+        value,
+        method=conn.scope["method"],
+        path=conn.url.path,
+        body_sha256=conn.scope.get(_BODY_SHA256) or hashlib.sha256(b"").hexdigest(),
+    )
+    if npub is None:
+        return None
+    return AccessToken(token=value, client_id=SIGNED, scopes=[], claims={"npub": npub})
+
+
+class _HashSignedBody:
+    """Reads a signed request's body ahead of authentication, so the signature's
+    ``payload`` hash can be checked, then hands the body on unchanged."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not _is_signed(scope):
+            await self.app(scope, receive, send)
+            return
+        import hashlib
+
+        digest, held, size = hashlib.sha256(), [], 0
+        while True:
+            message = await receive()
+            held.append(message)
+            chunk = message.get("body", b"")
+            size += len(chunk)
+            if size > MAX_SIGNED_BODY_BYTES:
+                await JSONResponse({"error": "request body too large"}, status_code=413)(scope, receive, send)
+                return
+            digest.update(chunk)
+            if message["type"] != "http.request" or not message.get("more_body"):
+                break
+        scope[_BODY_SHA256] = digest.hexdigest()
+
+        async def replay() -> Message:
+            return held.pop(0) if held else await receive()
+
+        await self.app(scope, replay, send)
+
+
+def _is_signed(scope: Scope) -> bool:
+    for name, value in scope.get("headers", []):
+        if name == b"authorization":
+            return value[:6].lower() == b"nostr "
+    return False
+
