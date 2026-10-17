@@ -1,1 +1,0 @@
-- Holder connections work on every mcp version: the holder rides in the access token's `claims`, not `subject` (which arrived only in mcp 1.28). On operators locked to mcp 1.26–1.27 a holder could not act at all (`AccessToken` has no `subject`).
