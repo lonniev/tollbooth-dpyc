@@ -73,6 +73,9 @@ REGISTRATIONS_PER_HOUR = 20
 # signature binds, so the body is read whole before the request is admitted.
 MAX_SIGNED_BODY_BYTES = 32 * 1024 * 1024
 _BODY_SHA256 = "dpyc.body_sha256"
+# A signed request's NIP-98 credential, restated as a bearer: FastMCP admits
+# only the Bearer scheme to an authenticated route.
+_SIGNED_BEARER = "nostr."
 
 
 def _request_token() -> AccessToken | None:
@@ -354,12 +357,13 @@ class _ConnectionIdentity(AuthenticationBackend):
 
     async def authenticate(self, conn: HTTPConnection) -> tuple[AuthCredentials, AuthenticatedUser] | None:
         scheme, _, value = (conn.headers.get("authorization") or "").partition(" ")
-        if scheme.lower() == "bearer":
-            token = await self._provider.verify_token(value.strip())
-        elif scheme.lower() == "nostr":
-            token = _signed_request_token(conn, value)
-        else:
+        value = value.strip()
+        if scheme.lower() != "bearer":
             return None
+        if value.startswith(_SIGNED_BEARER):
+            token = _signed_request_token(conn, value.removeprefix(_SIGNED_BEARER))
+        else:
+            token = await self._provider.verify_token(value)
         if token is None or (token.expires_at and token.expires_at < int(time.time())):
             return None
         return AuthCredentials(token.scopes), AuthenticatedUser(token)
@@ -383,7 +387,11 @@ def _signed_request_token(conn: HTTPConnection, value: str) -> AccessToken | Non
 
 class _HashSignedBody:
     """Reads a signed request's body ahead of authentication, so the signature's
-    ``payload`` hash can be checked, then hands the body on unchanged."""
+    ``payload`` hash can be checked, then hands the body on unchanged.
+
+    It also restates the ``Nostr`` credential as a bearer the backend knows,
+    because FastMCP admits only the Bearer scheme to an authenticated route.
+    """
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -407,6 +415,11 @@ class _HashSignedBody:
             if message["type"] != "http.request" or not message.get("more_body"):
                 break
         scope[_BODY_SHA256] = digest.hexdigest()
+        scope["headers"] = [
+            (name, b"Bearer " + _SIGNED_BEARER.encode() + value[6:].strip())
+            if name == b"authorization" else (name, value)
+            for name, value in scope["headers"]
+        ]
 
         async def replay() -> Message:
             return held.pop(0) if held else await receive()
