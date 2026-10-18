@@ -141,6 +141,19 @@ def harvest_request_origin() -> str | None:
     return _assemble_origin(headers, req)
 
 
+def _needs_holder(tool: str) -> dict[str, Any]:
+    from tollbooth.constants import ErrorCode as _EC
+    return {
+        "success": False,
+        "error_code": _EC.PROOF_REQUIRED,
+        "error": (
+            f"{tool} needs an OAuth (holder) connection to keep the proof in. "
+            "Connect with OAuth and call it again; a client holding the npub's "
+            "nsec needs no proof — it signs each request."
+        ),
+    }
+
+
 async def request_npub_proof_tool(
     rt: Any,
     patron_npub: str,
@@ -161,6 +174,12 @@ async def request_npub_proof_tool(
     err = rt.npub_validation_error(patron_npub, param="patron_npub")
     if err is not None:
         return err
+    # The proof lands in the wallet of the connection that asked, so only a
+    # holder may ask, and only it may collect the reply.
+    from tollbooth.holder_auth import current_holder
+    holder = current_holder() if rt.holder_auth_enabled else None
+    if holder is None:
+        return _needs_holder("request_npub_proof")
 
     courier = await rt.courier()
     if courier is None:
@@ -218,6 +237,7 @@ async def request_npub_proof_tool(
             reason=reason,
             origin=origin,
             verify_at=verify_at,
+            bound_to=holder,
         )
         if not result.get("success"):
             return result
@@ -282,15 +302,7 @@ async def receive_npub_proof_tool(
     from tollbooth.holder_auth import current_holder
     holder = current_holder() if rt.holder_auth_enabled else None
     if holder is None:
-        return {
-            "success": False,
-            "error_code": _EC.PROOF_REQUIRED,
-            "error": (
-                "receive_npub_proof needs an OAuth (holder) connection to keep "
-                "the proof in. Connect with OAuth and call it again; a client "
-                "holding the npub's nsec needs no proof — it signs each request."
-            ),
-        }
+        return _needs_holder("receive_npub_proof")
     resolved = rt.resolve_npub(patron_npub)
 
     courier = await rt.courier()
@@ -319,7 +331,7 @@ async def receive_npub_proof_tool(
     # (patron, nonce-service, nonce). Handles cold-start vault rehydration
     # and returns a structured error — popping nothing — when unresolved.
     pinned, error_code = await exchange._resolve_pinned_record(
-        resolved, PROOF_SERVICE, nonce,
+        resolved, PROOF_SERVICE, nonce, bound_to=holder,
     )
     if error_code is not None:
         return {

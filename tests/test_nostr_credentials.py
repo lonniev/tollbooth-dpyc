@@ -2,7 +2,7 @@
 
 import json
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pynostr.key import PrivateKey
@@ -3045,3 +3045,43 @@ class TestSignedLayerSurfaced:
 
         with pytest.raises(CourierValidationError, match="signature"):
             ex._decrypt_nip04_dm(event, patron.public_key.hex())
+
+
+class TestHolderBoundChannel:
+    """A challenge raised on one holder connection resolves only there."""
+
+    def _seed(self, ex, sender_npub: str, bound_to: str) -> None:
+        _seed_channel(ex, sender_npub, nonce=_TEST_NONCE)
+        ex._bound_to[(sender_npub, "x")] = bound_to
+
+    @pytest.mark.asyncio
+    async def test_the_requesting_holder_resolves_its_channel(self):
+        ex = _make_exchange()
+        sender_npub = PrivateKey().public_key.bech32()
+        self._seed(ex, sender_npub, "holder-a")
+        pinned, code = await ex._resolve_pinned_record(sender_npub, "x", _TEST_NONCE, bound_to="holder-a")
+        assert code is None and pinned == _TEST_RELAY
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("caller", ["holder-b", ""])
+    async def test_another_caller_with_the_nonce_cannot(self, caller):
+        ex = _make_exchange()
+        sender_npub = PrivateKey().public_key.bech32()
+        self._seed(ex, sender_npub, "holder-a")
+        pinned, code = await ex._resolve_pinned_record(sender_npub, "x", _TEST_NONCE, bound_to=caller)
+        assert pinned is None
+        assert code == ErrorCode.COURIER_NONCE_MISMATCH
+
+    @pytest.mark.asyncio
+    async def test_the_binding_survives_a_cold_start(self):
+        vault = AsyncMock()
+        vault.fetch_credentials = AsyncMock(return_value=None)
+        ex = _make_exchange(credential_vault=vault)
+        sender_npub = PrivateKey().public_key.bech32()
+        blob = {"nonce": _TEST_NONCE, "expiry": time.time() + 600,
+                "rendezvous_relay": _TEST_RELAY, "bound_to": "holder-a"}
+        with patch.object(ex, "_vault_fetch", AsyncMock(return_value=blob)):
+            _, other = await ex._resolve_pinned_record(sender_npub, "x", _TEST_NONCE, bound_to="holder-b")
+            pinned, mine = await ex._resolve_pinned_record(sender_npub, "x", _TEST_NONCE, bound_to="holder-a")
+        assert other == ErrorCode.COURIER_NONCE_MISMATCH
+        assert mine is None and pinned == _TEST_RELAY

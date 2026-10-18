@@ -427,6 +427,9 @@ class NostrCredentialExchange:
         self._consumed_ids: set[str] = set()
         # Dpop_token slugs: {(recipient_npub, service): (phrase, expiry_timestamp)}
         self._pending_nonces: dict[tuple[str, str], tuple[str, float]] = {}
+        # The holder connection a challenge was raised on, when it is bound to
+        # one: its reply may only be collected on that same connection.
+        self._bound_to: dict[tuple[str, str], str] = {}
         # Per-conversation rendezvous relay pins: {(recipient_npub, service): wss_url}
         # The wheel commits one relay per challenge (the one that accepted the
         # publish) and embeds it in the DM body so the responder knows where
@@ -948,6 +951,7 @@ class NostrCredentialExchange:
         reason: str | None = None,
         origin: str | None = None,
         verify_at: str | None = None,
+        bound_to: str = "",
     ) -> dict[str, Any]:
         """Open a credential delivery channel for a service.
 
@@ -1194,6 +1198,7 @@ class NostrCredentialExchange:
             expiry = time.time() + self._freshness_window
             self._pending_nonces[(recipient_npub, service)] = (nonce, expiry)
             self._pinned_relays[(recipient_npub, service)] = committed_relay
+            self._bound_to[(recipient_npub, service)] = bound_to
 
             # Persist pending state to survive cold starts
             if self._credential_vault is not None:
@@ -1201,6 +1206,7 @@ class NostrCredentialExchange:
                     "nonce": nonce,
                     "expiry": expiry,
                     "rendezvous_relay": committed_relay,
+                    "bound_to": bound_to,
                 }
                 if agent_key is not None:
                     pending_blob["agent_nsec_hex"] = agent_key.hex()
@@ -1510,6 +1516,7 @@ class NostrCredentialExchange:
         # ── Match: consume one-time channel state (keyed by raw service) ──
         self._pending_nonces.pop(nonce_key, None)
         self._pinned_relays.pop(nonce_key, None)
+        self._bound_to.pop(nonce_key, None)
         self._ephemeral_agents.pop(nonce_key, None)
         if self._credential_vault is not None:
             try:
@@ -1897,13 +1904,16 @@ class NostrCredentialExchange:
         return service
 
     async def _resolve_pinned_record(
-        self, sender_npub: str, service: str, nonce: str,
+        self, sender_npub: str, service: str, nonce: str, *, bound_to: str = "",
     ) -> tuple[str | None, str | None]:
         """Resolve and verify the pinned rendezvous relay for a courier channel.
 
         Looks up the pending record for ``(sender_npub, service)``, verifies
         the supplied *nonce* matches it and has not expired, and returns the
-        pinned rendezvous relay the original request committed to. Performs
+        pinned rendezvous relay the original request committed to. A channel
+        opened ``bound_to`` a holder connection resolves only for that same
+        connection; any other caller gets the nonce-mismatch answer, which
+        reveals nothing. Performs
         cold-start recovery from the vault (restoring the in-memory nonce,
         pin, and ephemeral agent key) when the in-memory state is gone after
         a process restart.
@@ -1952,6 +1962,7 @@ class NostrCredentialExchange:
                     return None, ErrorCode.COURIER_TOKEN_EXPIRED
                 self._pending_nonces[nonce_key] = (pending["nonce"], p_expiry)
                 expected = self._pending_nonces[nonce_key]
+                self._bound_to[nonce_key] = str(pending.get("bound_to") or "")
                 pin_url = pending.get("rendezvous_relay")
                 if pin_url:
                     self._pinned_relays[nonce_key] = pin_url
@@ -1974,6 +1985,7 @@ class NostrCredentialExchange:
         if time.time() > expiry:
             self._pending_nonces.pop(nonce_key, None)
             self._pinned_relays.pop(nonce_key, None)
+            self._bound_to.pop(nonce_key, None)
             if self._credential_vault is not None:
                 try:
                     await self._credential_vault.delete_credentials(
@@ -1986,7 +1998,7 @@ class NostrCredentialExchange:
                     )
             return None, ErrorCode.COURIER_TOKEN_EXPIRED
 
-        if nonce != expected_phrase:
+        if nonce != expected_phrase or self._bound_to.get(nonce_key, "") != bound_to:
             return None, ErrorCode.COURIER_NONCE_MISMATCH
 
         if not pinned:

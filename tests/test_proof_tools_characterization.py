@@ -57,7 +57,8 @@ class FakeExchange:
         self.popped: list[tuple] = []      # (event_id, nacked: bool)
         self.sent_dms: list[str] = []
 
-    async def _resolve_pinned_record(self, npub, service, nonce):
+    async def _resolve_pinned_record(self, npub, service, nonce, *, bound_to=""):
+        self.resolved_for = bound_to
         if self._resolve_error is not None:
             return None, self._resolve_error
         # seed channel state so the cleanup .pop()s have something to remove
@@ -329,7 +330,8 @@ async def test_match_clears_channel_state(patron):
 @pytest.mark.asyncio
 async def test_request_sends_challenge_and_returns_token(patron):
     ex = FakeExchange(candidates=[])  # nothing stale to purge
-    rt = OperatorRuntime(tool_registry={}, service_name="Test Operator")
+    rt = OperatorRuntime(tool_registry={}, service_name="Test Operator",
+                         holder_auth_url="https://op.example")
     rt._courier = SimpleNamespace(
         _exchange=ex,
         open_channel=AsyncMock(return_value={
@@ -346,6 +348,8 @@ async def test_request_sends_challenge_and_returns_token(patron):
     assert PIN in r["message"]
     # opened the channel on the proof service
     assert rt._courier.open_channel.await_args.args[0] == "npub_ownership"
+    # bound to the holder that asked, so only it may collect the reply
+    assert rt._courier.open_channel.await_args.kwargs["bound_to"] == HOLDER
 
 
 @pytest.mark.asyncio
@@ -354,7 +358,8 @@ async def test_request_greeting_includes_request_timestamp(patron):
     # directly above the @@@ fields) must carry the request's date/time so the
     # patron sees when the challenge was raised. Kept to one terse line.
     ex = FakeExchange(candidates=[])
-    rt = OperatorRuntime(tool_registry={}, service_name="Test Operator")
+    rt = OperatorRuntime(tool_registry={}, service_name="Test Operator",
+                         holder_auth_url="https://op.example")
     rt._courier = SimpleNamespace(
         _exchange=ex,
         open_channel=AsyncMock(return_value={
@@ -376,7 +381,8 @@ async def test_request_greeting_includes_request_timestamp(patron):
 @pytest.mark.asyncio
 async def test_request_propagates_open_channel_failure(patron):
     ex = FakeExchange(candidates=[])
-    rt = OperatorRuntime(tool_registry={}, service_name="Test")
+    rt = OperatorRuntime(tool_registry={}, service_name="Test",
+                         holder_auth_url="https://op.example")
     rt._courier = SimpleNamespace(
         _exchange=ex,
         open_channel=AsyncMock(return_value={"success": False, "error": "relay down"}),
@@ -461,3 +467,25 @@ async def test_receive_drain_does_not_block_event_loop(patron):
     assert progressed[0] - start < 0.18, (
         f"event loop blocked: tick at {progressed[0] - start:.3f}s"
     )
+
+
+@pytest.mark.asyncio
+async def test_request_needs_a_holder_connection(patron):
+    ex = FakeExchange(candidates=[])
+    rt = OperatorRuntime(tool_registry={}, service_name="Test Operator",
+                         holder_auth_url="https://op.example")
+    rt._courier = SimpleNamespace(_exchange=ex, open_channel=AsyncMock())
+    tools = _register(rt)
+    with patch("tollbooth.holder_auth.current_holder", return_value=None):
+        r = await tools["request_npub_proof"](patron_npub=patron)
+    assert r["success"] is False
+    rt._courier.open_channel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_receive_collects_only_on_the_requesting_holder(patron):
+    ex = FakeExchange(candidates=[])
+    rt, _ = _runtime_with_exchange(ex)
+    tools = _register(rt)
+    await tools["receive_npub_proof"](patron_npub=patron, nonce="bold-hawk-42")
+    assert ex.resolved_for == HOLDER
