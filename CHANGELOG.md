@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.103.0] — 2026-10-17
+
+### Added
+
+- `SignedRequestProvider`: connection identity for a service that keeps no holders (such as the Oracle). A signed request proves its npub; every other request is anonymous, so free tools stay open.
+
+### Changed
+
+- **Breaking:** the Secure Courier session phrase is called `nonce` everywhere: `request_npub_proof` returns `nonce`; `receive_npub_proof`, `receive_credentials` and `receive_patron_credentials` take it; the DM reads `nonce = @@@…@@@`; error codes `nonce_missing` and `courier_nonce_mismatch`.
+- `request_npub_proof` and `receive_npub_proof` serve OAuth holder connections only, and a challenge's reply may be collected only on the connection that asked for it. `check_proof_status(patron_npub)` reports what this connection proves.
+- Authority owner queue: `list_operator_requests`, `approve_operator_request(operator_npub, kind)`, `reject_operator_request`. `update_operator` records a request the owner approves; `deregister_operator` may be called by the operator (leaving) or the Authority (disowning).
+- `PatronProofConstraint` is satisfied only by a request signed with the patron's own key.
+
+### Removed
+
+- **Breaking:** tools no longer take `dpop_token` or `authority_proof`. Identity rides on the connection only: a request signed with the npub's key (NIP-98), or an OAuth holder connection that holds the npub. `require_caller_proof(npub)` and `prove_caller(npub)` take the npub alone; dynamic tool runners are `(params, npub)`. Removed: `params.DpopToken`, `PatronSigner`, `create_proof`, `verify_proof`, `proof_validation_error`, `argument_proofs_seen`.
+- **Breaking:** `register_operator` is gone; an operator is adopted through `request_adoption` and the owner's approval.
+
+### Fixed
+
+- Authority owner notifications (operator requests, database-quota alerts) are sent; they had silently failed.
+- Authority onboarding's `confirm_authority_claim` and `check_authority_approval` pass the challenge's nonce, so steps 2 and 3 can complete.
+- `request_adoption` forwards the operator's display name and note to the Authority.
+
 ## [0.102.1] — 2026-10-17
 
 ### Fixed
