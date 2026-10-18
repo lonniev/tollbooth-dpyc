@@ -1,3 +1,0 @@
-- Authority owner notifications (operator requests, database-quota alerts) are sent; they had silently failed.
-- Authority onboarding's `confirm_authority_claim` and `check_authority_approval` pass the challenge's nonce, so steps 2 and 3 can complete.
-- `request_adoption` forwards the operator's display name and note to the Authority.
