@@ -104,7 +104,7 @@ def _randomize_timestamp() -> int:
     return int(time.time()) - random.randint(0, _TIMESTAMP_FUZZ_SECONDS)
 
 
-# Anti-replay dpop_token slug — memorable adjective-noun-number phrases
+# Anti-replay nonce slug — memorable adjective-noun-number phrases
 _ADJECTIVES = [
     "amber", "bold", "calm", "dark", "eager", "faint", "glad", "hazy",
     "iron", "jade", "keen", "live", "mild", "neat", "opal", "pale",
@@ -117,7 +117,7 @@ _NOUNS = [
 ]
 
 
-def _generate_dpop_token() -> str:
+def _generate_nonce() -> str:
     """Generate a memorable anti-replay phrase like ``bold-hawk-42``."""
     adj = random.choice(_ADJECTIVES)
     noun = random.choice(_NOUNS)
@@ -205,7 +205,7 @@ _DM_READ_PROBE_TTL = 600.0
 
 # NACK copy sent to the sender of a popped courier DM whose anti-replay
 # token did NOT match the open channel. Deliberately does NOT reveal the
-# expected dpop_token phrase — telling an unknown sender the token they should
+# expected nonce phrase — telling an unknown sender the token they should
 # have used would defeat the anti-replay guarantee.
 _NACK_TOKEN = (
     "Your message was popped from the courier queue, but its session "
@@ -227,11 +227,11 @@ _MAX_NACKS_PER_DRAIN = 5
 _COURIER_RESOLVE_ERRORS = {
     ErrorCode.COURIER_NO_PENDING_RECORD: (
         "No open courier channel for this npub. Call {request_tool} first, "
-        "then retrieve with the dpop_token it returns."
+        "then retrieve with the nonce it returns."
     ),
-    ErrorCode.COURIER_DPOP_TOKEN_MISMATCH: (
+    ErrorCode.COURIER_NONCE_MISMATCH: (
         "The supplied session phrase does not match the open channel for this "
-        "npub. Use the exact dpop_token returned by {request_tool}, or open a "
+        "npub. Use the exact nonce returned by {request_tool}, or open a "
         "fresh channel."
     ),
     ErrorCode.COURIER_TOKEN_EXPIRED: (
@@ -426,11 +426,14 @@ class NostrCredentialExchange:
         # Track consumed event IDs (prevent double-pickup)
         self._consumed_ids: set[str] = set()
         # Dpop_token slugs: {(recipient_npub, service): (phrase, expiry_timestamp)}
-        self._pending_dpop_tokens: dict[tuple[str, str], tuple[str, float]] = {}
+        self._pending_nonces: dict[tuple[str, str], tuple[str, float]] = {}
+        # The holder connection a challenge was raised on, when it is bound to
+        # one: its reply may only be collected on that same connection.
+        self._bound_to: dict[tuple[str, str], str] = {}
         # Per-conversation rendezvous relay pins: {(recipient_npub, service): wss_url}
         # The wheel commits one relay per challenge (the one that accepted the
         # publish) and embeds it in the DM body so the responder knows where
-        # to send their reply. Lives alongside _pending_dpop_tokens; cleared
+        # to send their reply. Lives alongside _pending_nonces; cleared
         # together on receive success / expiry.
         self._pinned_relays: dict[tuple[str, str], str] = {}
         # Ephemeral agent keys for self-DM avoidance:
@@ -948,6 +951,7 @@ class NostrCredentialExchange:
         reason: str | None = None,
         origin: str | None = None,
         verify_at: str | None = None,
+        bound_to: str = "",
     ) -> dict[str, Any]:
         """Open a credential delivery channel for a service.
 
@@ -981,8 +985,8 @@ class NostrCredentialExchange:
         template = self._templates[service]
         instructions = render_delimited_instructions(template)
 
-        # Generate anti-replay dpop_token slug
-        dpop_token = _generate_dpop_token()
+        # Generate anti-replay nonce slug
+        nonce = _generate_nonce()
 
         # Drain the relay subscription off the event loop. The relay I/O is
         # synchronous (websocket-client: connect + recv until EOSE, bounded by
@@ -1049,7 +1053,7 @@ class NostrCredentialExchange:
                     sender_pubkey_hex=sender_pubkey_hex,
                     subject_npub=recipient_npub,
                     service=service,
-                    challenge=dpop_token,
+                    challenge=nonce,
                     reason=reason,
                     origin=origin,
                     verify_at=verify_at,
@@ -1079,7 +1083,7 @@ class NostrCredentialExchange:
                 f"{greeting}\n\n"
                 f"--- Credential Payload ---\n"
                 + "\n".join(payload_lines) + "\n"
-                f"  dpop_token = @@@{dpop_token}@@@\n"
+                f"  nonce = @@@{nonce}@@@\n"
                 f"  rendezvous_relay = @@@{rendezvous_relay}@@@\n\n"
                 f"IMPORTANT: include the anti-replay token exactly as shown.\n"
                 f"IMPORTANT: reply via the rendezvous_relay above — the "
@@ -1111,7 +1115,7 @@ class NostrCredentialExchange:
             "service": service,
             "freshness_window_seconds": self._freshness_window,
             "instructions": instructions,
-            "dpop_token": dpop_token,
+            "nonce": nonce,
         }
 
         if agent_key is not None:
@@ -1189,18 +1193,20 @@ class NostrCredentialExchange:
                     f"Errors: {'; '.join(attempt_errors)}"
                 )
 
-            # Pin committed. Persist dpop_token + rendezvous so receive can
+            # Pin committed. Persist nonce + rendezvous so receive can
             # match the reply and the caller can display the URL.
             expiry = time.time() + self._freshness_window
-            self._pending_dpop_tokens[(recipient_npub, service)] = (dpop_token, expiry)
+            self._pending_nonces[(recipient_npub, service)] = (nonce, expiry)
             self._pinned_relays[(recipient_npub, service)] = committed_relay
+            self._bound_to[(recipient_npub, service)] = bound_to
 
             # Persist pending state to survive cold starts
             if self._credential_vault is not None:
                 pending_blob: dict[str, Any] = {
-                    "dpop_token": dpop_token,
+                    "nonce": nonce,
                     "expiry": expiry,
                     "rendezvous_relay": committed_relay,
+                    "bound_to": bound_to,
                 }
                 if agent_key is not None:
                     pending_blob["agent_nsec_hex"] = agent_key.hex()
@@ -1213,12 +1219,12 @@ class NostrCredentialExchange:
             result["message"] = (
                 f"A welcome DM has been sent to {recipient_npub} via {committed_relay}. "
                 f"Tell the user to look for a DM containing the session phrase "
-                f"\"{dpop_token}\" — share this phrase in chat so they can identify "
+                f"\"{nonce}\" — share this phrase in chat so they can identify "
                 f"the correct message. It is not sensitive. "
                 f"They MUST reply on the rendezvous relay {committed_relay} "
                 f"(included in the DM body) using the @@@ format shown. "
                 f"Then call receive_credentials with their npub, the service, "
-                f"and the session phrase \"{dpop_token}\" as the dpop_token argument."
+                f"and the session phrase \"{nonce}\" as the nonce argument."
             )
             result["relay_propagation_note"] = (
                 f"Reply must land on {committed_relay} — the courier listens there. "
@@ -1233,10 +1239,10 @@ class NostrCredentialExchange:
             result["message"] = (
                 f"The user should send their {template.service} credentials as a Nostr DM "
                 f"to {self._npub} from their Nostr client, including the session phrase "
-                f"\"{dpop_token}\" — share this phrase in chat so they can include it. "
+                f"\"{nonce}\" — share this phrase in chat so they can include it. "
                 f"Reply with credentials using the @@@ format shown above. "
                 f"Then call receive_credentials with their npub, the service, "
-                f"and the session phrase \"{dpop_token}\" as the dpop_token argument."
+                f"and the session phrase \"{nonce}\" as the nonce argument."
             )
 
         return result
@@ -1244,7 +1250,7 @@ class NostrCredentialExchange:
     async def receive_from_vault(
         self, sender_npub: str, *, service: str | None = None,
     ) -> dict[str, Any]:
-        """Vault-only credential lookup — no relay I/O, no dpop_token.
+        """Vault-only credential lookup — no relay I/O, no nonce.
 
         This is the cold-start / returning-session path: it answers "do we
         already hold complete credentials for this (service, npub)?" without
@@ -1252,7 +1258,7 @@ class NostrCredentialExchange:
         ``SecureCourier.restore_session`` to re-establish an operator session
         on a serverless cold start. It is deliberately separate from
         ``receive()`` — the agent-facing courier retrieve is strict and
-        dpop_token-scoped, while this is a plain encrypted-store read.
+        nonce-scoped, while this is a plain encrypted-store read.
 
         Returns a success dict (``encryption: "vault"``) on a complete vault
         hit, else ``{"success": False}``.
@@ -1299,21 +1305,21 @@ class NostrCredentialExchange:
         }
 
     async def receive(
-        self, sender_npub: str, *, service: str, dpop_token: str,
+        self, sender_npub: str, *, service: str, nonce: str,
         request_tool: str = "request_credential_channel",
     ) -> dict[str, Any]:
         """Pick up validated credentials via the deterministic courier drain.
 
         The client names exactly which response it wants — ``(sender_npub,
-        service, dpop_token)`` — and the drain is unambiguous:
+        service, nonce)`` — and the drain is unambiguous:
 
         1. Resolve the pending channel for ``(sender_npub, service)``, verify
-           ``dpop_token`` matches it and hasn't expired, and read the pinned
+           ``nonce`` matches it and hasn't expired, and read the pinned
            rendezvous relay the original request committed to.
-        2. Drain ONLY that relay. Every popped DM whose dpop_token is wrong (or is
+        2. Drain ONLY that relay. Every popped DM whose nonce is wrong (or is
            undecryptable / lacks ``@@@`` markers) is NIP-09 deleted and the
-           sender is NACK'd (without revealing the expected dpop_token). The first
-           DM whose dpop_token matches is deleted, the sender is ACK'd, and the
+           sender is NACK'd (without revealing the expected nonce). The first
+           DM whose nonce matches is deleted, the sender is ACK'd, and the
            scan STOPS (stop-at-match).
         3. On a match the credentials are validated, vaulted, and returned.
            If the relay drains with no match, a structured not-found result
@@ -1333,13 +1339,13 @@ class NostrCredentialExchange:
                 "Secure Courier not available. Check logs for missing dependencies."
             )
 
-        if not dpop_token:
+        if not nonce:
             return {
                 "success": False,
-                "error_code": ErrorCode.DPOP_TOKEN_MISSING,
+                "error_code": ErrorCode.NONCE_MISSING,
                 "popped": 0,
                 "error": (
-                    f"dpop_token is required — pass the session phrase returned by "
+                    f"nonce is required — pass the session phrase returned by "
                     f"{request_tool}."
                 ),
             }
@@ -1349,18 +1355,18 @@ class NostrCredentialExchange:
         except Exception as exc:
             raise CourierValidationError(f"Invalid sender npub: {exc}") from exc
 
-        # Channel state (dpop_token, pin, ephemeral agent, __pending__ vault blob)
+        # Channel state (nonce, pin, ephemeral agent, __pending__ vault blob)
         # is keyed by the RAW service to match open_channel's write. The
         # resolved service is used only for template matching/validation later.
         resolved_service = self._resolve_service(service)
-        dpop_token_key = (sender_npub, service)
+        nonce_key = (sender_npub, service)
 
         # Resolve + verify the pinned rendezvous relay for this exact
-        # (npub, service, dpop_token). Handles cold-start vault rehydration and
+        # (npub, service, nonce). Handles cold-start vault rehydration and
         # returns a structured error (popping nothing) when the channel can't
         # be resolved.
         pinned, error_code = await self._resolve_pinned_record(
-            sender_npub, service, dpop_token,
+            sender_npub, service, nonce,
         )
         if error_code is not None:
             return {
@@ -1386,7 +1392,7 @@ class NostrCredentialExchange:
 
         # Self-DM decryption uses the ephemeral agent key restored by the
         # resolver; falls back to the operator nsec for patron→operator DMs.
-        agent_key = self._ephemeral_agents.get(dpop_token_key)
+        agent_key = self._ephemeral_agents.get(nonce_key)
         decrypt_privkey = agent_key.hex() if agent_key else None
 
         # ── Strict pinned-relay drain ──────────────────────────────────
@@ -1465,7 +1471,7 @@ class NostrCredentialExchange:
                             "Your message was popped but had no @@@ field "
                             "markers. Resend using: field_name = @@@value@@@"
                         )
-                    elif payload.get("dpop_token", "") != dpop_token:
+                    elif payload.get("nonce", "") != nonce:
                         nack_reason = _NACK_TOKEN
 
             if nack_reason is None:
@@ -1508,9 +1514,10 @@ class NostrCredentialExchange:
         assert plaintext is not None
 
         # ── Match: consume one-time channel state (keyed by raw service) ──
-        self._pending_dpop_tokens.pop(dpop_token_key, None)
-        self._pinned_relays.pop(dpop_token_key, None)
-        self._ephemeral_agents.pop(dpop_token_key, None)
+        self._pending_nonces.pop(nonce_key, None)
+        self._pinned_relays.pop(nonce_key, None)
+        self._bound_to.pop(nonce_key, None)
+        self._ephemeral_agents.pop(nonce_key, None)
         if self._credential_vault is not None:
             try:
                 await self._credential_vault.delete_credentials(
@@ -1531,7 +1538,7 @@ class NostrCredentialExchange:
                 "field_name = @@@your_value@@@"
             )
 
-        payload.pop("dpop_token", None)
+        payload.pop("nonce", None)
         template = self._match_template(resolved_service, payload)
 
         # Merge-on-receive: a reply may carry a SUBSET of the template's fields
@@ -1897,37 +1904,40 @@ class NostrCredentialExchange:
         return service
 
     async def _resolve_pinned_record(
-        self, sender_npub: str, service: str, dpop_token: str,
+        self, sender_npub: str, service: str, nonce: str, *, bound_to: str = "",
     ) -> tuple[str | None, str | None]:
         """Resolve and verify the pinned rendezvous relay for a courier channel.
 
         Looks up the pending record for ``(sender_npub, service)``, verifies
-        the supplied *dpop_token* matches it and has not expired, and returns the
-        pinned rendezvous relay the original request committed to. Performs
-        cold-start recovery from the vault (restoring the in-memory dpop_token,
+        the supplied *nonce* matches it and has not expired, and returns the
+        pinned rendezvous relay the original request committed to. A channel
+        opened ``bound_to`` a holder connection resolves only for that same
+        connection; any other caller gets the nonce-mismatch answer, which
+        reveals nothing. Performs
+        cold-start recovery from the vault (restoring the in-memory nonce,
         pin, and ephemeral agent key) when the in-memory state is gone after
         a process restart.
 
         This is the gate for the deterministic Secure Courier retrieve path:
-        the client names ``(sender_npub, service, dpop_token)`` and the drain
+        the client names ``(sender_npub, service, nonce)`` and the drain
         targets exactly the one relay returned here — no guessing, no fan-out.
 
         Returns:
             ``(pinned_relay, None)`` on success, or ``(None, error_code)``
             where ``error_code`` is one of ``ErrorCode.COURIER_NO_PENDING_RECORD``
-            / ``COURIER_DPOP_TOKEN_MISMATCH`` / ``COURIER_TOKEN_EXPIRED`` /
+            / ``COURIER_NONCE_MISMATCH`` / ``COURIER_TOKEN_EXPIRED`` /
             ``COURIER_NO_PINNED_RELAY``.
         """
         # Key by the RAW service — open_channel stores the pending record
         # under the exact service string the request used (see open_channel:
-        # self._pending_dpop_tokens[(recipient_npub, service)] and
+        # self._pending_nonces[(recipient_npub, service)] and
         # __pending__{service}). _resolve_service is intentionally NOT applied
         # here: for the proof service it would collapse to a credential
         # template name when only one is configured, breaking the lookup.
-        dpop_token_key = (sender_npub, service)
+        nonce_key = (sender_npub, service)
 
-        expected = self._pending_dpop_tokens.get(dpop_token_key)
-        pinned = self._pinned_relays.get(dpop_token_key)
+        expected = self._pending_nonces.get(nonce_key)
+        pinned = self._pinned_relays.get(nonce_key)
 
         # Cold-start recovery: rehydrate from the __pending__ vault blob when
         # in-memory state was lost to a restart (mirrors open_channel's write).
@@ -1935,7 +1945,7 @@ class NostrCredentialExchange:
             pending = await self._vault_fetch(
                 f"__pending__{service}", sender_npub,
             )
-            if pending and "dpop_token" in pending:
+            if pending and "nonce" in pending:
                 # JSON round-trips numbers as strings; coerce before comparing
                 # (a bare str would raise "float > str" at runtime).
                 p_expiry = float(pending.get("expiry", 0) or 0)
@@ -1950,17 +1960,18 @@ class NostrCredentialExchange:
                             exc_info=True,
                         )
                     return None, ErrorCode.COURIER_TOKEN_EXPIRED
-                self._pending_dpop_tokens[dpop_token_key] = (pending["dpop_token"], p_expiry)
-                expected = self._pending_dpop_tokens[dpop_token_key]
+                self._pending_nonces[nonce_key] = (pending["nonce"], p_expiry)
+                expected = self._pending_nonces[nonce_key]
+                self._bound_to[nonce_key] = str(pending.get("bound_to") or "")
                 pin_url = pending.get("rendezvous_relay")
                 if pin_url:
-                    self._pinned_relays[dpop_token_key] = pin_url
+                    self._pinned_relays[nonce_key] = pin_url
                     pinned = pin_url
                 agent_nsec_hex = pending.get("agent_nsec_hex")
-                if agent_nsec_hex and dpop_token_key not in self._ephemeral_agents:
+                if agent_nsec_hex and nonce_key not in self._ephemeral_agents:
                     restored_key = PrivateKey(bytes.fromhex(agent_nsec_hex))
                     with self._lock:
-                        self._ephemeral_agents[dpop_token_key] = restored_key
+                        self._ephemeral_agents[nonce_key] = restored_key
                     logger.info(
                         "Cold-start: restored ephemeral agent %s for %s/%s",
                         restored_key.public_key.bech32()[:20],
@@ -1972,8 +1983,9 @@ class NostrCredentialExchange:
 
         expected_phrase, expiry = expected
         if time.time() > expiry:
-            self._pending_dpop_tokens.pop(dpop_token_key, None)
-            self._pinned_relays.pop(dpop_token_key, None)
+            self._pending_nonces.pop(nonce_key, None)
+            self._pinned_relays.pop(nonce_key, None)
+            self._bound_to.pop(nonce_key, None)
             if self._credential_vault is not None:
                 try:
                     await self._credential_vault.delete_credentials(
@@ -1986,8 +1998,8 @@ class NostrCredentialExchange:
                     )
             return None, ErrorCode.COURIER_TOKEN_EXPIRED
 
-        if dpop_token != expected_phrase:
-            return None, ErrorCode.COURIER_DPOP_TOKEN_MISMATCH
+        if nonce != expected_phrase or self._bound_to.get(nonce_key, "") != bound_to:
+            return None, ErrorCode.COURIER_NONCE_MISMATCH
 
         if not pinned:
             return None, ErrorCode.COURIER_NO_PINNED_RELAY

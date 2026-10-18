@@ -38,19 +38,14 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
-from tollbooth.authority import adoption_store, neon_alert_store
+from tollbooth.authority import neon_alert_store, operator_requests
 from tollbooth.authority.nostr_signing import AuthorityNostrSigner
 from tollbooth.authority.onboarding import ONBOARDING_TEMPLATES, OnboardingState
 from tollbooth.authority.replay import ReplayTracker
 from tollbooth.authority.settings import AuthoritySettings
 from tollbooth.constants import ErrorCode
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
-from tollbooth.identity_proof import (
-    ADOPTION_PROOF_TOOL,
-    verify_proof,
-)
 from tollbooth.nostr_diagnostics import resolve_relays as _resolve_relays
-from tollbooth.params import DpopToken
 from tollbooth.registry import (
     DEFAULT_REGISTRY_URL,
     DPYCRegistry,
@@ -123,7 +118,6 @@ OPERATOR_CREDENTIAL_TEMPLATE = CredentialTemplate(
 # capability_uuid("<name>") at refactor time; pinned as constants
 # thereafter so rebrands and renames don't break pricing-model rows.
 CERTIFY_CREDITS_UUID          = "2b132223-a5c4-51e3-a854-a8445c0d7e0f"
-REGISTER_OPERATOR_UUID        = "21de2356-1e49-52eb-8f28-6fed77c039d9"
 UPDATE_OPERATOR_UUID          = "a7856d24-0665-5a3d-ae81-87a54fa35f26"
 DEREGISTER_OPERATOR_UUID      = "abbaa449-2b72-5632-812a-fb95c219e7d3"
 GET_OPERATOR_CONFIG_UUID      = "f77b4457-28cc-5e14-8bca-64a09d3ac5a0"
@@ -134,9 +128,9 @@ CONFIRM_AUTHORITY_CLAIM_UUID  = "0c32c30f-4a1f-51d9-9b46-785de2d3e15a"
 CHECK_AUTHORITY_APPROVAL_UUID = "c901360d-a32e-53ea-b965-df35a66af68a"
 # Deferred operator adoption (the courtship)
 RECEIVE_ADOPTION_REQUEST_UUID = "b77747af-dda0-51be-9952-33e815b4dc5f"
-LIST_ADOPTION_REQUESTS_UUID   = "d68a9b0b-dae6-5095-8d9a-1ed6f0b96edc"
-APPROVE_ADOPTION_UUID         = "104c741c-4647-5e8c-bd6d-3ba49ea44be7"
-REJECT_ADOPTION_UUID          = "7dbcfa85-f776-5306-a6dc-9032f1dcb9b3"
+LIST_OPERATOR_REQUESTS_UUID   = "d68a9b0b-dae6-5095-8d9a-1ed6f0b96edc"
+APPROVE_OPERATOR_REQUEST_UUID = "104c741c-4647-5e8c-bd6d-3ba49ea44be7"
+REJECT_OPERATOR_REQUEST_UUID  = "7dbcfa85-f776-5306-a6dc-9032f1dcb9b3"
 GET_ADOPTION_STATUS_UUID      = "45c1b7b4-93ac-52e3-ad5a-8fac1b05fad1"
 # Tenant-schema ownership repair (owner consent)
 REPAIR_OPERATOR_SCHEMA_UUID   = "b626ee48-dcd7-5ef2-93dd-0be12364acbb"
@@ -162,20 +156,12 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         pricing_hint_min=10,
     ),
     ToolIdentity(
-        tool_id=REGISTER_OPERATOR_UUID,
-        capability="register_operator",
-        category="free",
-        title="Register operator",
-        behavior=WRITES_REMOTE,
-        intent="Provision an operator in the Authority ledger.",
-    ),
-    ToolIdentity(
         tool_id=UPDATE_OPERATOR_UUID,
         capability="update_operator",
         category="free",
-        title="Update operator",
-        behavior=WRITES_REMOTE,
-        intent="Update an operator's community registry entry.",
+        title="Request operator update",
+        behavior=CREATES,
+        intent="An operator asks to change its registry entry; the Authority owner approves.",
     ),
     ToolIdentity(
         tool_id=DEREGISTER_OPERATOR_UUID,
@@ -183,7 +169,7 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         category="free",
         title="Deregister operator",
         behavior=DELETES_REMOTE,
-        intent="Remove an operator from the DPYC community registry.",
+        intent="Remove an operator from the registry: the operator leaving, or the Authority disowning it.",
     ),
     ToolIdentity(
         tool_id=GET_OPERATOR_CONFIG_UUID,
@@ -243,28 +229,28 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
         intent="Inbound: record an operator's request to be adopted (operator-proof gated).",
     ),
     ToolIdentity(
-        tool_id=LIST_ADOPTION_REQUESTS_UUID,
-        capability="list_adoption_requests",
+        tool_id=LIST_OPERATOR_REQUESTS_UUID,
+        capability="list_operator_requests",
         category="restricted",
-        title="Adoption requests",
+        title="Operator requests",
         behavior=READS,
-        intent="Operator-owner queue: list pending operator-adoption requests.",
+        intent="Owner queue: pending operator requests (adoptions and registry updates).",
     ),
     ToolIdentity(
-        tool_id=APPROVE_ADOPTION_UUID,
-        capability="approve_adoption",
+        tool_id=APPROVE_OPERATOR_REQUEST_UUID,
+        capability="approve_operator_request",
         category="restricted",
-        title="Approve adoption",
+        title="Approve operator request",
         behavior=CREATES_REMOTE,
-        intent="Approve a pending operator-adoption request and provision the operator.",
+        intent="Approve a pending operator request: provision an adoption, or apply an update.",
     ),
     ToolIdentity(
-        tool_id=REJECT_ADOPTION_UUID,
-        capability="reject_adoption",
+        tool_id=REJECT_OPERATOR_REQUEST_UUID,
+        capability="reject_operator_request",
         category="restricted",
-        title="Reject adoption",
+        title="Reject operator request",
         behavior=WRITES,
-        intent="Reject a pending operator-adoption request.",
+        intent="Reject a pending operator request.",
     ),
     ToolIdentity(
         tool_id=GET_ADOPTION_STATUS_UUID,
@@ -317,6 +303,14 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
     ),
 ]
 
+# The kind of operator request a queue tool acts on. Module level: tool
+# annotations are strings here (``from __future__ import annotations``) and
+# FastMCP resolves them against this module's globals.
+_KIND = Annotated[
+    str,
+    Field(description="The request's kind, as list_operator_requests names it: 'adoption' or 'update'."),
+]
+
 AUTHORITY_TOOL_REGISTRY: dict[str, ToolIdentity] = {
     ti.tool_id: ti for ti in AUTHORITY_DOMAIN_TOOLS
 }
@@ -336,6 +330,7 @@ _onboarding = OnboardingState()
 _cached_authority_npub: str | None = None
 _dpyc_registry: DPYCRegistry | None = None
 _runtime: OperatorRuntime | None = None
+_exchange: Any = None
 
 
 def _get_settings() -> AuthoritySettings:
@@ -390,17 +385,34 @@ def _get_dpyc_registry() -> DPYCRegistry | None:
     return _dpyc_registry
 
 
-def _get_nostr_exchange() -> Any:
-    from tollbooth.nostr_credentials import NostrCredentialExchange
+async def _nostr_exchange() -> Any:
+    """This Authority's Secure Courier exchange for onboarding DMs.
 
-    s = _get_settings()
-    relays = _resolve_relays()
-    return NostrCredentialExchange(
-        nsec=s.tollbooth_nostr_operator_nsec,
-        relays=relays,
-        templates=ONBOARDING_TEMPLATES,
-        credential_vault=None,
-    )
+    One per process, so a reply is found by the nonce its channel was opened
+    with, and backed by the Authority's vault, so the open channel outlives a
+    cold start.
+    """
+    global _exchange
+    if _exchange is None:
+        from tollbooth.nostr_credentials import NostrCredentialExchange
+        from tollbooth.vaults.neon import NeonCredentialVault
+
+        _exchange = NostrCredentialExchange(
+            nsec=_get_settings().tollbooth_nostr_operator_nsec,
+            relays=_resolve_relays(),
+            templates=ONBOARDING_TEMPLATES,
+            credential_vault=NeonCredentialVault(neon_vault=await _get_runtime().vault()),
+        )
+    return _exchange
+
+
+async def _dm_owner(runtime: OperatorRuntime, text: str) -> None:
+    """Best-effort DM to the Authority's owner. Never raises."""
+    try:
+        exchange = await _nostr_exchange()
+        await asyncio.to_thread(exchange.send_dm, runtime.operator_npub(), text)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Owner DM skipped: %s", exc)
 
 
 def _resolve_npub_or_operator(npub: str) -> str:
@@ -503,19 +515,26 @@ def _parse_oracle_commit_url(result: Any) -> str:
     return str(result)
 
 
+async def _oracle_client() -> Any:
+    """A client of the Oracle whose every request this Authority signs.
+
+    The Oracle commits registry changes only for a registered Authority, which
+    it knows by the request's signature.
+    """
+    from tollbooth.mcp_client import service_client
+    from tollbooth.registry import resolve_oracle_service
+
+    oracle_info = await resolve_oracle_service(_get_nostr_signer().npub)
+    return service_client(oracle_info["url"], _get_runtime()._get_nsec())
+
+
 async def _register_operator_via_oracle(
     operator_npub: str,
     display_name: str,
     service_url: str,
     authority_npub: str,
 ) -> str:
-    from tollbooth.mcp_client import service_client
-    from tollbooth.registry import resolve_oracle_service
-
-    signer = _get_nostr_signer()
-    oracle_info = await resolve_oracle_service(signer.npub)
-
-    async with service_client(oracle_info["url"]) as client:
+    async with await _oracle_client() as client:
         result = await client.call_tool(
             "register_operator",
             {
@@ -534,19 +553,13 @@ async def _update_operator_via_oracle(
     display_name: str,
     authority_npub: str,
 ) -> str:
-    from tollbooth.mcp_client import service_client
-    from tollbooth.registry import resolve_oracle_service
-
-    signer = _get_nostr_signer()
-    oracle_info = await resolve_oracle_service(signer.npub)
-
     args: dict = {"operator_npub": operator_npub, "authority_npub": authority_npub}
     if service_url:
         args["service_url"] = service_url
     if display_name:
         args["display_name"] = display_name
 
-    async with service_client(oracle_info["url"]) as client:
+    async with await _oracle_client() as client:
         result = await client.call_tool("update_operator", args)
         return _parse_oracle_commit_url(result)
 
@@ -555,13 +568,7 @@ async def _deregister_operator_via_oracle(
     operator_npub: str,
     authority_npub: str,
 ) -> str:
-    from tollbooth.mcp_client import service_client
-    from tollbooth.registry import resolve_oracle_service
-
-    signer = _get_nostr_signer()
-    oracle_info = await resolve_oracle_service(signer.npub)
-
-    async with service_client(oracle_info["url"]) as client:
+    async with await _oracle_client() as client:
         result = await client.call_tool(
             "deregister_operator",
             {"operator_npub": operator_npub, "authority_npub": authority_npub},
@@ -575,13 +582,7 @@ async def _register_via_oracle(
     service_url: str,
     upstream_authority_npub: str,
 ) -> str:
-    from tollbooth.mcp_client import service_client
-    from tollbooth.registry import resolve_oracle_service
-
-    signer = _get_nostr_signer()
-    oracle_info = await resolve_oracle_service(signer.npub)
-
-    async with service_client(oracle_info["url"]) as client:
+    async with await _oracle_client() as client:
         result = await client.call_tool(
             "register_authority",
             {
@@ -629,42 +630,25 @@ def _signed_by(npub: str) -> bool:
         return False
 
 
-async def _require_authority_consent(
-    runtime: OperatorRuntime,
-    authority_proof: str,
-    tool_name: str,
-) -> dict[str, Any] | None:
-    """Verify the caller holds the Authority's own nsec.
+async def _require_owner(runtime: OperatorRuntime) -> dict[str, Any] | None:
+    """The request must prove the Authority's own npub: its owner is acting.
 
-    The Authority's adoption / modification of an Operator entry is a
-    discretionary act. Only someone with the Authority's nsec on hand can
-    produce a valid Schnorr proof signed by the Authority's npub — the
-    cryptographic witness that the human who controls this Authority has
-    authorized this action. An app (e.g. the Pricing Studio) produces
-    this proof automatically when its user clicks "adopt", provided the
-    Authority's nsec is in the app's secure store.
-
-    Returns ``None`` on success (caller proceeds) or a structured error
-    dict the caller should return verbatim. The error code is
-    ``AUTHORITY_CONSENT_REQUIRED`` regardless of whether the proof was
-    missing, expired, or signature-invalid — the patron-actionable
-    remedy is the same: present a fresh valid Authority proof.
+    Returns ``None`` on success or a structured ``AUTHORITY_CONSENT_REQUIRED``
+    error to return verbatim.
     """
     from tollbooth.constants import ErrorCode as _EC
 
     authority_npub = runtime.operator_npub()
-    err = await runtime.prove_caller(authority_npub, authority_proof, tool_name)
-    if err is None:
+    if await runtime.prove_caller(authority_npub) is None:
         return None
     return {
         "success": False,
         "error_code": _EC.AUTHORITY_CONSENT_REQUIRED,
         "error": (
-            f"Authority consent required: caller must supply a valid identity "
-            f"proof signed by the Authority's npub ({authority_npub[:16]}...). "
-            f"Apps holding the Authority's nsec produce this proof inline; "
-            f"otherwise call request_npub_proof / receive_npub_proof against "
-            f"this MCP using the Authority's npub to cache one."
+            f"Only the Authority's owner may do this: the request must prove "
+            f"the Authority's npub ({authority_npub[:16]}...). Sign it with "
+            f"that npub's key, or prove it into an OAuth connection with "
+            f"request_npub_proof / receive_npub_proof."
         ),
         "authority_npub": authority_npub,
     }
@@ -809,12 +793,9 @@ async def _provision_operator(
 ) -> dict[str, Any]:
     """Provision an operator: ledger row + isolated Neon tenant + registry.
 
-    The single source of truth for *what adoption does*. Both the inline-
-    consent path (``register_operator``, consent supplied at call time) and
-    the deferred-courtship path (``approve_adoption``, consent supplied
-    later via the owner's review) call this, so the two paths produce a
-    byte-identical effect. Proof/consent gating lives in the callers, never
-    here.
+    The single source of truth for *what adoption does*, run when the owner
+    approves an operator's adoption request. Proof gating lives in the caller,
+    never here.
     """
     cache = await runtime.ledger_cache()
     # Materialize the operator's ledger row. Nothing is being changed — the
@@ -934,176 +915,85 @@ def register_authority_tools(
     # ------------------------------------------------------------------
 
     @tool
-    async def register_operator(
-        npub: Annotated[
-            str,
-            Field(description="Your Nostr npub (bech32). Get one from the dpyc-oracle's how_to_join() tool."),
-        ] = "",
-        dpop_token: DpopToken = "",
-        service_url: Annotated[
-            str,
-            Field(description="Your MCP endpoint URL (e.g. 'https://my-service.fastmcp.app/mcp')."),
-        ] = "",
-        display_name: Annotated[
-            str,
-            Field(description=(
-                "Human-readable name for the Operator service, shown in the community "
-                "roster (e.g. 'my-service'). If empty, the roster falls back to a "
-                "truncated npub."
-            )),
-        ] = "",
-        authority_proof: Annotated[
-            str,
-            Field(description=(
-                "Identity proof signed by the Authority's OWN npub — the "
-                "Authority's discretionary consent to adopt this Operator. "
-                "Apps with the Authority's nsec in their keystore (e.g. the "
-                "Pricing Studio) produce this proof automatically when the "
-                "user clicks 'adopt'."
-            )),
-        ] = "",
-    ) -> dict[str, Any]:
-        """Provision an operator in the Authority ledger.
-
-        Creates a ledger entry so the operator can purchase credits and
-        certify purchase orders. Idempotent — safe to call again.
-
-        Requires TWO independent identity proofs:
-
-        1. ``proof`` — Schnorr proof signed by the candidate operator's
-           ``npub``. Proves the requester really controls that npub. The
-           operator typically calls ``request_npub_proof`` /
-           ``receive_npub_proof`` against this Authority first to get
-           a proof grant.
-        2. ``authority_proof`` — Schnorr proof signed by the Authority's
-           own npub. This is the Authority's human consent — only an
-           agent with the Authority's nsec on hand can produce it. Apps
-           generate this inline when the human admin clicks 'adopt';
-           otherwise an Authority-side proof can be minted the same way
-           an operator-side one is.
-
-        Next step: Call purchase_credits to fund your credit balance.
-        """
-        err = await runtime.prove_caller(npub, dpop_token, runtime.runtime_name("register_operator"))
-        if err:
-            return err
-        err = await _require_authority_consent(
-            runtime, authority_proof, runtime.runtime_name("register_operator"),
-        )
-        if err:
-            return err
-
-        # Inline-consent path: provisioning is the shared effect.
-        return await _provision_operator(runtime, npub, service_url, display_name)
-
-    @tool
     async def update_operator(
-        npub: Annotated[str, Field(description="Nostr npub of the Operator to update.")] = "",
-        dpop_token: DpopToken = "",
+        npub: Annotated[str, Field(description="Your operator npub; the request must prove it.")] = "",
         service_url: Annotated[str, Field(description="New MCP endpoint URL (leave empty to keep current).")] = "",
         display_name: Annotated[str, Field(description="New display name (leave empty to keep current).")] = "",
-        authority_proof: Annotated[
-            str,
-            Field(description=(
-                "Identity proof signed by the Authority's OWN npub — the "
-                "Authority's consent to modify this Operator's registry entry."
-            )),
-        ] = "",
     ) -> dict[str, Any]:
-        """Update an existing Operator's community registry entry.
+        """Ask this Authority to change your community registry entry.
 
-        Requires the same two proofs as ``register_operator``:
-
-        - ``proof`` proves the caller controls the Operator's ``npub``.
-        - ``authority_proof`` proves the Authority's human admin consents
-          to the change. Without the Authority proof, anyone with the
-          Operator's nsec could redirect their own ``service_url`` under
-          this Authority's signature without the Authority's awareness.
+        The operator acts: the request must prove ``npub``. The change waits in
+        the owner's queue (``list_operator_requests``) and takes effect when the
+        Authority owner approves it, so the registry never changes under this
+        Authority's name without its owner seeing it.
         """
-        err = await runtime.prove_caller(npub, dpop_token, runtime.runtime_name("update_operator"))
-        if err:
-            return err
-        err = await _require_authority_consent(
-            runtime, authority_proof, runtime.runtime_name("update_operator"),
-        )
-        if err:
+        if err := await runtime.prove_caller(npub):
             return err
         if not service_url and not display_name:
             return {"success": False, "error": "Nothing to update. Provide service_url and/or display_name."}
-
+        npub = resolve_npub(npub)
         try:
-            signer = _get_nostr_signer()
-            commit_url = await _update_operator_via_oracle(
-                operator_npub=npub,
-                service_url=service_url,
-                display_name=display_name,
-                authority_npub=signer.npub,
+            vault = await runtime.vault()
+            await operator_requests.ensure_schema(vault)
+            await operator_requests.upsert_pending(
+                vault, operator_requests.UPDATE, npub,
+                service_url=service_url, display_name=display_name,
             )
-            await _resend_bootstrap_dm(npub)
-            return {
-                "success": True,
-                "commit_url": commit_url,
-                "message": f"Operator {npub[:16]}... updated in community registry.",
-            }
         except Exception as exc:  # noqa: BLE001
-            return {"success": False, "error": f"Update failed: {exc}"}
+            return {"success": False, "error": f"Could not record request: {exc}"}
+        await _notify_owner(f"Operator {npub[:16]}... asks to update its registry entry.")
+        return {
+            "success": True,
+            "status": operator_requests.PENDING,
+            "operator_npub": npub,
+            "message": "Update requested; it takes effect when the Authority's owner approves it.",
+        }
 
     @tool
     async def deregister_operator(
-        npub: Annotated[str, Field(description="Nostr npub of the Operator to deregister.")] = "",
-        dpop_token: DpopToken = "",
-        authority_proof: Annotated[
-            str,
-            Field(description=(
-                "Identity proof signed by the Authority's OWN npub — the "
-                "Authority's consent to remove this Operator from the community "
-                "registry under its signature."
-            )),
-        ] = "",
+        npub: Annotated[str, Field(description="Nostr npub of the Operator to remove.")] = "",
     ) -> dict[str, Any]:
         """Remove an Operator from the DPYC community registry.
 
-        Requires the same two proofs as ``register_operator``:
-
-        - ``proof`` proves the caller controls the Operator's ``npub``.
-        - ``authority_proof`` proves the Authority's human admin consents
-          to the removal. Without the Authority proof, anyone who knew an
-          Operator's public npub and held its nsec could remove themselves
-          from this Authority's roster without the Authority noticing.
+        Either party may: the operator leaving (the request proves ``npub``),
+        or the Authority's owner disowning it (the request proves the
+        Authority's npub). Its ledger and database stay, so a later adoption
+        resumes where it left off.
         """
-        err = await runtime.prove_caller(npub, dpop_token, runtime.runtime_name("deregister_operator"))
-        if err:
-            return err
-        err = await _require_authority_consent(
-            runtime, authority_proof, runtime.runtime_name("deregister_operator"),
-        )
-        if err:
-            return err
-
         try:
-            signer = _get_nostr_signer()
+            npub = resolve_npub(npub)
+        except ValueError as exc:
+            return {"success": False, "error_code": ErrorCode.NPUB_INVALID, "error": str(exc)}
+        if await runtime.prove_caller(npub) is not None and (err := await _require_owner(runtime)):
+            return err
+        try:
             commit_url = await _deregister_operator_via_oracle(
                 operator_npub=npub,
-                authority_npub=signer.npub,
+                authority_npub=_get_nostr_signer().npub,
             )
-            return {
-                "success": True,
-                "commit_url": commit_url,
-                "message": f"Operator {npub[:16]}... removed from community registry.",
-            }
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Deregistration failed: {exc}"}
+        try:
+            vault = await runtime.vault()
+            await operator_requests.ensure_schema(vault)
+            await operator_requests.mark(vault, operator_requests.ADOPTION, npub, operator_requests.CLOSED)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not close the adoption record of %s: %s", npub[:16], exc)
+        return {
+            "success": True,
+            "commit_url": commit_url,
+            "message": f"Operator {npub[:16]}... removed from community registry.",
+        }
 
     @tool
     async def get_operator_config(
         npub: Annotated[str, Field(description="Your Nostr npub (bech32).")] = "",
-        dpop_token: DpopToken = "",
     ) -> dict[str, Any]:
         """Retrieve operator bootstrap configuration (Neon URL, schema).
 
-        Gated by Schnorr signature proving ownership of the requested npub.
+        The request must prove ``npub``.
         """
-        err = await runtime.prove_caller(npub, dpop_token, runtime.runtime_name("get_operator_config"))
+        err = await runtime.prove_caller(npub)
         if err:
             return err
 
@@ -1132,18 +1022,16 @@ def register_authority_tools(
     @tool
     async def operator_status(
         npub: Annotated[str, Field(description="Nostr public key (npub1...). Defaults to operator identity if empty.")] = "",
-        dpop_token: DpopToken = "",
     ) -> dict[str, Any]:
         """View registration status, balance summary, and the Authority's Nostr npub.
 
-        When an explicit ``npub`` is provided, requires a Schnorr proof of
-        ownership — without it, anyone could enumerate balances by walking
-        the community registry. When ``npub`` is empty, falls back to the
-        Authority's own operator identity and skips the proof check (self-
-        inspection is always allowed).
+        When an explicit ``npub`` is provided, the request must prove it —
+        otherwise anyone could enumerate balances by walking the community
+        registry. When ``npub`` is empty, falls back to the Authority's own
+        operator identity (self-inspection is always allowed).
         """
         if npub:
-            err = await runtime.prove_caller(npub, dpop_token, runtime.runtime_name("operator_status"))
+            err = await runtime.prove_caller(npub)
             if err:
                 return err
         user_id = _resolve_npub_or_operator(npub)
@@ -1182,9 +1070,8 @@ def register_authority_tools(
     async def certify_credits(
         npub: Annotated[
             str,
-            Field(description="The operator's DPYC npub (from register_operator response)."),
+            Field(description="The operator's DPYC npub; the request must prove it."),
         ] = "",
-        dpop_token: DpopToken = "",
         amount_sats: Annotated[
             int,
             Field(description="The total purchase amount in satoshis. Must be positive."),
@@ -1306,81 +1193,53 @@ def register_authority_tools(
     # Deferred operator adoption (the courtship)
     # ------------------------------------------------------------------
 
-    async def _notify_owner_of_request(operator_npub: str, service_url: str) -> None:
-        """Best-effort heads-up DM to the Authority owner. Never raises.
-
-        The durable queue (``list_adoption_requests``) is the source of
-        truth; this DM is only a "check your queue" ping. Fire-and-forget so
-        relay I/O never blocks the inbound request.
-        """
-        try:
-            exchange = _get_nostr_exchange()
-            await exchange.open_channel(
-                "operator_adoption",
-                greeting=(
-                    f"Operator {operator_npub[:16]}... ({service_url}) requests "
-                    "adoption. Review pending requests with list_adoption_requests "
-                    "and approve/reject in the Pricing Studio."
-                ),
-                recipient_npub=runtime.operator_npub(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.info("Owner-notification DM skipped for %s: %s", operator_npub[:16], exc)
+    async def _notify_owner(text: str) -> None:
+        """Best-effort "check your queue" DM to the Authority owner. The
+        durable queue (``list_operator_requests``) is the source of truth."""
+        await _dm_owner(runtime, text + " Review it with list_operator_requests in the Pricing Studio.")
 
     @tool
     async def receive_adoption_request(
         operator_npub: Annotated[
             str,
-            Field(description="The operator's Nostr npub requesting adoption."),
+            Field(description="The operator's Nostr npub requesting adoption; the request must be signed by it."),
         ] = "",
-        dpop_token: Annotated[
-            str,
-            Field(description=(
-                "Inline kind-27235 proof signed by the operator's nsec, bound "
-                "to the canonical adoption sentinel. request_adoption mints "
-                "this automatically."
-            )),
-        ] = "",
-        service_url: Annotated[
-            str,
-            Field(description="The operator's MCP endpoint URL."),
-        ] = "",
+        service_url: Annotated[str, Field(description="The operator's MCP endpoint URL.")] = "",
+        display_name: Annotated[str, Field(description="The operator's name for the community roster.")] = "",
+        note: Annotated[str, Field(description="An optional message for the Authority's owner.")] = "",
     ) -> dict[str, Any]:
         """Inbound: record an operator's request to be adopted by this Authority.
 
-        Called MCP-to-MCP by the operator's ``request_adoption``. Verifies the
-        operator controls ``operator_npub`` (inline Schnorr bound to the
-        adoption sentinel — no relay round-trip), records a durable ``pending``
-        row, and fires a best-effort owner-notification DM. Does NOT provision —
-        provisioning waits for the owner's ``approve_adoption``.
+        Called MCP-to-MCP by the operator's ``request_adoption`` on a connection
+        signed by the operator's key. Records a durable ``pending`` request and
+        fires a best-effort owner-notification DM. Does NOT provision —
+        provisioning waits for the owner's ``approve_operator_request``.
         """
         if not operator_npub:
             return {"success": False, "error": "operator_npub is required."}
-        # The operator's own key signed this request, or (while callers move to
-        # the connection) an inline proof bound to the adoption sentinel.
-        if not _signed_by(operator_npub) and not verify_proof(
-            dpop_token, operator_npub, ADOPTION_PROOF_TOOL,
-        ):
+        if not _signed_by(operator_npub):
             return {
                 "success": False,
                 "error_code": ErrorCode.PROOF_INVALID,
                 "error": (
-                    "Invalid operator adoption proof. The request must carry a "
-                    "fresh kind-27235 proof signed by operator_npub. Call "
-                    "request_adoption on the operator (it mints this inline)."
+                    "An adoption request must be signed with operator_npub's key. "
+                    "Call request_adoption on the operator."
                 ),
             }
         try:
             vault = await runtime.vault()
-            await adoption_store.ensure_schema(vault)
-            await adoption_store.upsert_pending(vault, operator_npub, service_url)
+            await operator_requests.ensure_schema(vault)
+            await operator_requests.upsert_pending(
+                vault, operator_requests.ADOPTION, operator_npub,
+                service_url=service_url, display_name=display_name, note=note,
+            )
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not record request: {exc}"}
 
-        await _notify_owner_of_request(operator_npub, service_url)
+        await _notify_owner(f"Operator {operator_npub[:16]}... ({service_url}) requests adoption.")
         return {
             "success": True,
-            "status": adoption_store.PENDING,
+            "status": operator_requests.PENDING,
             "operator_npub": operator_npub,
             "message": (
                 "Adoption request received and pending the Authority owner's "
@@ -1389,27 +1248,20 @@ def register_authority_tools(
         }
 
     @tool
-    async def list_adoption_requests(
-        authority_proof: Annotated[
-            str,
-            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
-        ] = "",
-    ) -> dict[str, Any]:
-        """Owner queue: list pending operator-adoption requests.
+    async def list_operator_requests() -> dict[str, Any]:
+        """Owner queue: pending operator requests, adoptions and registry
+        updates alike, each naming its ``kind``.
 
-        Restricted to the Authority owner (consent proof). This is the
-        review-on-your-own-time surface the Pricing Studio renders.
+        Restricted to the Authority's owner. This is the review-on-your-own-time
+        surface the Pricing Studio renders.
         """
-        err = await _require_authority_consent(
-            runtime, authority_proof, runtime.runtime_name("list_adoption_requests"),
-        )
-        if err:
+        if err := await _require_owner(runtime):
             return err
         try:
             vault = await runtime.vault()
-            await adoption_store.ensure_schema(vault)
-            await adoption_store.prune_expired(vault)
-            pending = await adoption_store.list_pending(vault)
+            await operator_requests.ensure_schema(vault)
+            await operator_requests.prune_expired(vault)
+            pending = await operator_requests.list_pending(vault)
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not list requests: {exc}"}
         return {"success": True, "count": len(pending), "requests": pending}
@@ -1421,35 +1273,19 @@ def register_authority_tools(
     async def _notify_owner_of_neon_402(operator_npub: str, detail: str) -> None:
         """Best-effort heads-up DM to the Authority owner that an operator's
         store is 402-locked. Never raises; the durable row is the record."""
-        try:
-            exchange = _get_nostr_exchange()
-            await exchange.open_channel(
-                "neon_persistence_alert",
-                greeting=(
-                    f"⚠ Operator {operator_npub[:16]}... reports its Neon store is "
-                    "402-locked (compute/storage quota exhausted) — paid tools are "
-                    "down for its patrons. Review with network_persistence_health / "
-                    "list_neon_alerts and restore capacity (upgrade the plan or wait "
-                    "for the quota reset)."
-                ),
-                recipient_npub=runtime.operator_npub(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.info("Neon-402 owner DM skipped for %s: %s", operator_npub[:16], exc)
+        await _dm_owner(runtime, (
+            f"⚠ Operator {operator_npub[:16]}... reports its Neon store is "
+            "402-locked (compute/storage quota exhausted) — paid tools are "
+            "down for its patrons. Review with network_persistence_health / "
+            "list_neon_alerts and restore capacity (upgrade the plan or wait "
+            "for the quota reset)."
+        ))
 
     @tool
     async def receive_neon_402_alert(
         npub: Annotated[
             str,
             Field(description="The reporting operator's Nostr npub (the one whose store is locked)."),
-        ] = "",
-        dpop_token: Annotated[
-            str,
-            Field(description=(
-                "Inline kind-27235 proof signed by the operator's nsec, bound to "
-                "this tool's wire name. The operator's runtime mints and sends this "
-                "automatically when it catches a Neon 402."
-            )),
         ] = "",
         detail: Annotated[
             str,
@@ -1459,24 +1295,19 @@ def register_authority_tools(
         """Inbound: an operator reports its Neon store is 402-locked.
 
         Called MCP-to-MCP by the operator's runtime the instant it catches a
-        Neon HTTP 402 on its own database. Verifies the operator controls
-        ``npub`` (inline Schnorr bound to this tool's wire name), records a
+        Neon HTTP 402 on its own database, on a connection signed by the
+        operator's key. Records a
         durable latest-state row, and fires a best-effort owner-notification
         DM. This is how the Authority learns the store is dark BEFORE a patron
         files a complaint.
         """
         if not npub:
             return {"success": False, "error": "npub is required."}
-        if not _signed_by(npub) and not verify_proof(
-            dpop_token, npub, runtime.runtime_name("receive_neon_402_alert"),
-        ):
+        if not _signed_by(npub):
             return {
                 "success": False,
                 "error_code": ErrorCode.PROOF_INVALID,
-                "error": (
-                    "Invalid operator proof. The alert must carry a fresh "
-                    "kind-27235 proof signed by npub, bound to this tool."
-                ),
+                "error": "The alert must be signed with npub's key.",
             }
         try:
             vault = await runtime.vault()
@@ -1500,10 +1331,6 @@ def register_authority_tools(
 
     @tool
     async def list_neon_alerts(
-        authority_proof: Annotated[
-            str,
-            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
-        ] = "",
     ) -> dict[str, Any]:
         """Owner queue: operators that reported a Neon-402 (store locked).
 
@@ -1511,9 +1338,7 @@ def register_authority_tools(
         this is the reactive list (operators that already went dark); the health
         tool adds the proactive per-project compute posture.
         """
-        err = await _require_authority_consent(
-            runtime, authority_proof, runtime.runtime_name("list_neon_alerts"),
-        )
+        err = await _require_owner(runtime)
         if err:
             return err
         try:
@@ -1526,10 +1351,6 @@ def register_authority_tools(
 
     @tool
     async def network_persistence_health(
-        authority_proof: Annotated[
-            str,
-            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
-        ] = "",
     ) -> dict[str, Any]:
         """Owner view: the health of the DPYC economy's accounting store (Neon).
 
@@ -1546,9 +1367,7 @@ def register_authority_tools(
         3. ``operator_alerts`` — operators that reported a 402 (from
            receive_neon_402_alert). Reactive, but immediate.
         """
-        err = await _require_authority_consent(
-            runtime, authority_proof, runtime.runtime_name("network_persistence_health"),
-        )
+        err = await _require_owner(runtime)
         if err:
             return err
 
@@ -1651,89 +1470,85 @@ def register_authority_tools(
         }
 
     @tool
-    async def approve_adoption(
-        operator_npub: Annotated[
-            str,
-            Field(description="The operator npub to approve and provision."),
-        ] = "",
-        authority_proof: Annotated[
-            str,
-            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
-        ] = "",
+    async def approve_operator_request(
+        operator_npub: Annotated[str, Field(description="The operator whose request to approve.")] = "",
+        kind: _KIND = operator_requests.ADOPTION,
     ) -> dict[str, Any]:
-        """Approve a pending request and provision the operator.
+        """Approve a pending operator request (owner only).
 
-        The deferred-courtship counterpart to register_operator: same
-        ``authority_proof`` consent, same provisioning effect
-        (``_provision_operator``) — just supplied later, after review.
+        An adoption provisions the operator: ledger row, isolated Neon tenant
+        and registry entry. An update applies the requested service URL or
+        display name to the registry entry.
         """
-        err = await _require_authority_consent(
-            runtime, authority_proof, runtime.runtime_name("approve_adoption"),
-        )
-        if err:
+        if err := await _require_owner(runtime):
             return err
         try:
             vault = await runtime.vault()
-            await adoption_store.ensure_schema(vault)
-            row = await adoption_store.get(vault, operator_npub)
+            await operator_requests.ensure_schema(vault)
+            row = await operator_requests.get(vault, kind, operator_npub)
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not read request: {exc}"}
         if row is None:
             return {
                 "success": False,
                 "error_code": ErrorCode.ADOPTION_NOT_FOUND,
-                "error": f"No adoption request found for {operator_npub[:16]}...",
+                "error": f"No {kind} request found for {operator_npub[:16]}...",
             }
-        if row.get("status") == adoption_store.PROVISIONED:
+        if row.get("status") != operator_requests.PENDING:
             return {
                 "success": False,
                 "error_code": ErrorCode.ADOPTION_ALREADY_PROVISIONED,
-                "error": f"Operator {operator_npub[:16]}... is already provisioned.",
+                "error": f"That {kind} request is already {row.get('status')}.",
             }
 
-        # Deferred path carries the name if the request captured one; today the adoption
-        # store has no display_name column, so this is "" and falls back to a short npub.
-        # The inline register_operator path (the app's "adopt") is where the name flows.
-        result = await _provision_operator(
-            runtime, operator_npub, row.get("service_url", ""), row.get("display_name", ""),
-        )
-        await adoption_store.mark(vault, operator_npub, adoption_store.PROVISIONED)
-        result["adoption"] = "approved"
-        return result
+        if kind == operator_requests.ADOPTION:
+            result = await _provision_operator(
+                runtime, operator_npub, row.get("service_url", ""), row.get("display_name", ""),
+            )
+            await operator_requests.mark(vault, kind, operator_npub, operator_requests.PROVISIONED)
+            return result
+
+        try:
+            commit_url = await _update_operator_via_oracle(
+                operator_npub=operator_npub,
+                service_url=row.get("service_url", ""),
+                display_name=row.get("display_name", ""),
+                authority_npub=_get_nostr_signer().npub,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"success": False, "error": f"Update failed: {exc}"}
+        await operator_requests.mark(vault, kind, operator_npub, operator_requests.APPLIED)
+        await _resend_bootstrap_dm(operator_npub)
+        return {
+            "success": True,
+            "commit_url": commit_url,
+            "message": f"Operator {operator_npub[:16]}... updated in community registry.",
+        }
 
     @tool
-    async def reject_adoption(
-        operator_npub: Annotated[
-            str,
-            Field(description="The operator npub to reject."),
-        ] = "",
-        authority_proof: Annotated[
-            str,
-            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
-        ] = "",
+    async def reject_operator_request(
+        operator_npub: Annotated[str, Field(description="The operator whose request to reject.")] = "",
+        kind: _KIND = operator_requests.ADOPTION,
         reason: Annotated[str, Field(description="Optional human-readable reason.")] = "",
     ) -> dict[str, Any]:
-        """Reject a pending operator-adoption request (owner consent)."""
-        err = await _require_authority_consent(
-            runtime, authority_proof, runtime.runtime_name("reject_adoption"),
-        )
-        if err:
+        """Reject a pending operator request (owner only)."""
+        if err := await _require_owner(runtime):
             return err
         try:
             vault = await runtime.vault()
-            await adoption_store.ensure_schema(vault)
-            hit = await adoption_store.mark(vault, operator_npub, adoption_store.REJECTED)
+            await operator_requests.ensure_schema(vault)
+            hit = await operator_requests.mark(vault, kind, operator_npub, operator_requests.REJECTED)
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not reject request: {exc}"}
         if not hit:
             return {
                 "success": False,
                 "error_code": ErrorCode.ADOPTION_NOT_FOUND,
-                "error": f"No adoption request found for {operator_npub[:16]}...",
+                "error": f"No {kind} request found for {operator_npub[:16]}...",
             }
         return {
             "success": True,
-            "status": adoption_store.REJECTED,
+            "status": operator_requests.REJECTED,
             "operator_npub": operator_npub,
             "reason": reason,
         }
@@ -1744,23 +1559,17 @@ def register_authority_tools(
             str,
             Field(description="The operator npub whose tenant-schema ownership to repair."),
         ] = "",
-        authority_proof: Annotated[
-            str,
-            Field(description="Proof signed by the Authority's OWN npub (owner consent)."),
-        ] = "",
     ) -> dict[str, Any]:
         """Owner repair: reassign every table in an operator's tenant schema to
         the operator's own role, then re-grant DML.
 
         For tenants whose tables were created/owned by the provisioning role —
         the operator role then cannot CREATE INDEX on them ("must be owner"),
-        which aborts the whole vault bootstrap. Unlike register_operator this
+        which aborts the whole vault bootstrap. Unlike adoption this
         does NOT rotate the operator's DB password or re-send the bootstrap DM;
         it only fixes ownership + grants in place. Idempotent.
         """
-        err = await _require_authority_consent(
-            runtime, authority_proof, runtime.runtime_name("repair_operator_schema"),
-        )
+        err = await _require_owner(runtime)
         if err:
             return err
         if not operator_npub.startswith("npub1"):
@@ -1800,14 +1609,14 @@ def register_authority_tools(
     ) -> dict[str, Any]:
         """Read an operator's adoption-request status (free, no proof).
 
-        Status (pending/approved/rejected/provisioned) isn't sensitive — it's
+        Status (pending/rejected/provisioned/closed) isn't sensitive — it's
         the operator's own request — so the operator can poll it openly via
         its ``adoption_status`` tool.
         """
         try:
             vault = await runtime.vault()
-            await adoption_store.ensure_schema(vault)
-            row = await adoption_store.get(vault, operator_npub)
+            await operator_requests.ensure_schema(vault)
+            row = await operator_requests.get(vault, operator_requests.ADOPTION, operator_npub)
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not read status: {exc}"}
         if row is None:
@@ -1846,15 +1655,16 @@ def register_authority_tools(
             return {"success": False, "error": str(exc)}
 
         try:
-            exchange = _get_nostr_exchange()
+            exchange = await _nostr_exchange()
             result = await exchange.open_channel(
                 "authority_claim",
                 greeting=(
                     "You are requesting to become the curator of this Authority. "
-                    "Reply with: claim = @@@yes@@@ and include the dpop_token slug."
+                    "Reply with: claim = @@@yes@@@ and include the nonce."
                 ),
                 recipient_npub=candidate_npub,
             )
+            challenge.nonce = result.get("nonce", "")
         except Exception as exc:  # noqa: BLE001
             _onboarding.complete()
             return {"success": False, "error": f"Failed to send DM challenge: {exc}"}
@@ -1865,7 +1675,7 @@ def register_authority_tools(
             "phase": challenge.phase,
             "instructions": (
                 f"A Nostr DM challenge has been sent to {candidate_npub[:16]}... "
-                "Reply with: claim = @@@yes@@@ and the dpop_token slug. "
+                "Reply with: claim = @@@yes@@@ and the nonce. "
                 "Then call confirm_authority_claim(candidate_npub)."
             ),
             "message": result.get("message", "DM sent."),
@@ -1894,8 +1704,10 @@ def register_authority_tools(
             return {"success": False, "error": f"Onboarding is in '{challenge.phase}' phase, not 'claim'."}
 
         try:
-            exchange = _get_nostr_exchange()
-            await exchange.receive(sender_npub=candidate_npub, service="authority_claim")
+            exchange = await _nostr_exchange()
+            await exchange.receive(
+                sender_npub=candidate_npub, service="authority_claim", nonce=challenge.nonce,
+            )
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"No valid claim DM received: {exc}"}
 
@@ -1911,16 +1723,16 @@ def register_authority_tools(
             return {"success": False, "error": str(exc)}
 
         try:
-            exchange2 = _get_nostr_exchange()
-            await exchange2.open_channel(
+            opened = await exchange.open_channel(
                 "authority_approval",
                 greeting=(
                     f"{candidate_npub} requests to curate the Authority at "
                     f"npub {signer.npub[:16]}... "
-                    "Reply with: approval = @@@yes@@@ and the dpop_token slug."
+                    "Reply with: approval = @@@yes@@@ and the nonce."
                 ),
                 recipient_npub=parent_npub,
             )
+            challenge.nonce = opened.get("nonce", "")
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Failed to send approval request to parent Authority: {exc}"}
 
@@ -1957,8 +1769,10 @@ def register_authority_tools(
             return {"success": False, "error": "Parent Authority npub not set."}
 
         try:
-            exchange = _get_nostr_exchange()
-            await exchange.receive(sender_npub=parent_npub, service="authority_approval")
+            exchange = await _nostr_exchange()
+            await exchange.receive(
+                sender_npub=parent_npub, service="authority_approval", nonce=challenge.nonce,
+            )
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"No approval received from parent Authority: {exc}"}
 

@@ -1,0 +1,2 @@
+- **Breaking:** tools no longer take `dpop_token` or `authority_proof`. Identity rides on the connection only: a request signed with the npub's key (NIP-98), or an OAuth holder connection that holds the npub. `require_caller_proof(npub)` and `prove_caller(npub)` take the npub alone; dynamic tool runners are `(params, npub)`. Removed: `params.DpopToken`, `PatronSigner`, `create_proof`, `verify_proof`, `proof_validation_error`, `argument_proofs_seen`.
+- **Breaking:** `register_operator` is gone; an operator is adopted through `request_adoption` and the owner's approval.

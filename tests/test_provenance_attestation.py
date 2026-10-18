@@ -15,8 +15,8 @@ from pynostr.key import PrivateKey
 
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.identity_proof import (
-    create_ownership_proof,
     create_provenance_attestation,
+    sign_request,
     verify_provenance_attestation,
 )
 from tollbooth.nostr_credentials import NostrCredentialExchange
@@ -340,12 +340,15 @@ def test_malformed_json_rejected(operator):
     assert res["reason"] == "malformed"
 
 
-def test_ownership_proof_is_not_an_attestation(operator):
-    """A caller's kind-27235 ownership proof must never pass as an attestation."""
+def test_signed_request_is_not_an_attestation(operator):
+    """A caller's kind-27235 signed request must never pass as an attestation."""
+    import base64
+
     op_pk, _, _ = operator
-    ownership = create_ownership_proof(op_pk.nsec)
+    header = sign_request(op_pk.nsec, method="POST", url="https://x.example/mcp", body=b"{}")
+    signed = base64.b64decode(header.removeprefix("Nostr ")).decode()
     res = verify_provenance_attestation(
-        ownership,
+        signed,
         expected_sender_pubkey_hex="x",
         expected_subject_npub="y",
         expected_challenge="z",
@@ -398,7 +401,7 @@ async def test_self_dm_body_attributes_to_registered_npub_and_verifies():
         att,
         expected_sender_pubkey_hex=ephemeral_hex,
         expected_subject_npub=op.public_key.bech32(),
-        expected_challenge=result["dpop_token"],
+        expected_challenge=result["nonce"],
     )
     assert res["valid"] is True
     assert res["operator_pubkey_hex"] == op.public_key.hex()
@@ -431,6 +434,6 @@ async def test_patron_dm_attestation_binds_operator_own_key():
         att,
         expected_sender_pubkey_hex=op.public_key.hex(),
         expected_subject_npub=patron.public_key.bech32(),
-        expected_challenge=result["dpop_token"],
+        expected_challenge=result["nonce"],
     )
     assert res["valid"] is True

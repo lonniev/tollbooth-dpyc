@@ -48,7 +48,7 @@ async def test_restore_forces_a_full_prepare_and_reports_every_step():
     steps = [{"step": "ledger", "ok": True}, {"step": "credentials", "ok": True}, {"step": "crumb", "ok": True}]
     prepare = AsyncMock(return_value=steps)
     with patch("tollbooth.vaults.schema.prepare_schema", prepare):
-        r = await _tools(rt)["restore_neon_schema"](dpop_token="ok")
+        r = await _tools(rt)["restore_neon_schema"]()
     prepare.assert_awaited_once_with(vault, force=True)
     assert r["success"] is True and r["steps"] == steps
 
@@ -59,7 +59,7 @@ async def test_restore_reports_the_failing_step_inline():
     steps = [{"step": "ledger", "ok": True},
              {"step": "credentials", "ok": False, "error_type": "NeonQueryError", "error": "grants missing"}]
     with patch("tollbooth.vaults.schema.prepare_schema", AsyncMock(side_effect=SchemaPrepError(steps))):
-        r = await _tools(rt)["restore_neon_schema"](dpop_token="ok")
+        r = await _tools(rt)["restore_neon_schema"]()
     assert r["success"] is False
     assert r["steps"][-1]["step"] == "credentials" and "grants missing" in r["steps"][-1]["error"]
 
@@ -69,6 +69,6 @@ async def test_restore_requires_the_operators_proof():
     rt, _ = _runtime()
     denial = {"success": False, "error_code": "proof_required", "error": "proof required"}
     rt.require_caller_proof = AsyncMock(return_value=denial)
-    r = await _tools(rt)["restore_neon_schema"](dpop_token="")
+    r = await _tools(rt)["restore_neon_schema"]()
     assert r == denial
-    rt.require_caller_proof.assert_awaited_once_with(rt.operator_npub(), "", "restore_neon_schema")
+    rt.require_caller_proof.assert_awaited_once_with(rt.operator_npub())

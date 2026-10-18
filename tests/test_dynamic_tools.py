@@ -126,7 +126,7 @@ SCHEMA = {
 
 class TestBuildDynamicHandler:
     def test_signature_and_annotations(self) -> None:
-        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+        async def runner(params: dict, npub: str) -> dict:
             return {}
 
         h = build_dynamic_handler("find_airline_flights", SCHEMA, runner, intent="Find flights.")
@@ -134,8 +134,8 @@ class TestBuildDynamicHandler:
         assert h.__doc__ == "Find flights."
 
         params = inspect.signature(h).parameters
-        assert list(params) == ["from_city", "to_city", "max_stops", "npub", "dpop_token"]
-        # required params have no default; optional + npub/dpop_token do.
+        assert list(params) == ["from_city", "to_city", "max_stops", "npub"]
+        # required params have no default; optional + npub do.
         assert params["from_city"].default is inspect.Parameter.empty
         assert params["max_stops"].default is None
         assert params["npub"].default == ""
@@ -148,23 +148,22 @@ class TestBuildDynamicHandler:
     async def test_delegates_and_drops_omitted_optionals(self) -> None:
         captured: dict[str, Any] = {}
 
-        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+        async def runner(params: dict, npub: str) -> dict:
             captured["params"] = params
             captured["npub"] = npub
-            captured["dpop_token"] = dpop_token
             return {"ok": True}
 
         h = build_dynamic_handler("find_airline_flights", SCHEMA, runner)
         # max_stops omitted → must NOT appear as None in the runner's params.
-        out = await h(from_city="JFK", to_city="LHR", max_stops=None, npub="np", dpop_token="pf")
+        out = await h(from_city="JFK", to_city="LHR", max_stops=None, npub="np")
         assert out == {"ok": True}
         assert captured["params"] == {"from_city": "JFK", "to_city": "LHR"}
-        assert captured["npub"] == "np" and captured["dpop_token"] == "pf"
+        assert captured["npub"] == "np"
 
     async def test_passes_supplied_optionals(self) -> None:
         captured: dict[str, Any] = {}
 
-        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+        async def runner(params: dict, npub: str) -> dict:
             captured["params"] = params
             return {}
 
@@ -183,7 +182,7 @@ class TestBuildDynamicHandler:
         """
         captured: dict[str, Any] = {}
 
-        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+        async def runner(params: dict, npub: str) -> dict:
             captured["params"] = params
             return {}
 
@@ -203,7 +202,7 @@ class TestBuildDynamicHandler:
         """A caller reading tools/list must see the value it will actually get,
         not a null that the declared type does not even admit."""
 
-        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+        async def runner(params: dict, npub: str) -> dict:
             return {}
 
         schema = {"since_ms": {"type": "int", "required": False, "default": 0}}
@@ -214,7 +213,7 @@ class TestBuildDynamicHandler:
         """Absence stays expressible — some backends branch on it."""
         captured: dict[str, Any] = {}
 
-        async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+        async def runner(params: dict, npub: str) -> dict:
             captured["params"] = params
             return {}
 
@@ -255,7 +254,7 @@ def _wired_runtime(slug: str = "cypher") -> tuple[OperatorRuntime, _FakeMCP]:
     return rt, fake
 
 
-async def _runner(params: dict, npub: str, dpop_token: str) -> dict:
+async def _runner(params: dict, npub: str) -> dict:
     return {"params": params}
 
 
@@ -392,7 +391,7 @@ def test_fastmcp_generates_typed_schema() -> None:
 
     from fastmcp.tools import Tool
 
-    async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+    async def runner(params: dict, npub: str) -> dict:
         return {}
 
     h = build_dynamic_handler("find_airline_flights", SCHEMA, runner)
@@ -464,10 +463,10 @@ async def test_the_named_tool_path_still_fills_defaults_after_the_extraction() -
     """Behaviour-preserving: build_dynamic_handler delegates now, same result."""
     seen: dict[str, Any] = {}
 
-    async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+    async def runner(params: dict, npub: str) -> dict:
         seen.update(params)
         return {"ok": True}
 
     handler = build_dynamic_handler("t", _AS_AT, runner)
-    await handler(name="cap", npub="npub1", dpop_token="tok")
+    await handler(name="cap", npub="npub1")
     assert seen == {"name": "cap", "as_at_ms": 0}

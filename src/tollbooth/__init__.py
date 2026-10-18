@@ -91,17 +91,15 @@ except ImportError:
 
 try:
     from tollbooth.identity_proof import (
-        OWNERSHIP_SENTINEL,
         PROOF_EVENT_KIND,
-        create_proof,
-        verify_proof,
+        sign_request,
+        verify_request_signature,
     )
     from tollbooth.proven_npub import ProofGrantRevocations
 except ImportError:
-    verify_proof = None  # type: ignore[assignment,misc]
-    create_proof = None  # type: ignore[assignment,misc]
+    sign_request = None  # type: ignore[assignment,misc]
+    verify_request_signature = None  # type: ignore[assignment,misc]
     PROOF_EVENT_KIND = None  # type: ignore[assignment,misc]
-    OWNERSHIP_SENTINEL = None  # type: ignore[assignment,misc]
     ProofGrantRevocations = None  # type: ignore[assignment,misc]
 
 try:
@@ -266,7 +264,6 @@ __all__ = [
     "NOSTR_CERT_KIND",
     "OPERATOR_BASE_CATALOG",
     "OPERATOR_OBSOLETE_PRACTICES",
-    "OWNERSHIP_SENTINEL",
     "PROOF_EVENT_KIND",
     "PROOF_GRANT_LABEL",
     "PROOF_GRANT_TAG",
@@ -376,7 +373,6 @@ __all__ = [
     "classify_upstream_payment",
     "courier_health",
     "courier_ping",
-    "create_proof",
     # Shortlinks
     "create_shortlink",
     "decode_credential_card",
@@ -396,6 +392,7 @@ __all__ = [
     # Identity Credential
     "sign_identity_credential",
     "sign_proof_grant",
+    "sign_request",
     "situation_response_from_row",
     "upstream_payment_situation",
     "validate_operator_tools",
@@ -404,9 +401,8 @@ __all__ = [
     "verify_credential_chain",
     "verify_identity_credential",
     "verify_nostr_certificate",
-    # Operator Proof & Npub Ownership
-    "verify_proof",
     "verify_proof_grant",
+    "verify_request_signature",
     "web_fetch_tool",
     "web_search_tool",
     "x402_wallet_template",

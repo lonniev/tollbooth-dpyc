@@ -31,7 +31,7 @@ Usage::
     # In a tool function:
     npub = runtime.resolve_npub(npub)
     cache = await runtime.ledger_cache()
-    result = await runtime.debit_or_deny(my_tool_uuid, npub, dpop_token=dpop_token)
+    result = await runtime.debit_or_deny(my_tool_uuid, npub)
     if isinstance(result, dict):
         return result  # denial
     cost = result  # int — the computed cost
@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 from datetime import UTC
 
 from tollbooth.credential_meta import CredentialFieldDetail
-from tollbooth.identity_proof import require_proof
+from tollbooth.identity_proof import require_held_grant
 from tollbooth.oauth_situation import OAuthSituation
 from tollbooth.tool_identity import capability_uuid
 from tollbooth.vault_backend import LedgerUnavailableError, LedgerWriteError
@@ -276,7 +276,6 @@ class OperatorRuntime:
         self._holder_store: Any | None = None  # lazy HolderStore
         # Proofs carried in a tool argument since this process started; the
         # argument goes once every client proves itself on the connection.
-        self.argument_proofs_seen = 0
         # One refresh at a time per (service, patron). A rotating single-use
         # refresh token cannot survive being spent twice at once — see
         # _oauth_refresh_lock.
@@ -797,16 +796,11 @@ class OperatorRuntime:
                 return self.mcp_name_for(tool_id)
         return self.mcp_name_for(capability_uuid(capability))
 
-    async def require_caller_proof(
-        self,
-        npub: str,
-        dpop_token: str,
-        capability: str,
-    ) -> dict[str, Any] | None:
+    async def require_caller_proof(self, npub: str) -> dict[str, Any] | None:
         """Canonical caller-identity gate for free / bootstrap standard tools.
 
-        Wraps ``identity_proof.require_proof`` with this runtime's proven-npub
-        cache and the runtime name for ``capability``. Paid tools are gated by
+        ``prove_caller``, plus — when the connection does not hold ``npub`` —
+        what else this operator needs from a patron. Paid tools are gated by
         ``debit_or_deny``; this helper is for the free tools that still need
         to assert "the caller is who they claim to be" (check_balance,
         purchase_credits, account_statement, etc.).
@@ -815,7 +809,7 @@ class OperatorRuntime:
         dict to return verbatim.
         """
         from tollbooth.constants import ErrorCode
-        err = await self.prove_caller(npub, dpop_token, self.runtime_name(capability))
+        err = await self.prove_caller(npub)
         # When the caller has not yet proven ownership, tell them — right in
         # the denial — whether this operator ALSO needs patron credentials or
         # OAuth, so they don't have to authenticate just to discover the
@@ -942,31 +936,27 @@ class OperatorRuntime:
             self._holder_store = HolderStore(await self.vault())
         return self._holder_store
 
-    async def prove_caller(self, npub: str, dpop_token: str, name: str) -> dict[str, Any] | None:
+    async def prove_caller(self, npub: str) -> dict[str, Any] | None:
         """The one proof gate: may the request in flight act as ``npub``?
 
-        The connection answers first. A request signed by ``npub``'s own key
-        needs nothing more. A holder is proven by the grant its wallet holds
-        for ``npub`` — checked exactly as a grant passed inline. A proof in the
-        ``dpop_token`` argument is still honoured while clients move to the
-        connection; ``argument_proofs_seen`` counts them so the last can be
-        seen to go.
+        Identity rides on the connection. A request signed by ``npub``'s own
+        key needs nothing more. A holder is proven by the grant its wallet
+        holds for ``npub``, which this runtime signed when a DM proved it.
         """
         from tollbooth.holder_auth import signed_npub
 
         signer = signed_npub()
         if signer is not None and _same_npub(signer, npub):
             return None
-        if dpop_token:
-            self.argument_proofs_seen += 1
-        elif self.holder_auth_enabled:
+        envelope = ""
+        if self.holder_auth_enabled:
             try:
-                dpop_token = await self._held_envelope(npub)
+                envelope = await self._held_envelope(npub)
             except Exception as exc:  # noqa: BLE001 — unknown is not "not held"
                 logger.warning("holder wallet unavailable: %s", type(exc).__name__)
                 return _holder_store_unavailable()
-        return await require_proof(
-            npub, dpop_token, name,
+        return await require_held_grant(
+            npub, envelope,
             revocations=await self.proof_grant_revocations(),
             operator_hex=self.operator_pubkey_hex(),
         )
@@ -1020,7 +1010,6 @@ class OperatorRuntime:
         tool_id: str,
         npub: str,
         *,
-        dpop_token: str = "",
         tool_kwargs: dict[str, Any] | None = None,
     ) -> dict[str, Any] | int:
         """Gate a tool call: identity → proof → access → pricing → constraints → billing.
@@ -1028,8 +1017,8 @@ class OperatorRuntime:
         Returns the computed cost (int, 0 for free) to proceed.
         Returns an error dict to deny.
 
-        Every tool that takes an npub requires a proof (Schnorr-signed
-        kind-27235 event proving npub ownership). No proof, no service.
+        Every tool that takes an npub requires the connection to prove it
+        (``prove_caller``). No proof, no service.
         """
         from tollbooth.constants import ErrorCode
 
@@ -1047,12 +1036,9 @@ class OperatorRuntime:
         category = identity.category           # set in code, never by the pricing model
 
         # ── Proof verification ────────────────────────────────
-        # Single gate for both tactics (proof grant and inline Schnorr).
-        # Restricted tools verify against the operator's npub — the proof
-        # must be signed by the operator, regardless of which caller npub
-        # is acting. The access check below enforces caller == operator.
-        # The proof's u-tag matches the runtime name (`name`) — capability
-        # is a Python-function-identifier seed that never crosses the wire.
+        # Restricted tools verify against the operator's npub: the connection
+        # must prove the operator, whichever caller npub is named. The access
+        # check below enforces caller == operator.
         if npub:
             try:
                 resolved = resolve_npub(npub)
@@ -1079,7 +1065,7 @@ class OperatorRuntime:
                 }
 
             proof_npub = self.operator_npub() if category == "restricted" else resolved
-            if err := await self.prove_caller(proof_npub, dpop_token, name):
+            if err := await self.prove_caller(proof_npub):
                 return err
 
         # ── Access: operator-restricted ───────────────────────
@@ -1134,7 +1120,7 @@ class OperatorRuntime:
         consumed_coupon_ids: list[str] = []
         if npub and category != "free":
             effective_cost, consumed_coupon_ids, denial = await self._evaluate_constraints(
-                tool_id, name, npub, cost, dpop_token,
+                tool_id, name, npub, cost,
             )
             if denial is not None:
                 return denial
@@ -1208,7 +1194,7 @@ class OperatorRuntime:
                     "Service is warming up — the pricing model could not be "
                     "loaded from the database yet. This typically resolves shortly "
                     "after a cold start. Retry your request. "
-                    "Free tools (check_balance, check_payment, dpop_token exchange) "
+                    "Free tools (check_balance, check_payment, the npub-proof DM) "
                     "remain available during warm-up."
                 ),
                 "next_steps": ["Retry the same call shortly"],
@@ -1320,7 +1306,6 @@ class OperatorRuntime:
         name: str,
         npub: str,
         cost: int,
-        dpop_token: str,
     ) -> tuple[int, list[str], dict[str, Any] | None]:
         """Constraint stage of ``debit_or_deny``.
 
@@ -1348,7 +1333,6 @@ class OperatorRuntime:
                     ledger=ledger,
                     npub=npub,
                     global_demand=demand,
-                    dpop_token=dpop_token,
                     coupon_redemptions=coupon_map,
                 )
                 if denial is not None:
@@ -2730,39 +2714,6 @@ class OperatorRuntime:
             }
         return None
 
-    def proof_validation_error(
-        self, dpop_token: str, *, param: str = "dpop_token",
-    ) -> dict[str, Any] | None:
-        """Validate a dpop_token parameter for the npub-proof flow.
-        Returns ``None`` if non-empty, or a structured error dict if
-        absent.
-
-        This is the "param missing" check only — actual cache lookup
-        and Schnorr verification happen in ``debit_or_deny`` and
-        produce the more specific ``PROOF_REFRESH_NEEDED`` /
-        ``PROOF_INVALID`` codes when needed.
-        """
-        from tollbooth.constants import ErrorCode
-
-        if not dpop_token:
-            slug = self._slug or ""
-            prefix = f"{slug}_" if slug else ""
-            return {
-                "success": False,
-                "error_code": ErrorCode.PROOF_MISSING,
-                "error": (
-                    f"{param} is required. Establish npub ownership first "
-                    "via the proof exchange."
-                ),
-                "next_steps": [
-                    f"{prefix}request_npub_proof(patron_npub=<patron_npub>)",
-                    "Sign the DM challenge from your Nostr client",
-                    f"{prefix}receive_npub_proof(patron_npub=<patron_npub>) — remember the returned dpop_token",
-                    "Pass dpop_token as the proof parameter on every subsequent paid tool call",
-                ],
-            }
-        return None
-
     # ------------------------------------------------------------------
     # OAuth situation → structured patron-facing error
     # ------------------------------------------------------------------
@@ -3858,13 +3809,13 @@ class OperatorRuntime:
             catch_errors: If True (default), catch exceptions from the body
                 and return ``{"success": False, "error": ...}`` after rollback.
 
-        The decorated function **must** accept ``npub`` and ``dpop_token`` as keyword arguments.
+        The decorated function **must** accept ``npub`` as a keyword argument.
 
         Example::
 
             @tool
             @runtime.paid_tool(TOOL_REGISTRY["get_weather"].tool_id)
-            async def get_weather(lat: float, lon: float, npub: str = "", dpop_token: str = ""):
+            async def get_weather(lat: float, lon: float, npub: str = ""):
                 return await weather.get(lat, lon)
         """
         rt = self
@@ -3876,16 +3827,14 @@ class OperatorRuntime:
                 bound = sig.bind(*args, **kwargs)
                 bound.apply_defaults()
 
-                # Extract npub and dpop_token from kwargs directly —
-                # inspect.signature().bind() can lose optional kwargs
-                # when FastMCP passes arguments through Pydantic models.
+                # Extract npub from kwargs directly — inspect.signature().bind()
+                # can lose optional kwargs when FastMCP passes arguments
+                # through Pydantic models.
                 npub = kwargs.get("npub", "") or bound.arguments.get("npub", "")
-                dpop_token = kwargs.get("dpop_token", "") or bound.arguments.get("dpop_token", "")
 
                 call_kwargs = dict(bound.arguments)
                 result_or_cost = await rt.debit_or_deny(
                     tool_id, npub,
-                    dpop_token=dpop_token,
                     tool_kwargs=call_kwargs,
                 )
                 if isinstance(result_or_cost, dict):
@@ -3995,8 +3944,7 @@ class OperatorRuntime:
         """Synthesize and register a typed MCP tool at runtime.
 
         The tool exposes one flat, typed param per ``param_schema`` entry
-        (plus ``npub`` / ``proof``) and delegates to
-        ``runner(params, npub, dpop_token)``. It is inserted into the tool
+        (plus ``npub``) and delegates to ``runner(params, npub)``. It is inserted into the tool
         registry so pricing, ``check_price``, ``debit_or_deny``, and
         ``list_canonical_identities`` all see it — but it carries **no**
         pricing hint, so it stays unpriced until the operator prices it in
@@ -4004,8 +3952,7 @@ class OperatorRuntime:
         lifecycle message). The wrapped body still gets debit / refund-on-
         raise from :meth:`paid_tool`.
 
-        ``runner`` is a coroutine ``async (params: dict, npub: str, dpop_token:
-        str) -> dict``. ``name`` must match ``^[a-z][a-z0-9_]*$`` (it becomes
+        ``runner`` is a coroutine ``async (params: dict, npub: str) -> dict``. ``name`` must match ``^[a-z][a-z0-9_]*$`` (it becomes
         the ``{slug}_{name}`` wire name). ``uuid`` defaults to a deterministic
         ``capability_uuid("dyn:" + name)`` so the same name always maps to the
         same pricing identity. ``title`` and ``behavior`` describe the tool to
@@ -4303,7 +4250,7 @@ def register_standard_tools(
     # -- Credit tools --------------------------------------------------
 
     @tool
-    async def check_balance(npub: str, dpop_token: str = "") -> dict[str, Any]:
+    async def check_balance(npub: str) -> dict[str, Any]:
         """Check a patron's credit balance at this operator.
 
         This is the patron's spending balance — credits purchased via
@@ -4316,11 +4263,8 @@ def register_standard_tools(
 
         Args:
             npub: The Nostr public key (npub1...) whose balance to check.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
-        if err := await rt.require_caller_proof(npub, dpop_token, "check_balance"):
+        if err := await rt.require_caller_proof(npub):
             return err
         try:
             npub = resolve_npub(npub)
@@ -4331,7 +4275,7 @@ def register_standard_tools(
         return await credits.check_balance_tool(cache, npub)
 
     @tool
-    async def purchase_credits(npub: str, dpop_token: str = "", amount_sats: int = 1000) -> dict[str, Any]:
+    async def purchase_credits(npub: str, amount_sats: int = 1000) -> dict[str, Any]:
         """Buy credits via Bitcoin Lightning.
 
         Creates a Lightning invoice. Pay it with any Lightning wallet,
@@ -4342,12 +4286,9 @@ def register_standard_tools(
 
         Args:
             npub: The Nostr public key (npub1...) the credits will fund.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
             amount_sats: Satoshis to purchase (default 1000).
         """
-        if err := await rt.require_caller_proof(npub, dpop_token, "purchase_credits"):
+        if err := await rt.require_caller_proof(npub):
             return err
         try:
             npub = resolve_npub(npub)
@@ -4434,7 +4375,7 @@ def register_standard_tools(
             return {"success": False, "error": str(e)}
 
     @tool
-    async def check_payment(invoice_id: str, npub: str, dpop_token: str = "") -> dict[str, Any]:
+    async def check_payment(invoice_id: str, npub: str) -> dict[str, Any]:
         """Check the payment status of a Lightning invoice.
 
         Call after paying the invoice from purchase_credits.
@@ -4445,11 +4386,8 @@ def register_standard_tools(
         Args:
             invoice_id: The invoice ID returned by purchase_credits.
             npub: The Nostr public key (npub1...) that purchased the invoice.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
-        if err := await rt.require_caller_proof(npub, dpop_token, "check_payment"):
+        if err := await rt.require_caller_proof(npub):
             return err
         try:
             npub = resolve_npub(npub)
@@ -4486,7 +4424,7 @@ def register_standard_tools(
         return result
 
     @tool
-    async def restore_credits(invoice_id: str, patron_npub: str, dpop_token: str = "") -> dict[str, Any]:
+    async def restore_credits(invoice_id: str, patron_npub: str) -> dict[str, Any]:
         """Credit a patron's ledger from a BTCPay-settled invoice.
 
         **RESTRICTED to the operator** — the operator owns the books and is
@@ -4505,17 +4443,8 @@ def register_standard_tools(
         Args:
             invoice_id: The BTCPay invoice ID to verify and credit.
             patron_npub: The patron's npub whose ledger receives the grant.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
-        # Accept both inline kind-27235 proofs and proof grants.
-        # The wheel's require_caller_proof checks the cache first (filled by
-        # the request/receive_npub_proof handshake) and falls through to
-        # inline Schnorr verification.
-        err = await rt.require_caller_proof(
-            rt.operator_npub(), dpop_token, "restore_credits",
-        )
+        err = await rt.require_caller_proof(rt.operator_npub())
         if err:
             return err
         try:
@@ -4532,7 +4461,7 @@ def register_standard_tools(
         )
 
     @tool
-    async def account_statement(npub: str, dpop_token: str = "", days: int = 30) -> dict[str, Any]:
+    async def account_statement(npub: str, days: int = 30) -> dict[str, Any]:
         """Generate a patron's account statement at this operator.
 
         Returns the patron's purchase history, active credit tranches,
@@ -4545,12 +4474,9 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
             days: Number of days of daily usage history to include (default 30).
         """
-        if err := await rt.require_caller_proof(npub, dpop_token, "account_statement"):
+        if err := await rt.require_caller_proof(npub):
             return err
         try:
             npub = resolve_npub(npub)
@@ -4561,7 +4487,7 @@ def register_standard_tools(
         return await credits.account_statement_tool(cache, npub, days=days)
 
     @tool
-    async def account_statement_infographic(npub: str, dpop_token: str = "", days: int = 30) -> dict[str, Any]:
+    async def account_statement_infographic(npub: str, days: int = 30) -> dict[str, Any]:
         """Generate a visual SVG infographic of your account statement.
 
         Returns the same data as account_statement, rendered as a dark-themed
@@ -4571,16 +4497,13 @@ def register_standard_tools(
 
         Args:
             npub: The Nostr public key (npub1...) whose statement to render.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
             days: Number of days of daily usage history to include (default 30).
         """
         try:
             npub = resolve_npub(npub)
         except ValueError as e:
             return {"success": False, "error": str(e)}
-        result_or_cost = await rt.debit_or_deny(capability_uuid("account_statement_infographic"), npub, dpop_token=dpop_token)
+        result_or_cost = await rt.debit_or_deny(capability_uuid("account_statement_infographic"), npub)
         if isinstance(result_or_cost, dict):
             return result_or_cost
         try:
@@ -4608,7 +4531,6 @@ def register_standard_tools(
         title: str,
         body: str,
         tool_name: str = "",
-        dpop_token: str = "",
     ) -> dict[str, Any]:
         """File a field report about this service as a GitHub issue on the operator's repo.
 
@@ -4624,9 +4546,6 @@ def register_standard_tools(
 
         Args:
             npub: Your Nostr public key (npub1...); the report's author of record.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
             title: One-line summary of the problem.
             body: The details — which tool, what was wrong, what you expected.
             tool_name: Optional: the specific tool the report is about
@@ -4637,7 +4556,7 @@ def register_standard_tools(
         except ValueError as e:
             return {"success": False, "error": str(e)}
         cost = await rt.debit_or_deny(
-            capability_uuid("report_issue"), npub, dpop_token=dpop_token,
+            capability_uuid("report_issue"), npub,
         )
         if isinstance(cost, dict):
             return cost
@@ -4714,7 +4633,6 @@ def register_standard_tools(
         status["patron_auth"] = rt.patron_auth_block()
         # How many calls since this process started still carried their proof
         # in a tool argument rather than on the connection.
-        status["argument_proofs_seen"] = rt.argument_proofs_seen
         # Durable long-runner diagnostics: the non-secret key_id names the
         # operator's Prefect Secret block (dpyc-closure-key-<key_id>), and
         # whether a detached executor is currently installed. Helps an operator
@@ -4760,8 +4678,8 @@ def register_standard_tools(
                 "holder": False,
                 "identities": [],
                 "message": (
-                    "This connection holds no identities; pass dpop_token on "
-                    "each call."
+                    "This connection is no holder: it proves an npub only by "
+                    "signing each request with that npub's key."
                 ),
             }
         try:
@@ -4837,7 +4755,7 @@ def register_standard_tools(
         return await rt.onboarding_status()
 
     @tool
-    async def get_patron_onboarding_status(patron_npub: str, dpop_token: str = "") -> dict[str, Any]:
+    async def get_patron_onboarding_status(patron_npub: str) -> dict[str, Any]:
         """Report a patron's credential readiness for this operator.
 
         For set-once services (eXcalibur, TheBrain), shows which patron
@@ -4848,11 +4766,8 @@ def register_standard_tools(
 
         Args:
             patron_npub: The patron's Nostr public key (npub1...).
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
-        if err := await rt.require_caller_proof(patron_npub, dpop_token, "get_patron_onboarding_status"):
+        if err := await rt.require_caller_proof(patron_npub):
             return err
         return await rt.patron_onboarding_status(patron_npub)
 
@@ -5070,7 +4985,7 @@ def register_standard_tools(
     async def receive_credentials(
         sender_npub: str = "",
         service: str = "",
-        dpop_token: str = "",
+        nonce: str = "",
         credential_card: str = "",
     ) -> dict[str, Any]:
         """Pick up credentials from the Secure Courier.
@@ -5080,7 +4995,7 @@ def register_standard_tools(
 
         **Call this only after the user confirms they have replied.**
         Deterministic, one-shot retrieval: name the response you want with
-        ``(sender_npub, service, dpop_token)`` and the tool drains ONLY the
+        ``(sender_npub, service, nonce)`` and the tool drains ONLY the
         rendezvous relay that channel was pinned to. Every popped DM with the
         wrong session phrase is deleted and its sender is NACK'd; the first DM
         with the matching phrase is accepted (ACK'd) and the scan stops. If
@@ -5088,7 +5003,7 @@ def register_standard_tools(
         returned. Do NOT poll, loop, or retry.
 
         If a credential_card (ncred1...) is provided, it is redeemed directly
-        without any relay access (dpop_token not required for that path). On
+        without any relay access (nonce not required for that path). On
         success, the payment processor client is reinitialized from the new
         credentials — no server restart needed.
 
@@ -5096,16 +5011,15 @@ def register_standard_tools(
             sender_npub: Required. The npub that sent the credentials.
             service: Required. The credential service name (must match
                 the service used in request_credential_channel).
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
+            nonce: The session phrase request_credential_channel returned (and
+                the welcome DM shows); it names the reply to collect.
             credential_card: Optional. An ncred1... card to redeem directly
-                (bypasses the relay drain; dpop_token not needed).
+                (bypasses the relay drain; nonce not needed).
         Free.
         """
         from tollbooth.tools.courier import receive_credentials_tool
         return await receive_credentials_tool(
-            rt, sender_npub, service, dpop_token, credential_card,
+            rt, sender_npub, service, nonce, credential_card,
             service_name=service_name, slug=slug,
         )
 
@@ -5113,7 +5027,6 @@ def register_standard_tools(
     async def forget_credentials(
         service: str,
         npub: str,
-        dpop_token: str = "",
     ) -> dict[str, Any]:
         """Delete vaulted credentials for a specific service and npub.
 
@@ -5124,13 +5037,10 @@ def register_standard_tools(
         Args:
             service: The credential service to forget.
             npub: The Nostr public key (npub1...) whose credentials to forget.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         Free.
         """
         from tollbooth.tools.courier import forget_credentials_tool
-        return await forget_credentials_tool(rt, service, npub, dpop_token)
+        return await forget_credentials_tool(rt, service, npub)
 
     # -- Patron credential tools (only if patron template is set) ------
 
@@ -5154,29 +5064,29 @@ def register_standard_tools(
         @tool
         async def receive_patron_credentials(
             sender_npub: str = "",
-            dpop_token: str = "",
+            nonce: str = "",
             credential_card: str = "",
         ) -> dict[str, Any]:
             """Pick up patron credentials from the Secure Courier.
 
             Deterministic, one-shot retrieval: name the response with
-            ``(sender_npub, dpop_token)`` and the tool drains ONLY the pinned
+            ``(sender_npub, nonce)`` and the tool drains ONLY the pinned
             rendezvous relay for that channel, stopping at the matching DM.
             Provide an ncred1... credential_card to redeem directly instead
-            (dpop_token not required for that path). Do NOT poll or retry.
+            (nonce not required for that path). Do NOT poll or retry.
             Free.
 
             Args:
                 sender_npub: The patron's Nostr public key (npub1...) that sent
                     the credential reply.
-                dpop_token: The session phrase from the welcome DM; it names
+                nonce: The session phrase from the welcome DM; it names
                     the reply to collect.
                 credential_card: An ncred1... credential card to redeem instead
                     of a DM reply.
             """
             from tollbooth.tools.courier import receive_patron_credentials_tool
             return await receive_patron_credentials_tool(
-                rt, sender_npub, dpop_token, credential_card,
+                rt, sender_npub, nonce, credential_card,
             )
 
     # Prune registry entries for conditionally-skipped tools so they
@@ -5189,7 +5099,7 @@ def register_standard_tools(
 
     @tool
     async def update_patron_credential(
-        npub: str, field: str, value: str, dpop_token: str = "",
+        npub: str, field: str, value: str,
     ) -> dict[str, Any]:
         """Add or update a single patron credential field.
 
@@ -5201,13 +5111,10 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
             field: The credential field name to set.
             value: The value to store.
         """
-        if err := await rt.require_caller_proof(npub, dpop_token, "update_patron_credential"):
+        if err := await rt.require_caller_proof(npub):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -5226,7 +5133,7 @@ def register_standard_tools(
 
     @tool
     async def update_operator_credential(
-        field: str, value: str, dpop_token: str = "",
+        field: str, value: str,
     ) -> dict[str, Any]:
         """Add or update a single operator secret field.
 
@@ -5237,23 +5144,17 @@ def register_standard_tools(
         change, where any field omitted from a courier reply is destroyed.
 
         The value is never echoed back. RESTRICTED to the operator —
-        requires the operator's proof (a kind-27235 event or a proof grant);
-        patron proofs are rejected.
+        the connection must prove the operator's npub.
 
         Args:
             field: The operator credential field to set. Must be declared
                 in the operator's credential template.
             value: The value to store.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
         npub = rt.operator_npub()
         if not npub:
             return {"success": False, "error": "No operator identity configured."}
-        if err := await rt.require_caller_proof(
-            npub, dpop_token, "update_operator_credential",
-        ):
+        if err := await rt.require_caller_proof(npub):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -5283,7 +5184,7 @@ def register_standard_tools(
 
     @tool
     async def delete_patron_credential(
-        npub: str, field: str, dpop_token: str = "",
+        npub: str, field: str,
     ) -> dict[str, Any]:
         """Remove a single patron credential field.
 
@@ -5293,12 +5194,9 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
             field: The credential field name to remove.
         """
-        if err := await rt.require_caller_proof(npub, dpop_token, "delete_patron_credential"):
+        if err := await rt.require_caller_proof(npub):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -5315,7 +5213,7 @@ def register_standard_tools(
 
     @tool
     async def delete_operator_credential(
-        field: str, dpop_token: str = "",
+        field: str,
     ) -> dict[str, Any]:
         """Remove a single operator secret field.
 
@@ -5329,22 +5227,17 @@ def register_standard_tools(
         Stored-but-untemplated fields are first-class: the delete is keyed on
         what is vaulted, not on what the current template declares. Idempotent
         — already-absent fields report ``removed: false`` without rewriting
-        the vault. RESTRICTED to the operator — requires the operator's proof
-        (a kind-27235 event or a proof grant); patron proofs are rejected.
+        the vault. RESTRICTED to the operator — the connection must
+        prove the operator's npub.
         A deletion is as destructive as a write.
 
         Args:
             field: The operator credential field to remove (templated or not).
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
         npub = rt.operator_npub()
         if not npub:
             return {"success": False, "error": "No operator identity configured."}
-        if err := await rt.require_caller_proof(
-            npub, dpop_token, "delete_operator_credential",
-        ):
+        if err := await rt.require_caller_proof(npub):
             return err
         if not field:
             return {"success": False, "error": "field is required."}
@@ -5375,7 +5268,7 @@ def register_standard_tools(
 
     @tool
     async def get_patron_credential_fields(
-        npub: str, dpop_token: str = "",
+        npub: str,
     ) -> dict[str, Any]:
         """List stored patron credential field names (not values).
 
@@ -5389,11 +5282,8 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
-        if err := await rt.require_caller_proof(npub, dpop_token, "get_patron_credential_fields"):
+        if err := await rt.require_caller_proof(npub):
             return err
         try:
             details = await rt.list_patron_credential_field_details(npub)
@@ -5416,7 +5306,7 @@ def register_standard_tools(
         # Tool bodies live in tollbooth.tools.oauth (they read rt._oauth_provider).
 
         @tool
-        async def begin_oauth(npub: str, dpop_token: str = "") -> dict[str, Any]:
+        async def begin_oauth(npub: str) -> dict[str, Any]:
             """Start the OAuth2 authorization flow.
 
             Returns an authorization URL. Open it in a browser to log in
@@ -5433,15 +5323,12 @@ def register_standard_tools(
 
             Args:
                 npub: Your DPYC patron npub (npub1...).
-                dpop_token: Proof that the caller holds npub: the grant envelope from
-                    receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                    by npub whose `u` tag is this tool's name.
             """
             from tollbooth.tools.oauth import begin_oauth_tool
-            return await begin_oauth_tool(rt, npub, dpop_token)
+            return await begin_oauth_tool(rt, npub)
 
         @tool
-        async def check_oauth_status(npub: str, dpop_token: str = "") -> dict[str, Any]:
+        async def check_oauth_status(npub: str) -> dict[str, Any]:
             """Check whether the OAuth2 authorization flow has completed.
 
             Call after opening the authorization URL from ``begin_oauth``
@@ -5457,12 +5344,9 @@ def register_standard_tools(
 
             Args:
                 npub: The same Nostr public key (npub1...) used in begin_oauth.
-                dpop_token: Proof that the caller holds npub: the grant envelope from
-                    receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                    by npub whose `u` tag is this tool's name.
             """
             from tollbooth.tools.oauth import check_oauth_status_tool
-            return await check_oauth_status_tool(rt, npub, dpop_token)
+            return await check_oauth_status_tool(rt, npub)
 
     # Prune registry if OAuth not configured
     if rt._oauth_provider is None:
@@ -5497,15 +5381,14 @@ def register_standard_tools(
         Do NOT poll or retry — each ``receive_npub_proof`` call
         destructively drains the relay mailbox.
 
-        **Returns** a ``dpop_token`` — the one-time challenge nonce shown in
-        the DM. Pass it to ``receive_npub_proof`` to collect the reply. It
-        is a matching token, not a credential: on its own it authorizes
-        nothing.
+        **Returns** a ``nonce`` — the one-time challenge phrase shown in the
+        DM. Pass it to ``receive_npub_proof`` to collect the reply. It names
+        the reply; on its own it authorizes nothing.
 
-        **Lifecycle:** ``receive_npub_proof`` returns the proof grant, which
-        expires after the duration the patron named in their reply. When it
-        expires, call ``request_npub_proof`` again for a fresh challenge,
-        then wait for the user, then call ``receive_npub_proof``.
+        **Lifecycle:** ``receive_npub_proof`` puts the npub into this
+        connection's wallet until the duration the patron named in their
+        reply. When it expires, call ``request_npub_proof`` again for a fresh
+        challenge, then wait for the user, then call ``receive_npub_proof``.
 
         Free.
 
@@ -5534,62 +5417,51 @@ def register_standard_tools(
     @tool
     async def receive_npub_proof(
         patron_npub: str = "",
-        dpop_token: str = "",
+        nonce: str = "",
     ) -> dict[str, Any]:
         """Receive npub ownership confirmation from a patron.
 
         Completes the npub-OWNERSHIP-PROOF flow (the credential-delivery
-        counterpart is ``receive_credentials``).
+        counterpart is ``receive_credentials``). Call it on an OAuth (holder)
+        connection: the proven npub goes into that connection's wallet, and
+        every later call on it names only the npub.
 
         **Call this only after the user confirms they have replied.**
         Deterministic, one-shot retrieval: name the response with
-        ``(patron_npub, dpop_token)`` — the ``dpop_token`` being the value
-        returned by ``request_npub_proof``. The tool drains ONLY the pinned
-        rendezvous relay that challenge was published on, stopping at the DM
-        whose phrase matches. Mismatched DMs are deleted and NACK'd (without
+        ``(patron_npub, nonce)`` — the ``nonce`` being the value returned by
+        ``request_npub_proof``. The tool drains ONLY the pinned rendezvous
+        relay that challenge was published on, stopping at the DM whose
+        phrase matches. Mismatched DMs are deleted and NACK'd (without
         revealing the expected phrase). If called before the user replies,
         their message will never be found. Do NOT poll, loop, or retry.
 
-        The signed DM itself proves npub ownership (the patron's nsec
-        signed it). On success, returns a new ``dpop_token``: an
-        Operator-signed **proof grant envelope** ``{"grant": …, "nonce": …}``
-        bound to the patron, this challenge, and the duration the patron
-        named. The calling application MUST remember that whole string and
-        pass it as ``dpop_token`` on every subsequent paid tool call. The
-        grant is self-verifying; nothing about it is stored here. Free.
+        The signed DM itself proves npub ownership (the patron's nsec signed
+        it). Free.
 
         Args:
             patron_npub: Required. The patron's npub to receive proof from.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
+            nonce: Required. The phrase ``request_npub_proof`` returned.
         """
         from tollbooth.tools.proof import receive_npub_proof_tool
-        return await receive_npub_proof_tool(rt, patron_npub, dpop_token)
+        return await receive_npub_proof_tool(rt, patron_npub, nonce)
 
     @tool
-    async def check_proof_status(
-        patron_npub: str = "",
-        dpop_token: str = "",
-    ) -> dict[str, Any]:
-        """Check whether a proof grant is still valid.
+    async def check_proof_status(patron_npub: str = "") -> dict[str, Any]:
+        """Check whether this connection proves an npub, and until when.
 
         Mirrors ``check_oauth_status`` for the npub-proof flow: a calling
-        agent can ask "will my next paid call accept this dpop_token?"
-        before burning credits on a guaranteed failure. Expiry is read from
-        the grant itself; the only store consulted is the patron's
-        revocation watermark.
+        agent can ask "will my next paid call be accepted?" before burning
+        credits on a guaranteed failure. A request signed by the npub's key
+        always proves it; a holder connection proves it while the grant its
+        wallet holds is unexpired and unrevoked.
 
         Free, no side effects — touches no relay.
 
         Args:
             patron_npub: Required. The patron's npub (npub1...).
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
         from tollbooth.tools.proof import check_proof_status_tool
-        return await check_proof_status_tool(rt, patron_npub, dpop_token)
+        return await check_proof_status_tool(rt, patron_npub)
 
     # -- Oracle delegation (oracle_ namespace) ----------------------------
 
@@ -5675,26 +5547,16 @@ def register_standard_tools(
             return {"status": "error", "error": str(e)}
 
     @tool
-    async def set_pricing_model(model_json: str, dpop_token: str = "") -> dict[str, Any]:
+    async def set_pricing_model(model_json: str) -> dict[str, Any]:
         """Set the active pricing model. RESTRICTED to operator.
 
-        Requires a valid proof (Schnorr-signed kind-27235 event)
-        proving the caller holds the operator's nsec.
+        The connection must prove the operator's npub.
 
         Args:
             model_json: The complete pricing model as a JSON object; it
                 replaces the active model.
-            dpop_token: Proof that the caller holds the operator's npub: the grant
-                envelope from receive_npub_proof, or the raw JSON of a kind-27235
-                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
-        # Accept BOTH proof tactics — inline kind-27235 and cached
-        # dpop_token-keyed token from request/receive_npub_proof.
-        # require_caller_proof checks the cache first, falls through to
-        # inline verification.
-        err = await rt.require_caller_proof(
-            rt.operator_npub(), dpop_token, "set_pricing_model",
-        )
+        err = await rt.require_caller_proof(rt.operator_npub())
         if err:
             return err
 
@@ -5714,7 +5576,7 @@ def register_standard_tools(
             return {"status": "error", "error": str(e)}
 
     @tool
-    async def reset_pricing_model(dpop_token: str = "") -> dict[str, Any]:
+    async def reset_pricing_model() -> dict[str, Any]:
         """Erase all pricing models and restore a viable default.
 
         Deletes every stored model, then self-initializes a fresh one
@@ -5722,16 +5584,8 @@ def register_standard_tools(
         Returns the new model.
 
         RESTRICTED to operator — requires proof (nsec-signed).
-
-        Args:
-            dpop_token: Proof that the caller holds the operator's npub: the grant
-                envelope from receive_npub_proof, or the raw JSON of a kind-27235
-                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
-        # Accept both inline kind-27235 proofs and proof grants.
-        err = await rt.require_caller_proof(
-            rt.operator_npub(), dpop_token, "reset_pricing_model",
-        )
+        err = await rt.require_caller_proof(rt.operator_npub())
         if err:
             return err
         try:
@@ -5806,61 +5660,42 @@ def register_standard_tools(
 
     @tool
     async def request_adoption(
-        authority_npub: str, dpop_token: str = "", service_url: str = "", note: str = "",
+        authority_npub: str, service_url: str = "", display_name: str = "", note: str = "",
     ) -> dict[str, Any]:
         """Ask a chosen Authority to adopt this operator (deferred courtship).
 
-        RESTRICTED to the operator — requires proof the caller controls this
-        operator's npub. Resolves the Authority's MCP endpoint from the
-        community registry, mints an inline ownership proof with this
-        operator's nsec, and delivers the request MCP-to-MCP. The Authority
+        RESTRICTED to the operator — the request must be signed with this
+        operator's key. Resolves the Authority's MCP endpoint from the
+        community registry and delivers the request MCP-to-MCP on a
+        connection this operator signs. The Authority
         records it as pending; its owner approves on their own time. Poll
         ``adoption_status`` for progress; the operator flips to ``ready``
         once the Authority provisions it.
 
         Args:
             authority_npub: npub of the Authority to request adoption from.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
             service_url: this operator's MCP endpoint (advertised to the Authority).
+            display_name: this operator's name for the community roster.
             note: optional message for the Authority owner.
         """
-        # Only the operator's own key may ask: a request it signed, or a fresh
-        # kind-27235 it signed. Never a grant — checking one needs the vault,
-        # and an un-adopted orphan has no vault yet; bootstrapping it is
-        # precisely what adoption provisions.
+        # Only the operator's own key may ask. Never a grant: checking one
+        # needs the vault, and an un-adopted orphan has no vault yet;
+        # bootstrapping it is precisely what adoption provisions.
         from tollbooth.holder_auth import signed_npub
         if signed_npub() != rt.operator_npub():
-            if not dpop_token:
-                return {
-                    "success": False,
-                    "error": "Only the operator can request adoption — sign the request with its key.",
-                }
-            from tollbooth.identity_proof import require_proof
-            err = await require_proof(
-                rt.operator_npub(), dpop_token, rt.runtime_name("request_adoption"),
-                revocations=None,
-            )
-            if err:
-                return err
+            return {
+                "success": False,
+                "error": "Only the operator can request adoption — sign the request with its key.",
+            }
         if not authority_npub.startswith("npub1"):
             return {"success": False, "error": "authority_npub must be a valid npub1..."}
-
-        from tollbooth.identity_proof import ADOPTION_PROOF_TOOL, create_proof
-        nsec = rt._get_nsec()
-        if not nsec:
-            return {"success": False, "error": "Operator nsec not configured — cannot sign the adoption request."}
-        adoption_proof = create_proof(nsec, ADOPTION_PROOF_TOOL)
-
         try:
             result = await _remote_authority_call(
                 authority_npub,
                 "receive_adoption_request",
                 {
-                    "operator_npub": rt.operator_npub(),
-                    "dpop_token": adoption_proof,
-                    "service_url": service_url,
+                    "operator_npub": rt.operator_npub(), "service_url": service_url,
+                    "display_name": display_name, "note": note,
                 },
             )
         except Exception as exc:  # noqa: BLE001
@@ -5869,7 +5704,7 @@ def register_standard_tools(
         return result
 
     @tool
-    async def adoption_status(authority_npub: str, dpop_token: str = "") -> dict[str, Any]:
+    async def adoption_status(authority_npub: str) -> dict[str, Any]:
         """Check this operator's adoption-request status at a chosen Authority.
 
         Free. Polls the Authority MCP-to-MCP for the status of this operator's
@@ -5877,9 +5712,6 @@ def register_standard_tools(
 
         Args:
             authority_npub: The npub of the Authority the request was sent to.
-            dpop_token: Proof that the caller holds the operator's npub: the grant
-                envelope from receive_npub_proof, or the raw JSON of a kind-27235
-                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
         if not authority_npub.startswith("npub1"):
             return {"success": False, "error": "authority_npub must be a valid npub1..."}
@@ -5893,7 +5725,7 @@ def register_standard_tools(
             return {"success": False, "error": f"Could not reach the Authority: {exc}"}
 
     @tool
-    async def restore_neon_schema(dpop_token: str = "") -> dict[str, Any]:
+    async def restore_neon_schema() -> dict[str, Any]:
         """Prepare this operator's database schema again, ignoring the breadcrumb.
 
         Diagnostic / recovery tool for when Neon keeps answering 4xx and the
@@ -5903,16 +5735,8 @@ def register_standard_tools(
         inline for any that failed.
 
         RESTRICTED to operator — requires proof (nsec-signed).
-
-        Args:
-            dpop_token: Proof that the caller holds the operator's npub: the grant
-                envelope from receive_npub_proof, or the raw JSON of a kind-27235
-                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
-        # Accept both inline kind-27235 proofs and proof grants.
-        err = await rt.require_caller_proof(
-            rt.operator_npub(), dpop_token, "restore_neon_schema",
-        )
+        err = await rt.require_caller_proof(rt.operator_npub())
         if err:
             return err
 
@@ -6042,7 +5866,7 @@ def register_standard_tools(
     # -- Constraint Engine tools ---------------------------------------
 
     @tool
-    async def check_price(tool_id: str, npub: str = "", dpop_token: str = "", tool_kwargs: str = "") -> dict[str, Any]:
+    async def check_price(tool_id: str, npub: str = "", tool_kwargs: str = "") -> dict[str, Any]:
         """Preview the effective cost of a tool call.
 
         Shows the base cost and any constraint effects (discounts, free
@@ -6059,9 +5883,6 @@ def register_standard_tools(
                 '{"difficulty": "sovereign", "mode": "live"}').
             npub: Optional patron npub; with it, the preview includes that
                 patron's coupons and constraint effects.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
         identity = rt._tool_registry.get(tool_id)
         # Fallback: caller passed a capability name instead of a UUID.
@@ -6199,7 +6020,6 @@ def register_standard_tools(
         uses_per_patron: int | None = 1,
         total_uses: int | None = None,
         tool_ids: list[str] | None = None,
-        dpop_token: str = "",
     ) -> dict[str, Any]:
         """Create a new operator-owned discount coupon.
 
@@ -6220,15 +6040,10 @@ def register_standard_tools(
                 unlimited).
             tool_ids: The tools this coupon discounts — tool ids or MCP
                 tool names, or ``["*"]`` for every tool priced above zero.
-            dpop_token: Proof that the caller holds the operator's npub: the grant
-                envelope from receive_npub_proof, or the raw JSON of a kind-27235
-                Nostr event signed by the operator whose `u` tag is this tool's name.
 
         Returns the new coupon row. RESTRICTED to operator — requires proof.
         """
-        err = await rt.require_caller_proof(
-            rt.operator_npub(), dpop_token, "mint_coupon",
-        )
+        err = await rt.require_caller_proof(rt.operator_npub())
         if err:
             return err
 
@@ -6249,21 +6064,14 @@ def register_standard_tools(
         return result
 
     @tool
-    async def list_coupons(dpop_token: str = "") -> dict[str, Any]:
+    async def list_coupons() -> dict[str, Any]:
         """List every coupon this operator has minted (newest first).
 
         Each row carries the current ``times_redeemed`` counter — the
         Studio renders a progress bar from this against ``total_uses``.
         RESTRICTED to operator — requires proof.
-
-        Args:
-            dpop_token: Proof that the caller holds the operator's npub: the grant
-                envelope from receive_npub_proof, or the raw JSON of a kind-27235
-                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
-        err = await rt.require_caller_proof(
-            rt.operator_npub(), dpop_token, "list_coupons",
-        )
+        err = await rt.require_caller_proof(rt.operator_npub())
         if err:
             return err
 
@@ -6283,7 +6091,6 @@ def register_standard_tools(
         clear_uses_per_patron: bool = False,
         clear_total_uses: bool = False,
         tool_ids: list[str] | None = None,
-        dpop_token: str = "",
     ) -> dict[str, Any]:
         """Patch a coupon's editable fields.
 
@@ -6308,13 +6115,8 @@ def register_standard_tools(
             clear_total_uses: True makes total redemptions unlimited.
             tool_ids: The tools the coupon discounts: tool ids or MCP tool names,
                 ["*"] for every paid tool, [] to unbind it.
-            dpop_token: Proof that the caller holds the operator's npub: the grant
-                envelope from receive_npub_proof, or the raw JSON of a kind-27235
-                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
-        err = await rt.require_caller_proof(
-            rt.operator_npub(), dpop_token, "update_coupon",
-        )
+        err = await rt.require_caller_proof(rt.operator_npub())
         if err:
             return err
 
@@ -6337,7 +6139,7 @@ def register_standard_tools(
         return result
 
     @tool
-    async def delete_coupon(coupon_id: str, dpop_token: str = "") -> dict[str, Any]:
+    async def delete_coupon(coupon_id: str) -> dict[str, Any]:
         """Delete a coupon.  Cascades to all patron redemptions.
 
         Any chain step referencing the deleted coupon_id becomes a
@@ -6348,13 +6150,8 @@ def register_standard_tools(
 
         Args:
             coupon_id: The id of the coupon to delete (from list_coupons).
-            dpop_token: Proof that the caller holds the operator's npub: the grant
-                envelope from receive_npub_proof, or the raw JSON of a kind-27235
-                Nostr event signed by the operator whose `u` tag is this tool's name.
         """
-        err = await rt.require_caller_proof(
-            rt.operator_npub(), dpop_token, "delete_coupon",
-        )
+        err = await rt.require_caller_proof(rt.operator_npub())
         if err:
             return err
 
@@ -6365,7 +6162,7 @@ def register_standard_tools(
         return result
 
     @tool
-    async def redeem_coupon(npub: str, code: str, dpop_token: str = "") -> dict[str, Any]:
+    async def redeem_coupon(npub: str, code: str) -> dict[str, Any]:
         """Claim a coupon by its name (the code the operator shared).
 
         Looks up the operator's coupon by ``code``, validates the window
@@ -6380,15 +6177,12 @@ def register_standard_tools(
         Args:
             npub: The patron's Nostr public key (npub1...).
             code: The coupon code the operator shared.
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
         try:
             resolved = resolve_npub(npub)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        err = await rt.require_caller_proof(resolved, dpop_token, "redeem_coupon")
+        err = await rt.require_caller_proof(resolved)
         if err:
             return err
 
@@ -6399,7 +6193,7 @@ def register_standard_tools(
         )
 
     @tool
-    async def list_my_coupons(npub: str, dpop_token: str = "") -> dict[str, Any]:
+    async def list_my_coupons(npub: str) -> dict[str, Any]:
         """List the coupons this patron has redeemed on this operator.
 
         Returns both active and exhausted redemptions with a per-row
@@ -6408,15 +6202,12 @@ def register_standard_tools(
 
         Args:
             npub: The patron's Nostr public key (npub1...).
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
         try:
             resolved = resolve_npub(npub)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        err = await rt.require_caller_proof(resolved, dpop_token, "list_my_coupons")
+        err = await rt.require_caller_proof(resolved)
         if err:
             return err
 
@@ -6426,7 +6217,7 @@ def register_standard_tools(
 
     @tool
     async def forget_coupon(
-        npub: str, coupon_id: str, dpop_token: str = "",
+        npub: str, coupon_id: str,
     ) -> dict[str, Any]:
         """Remove a coupon from this patron's redemption list.
 
@@ -6438,15 +6229,12 @@ def register_standard_tools(
             npub: The patron's Nostr public key (npub1...).
             coupon_id: The id of the redeemed coupon to remove (from
                 list_my_coupons).
-            dpop_token: Proof that the caller holds npub: the grant envelope from
-                receive_npub_proof, or the raw JSON of a kind-27235 Nostr event signed
-                by npub whose `u` tag is this tool's name.
         """
         try:
             resolved = resolve_npub(npub)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        err = await rt.require_caller_proof(resolved, dpop_token, "forget_coupon")
+        err = await rt.require_caller_proof(resolved)
         if err:
             return err
 

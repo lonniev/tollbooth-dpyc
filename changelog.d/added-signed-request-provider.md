@@ -1,0 +1,1 @@
+- `SignedRequestProvider`: connection identity for a service that keeps no holders (such as the Oracle). A signed request proves its npub; every other request is anonymous, so free tools stay open.

@@ -26,7 +26,7 @@ from .test_credit_gate import PATRON, FakeLedgerCache, FakeResolver
 OPERATOR = PrivateKey().public_key.bech32()
 NOW = datetime.now(UTC)
 CID = "11111111-1111-4111-8111-111111111111"
-_PASS_PROOF = patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None))
+_PASS_PROOF = patch("tollbooth.runtime.require_held_grant", AsyncMock(return_value=None))
 
 
 def _registry(*names):
@@ -93,7 +93,7 @@ async def test_a_model_pushed_without_chains_still_honours_the_bound_coupon():
     coupons = FakeCoupons([_coupon([tid])])
     rt = _runtime(registry, resolver=FakeResolver(cost=20, chain=[]), coupons=coupons)
     with _PASS_PROOF:
-        charged = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        charged = await rt.debit_or_deny(tid, PATRON)
     assert charged == 0, "the model has no chain and the coupon still applies"
     assert coupons.burned == [CID]
     ledger = await (await rt.ledger_cache()).get(PATRON)
@@ -107,13 +107,13 @@ async def test_star_binds_every_paid_tool_and_an_empty_binding_binds_none():
     star = FakeCoupons([_coupon(["*"], percent=50.0)])
     rt = _runtime(registry, resolver=FakeResolver(cost=20, chain=[]), coupons=star)
     with _PASS_PROOF:
-        assert await rt.debit_or_deny(a, PATRON, dpop_token="p") == 10
-        assert await rt.debit_or_deny(b, PATRON, dpop_token="p") == 10
+        assert await rt.debit_or_deny(a, PATRON) == 10
+        assert await rt.debit_or_deny(b, PATRON) == 10
 
     none = FakeCoupons([_coupon([], percent=50.0)])
     rt = _runtime(registry, resolver=FakeResolver(cost=20, chain=[]), coupons=none)
     with _PASS_PROOF:
-        assert await rt.debit_or_deny(a, PATRON, dpop_token="p") == 20
+        assert await rt.debit_or_deny(a, PATRON) == 20
     assert none.burned == []
 
 
@@ -127,7 +127,7 @@ async def test_a_coupon_authored_in_the_chain_and_bound_on_the_row_applies_once(
     chain, _, _ = await rt._effective_chain(tid, "read_tool", PATRON)
     assert [s.id for s in chain] == ["s1"], "the authored step is where the operator put it; no second one"
     with _PASS_PROOF:
-        assert await rt.debit_or_deny(tid, PATRON, dpop_token="p") == 10  # 50 % once, not 75 %
+        assert await rt.debit_or_deny(tid, PATRON) == 10  # 50 % once, not 75 %
     assert coupons.burned == [CID]
 
 
@@ -138,12 +138,12 @@ async def test_bound_coupons_are_read_once_per_ttl_and_again_after_a_coupon_writ
     coupons = FakeCoupons([_coupon([tid])])
     rt = _runtime(registry, resolver=FakeResolver(cost=20, chain=[]), coupons=coupons)
     with _PASS_PROOF:
-        await rt.debit_or_deny(tid, PATRON, dpop_token="p")
-        await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        await rt.debit_or_deny(tid, PATRON)
+        await rt.debit_or_deny(tid, PATRON)
     assert coupons.bound_calls == 1
     rt._forget_bound_coupons()
     with _PASS_PROOF:
-        await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        await rt.debit_or_deny(tid, PATRON)
     assert coupons.bound_calls == 2
 
 

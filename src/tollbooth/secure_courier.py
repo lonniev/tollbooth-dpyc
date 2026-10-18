@@ -184,6 +184,7 @@ class SecureCourierService:
         reason: str | None = None,
         origin: str | None = None,
         verify_at: str | None = None,
+        bound_to: str = "",
     ) -> dict[str, Any]:
         """Open a Secure Courier channel.  Sends welcome DM if *recipient_npub* provided.
 
@@ -202,7 +203,7 @@ class SecureCourierService:
         """
         return await self._exchange.open_channel(
             service, greeting=greeting, recipient_npub=recipient_npub,
-            reason=reason, origin=origin, verify_at=verify_at,
+            reason=reason, origin=origin, verify_at=verify_at, bound_to=bound_to,
         )
 
     async def receive(
@@ -210,13 +211,13 @@ class SecureCourierService:
         sender_npub: str,
         service: str = "x",
         *,
-        dpop_token: str = "",
+        nonce: str = "",
         caller_id: str | None = None,
         request_tool: str = "request_credential_channel",
     ) -> dict[str, Any]:
         """Receive credentials via the deterministic Secure Courier drain.
 
-        1. Delegates to the exchange's dpop_token-scoped, pinned-relay drain.
+        1. Delegates to the exchange's nonce-scoped, pinned-relay drain.
         2. On success, runs the shared post-receive finalization (callback,
            identity credential, session binding, credential card).
         3. **Always** strips credential values before returning.
@@ -224,7 +225,7 @@ class SecureCourierService:
         Args:
             sender_npub: Patron's npub (bech32).
             service: Credential template service name.
-            dpop_token: The session phrase returned by the matching
+            nonce: The session phrase returned by the matching
                 ``request_credential_channel`` — required; identifies which
                 pinned channel to drain.
             caller_id: Optional transport-layer caller ID (e.g. Horizon
@@ -237,7 +238,7 @@ class SecureCourierService:
             metadata.  **NEVER** returns credential values.
         """
         result = await self._exchange.receive(
-            sender_npub, service=service, dpop_token=dpop_token, request_tool=request_tool,
+            sender_npub, service=service, nonce=nonce, request_tool=request_tool,
         )
         return await self._finalize_receive(
             result, sender_npub, service, caller_id,
@@ -364,8 +365,8 @@ class SecureCourierService:
 
         1. Looks up the persisted ``(caller_id, service) → npub`` binding.
         2. Reads the credentials straight from the vault via
-           ``receive_from_vault`` (no relay I/O, no dpop_token) — restoration is
-           NOT the courier protocol, so it does not use the dpop_token-scoped
+           ``receive_from_vault`` (no relay I/O, no nonce) — restoration is
+           NOT the courier protocol, so it does not use the nonce-scoped
            ``receive`` drain.
         3. Runs the shared ``_finalize_receive`` so the
            ``on_credentials_received`` callback fires and repopulates the

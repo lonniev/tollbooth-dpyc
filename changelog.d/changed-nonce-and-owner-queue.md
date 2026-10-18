@@ -1,0 +1,4 @@
+- **Breaking:** the Secure Courier session phrase is called `nonce` everywhere: `request_npub_proof` returns `nonce`; `receive_npub_proof`, `receive_credentials` and `receive_patron_credentials` take it; the DM reads `nonce = @@@…@@@`; error codes `nonce_missing` and `courier_nonce_mismatch`.
+- `request_npub_proof` and `receive_npub_proof` serve OAuth holder connections only, and a challenge's reply may be collected only on the connection that asked for it. `check_proof_status(patron_npub)` reports what this connection proves.
+- Authority owner queue: `list_operator_requests`, `approve_operator_request(operator_npub, kind)`, `reject_operator_request`. `update_operator` records a request the owner approves; `deregister_operator` may be called by the operator (leaving) or the Authority (disowning).
+- `PatronProofConstraint` is satisfied only by a request signed with the patron's own key.

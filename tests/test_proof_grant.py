@@ -2,10 +2,10 @@
 
 The challenge nonce selects a grant; it never unlocks one. These tests pin:
   - sign/verify round-trip and every rejection reason
-  - require_proof accepts a grant envelope and refuses a bare phrase
+  - require_held_grant accepts a held grant envelope and refuses an empty or
+    malformed one
   - the gate FAILS CLOSED: unknown issuer, foreign issuer, unreadable
     revocation store, and a patron's forget_credentials all refuse
-  - Tactic-2 kind-27235 behaviour is unchanged
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import time
 from unittest.mock import AsyncMock
 
 import pytest
-from pynostr.event import Event  # type: ignore[import-untyped]
 from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
 from tollbooth.constants import ErrorCode
@@ -27,7 +26,7 @@ from tollbooth.identity_credential import (
     sign_proof_grant,
     verify_proof_grant,
 )
-from tollbooth.identity_proof import PROOF_EVENT_KIND, require_proof
+from tollbooth.identity_proof import require_held_grant
 from tollbooth.proven_npub import ProofGrantRevocations, RevocationStoreUnavailable
 
 NONCE = "bold-hawk-42"
@@ -58,16 +57,6 @@ def _grant(op_nsec: str, patron_npub: str, *, ttl: int = 3600, challenge: str = 
 
 def _envelope(grant_json: str, nonce: str = NONCE) -> str:
     return json.dumps({"grant": json.loads(grant_json), "nonce": nonce}, separators=(",", ":"))
-
-
-def _signed_27235(pk: PrivateKey, tool: str = "tool") -> str:
-    event = Event(
-        kind=PROOF_EVENT_KIND, content="", tags=[["u", tool], ["nonce", "a1"]],
-        pubkey=pk.public_key.hex(),
-    )
-    event.created_at = int(time.time())
-    event.sign(pk.hex())
-    return json.dumps(event.to_dict())
 
 
 class _NoRevocations:
@@ -140,34 +129,39 @@ class TestSignVerifyGrant:
 
 
 # ---------------------------------------------------------------------------
-# require_proof gate
+# require_held_grant gate
 # ---------------------------------------------------------------------------
 
 
 class TestRequireProofGrant:
     @pytest.mark.asyncio
-    async def test_phrase_alone_refused(self, patron):
-        r = await require_proof(patron, NONCE, "tool", revocations=_NoRevocations(), operator_hex="ab" * 32)
-        assert r["error_code"] == ErrorCode.PROOF_REFRESH_NEEDED
+    async def test_nothing_held_is_proof_required(self, patron):
+        r = await require_held_grant(patron, "", revocations=_NoRevocations(), operator_hex="ab" * 32)
+        assert r["error_code"] == ErrorCode.PROOF_REQUIRED
+
+    @pytest.mark.asyncio
+    async def test_a_phrase_is_not_a_grant(self, patron):
+        r = await require_held_grant(patron, NONCE, revocations=_NoRevocations(), operator_hex="ab" * 32)
+        assert r["error_code"] == ErrorCode.PROOF_INVALID and r["reason"] == "malformed"
 
     @pytest.mark.asyncio
     async def test_grant_envelope_accepted(self, operator, patron):
         op_nsec, op_hex = operator
-        r = await require_proof(patron, _envelope(_grant(op_nsec, patron)), "tool",
+        r = await require_held_grant(patron, _envelope(_grant(op_nsec, patron)),
                                 revocations=_NoRevocations(), operator_hex=op_hex)
         assert r is None
 
     @pytest.mark.asyncio
     async def test_grant_accepted_without_a_revocation_store(self, operator, patron):
         op_nsec, op_hex = operator
-        r = await require_proof(patron, _envelope(_grant(op_nsec, patron)), "tool", operator_hex=op_hex)
+        r = await require_held_grant(patron, _envelope(_grant(op_nsec, patron)), operator_hex=op_hex)
         assert r is None
 
     @pytest.mark.asyncio
     async def test_unknown_issuer_refuses_fail_closed(self, operator, patron):
         # A runtime that cannot name its own pubkey must not accept ANY grant.
         op_nsec, _ = operator
-        r = await require_proof(patron, _envelope(_grant(op_nsec, patron)), "tool",
+        r = await require_held_grant(patron, _envelope(_grant(op_nsec, patron)),
                                 revocations=_NoRevocations(), operator_hex=None)
         assert r["error_code"] == ErrorCode.PROOF_INVALID
         assert r["reason"] == "operator_unknown"
@@ -175,7 +169,7 @@ class TestRequireProofGrant:
     @pytest.mark.asyncio
     async def test_foreign_operator_grant_refused(self, operator, patron):
         op_nsec, _ = operator
-        r = await require_proof(patron, _envelope(_grant(op_nsec, patron)), "tool",
+        r = await require_held_grant(patron, _envelope(_grant(op_nsec, patron)),
                                 revocations=_NoRevocations(), operator_hex=PrivateKey().public_key.hex())
         assert r["reason"] == "operator_mismatch"
 
@@ -183,20 +177,20 @@ class TestRequireProofGrant:
     @pytest.mark.parametrize("bad_nonce,expected", [("calm-reef-77", "challenge_mismatch")])
     async def test_wrong_nonce_reason(self, operator, patron, bad_nonce, expected):
         op_nsec, op_hex = operator
-        r = await require_proof(patron, _envelope(_grant(op_nsec, patron), bad_nonce), "tool", operator_hex=op_hex)
+        r = await require_held_grant(patron, _envelope(_grant(op_nsec, patron), bad_nonce), operator_hex=op_hex)
         assert r["error_code"] == ErrorCode.PROOF_INVALID and r["reason"] == expected
 
     @pytest.mark.asyncio
     async def test_wrong_npub_reason(self, operator, patron):
         op_nsec, op_hex = operator
         other = PrivateKey().public_key.bech32()
-        r = await require_proof(other, _envelope(_grant(op_nsec, patron)), "tool", operator_hex=op_hex)
+        r = await require_held_grant(other, _envelope(_grant(op_nsec, patron)), operator_hex=op_hex)
         assert r["reason"] == "wrong_npub"
 
     @pytest.mark.asyncio
     async def test_expired_reason(self, operator, patron):
         op_nsec, op_hex = operator
-        r = await require_proof(patron, _envelope(_grant(op_nsec, patron, ttl=-5)), "tool", operator_hex=op_hex)
+        r = await require_held_grant(patron, _envelope(_grant(op_nsec, patron, ttl=-5)), operator_hex=op_hex)
         assert r["reason"] == "expired"
 
     @pytest.mark.asyncio
@@ -204,11 +198,11 @@ class TestRequireProofGrant:
         op_nsec, op_hex = operator
         revocations = ProofGrantRevocations()
         before = _envelope(_grant(op_nsec, patron))
-        assert await require_proof(patron, before, "tool", revocations=revocations, operator_hex=op_hex) is None
+        assert await require_held_grant(patron, before, revocations=revocations, operator_hex=op_hex) is None
 
         await revocations.revoke_all(patron)  # what forget_credentials does
 
-        r = await require_proof(patron, before, "tool", revocations=revocations, operator_hex=op_hex)
+        r = await require_held_grant(patron, before, revocations=revocations, operator_hex=op_hex)
         assert r["error_code"] == ErrorCode.PROOF_INVALID and r["reason"] == "revoked"
 
     @pytest.mark.asyncio
@@ -216,7 +210,7 @@ class TestRequireProofGrant:
         op_nsec, op_hex = operator
         revocations = AsyncMock()
         revocations.is_revoked = AsyncMock(side_effect=RevocationStoreUnavailable("neon down"))
-        r = await require_proof(patron, _envelope(_grant(op_nsec, patron)), "tool",
+        r = await require_held_grant(patron, _envelope(_grant(op_nsec, patron)),
                                 revocations=revocations, operator_hex=op_hex)
         assert r["error_code"] == ErrorCode.PROOF_INVALID
         assert r["reason"] == "revocations_unavailable"
@@ -225,20 +219,14 @@ class TestRequireProofGrant:
     @pytest.mark.asyncio
     async def test_bare_grant_without_nonce_refused(self, operator, patron):
         op_nsec, op_hex = operator
-        r = await require_proof(patron, _grant(op_nsec, patron), "tool", operator_hex=op_hex)
+        r = await require_held_grant(patron, _grant(op_nsec, patron), operator_hex=op_hex)
         assert r["reason"] == "missing_nonce"
-
-    @pytest.mark.asyncio
-    async def test_tactic2_inline_unchanged(self):
-        pk = PrivateKey()
-        r = await require_proof(pk.public_key.bech32(), _signed_27235(pk, "tool"), "tool")
-        assert r is None
 
     @pytest.mark.asyncio
     async def test_denials_never_carry_the_grant_or_key_material(self, operator, patron):
         op_nsec, op_hex = operator
         grant = _grant(op_nsec, patron)
-        r = await require_proof(patron, _envelope(grant, "calm-reef-77"), "tool", operator_hex=op_hex)
+        r = await require_held_grant(patron, _envelope(grant, "calm-reef-77"), operator_hex=op_hex)
         blob = json.dumps(r)
         assert json.loads(grant)["sig"] not in blob
         assert op_nsec not in blob

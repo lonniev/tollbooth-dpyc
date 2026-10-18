@@ -1,4 +1,8 @@
-"""Tests for tollbooth.constraints.patron_proof — PatronProofConstraint (M3.6)."""
+"""Tests for tollbooth.constraints.patron_proof — PatronProofConstraint.
+
+Satisfied only when the request in flight is signed by the debited patron's own
+key; a holder connection's grant does not count.
+"""
 
 from datetime import UTC, datetime
 from unittest.mock import patch
@@ -14,57 +18,47 @@ from tollbooth.constraints.patron_proof import PatronProofConstraint
 _NOW = datetime(2026, 6, 11, 12, 0, tzinfo=UTC)
 
 
-def _ctx(dpop_token="", npub="npub1patron", tool_name="expensive_tool"):
+def _ctx(npub="npub1patron"):
     return ConstraintContext(
         ledger=LedgerSnapshot(),
         patron=PatronIdentity(npub=npub),
-        env=EnvironmentSnapshot(utc_now=_NOW, tool_name=tool_name),
-        dpop_token=dpop_token,
+        env=EnvironmentSnapshot(utc_now=_NOW, tool_name="expensive_tool"),
     )
 
 
-def test_missing_proof_denied():
-    r = PatronProofConstraint().evaluate(_ctx(dpop_token=""))
+def test_unsigned_request_denied():
+    with patch("tollbooth.holder_auth.signed_npub", return_value=None):
+        r = PatronProofConstraint().evaluate(_ctx())
     assert r.allowed is False
     assert r.reason == "patron_proof_required"
 
 
-def test_valid_proof_allowed_and_passes_npub_tool_window():
-    c = PatronProofConstraint(window_seconds=300)
-    with patch("tollbooth.identity_proof.verify_proof", return_value=True) as vp:
-        r = c.evaluate(_ctx(dpop_token="signed", npub="npub1x", tool_name="tool_a"))
+def test_request_signed_by_the_patron_allowed():
+    with patch("tollbooth.holder_auth.signed_npub", return_value="npub1patron"):
+        r = PatronProofConstraint().evaluate(_ctx())
     assert r.allowed is True
     assert r.reason == "patron_proof"
-    args, kwargs = vp.call_args
-    assert args[0] == "signed"
-    assert args[1] == "npub1x"
-    assert args[2] == "tool_a"
-    assert kwargs.get("window_seconds") == 300
 
 
-def test_invalid_proof_denied():
-    c = PatronProofConstraint()
-    with patch("tollbooth.identity_proof.verify_proof", return_value=False):
-        r = c.evaluate(_ctx(dpop_token="badsig"))
+def test_request_signed_by_someone_else_denied():
+    with patch("tollbooth.holder_auth.signed_npub", return_value="npub1other"):
+        r = PatronProofConstraint().evaluate(_ctx())
     assert r.allowed is False
-    assert r.reason == "patron_proof_invalid"
 
 
 def test_to_dict_from_dict_roundtrip():
-    d = PatronProofConstraint(window_seconds=240).to_dict()
-    assert d == {"type": "patron_proof", "window_seconds": 240}
-    assert PatronProofConstraint.from_dict(d).window_seconds == 240
+    d = PatronProofConstraint().to_dict()
+    assert d == {"type": "patron_proof"}
+    assert isinstance(PatronProofConstraint.from_dict(d), PatronProofConstraint)
 
 
-def test_from_dict_defaults_window_to_120():
-    assert PatronProofConstraint.from_dict({"type": "patron_proof"}).window_seconds == 120
+def test_an_older_stored_window_is_ignored():
+    assert PatronProofConstraint.from_dict({"type": "patron_proof", "window_seconds": 240}).to_dict() == {
+        "type": "patron_proof"
+    }
 
 
-def test_schema_exposes_window_param():
+def test_schema_has_no_params():
     s = PatronProofConstraint.schema()
     assert s.type == "patron_proof"
-    assert "window_seconds" in {p.name for p in s.params}
-
-
-def test_describe_mentions_window():
-    assert "120" in PatronProofConstraint(window_seconds=120).describe()
+    assert s.params == []

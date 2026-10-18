@@ -65,7 +65,6 @@ class ConstraintGate:
         membership_tier: str = "default",
         invocation_count: int = 0,
         global_demand: dict[str, int] | None = None,
-        dpop_token: str = "",
         coupon_redemptions: Any | None = None,
     ) -> ConstraintContext:
         return ConstraintContext(
@@ -85,7 +84,6 @@ class ConstraintGate:
                 invocation_count=invocation_count,
                 global_demand=tuple((global_demand or {}).items()),
             ),
-            dpop_token=dpop_token,
             coupon_redemptions=coupon_redemptions,
         )
 
@@ -180,7 +178,6 @@ class ConstraintGate:
         membership_tier: str = "default",
         invocation_count: int = 0,
         global_demand: dict[str, int] | None = None,
-        dpop_token: str = "",
         coupon_redemptions: Any | None = None,
     ) -> tuple[dict[str, Any] | None, int, list[str]]:
         """Fetch *tool_id*'s chain from the resolver and walk it.
@@ -208,7 +205,6 @@ class ConstraintGate:
             membership_tier=membership_tier,
             invocation_count=invocation_count,
             global_demand=global_demand,
-            dpop_token=dpop_token,
             coupon_redemptions=coupon_redemptions,
         )
         return self._walk(chain, base_cost, context)
@@ -224,7 +220,6 @@ class ConstraintGate:
         membership_tier: str = "default",
         invocation_count: int = 0,
         global_demand: dict[str, int] | None = None,
-        dpop_token: str = "",
         coupon_redemptions: Any | None = None,
     ) -> tuple[dict[str, Any] | None, int, list[str]]:
         """Sync chain walk.  Caller supplies the chain directly — used
@@ -239,7 +234,6 @@ class ConstraintGate:
             membership_tier=membership_tier,
             invocation_count=invocation_count,
             global_demand=global_demand,
-            dpop_token=dpop_token,
             coupon_redemptions=coupon_redemptions,
         )
         return self._walk(chain, base_cost, context)

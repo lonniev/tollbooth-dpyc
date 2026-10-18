@@ -49,6 +49,7 @@ class OnboardingChallenge:
     candidate_npub: str
     phase: str  # "claim" | "approval"
     parent_npub: str | None = None  # registered approver (Prime, NA, etc.)
+    nonce: str = ""  # names the reply to this phase's DM challenge
     created_at: float = field(default_factory=time.time)
     ttl_seconds: int = _DEFAULT_TTL_SECONDS
 

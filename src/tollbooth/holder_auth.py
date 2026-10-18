@@ -29,6 +29,7 @@ from typing import Any
 
 from fastmcp.server.auth.auth import (
     AccessToken,
+    AuthProvider,
     ClientRegistrationOptions,
     OAuthProvider,
     RevocationOptions,
@@ -370,6 +371,51 @@ class _ConnectionIdentity(AuthenticationBackend):
             token = await self._provider.verify_token(value)
         if token is None or (token.expires_at and token.expires_at < int(time.time())):
             return None
+        return AuthCredentials(token.scopes), AuthenticatedUser(token)
+
+
+class SignedRequestProvider(AuthProvider):
+    """Connection identity for a service that keeps no holders, such as the
+    Oracle: a request signed with an npub's key (NIP-98) proves that npub, and
+    every other request is anonymous — never refused at the door, so free
+    tools stay free. Tools read the signer with :func:`signed_npub`.
+    """
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        return AccessToken(token=token, client_id=ANONYMOUS, scopes=[])
+
+    def get_middleware(self) -> list:
+        return [
+            Middleware(_AnonymousWhenUnnamed),  # type: ignore[arg-type]
+            Middleware(_HashSignedBody),  # type: ignore[arg-type]
+            Middleware(AuthenticationMiddleware, backend=_SignedOrAnonymous()),  # type: ignore[arg-type]
+            Middleware(AuthContextMiddleware),  # type: ignore[arg-type]
+        ]
+
+
+class _AnonymousWhenUnnamed:
+    """Names a request that carries no ``Authorization`` as anonymous, since
+    FastMCP refuses an authenticated route any request without one."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and not any(n == b"authorization" for n, _ in scope.get("headers", [])):
+            scope = {**scope, "headers": [*scope.get("headers", []), (b"authorization", b"Bearer " + ANONYMOUS.encode())]}
+        await self.app(scope, receive, send)
+
+
+class _SignedOrAnonymous(AuthenticationBackend):
+    """A signed request's npub, else an anonymous caller."""
+
+    async def authenticate(self, conn: HTTPConnection) -> tuple[AuthCredentials, AuthenticatedUser]:
+        scheme, _, value = (conn.headers.get("authorization") or "").partition(" ")
+        value = value.strip()
+        token = None
+        if scheme.lower() == "bearer" and value.startswith(_SIGNED_BEARER):
+            token = _signed_request_token(conn, value.removeprefix(_SIGNED_BEARER))
+        token = token or AccessToken(token=value, client_id=ANONYMOUS, scopes=[])
         return AuthCredentials(token.scopes), AuthenticatedUser(token)
 
 

@@ -1,37 +1,21 @@
-"""Identity proof — single canonical gate for npub ownership.
+"""Identity proof — npub ownership, proven on the connection.
 
-The gate ``require_proof`` accepts ANY of the following tactics —
-caller chooses based on what credentials it has on hand:
+Two ways a request proves an npub:
 
-1. **Inline Schnorr proof** (kind 27235, NIP-98 style): a freshly-signed
-   Nostr event with the tool name in the ``u`` tag and a freshness
-   window. Works when the caller holds the nsec.
-   ::
+1. **A signed request** (NIP-98): ``Authorization: Nostr <base64 kind-27235>``
+   whose ``u``, ``method`` and ``payload`` tags bind the event to this one
+   request (``sign_request`` / ``verify_request_signature``). Whoever holds the
+   nsec needs no grant.
+2. **A held grant**: an OAuth (holder) connection's wallet keeps, per npub, the
+   Operator-signed kind-30080 grant ``receive_npub_proof`` issued after the
+   patron's DM reply — the envelope ``{"grant": <event>, "nonce": "<phrase>"}``.
+   The grant is self-verifying (Operator sig, patron binding, expiry,
+   challenge = sha256(nonce)); ``require_held_grant`` checks it.
 
-       {
-           "pubkey": "<hex_pubkey>",
-           "kind": 27235,
-           "content": "",
-           "created_at": <unix_timestamp>,
-           "tags": [["u", "<tool_name>"]],
-           "sig": "<schnorr_signature>"
-       }
-
-2. **Operator-signed proof grant** (kind 30080, envelope): the
-   ``dpop_token`` returned by ``receive_npub_proof`` is a JSON envelope
-   ``{"grant": <kind-30080 event>, "nonce": "<phrase>"}``. The grant is
-   self-verifying (Operator sig, patron binding, expiry, challenge =
-   sha256(nonce)). The challenge nonce *selects* the grant; a
-   phrase-shaped token alone is never a credential
-   (``PROOF_REFRESH_NEEDED``).
-
-A bare ``alpha-beta-42`` phrase is always refused — it must never
-unlock a proof on its own (clean break from the pre-grant cache).
-
-The gate is actor-agnostic — Operators, Authorities, and any future
-runtime use the same function. A runtime that accepts grants passes its
-own ``operator_hex`` (only its grants authorize here) and its
-``revocations`` store (a patron's ``forget_credentials`` watermark).
+The checks are actor-agnostic — Operators, Authorities, and any future runtime
+use the same functions. A runtime passes its own ``operator_hex`` (only its
+grants authorize here) and its ``revocations`` store (a patron's
+``forget_credentials`` watermark).
 
 Dependencies: ``pynostr`` (available via ``tollbooth-dpyc[nostr]``).
 """
@@ -40,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import secrets
 import time
 from typing import TYPE_CHECKING, Any
@@ -49,12 +32,6 @@ if TYPE_CHECKING:
     from tollbooth.proven_npub import ProofGrantRevocations
 
 logger = logging.getLogger(__name__)
-
-# Dpop_token phrases produced by request_npub_proof have the shape
-# ``<word>-<word>-<n>`` — three lowercase letters/digits segments.
-# These are challenge nonces that *select* a proof grant; they never
-# authorize on their own.
-_DPOP_TOKEN_RE = re.compile(r"^[a-z]+-[a-z]+-\d+$")
 
 PROOF_EVENT_KIND = 27235
 """NIP-98 HTTP Auth event kind, repurposed for MCP identity proofs."""
@@ -87,26 +64,6 @@ A signed kind-27235 event is well under 2 KB; anything approaching this cap is
 an adversarial oversized payload (tool arguments are untrusted AI input). Bound
 the input before ``json.loads`` so a 10 MB string can't be fully parsed."""
 
-OWNERSHIP_SENTINEL = "npub_ownership"
-"""Sentinel tool name for npub ownership proofs (not tied to a specific tool)."""
-
-ADOPTION_PROOF_TOOL = "operator_adoption_request"
-"""Sentinel tool name binding an operator's adoption-request proof.
-
-A canonical, slug-independent ``u``-tag value so an Operator can mint an
-inline kind-27235 proof (with its own service nsec) that any chosen
-Authority verifies without either side knowing the other's tool-slug. Used
-by ``request_adoption`` (operator mints) and ``receive_adoption_request``
-(Authority verifies)."""
-
-
-def _npub_to_hex(npub: str) -> str:
-    """Convert a bech32 npub to a hex pubkey string."""
-    from pynostr.key import PublicKey  # type: ignore[import-untyped]
-
-    return PublicKey.from_npub(npub).hex()
-
-
 def _signed_proof_event(nsec: str, tags: list[list[str]]) -> str:
     """A kind-27235 event over ``tags`` plus a per-proof nonce, signed by ``nsec``.
 
@@ -133,19 +90,6 @@ def _signed_proof_event(nsec: str, tags: list[list[str]]) -> str:
     return json.dumps(event.to_dict())
 
 
-def create_proof(nsec: str, tool_name: str) -> str:
-    """Create a signed kind-27235 identity proof for one tool.
-
-    Args:
-        nsec: Nostr private key (bech32 nsec1... or hex).
-        tool_name: The MCP tool name to embed in the ``u`` tag.
-
-    Returns:
-        JSON string of the signed Nostr event.
-    """
-    return _signed_proof_event(nsec, [["u", tool_name]])
-
-
 def sign_request(nsec: str, *, method: str, url: str, body: bytes) -> str:
     """The ``Authorization`` value for one request signed by ``nsec`` (NIP-98).
 
@@ -163,23 +107,10 @@ def sign_request(nsec: str, *, method: str, url: str, body: bytes) -> str:
     return "Nostr " + base64.b64encode(event.encode()).decode()
 
 
-def create_ownership_proof(nsec: str) -> str:
-    """Create a kind-27235 proof for npub ownership (no specific tool).
-
-    Args:
-        nsec: Nostr private key (bech32 nsec1... or hex).
-
-    Returns:
-        JSON string of the signed Nostr event with ``u=npub_ownership``.
-    """
-    return create_proof(nsec, OWNERSHIP_SENTINEL)
-
-
 PROVENANCE_ATTESTATION_TOOL = "npub_proof_request"
 """``u``-tag sentinel marking a kind-27235 event as a proof-request provenance
-attestation (not a per-tool caller proof). Distinct from ``OWNERSHIP_SENTINEL``
-so a provenance attestation can never be mistaken for a caller's ownership
-proof, or vice versa."""
+attestation, so it can never be mistaken for a signed request: it carries no
+``method`` or ``payload`` tag."""
 
 
 def create_provenance_attestation(
@@ -211,7 +142,7 @@ def create_provenance_attestation(
       attestation cannot be lifted onto a DM delivered by a different key.
     - ``subject``: the npub whose ownership/credentials the DM concerns.
     - ``service``: the credential-template / proof service the DM rides on.
-    - ``challenge``: the one-time ``dpop_token`` for this exchange, so the
+    - ``challenge``: the one-time ``nonce`` for this exchange, so the
       attestation is bound to this DM and cannot be replayed against another.
 
     The recipient verifies the signature (``verify_provenance_attestation``)
@@ -225,7 +156,7 @@ def create_provenance_attestation(
             for self-DMs, else the Operator's own pubkey).
         subject_npub: The npub the request concerns (bech32).
         service: The service name the DM rides on.
-        challenge: The one-time ``dpop_token`` slug for this exchange.
+        challenge: The one-time ``nonce`` for this exchange.
         reason: Optional human-readable purpose the Operator states for this
             request ("I'm working on your request XYZ and need the Operator to
             do ABC"). Signed into the attestation as a ``reason`` tag so the
@@ -238,7 +169,7 @@ def create_provenance_attestation(
             request came from* to judge an unsolicited ask. Best-effort: omitted
             when the transport exposes nothing. Omitted when not given.
         verify_at: Optional, free-form statement of *where the initiating agent
-            already showed the recipient this exact ``challenge`` (dpop_token)* —
+            already showed the recipient this exact ``challenge`` (nonce)* —
             a URL, or a description like "your Claude.ai conversation". This is
             the OAuth 2.0 Device Grant ``verification_uri`` generalized: the
             recipient approves only if the code here matches the one displayed
@@ -443,10 +374,6 @@ PROOF_REASON_WRONG_KIND = "wrong_kind"
 """Event kind was not 27235."""
 PROOF_REASON_SIGNATURE_INVALID = "signature_invalid"
 """Schnorr signature did not verify over the event id."""
-PROOF_REASON_NPUB_MISMATCH = "npub_mismatch"
-"""Signer pubkey ≠ the npub the caller claimed. NOT a registry statement."""
-PROOF_REASON_TOOL_MISMATCH = "tool_mismatch"
-"""No ``u`` tag held this tool's name."""
 PROOF_REASON_EXPIRED = "expired"
 """``created_at`` was outside the freshness window (too old or too far future)."""
 PROOF_REASON_REPLAYED = "replayed"
@@ -462,9 +389,8 @@ PROOF_REASON_REQUEST_MISMATCH = "request_mismatch"
 # "that npub is/isn't registered").
 _PROOF_REASON_MESSAGES = {
     PROOF_REASON_MALFORMED_JSON: (
-        "Invalid identity proof: the dpop_token must be the raw JSON of a "
-        "signed kind-27235 event — not base64, not NIP-98 "
-        "'Authorization: Nostr <b64>' framing."
+        "Invalid request signature: the Authorization value must be "
+        "'Nostr <base64 of a signed kind-27235 event>'."
     ),
     PROOF_REASON_BAD_EVENT: (
         "Invalid identity proof: the payload parsed as JSON but is not a "
@@ -475,13 +401,6 @@ _PROOF_REASON_MESSAGES = {
     ),
     PROOF_REASON_SIGNATURE_INVALID: (
         "Invalid identity proof: the Schnorr signature did not verify."
-    ),
-    PROOF_REASON_NPUB_MISMATCH: (
-        "Invalid identity proof: the event was signed by a different key than "
-        "the npub you claimed."
-    ),
-    PROOF_REASON_TOOL_MISMATCH: (
-        "Invalid identity proof: the u tag did not contain this tool's name."
     ),
     PROOF_REASON_EXPIRED: (
         "Invalid identity proof: created_at is outside the "
@@ -506,18 +425,16 @@ _PROOF_REASON_MESSAGES = {
 def _check_proof_event(
     proof_json: str,
     *,
-    expected_npub: str | None,
     binds: Any,
     mismatch_reason: str,
     window_seconds: int,
 ) -> tuple[str | None, str]:
-    """The checks every kind-27235 proof passes, in order: shape, signature,
-    kind, signer, binding, freshness, single use.
+    """The checks every kind-27235 request event passes, in order: shape,
+    signature, kind, binding, freshness, single use.
 
-    ``expected_npub`` is the npub the event must be signed by, or ``None`` when
-    the signer IS the identity being proven (a signed request). ``binds(event)``
-    says whether the event is bound to what is being authorized — a tool name
-    for an inline proof, the method, path and body of a signed request.
+    The signer IS the identity being proven. ``binds(event)`` says whether the
+    event is bound to what is being authorized: the method, path and body of
+    the request.
 
     Returns ``(reason, signer_hex)``: ``reason`` is ``None`` when the proof is
     good, else one of the ``PROOF_REASON_*`` constants. Do not loosen any check.
@@ -559,16 +476,6 @@ def _check_proof_event(
         logger.debug("identity_proof: wrong kind %d (expected %d)", event.kind, PROOF_EVENT_KIND)
         return PROOF_REASON_WRONG_KIND, ""
 
-    if expected_npub is not None:
-        try:
-            expected_hex = _npub_to_hex(expected_npub)
-        except Exception:  # noqa: BLE001
-            logger.debug("identity_proof: invalid expected npub")
-            return PROOF_REASON_NPUB_MISMATCH, ""
-        if event.pubkey != expected_hex:
-            logger.debug("identity_proof: pubkey mismatch")
-            return PROOF_REASON_NPUB_MISMATCH, ""
-
     if not binds(event):
         logger.debug("identity_proof: event not bound to this request (%s)", mismatch_reason)
         return mismatch_reason, ""
@@ -593,30 +500,6 @@ def _check_proof_event(
 
 def _tag_values(event: Any, name: str) -> list[str]:
     return [tag[1] for tag in event.tags if len(tag) >= 2 and tag[0] == name]
-
-
-def _verify_proof_reason(
-    proof_json: str,
-    expected_npub: str,
-    tool_name: str,
-    window_seconds: int = DEFAULT_WINDOW_SECONDS,
-) -> str | None:
-    """Verify an inline kind-27235 proof, returning the rejection *reason*.
-
-    The single source of truth for Tactic-2 accept/reject — ``verify_proof``
-    (bool) and ``require_proof`` (structured denial) both delegate here.
-
-    Returns ``None`` when the proof is valid, otherwise one of the
-    ``PROOF_REASON_*`` constants.
-    """
-    reason, _ = _check_proof_event(
-        proof_json,
-        expected_npub=expected_npub,
-        binds=lambda event: tool_name in _tag_values(event, "u"),
-        mismatch_reason=PROOF_REASON_TOOL_MISMATCH,
-        window_seconds=window_seconds,
-    )
-    return reason
 
 
 def verify_request_signature(
@@ -657,7 +540,6 @@ def verify_request_signature(
 
     reason, signer_hex = _check_proof_event(
         proof_json,
-        expected_npub=None,
         binds=binds,
         mismatch_reason=PROOF_REASON_REQUEST_MISMATCH,
         window_seconds=window_seconds,
@@ -669,33 +551,8 @@ def verify_request_signature(
     return _hex_to_npub(signer_hex), None
 
 
-def verify_proof(
-    proof_json: str,
-    expected_npub: str,
-    tool_name: str,
-    window_seconds: int = DEFAULT_WINDOW_SECONDS,
-) -> bool:
-    """Verify a Nostr kind-27235 identity proof.
-
-    Works for any npub holder — operator or patron.
-
-    Args:
-        proof_json: JSON string of the signed Nostr event.
-        expected_npub: The npub (bech32) the proof must be signed by.
-        tool_name: The MCP tool name that must appear in the ``u`` tag.
-        window_seconds: Maximum age (in seconds) of the proof event.
-
-    Returns:
-        ``True`` if the proof is valid, ``False`` otherwise.
-
-    Back-compat thin wrapper over ``_verify_proof_reason`` — a valid proof is
-    exactly one with no rejection reason.
-    """
-    return _verify_proof_reason(proof_json, expected_npub, tool_name, window_seconds) is None
-
-
-def _parse_grant_envelope(dpop_token: str) -> tuple[str, str | None] | None:
-    """Parse a proof-grant envelope or bare kind-30080 grant from ``dpop_token``.
+def _parse_grant_envelope(envelope: str) -> tuple[str, str | None] | None:
+    """Parse a proof-grant envelope or bare kind-30080 grant from ``envelope``.
 
     Returns ``(grant_json, nonce_or_none)`` when the payload is grant-shaped,
     else ``None`` so the caller can try Tactic-2 (kind 27235).
@@ -705,12 +562,12 @@ def _parse_grant_envelope(dpop_token: str) -> tuple[str, str | None] | None:
       - bare kind-30080 event JSON (nonce required separately — returns
         ``nonce=None`` so the gate can demand it)
     """
-    if not isinstance(dpop_token, str) or not dpop_token or dpop_token[0] not in "{[":
+    if not isinstance(envelope, str) or not envelope or envelope[0] not in "{[":
         return None
-    if len(dpop_token) > MAX_PROOF_JSON_BYTES:
+    if len(envelope) > MAX_PROOF_JSON_BYTES:
         return None
     try:
-        payload = json.loads(dpop_token)
+        payload = json.loads(envelope)
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(payload, dict):
@@ -733,7 +590,7 @@ def _parse_grant_envelope(dpop_token: str) -> tuple[str, str | None] | None:
     # Bare kind-30080 event.
     kind = payload.get("kind")
     if kind == 30080:
-        return dpop_token, None
+        return envelope, None
     return None
 
 
@@ -770,8 +627,7 @@ _GRANT_REASON_MESSAGES = {
     ),
     PROOF_REASON_GRANT_MISSING_NONCE: (
         "Invalid proof grant: a nonce is required to select the grant. "
-        "Pass the dpop_token envelope returned by receive_npub_proof "
-        '({\"grant\": ..., \"nonce\": \"...\"}).'
+        "Prove the npub again with request_npub_proof / receive_npub_proof."
     ),
     PROOF_REASON_GRANT_OPERATOR_UNKNOWN: (
         "This service could not establish its own identity, so it cannot "
@@ -802,48 +658,25 @@ def _error_codes() -> Any:
     return ErrorCode
 
 
-async def require_proof(
+async def require_held_grant(
     npub: str,
-    dpop_token: str,
-    tool_name: str,
+    envelope: str,
     *,
     revocations: ProofGrantRevocations | None = None,
-    window_seconds: int = DEFAULT_WINDOW_SECONDS,
     operator_hex: str | None = None,
 ) -> dict[str, Any] | None:
-    """Canonical proof-of-ownership gate. Returns ``None`` on success
-    (caller proceeds) or a structured error dict to return verbatim.
+    """Verify the grant a holder connection holds for ``npub``. Returns
+    ``None`` on success or a structured error dict to return verbatim.
 
-    Use at the top of every tool whose semantics include "caller is
-    acting as ``npub``" — check_balance, purchase_credits,
-    account_statement, register_operator, etc. Bootstrap tools
-    (request_npub_proof, receive_credentials, register_authority_npub)
-    deliberately do NOT gate on this — they're how a candidate proves
-    identity in the first place.
+    ``envelope`` is what ``receive_npub_proof`` put in the holder's wallet:
+    ``{"grant": <kind-30080 event>, "nonce": "<phrase>"}``. The grant is
+    signed by this runtime (``operator_hex``), names ``npub`` and commits to
+    ``sha256(nonce)``. A grant is accepted only when ``operator_hex`` is known
+    (a grant from a stranger, or from a runtime that cannot name itself,
+    never authorizes) and, when ``revocations`` is supplied, only if it
+    post-dates the patron's last ``forget_credentials``.
 
-    **Tactics accepted, in this order:**
-
-    1. **Operator-signed proof grant** — JSON envelope
-       ``{"grant": <kind-30080 event>, "nonce": "<phrase>"}`` returned by
-       ``receive_npub_proof``. Self-verifying; the nonce selects the grant
-       via ``sha256(nonce) == challenge``. A phrase alone is never accepted.
-    2. **Inline Schnorr proof** — JSON-encoded kind-27235 event with
-       ``tool_name`` in the ``u`` tag, signed by ``npub``, no older
-       than ``window_seconds``. Works for any caller that holds the
-       nsec; no cache needed.
-
-    Phrase-shaped ``dpop_token`` values always yield
-    ``PROOF_REFRESH_NEEDED`` (clean break — the nonce selects, never unlocks).
-
-    Bound to ``tool_name`` for Tactic 2: a proof issued for one tool will
-    not pass for another, preventing replay across the public tool surface.
-    Grants are tool-agnostic (bearer for the patron at this Operator).
-
-    Actor-agnostic — Operators, Authorities, and any future runtime
-    use the same gate. A grant is accepted only when ``operator_hex`` is
-    known (a grant from a stranger, or from a runtime that cannot name
-    itself, never authorizes) and, when ``revocations`` is supplied, only
-    if the grant post-dates the patron's last ``forget_credentials``.
+    An empty ``envelope`` means the connection does not hold ``npub``.
     """
     # Lazy import — constants is leaf-y, but identity_proof is too;
     # keep the dep one-way to be safe.
@@ -858,112 +691,62 @@ async def require_proof(
                 "least 60 characters."
             ),
         }
-    if not dpop_token:
+    if not envelope:
         return {
             "success": False,
             "error_code": ErrorCode.PROOF_REQUIRED,
-            "error": "dpop_token is required.",
+            "error": "This connection does not hold that npub yet.",
             "next_steps": [
-                ("Best: prove npub on the connection — sign each HTTP request with "
-                "npub's key (NIP-98, `Authorization: Nostr <base64 kind-27235>` "
-                "with u, method and payload tags), or connect with OAuth and prove "
-                "npub once by DM (request_npub_proof / receive_npub_proof); then "
-                "pass only npub."),
-                ("Or: sign a kind-27235 Nostr event with your nsec and pass "
-                "it as `dpop_token` (one-shot, no relay round-trip). Shape: "
-                "RAW JSON (not base64, not NIP-98 'Authorization: Nostr <b64>'), "
-                "kind:27235, content:\"\", a `u` tag holding THIS tool's exact "
-                "name from tools/list (not the endpoint URL), created_at within "
-                f"{DEFAULT_WINDOW_SECONDS}s of now, and a random `nonce` tag "
-                "recommended to avoid same-second event-id collisions."),
-                ("Or: call request_npub_proof, reply to the DM challenge from "
-                "your Nostr client, then call receive_npub_proof — pass the "
-                "returned dpop_token (grant envelope) as `dpop_token` on every "
-                "subsequent call."),
+                ("Holding npub's nsec: sign each HTTP request with it (NIP-98, "
+                "`Authorization: Nostr <base64 kind-27235>` with u, method and "
+                "payload tags) and pass only npub."),
+                ("Holding no key: connect with OAuth, call request_npub_proof, "
+                "reply to the DM from your Nostr client, then call "
+                "receive_npub_proof once. The connection then holds npub; pass "
+                "only npub."),
             ],
         }
 
-    # Clean break: a phrase-shaped token is a challenge nonce, never a credential.
-    # Refuse every phrase-shaped dpop_token with PROOF_REFRESH_NEEDED — no cache
-    # lookup, no unlock path. (Issue #267 / Secure Courier proof grant.)
-    if _DPOP_TOKEN_RE.match(dpop_token):
-        return {
-            "success": False,
-            "error_code": ErrorCode.PROOF_REFRESH_NEEDED,
-            "error": (
-                "That looks like a challenge nonce, not a proof grant. The "
-                "nonce selects a proof; it never authorizes on its own. Call "
-                "receive_npub_proof for an Operator-signed grant envelope, or "
-                "pass an inline kind-27235 Schnorr proof."
-            ),
-            "next_steps": [
-                "request_npub_proof(patron_npub=<patron_npub>)",
-                "Reply to the DM challenge from your Nostr client",
-                ("receive_npub_proof(patron_npub=<patron_npub>, dpop_token=<nonce>) "
-                "and pass the returned grant envelope as dpop_token"),
-            ],
-        }
+    grant_parsed = _parse_grant_envelope(envelope)
+    if grant_parsed is None:
+        return _grant_denial(PROOF_REASON_GRANT_MALFORMED)
+    grant_json, nonce = grant_parsed
+    if not nonce:
+        return _grant_denial(PROOF_REASON_GRANT_MISSING_NONCE)
+    # Fail closed: a runtime that cannot name itself cannot tell its own
+    # grants from a stranger's, and must not guess.
+    if not operator_hex:
+        return _grant_denial(PROOF_REASON_GRANT_OPERATOR_UNKNOWN)
 
-    # Tactic 1: Operator-signed kind-30080 proof grant (+ nonce selector).
-    grant_parsed = _parse_grant_envelope(dpop_token)
-    if grant_parsed is not None:
-        grant_json, nonce = grant_parsed
-        if not nonce:
-            return _grant_denial(PROOF_REASON_GRANT_MISSING_NONCE)
-        # Fail closed: a runtime that cannot name itself cannot tell its own
-        # grants from a stranger's, and must not guess.
-        if not operator_hex:
-            return _grant_denial(PROOF_REASON_GRANT_OPERATOR_UNKNOWN)
+    import hashlib as _hashlib
 
-        import hashlib as _hashlib
+    challenge_hash = _hashlib.sha256(nonce.encode()).hexdigest()
+    from tollbooth.identity_credential import (
+        IdentityCredentialError,
+        verify_proof_grant,
+    )
 
-        challenge_hash = _hashlib.sha256(nonce.encode()).hexdigest()
-        from tollbooth.identity_credential import (
-            IdentityCredentialError,
-            verify_proof_grant,
+    try:
+        claims = verify_proof_grant(
+            grant_json,
+            expected_patron_npub=npub,
+            challenge_hash=challenge_hash,
+            expected_operator_hex=operator_hex,
         )
+    except IdentityCredentialError as exc:
+        return _grant_denial(str(exc) or PROOF_REASON_GRANT_MALFORMED)
+
+    # Revocation: the patron's forget_credentials watermark. Unknown is
+    # not "not revoked" — if the store cannot answer, refuse and say why.
+    if revocations is not None:
+        from tollbooth.proven_npub import RevocationStoreUnavailable
 
         try:
-            claims = verify_proof_grant(
-                grant_json,
-                expected_patron_npub=npub,
-                challenge_hash=challenge_hash,
-                expected_operator_hex=operator_hex,
-            )
-        except IdentityCredentialError as exc:
-            return _grant_denial(str(exc) or PROOF_REASON_GRANT_MALFORMED)
+            revoked = await revocations.is_revoked(npub, claims["created_at"])
+        except RevocationStoreUnavailable as exc:
+            logger.warning("proof-grant revocation check unavailable: %s", exc)
+            return _grant_denial(PROOF_REASON_REVOCATIONS_UNAVAILABLE)
+        if revoked:
+            return _grant_denial(PROOF_REASON_GRANT_REVOKED)
 
-        # Revocation: the patron's forget_credentials watermark. Unknown is
-        # not "not revoked" — if the store cannot answer, refuse and say why.
-        if revocations is not None:
-            from tollbooth.proven_npub import RevocationStoreUnavailable
-
-            try:
-                revoked = await revocations.is_revoked(npub, claims["created_at"])
-            except RevocationStoreUnavailable as exc:
-                logger.warning("proof-grant revocation check unavailable: %s", exc)
-                return _grant_denial(PROOF_REASON_REVOCATIONS_UNAVAILABLE)
-            if revoked:
-                return _grant_denial(PROOF_REASON_GRANT_REVOKED)
-
-        return None
-
-    # Tactic 2: inline Schnorr-signed kind-27235 event
-    reason = _verify_proof_reason(
-        dpop_token, npub, tool_name, window_seconds=window_seconds
-    )
-    if reason is not None:
-        denial: dict[str, Any] = {
-            "success": False,
-            "error_code": ErrorCode.PROOF_INVALID,
-            "reason": reason,
-            "error": _PROOF_REASON_MESSAGES.get(reason, "Invalid identity proof."),
-        }
-        # ``expected_u`` names the tool the caller is already invoking, so it
-        # leaks nothing — and it's the single most common Tactic-2 mistake
-        # (endpoint URL in ``u`` instead of the tool name). Only for
-        # ``tool_mismatch``; every other reason keeps the surface minimal.
-        if reason == PROOF_REASON_TOOL_MISMATCH:
-            denial["expected_u"] = tool_name
-        return denial
     return None
