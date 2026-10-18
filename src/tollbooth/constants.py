@@ -21,19 +21,14 @@ class ErrorCode:
     NPUB_MISSING = "npub_missing"
     NPUB_INVALID = "npub_invalid"
 
-    # Npub ownership proof (request_npub_proof / receive_npub_proof → an
-    # Operator-signed proof grant the caller presents; or an inline kind-27235).
-    PROOF_MISSING = "proof_missing"          # parameter empty
-    PROOF_REQUIRED = "proof_required"        # restricted-tool path requiring inline Schnorr
-    PROOF_INVALID = "proof_invalid"          # signature does not verify
-    PROOF_REFRESH_NEEDED = "proof_refresh_needed"  # nonce-keyed nonce cache miss
+    # Npub ownership proof: the connection proves the npub, by a signed
+    # request or a grant in the holder's wallet (request_npub_proof /
+    # receive_npub_proof).
+    PROOF_REQUIRED = "proof_required"        # the connection does not prove the npub
+    PROOF_INVALID = "proof_invalid"          # a held grant does not verify
 
-    # Authority-side discretionary consent (register/update/deregister_operator).
-    # The Authority's adoption of a new Operator (or modification of an
-    # existing one) is gated by a Schnorr proof signed by the Authority's
-    # OWN npub — the cryptographic witness that the human who controls the
-    # Authority's nsec has authorized this action. A missing or invalid
-    # ``authority_proof`` argument trips this code.
+    # An Authority owner's act (its request queue, Neon health): the request
+    # must prove the Authority's own npub.
     AUTHORITY_CONSENT_REQUIRED = "authority_consent_required"
 
     # Tool/registry
