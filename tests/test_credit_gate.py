@@ -174,7 +174,7 @@ async def test_restricted_denies_non_operator():
 @pytest.mark.asyncio
 async def test_restricted_non_operator_is_restricted_before_proof():
     """A non-operator is rejected as RESTRICTED *before* the proof check — not
-    with a misleading proof_refresh_needed. Restricted tools verify proof against
+    with a misleading proof error. Restricted tools verify proof against
     the operator npub, so a non-operator's (valid) proof would fail that check
     and read as "your proof is invalid, re-sign-in". The access check must run
     first: require_held_grant is never reached for a non-operator caller."""
@@ -182,8 +182,8 @@ async def test_restricted_non_operator_is_restricted_before_proof():
     rt = _runtime(registry, operator_npub=OTHER)
     proof_err = {
         "success": False,
-        "error_code": ErrorCode.PROOF_REFRESH_NEEDED,
-        "error": "Your npub-proof cache entry is no longer valid.",
+        "error_code": ErrorCode.PROOF_INVALID,
+        "error": "That grant does not verify.",
     }
     mock_proof = AsyncMock(return_value=proof_err)
     with patch("tollbooth.runtime.require_held_grant", mock_proof):

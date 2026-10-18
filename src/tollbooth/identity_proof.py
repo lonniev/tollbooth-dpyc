@@ -234,7 +234,7 @@ def verify_provenance_attestation(
     → red). Keeping registry I/O out of this leaf makes it pure and testable,
     and lets the caller apply its own fail-closed policy.
 
-    Unlike ``verify_proof`` there is **no freshness window and no replay
+    Unlike a signed request there is **no freshness window and no replay
     consumption**: the attestation is an inbound, idempotently-readable fact a
     human may verify minutes or hours after the DM arrived (the same reason the
     proof-reply path dropped its wall-clock gate), and re-reading it is not a

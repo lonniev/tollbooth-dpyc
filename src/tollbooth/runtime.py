@@ -270,12 +270,11 @@ class OperatorRuntime:
         self._npub_proof_greeting = npub_proof_greeting
         self._on_npub_proven = on_npub_proven  # async callback(npub, payload)
         self._oauth_provider = oauth_provider  # OAuthProviderConfig or None
-        # Public base URL when connections authenticate as holders (see
-        # tollbooth.holder_auth); empty keeps today's argument-only proofs.
+        # Public base URL of this service, where holder connections sign in
+        # (see tollbooth.holder_auth). Empty installs no connection auth, so no
+        # request proves an npub.
         self._holder_auth_url = holder_auth_url.rstrip("/")
         self._holder_store: Any | None = None  # lazy HolderStore
-        # Proofs carried in a tool argument since this process started; the
-        # argument goes once every client proves itself on the connection.
         # One refresh at a time per (service, patron). A rotating single-use
         # refresh token cannot survive being spent twice at once — see
         # _oauth_refresh_lock.
@@ -1053,10 +1052,8 @@ class OperatorRuntime:
             # BEFORE proof. It's an npub comparison (the operator npub is public,
             # so this leaks nothing), and doing it first means a non-operator
             # gets a clear "restricted" error instead of a misleading proof
-            # failure against the operator's npub. The old order returned
-            # `proof_refresh_needed` ("your proof cache is invalid, re-sign-in")
-            # to a caller whose proof was perfectly valid — and on a
-            # non-best-effort call that reads as an auth bounce and logs them out.
+            # failure against the operator's npub, which a client would read as
+            # an auth bounce and sign the caller out.
             if category == "restricted" and resolved != self.operator_npub():
                 return {
                     "success": False,
@@ -5708,7 +5705,7 @@ def register_standard_tools(
         """Check this operator's adoption-request status at a chosen Authority.
 
         Free. Polls the Authority MCP-to-MCP for the status of this operator's
-        request (pending / approved / rejected / provisioned).
+        request (pending / rejected / provisioned / closed).
 
         Args:
             authority_npub: The npub of the Authority the request was sent to.

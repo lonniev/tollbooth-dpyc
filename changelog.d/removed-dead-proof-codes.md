@@ -1,0 +1,1 @@
+- Removed the unused error codes `proof_missing` and `proof_refresh_needed`; no 0.103 path returns them.
