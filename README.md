@@ -104,6 +104,9 @@ runtime = OperatorRuntime(
         },
     ),
     service_name="My Weather Service",
+    # This service's public URL. Connections prove who they act as here:
+    # signed requests (NIP-98) and OAuth holder connections. See Identity & Proofs.
+    holder_auth_url="https://my-weather.example.com",
 )
 ```
 
@@ -132,11 +135,11 @@ tool = register_standard_tools(mcp, "weather", runtime,
     service_version="1.0.0",
 )
 
-from tollbooth.params import DpopToken, PatronNpub
+from tollbooth.params import PatronNpub
 
 @tool
 @runtime.paid_tool(GET_WEATHER_UUID)
-async def get_weather(city: str, npub: PatronNpub = "", dpop_token: DpopToken = "") -> dict:
+async def get_weather(city: str, npub: PatronNpub = "") -> dict:
     """Get current weather for a city.
 
     Args:
@@ -175,7 +178,7 @@ That's it. The runtime bootstraps everything else from the Authority via encrypt
 1. **Patron calls `purchase_credits`** — the operator obtains an Authority certificate (Schnorr-signed Nostr event) and creates a Lightning invoice.
 2. **Patron pays** the Lightning invoice with any wallet.
 3. **Patron calls `check_payment`** — on settlement, credits are added as a tranche with optional expiry (`TrancheLifetime`).
-4. **Patron uses tools** — `debit_or_deny` gates every paid tool call: validates identity, proof, constraints, pricing, and debits the balance. FIFO tranche consumption.
+4. **Patron uses tools** — `debit_or_deny` gates every paid tool call: checks that the connection proves the `npub`, then constraints and pricing, and debits the balance. FIFO tranche consumption.
 5. **Balance runs low** — patron buys more credits. No subscription, no interruption.
 
 ### The Certification Fee Cascade
@@ -191,10 +194,10 @@ Every tool the wheel registers has three identifiers and exactly one of them cro
 | Identifier | Example | Scope | Used for |
 |---|---|---|---|
 | `capability` | `"check_balance"` | **Internal only** | Python function identifier; seed for the UUID. Lets a slug rename leave Neon pricing rows intact. |
-| `mcp_name` / runtime name | `"weather_check_balance"` | **External** | Wire-exposed tool name, pricing model `tool_name`, identity-proof `u` tag, audit logs. The one external identifier. |
+| `mcp_name` / runtime name | `"weather_check_balance"` | **External** | Wire-exposed tool name, pricing model `tool_name`, audit logs. The one external identifier. |
 | `tool_id` | UUID5 of capability | Internal | Neon pricing key. Stable across slug renames. |
 
-Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard tool by name outside this process (e.g., when signing an identity proof). Capability names never appear on the wire.
+Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard tool by name outside this process (e.g., when calling it from another service). Capability names never appear on the wire.
 
 ---
 
@@ -235,9 +238,10 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 
 | Tool | Cost | Purpose |
 |------|------|---------|
-| `request_npub_proof` | Free | Send a proof challenge DM to a patron |
-| `receive_npub_proof` | Free | Verify the patron's Schnorr-signed proof response |
-| `check_proof_status` | Free | Read-only check of a proof grant's remaining validity |
+| `request_npub_proof` | Free | Send a proof challenge DM to a patron; returns the challenge's `nonce` (holder connections only) |
+| `receive_npub_proof` | Free | Verify the patron's signed reply and put the npub in this holder's wallet (holder connections only) |
+| `check_proof_status` | Free | `check_proof_status(patron_npub)` — whether this connection proves the npub, and for how long |
+| `held_identities` | Free | The npubs this connection holds, with when each grant expires |
 
 ### Authority Balance
 
@@ -325,9 +329,8 @@ That's the entire Authority `server.py`. Everything below is wheel-provided.
 
 | Tool | Cost | Purpose |
 |------|------|---------|
-| `register_operator` | Free | Provision an operator in the Authority ledger; creates per-operator Neon schema + LOGIN role |
-| `update_operator` | Free | Update an operator's community registry entry |
-| `deregister_operator` | Free | Remove an operator from the DPYC community registry |
+| `update_operator` | Free (operator) | Ask to change the operator's registry entry; waits for the owner's approval |
+| `deregister_operator` | Free (operator or owner) | Remove an operator from the DPYC community registry — the operator leaving, or the owner removing it |
 | `get_operator_config` | Free (proof-gated) | Retrieve the operator's bootstrap config (Neon URL, schema) |
 | `operator_status` | Free | Operator registration status + Authority's Nostr npub |
 | `certify_credits` | Ad valorem (default 2%, min 10 sats) | Sign a Schnorr-signed Nostr event certificate (kind 30079) for a purchase order |
@@ -335,16 +338,18 @@ That's the entire Authority `server.py`. Everything below is wheel-provided.
 | `register_authority_npub` | Free | Step 1 of Authority self-claim — DM challenge to the candidate |
 | `confirm_authority_claim` | Free | Step 2 — verify candidate's DM, escalate to parent Authority |
 | `check_authority_approval` | Free | Step 3 — confirm parent's approval, activate Authority |
-| `receive_adoption_request` | Free (operator-proof gated) | Inbound: record an operator's request to be adopted |
-| `list_adoption_requests` | Free (owner) | Owner queue — list pending operator-adoption requests |
-| `approve_adoption` | Free (owner) | Approve a pending adoption request and provision the operator |
-| `reject_adoption` | Free (owner) | Reject a pending operator-adoption request |
+| `receive_adoption_request` | Free (signed by the operator) | Inbound: record an operator's request to be adopted |
+| `list_operator_requests` | Free (owner) | Owner queue — pending adoption and update requests |
+| `approve_operator_request` | Free (owner) | Approve a pending request: provision an adoption, or apply an update |
+| `reject_operator_request` | Free (owner) | Reject a pending adoption or update request |
 | `get_adoption_status` | Free | Read the status of an operator's adoption request |
 | `repair_operator_schema` | Free (owner) | Reassign all table ownership in an operator's tenant schema to its own role |
 | `list_neon_alerts` | Free (owner) | Owner queue — operators that reported a Neon-402 (persistence store locked) |
 | `network_persistence_health` | Free (owner) | Proactive per-project Neon quota posture + reactive alerts |
 
-The 3-step onboarding flow escalates to whichever upstream Authority the candidate's `dpyc-community` registry entry names — Prime for direct-of-Prime, NA for NE, etc. (`tollbooth.registry.resolve_my_parent_npub`, added v0.20.0).
+Operators join only by adoption: the operator calls its own `request_adoption`, signed with its key, and the owner approves it in the queue. There is no one-step registration. Each request proves one npub, so anything needing both parties is a request and an approval ([docs/deferred-operator-adoption.md](docs/deferred-operator-adoption.md)). Owner tools take a request that proves the Authority's own npub.
+
+The 3-step Authority onboarding flow escalates to whichever upstream Authority the candidate's `dpyc-community` registry entry names — Prime for direct-of-Prime, NA for NE, etc. (`tollbooth.registry.resolve_my_parent_npub`, added v0.20.0).
 
 ### What the package exports
 
@@ -359,7 +364,7 @@ The 3-step onboarding flow escalates to whichever upstream Authority the candida
 
 Three more were added as the Authority took on adoption and Neon-quota stewardship:
 
-- `adoption_store` — durable store for deferred operator-adoption requests
+- `operator_requests` — durable queue of operator requests (adoptions and registry updates)
 - `neon_admin` — Neon control-plane client for the proactive compute/storage-quota watch
 - `neon_alert_store` — durable store for operator Neon-402 quota alerts
 
@@ -424,9 +429,10 @@ OperatorRuntime(
 
 | Method | Returns | Purpose |
 |--------|---------|---------|
-| `debit_or_deny(tool_id, npub, *, proof, tool_kwargs)` | `int` (cost) or `dict` (denial) | Gate a tool call through identity, proof, constraints, pricing, and billing |
+| `debit_or_deny(tool_id, npub, *, tool_kwargs)` | `int` (cost) or `dict` (denial) | Gate a tool call through identity, proof, constraints, pricing, and billing |
 | `paid_tool(tool_id)` | decorator | Decorator that wraps `debit_or_deny` around a tool function |
-| `require_caller_proof(npub, proof, capability)` | `dict \| None` | Caller-identity gate for free / bootstrap standard tools — returns `None` on success or a structured error dict to return verbatim |
+| `prove_caller(npub)` | `dict \| None` | The one proof gate: does the request in flight prove `npub`? `None` on success, else a structured error dict to return verbatim |
+| `require_caller_proof(npub)` | `dict \| None` | `prove_caller` for free / bootstrap standard tools |
 | `runtime_name(capability)` | `str` | Resolve a capability seed to its runtime tool name (`<slug>_<capability>`) — what crosses every server boundary |
 | `mcp_name_for(tool_id)` | `str` | Resolve a tool UUID to its runtime tool name |
 | `vault()` | `NeonVault` | Bootstraps and returns the Neon vault (lazy) |
@@ -478,7 +484,7 @@ Operators configure constraints in the pricing model's `pipeline` array. Each st
 | `coupon` | Code-based discounts with expiration — bound by the coupon itself (`mint_coupon` / `update_coupon` `tool_ids`), never authored into a chain |
 | `loyalty_discount` | Spend-based tiered discounts |
 | `bulk_bonus` | Volume bonuses on credit purchases |
-| `patron_proof` | Require per-call Schnorr proof for high-value tools |
+| `patron_proof` | Require each request to be signed with the patron's own nsec (a holder connection does not satisfy it) — for high-value tools |
 | `json_expression` | Custom boolean logic rules |
 
 **Scoping:** Each pipeline step can target specific tools (`tool_ids`) and/or specific patrons (`patron_npubs`, max 10). Unscoped steps apply to all tools and patrons.
@@ -520,7 +526,7 @@ x402 = X402Client(
 )
 
 @runtime.paid_tool(tool_id)
-async def fetch_upstream(query: str, npub: str = "", proof: str = "") -> dict:
+async def fetch_upstream(query: str, npub: PatronNpub = "") -> dict:
     resp = await x402.get(f"https://x402-api.example.com/data?q={query}")
     return resp.json()  # patron sees data, never sees 402
 ```
@@ -533,27 +539,31 @@ Per-tool opt-in: only tool handlers that hit x402 upstreams use the client. Requ
 
 Every participant is identified by a [Nostr](https://nostr.com/) keypair. The `npub` is your identity in the DPYC Social Contract. The `nsec` stays with you — never shared, never sent to a service.
 
-Every tool that accepts `npub` also requires `proof` — a JSON-serialized Schnorr-signed kind-27235 Nostr event proving ownership. No proof, no service.
+Every tool takes the `npub` it acts as, and only that: the connection proves it. Each request acts as exactly one npub. An action that needs two parties (an operator and its Authority) is a request by one and an approval by the other, never one request carrying both.
+
+A connection proves an npub in one of two ways, both read from the HTTP `Authorization` header. Setting `OperatorRuntime(holder_auth_url="https://<your-host>")` turns them on.
+
+**Signed requests (a caller that holds the nsec).** An Operator calling its Authority, an agent with its own keyring, the native Pricing Studio: each signs every HTTP request with the npub's key, NIP-98 style. The header is `Authorization: Nostr <base64 kind-27235 event>`, whose tags name the URL (`u`), the `method`, the sha256 of the body (`payload`) and a random `nonce`. The signature authorizes that one request and nothing else; events older than 60 seconds and replays are refused. The signer needs no grant.
 
 ```python
-# Proof format (kind 27235, NIP-98 style)
-{
-    "pubkey": "<hex_pubkey>",
-    "kind": 27235,
-    "content": "",
-    "created_at": 1713000000,
-    "tags": [["u", "<tool_name>"]],
-    "sig": "<schnorr_signature>"
-}
+from tollbooth.identity_proof import sign_request
+from tollbooth.mcp_client import service_client
+
+header = sign_request(nsec, method="POST", url=url, body=body)   # one request, by hand
+client = service_client(url, nsec)                               # a FastMCP client that signs every request
 ```
 
-Inline proofs must be less than 60 seconds old, and consumed event IDs are tracked to prevent replay. A caller that holds the nsec (an Operator, an agent keyring, the native app) signs one of these per call.
+**Holder connections (a caller that holds no key).** An AI assistant or a web page connects with OAuth 2.1 (dynamic client registration, Authorization Code with PKCE, single-use refresh tokens); the Operator is its own authorization server. Connecting asks the person nothing, because the token names a *holder*: a connection with no identity of its own. The holder carries a *wallet* of npubs, each proven once by the patron answering a Secure Courier DM:
 
-**Proof grants (for an agent that holds no nsec).** A patron proves ownership once, by signing the challenge DM in their own Nostr client, and `receive_npub_proof` returns a `dpop_token` **envelope** `{"grant": <event>, "nonce": "<phrase>"}`. The grant is an Operator-signed kind-30080 event binding the patron's npub, the hash of the challenge nonce, the patron's verified reply signature, and an expiry the patron chose (up to a 30-day hard cap). The calling application passes that whole envelope as `dpop_token` on every subsequent paid call.
+1. `request_npub_proof(patron_npub)` sends the patron a challenge DM and returns its `nonce`. The challenge is bound to the holder that asked, so only that holder can collect the reply.
+2. The patron replies from their own Nostr client, optionally stating how long the proof should last; the reply is signed by the patron's key.
+3. `receive_npub_proof(patron_npub, nonce)` drains the pinned relay, verifies the signed reply, and puts a grant in the holder's wallet. The reply to the caller carries no grant.
 
-The grant is **self-verifying**: the gate checks the Operator's signature, the npub binding, the nonce, and the expiry with no server-side lookup, so it survives cold starts with no cache. The challenge nonce only *selects* the grant — a bare phrase is never a credential and is refused with `proof_refresh_needed`. `forget_credentials` revokes every grant issued to a patron via a per-npub watermark. (Superseded in 0.97.0: the earlier `sha256(poison):npub` proof cache, where the phrase itself was the credential.)
+The grant is an Operator-signed kind-30080 event binding the patron's npub, the hash of the `nonce`, the patron's verified reply signature, and the expiry the patron chose (up to a 30-day cap). The wallet keeps it as `{"grant": <event>, "nonce": "<phrase>"}`. On each call the gate checks the Operator's signature, the npub, the nonce hash and the expiry; `forget_credentials` revokes every grant issued to a patron. Many npubs can share one connection, and the grant never enters the model's transcript. `held_identities` lists what a connection holds, and `check_proof_status(patron_npub)` reports whether it proves an npub and for how long.
 
-**Holder bearer (opt-in: `OperatorRuntime(holder_auth_url="https://<your-host>")`).** The connection carries the grants instead of the tool arguments. A client authenticates with `Authorization: Bearer` as the MCP authorization spec describes; the Operator is its own OAuth 2.1 authorization server, and connecting asks the person nothing, because the token names a *holder* with no identity of its own. Each `receive_npub_proof` made over that connection puts the grant in the holder's wallet and leaves it out of the reply, so many npubs can share one connection and a paid call passes only `npub`. The grant is checked by the same gate, so it never enters the model's transcript. Any bearer value the Operator did not mint is an anonymous caller, which proves itself with `dpop_token` as above; a client without OAuth sends a placeholder such as `Bearer anonymous`. `held_identities` lists what a connection holds.
+Any other request is anonymous and acts as no npub: free tools answer it, and a paid tool returns `proof_required` with both ways to prove the npub. `request_npub_proof` and `receive_npub_proof` refuse a connection that is not a holder.
+
+A service that keeps no holders, such as the dpyc-oracle, installs `tollbooth.holder_auth.SignedRequestProvider`: a signed request proves its npub, every other request is anonymous and never refused at the door, and tools read the signer with `signed_npub()`.
 
 ---
 
@@ -632,7 +642,7 @@ All other secrets (BTCPay, API keys, OAuth tokens) flow through Secure Courier �
 
 `NeonVault` provides ACID ledger storage with AES-256-GCM encryption (with AAD), optimistic concurrency, and schema-qualified table names via `_t()`.
 
-`NeonCredentialVault` stores credentials encrypted in schema-isolated Postgres (one `op_{hash}` schema per operator, provisioned by `register_operator`).
+`NeonCredentialVault` stores credentials encrypted in schema-isolated Postgres (one `op_{hash}` schema per operator, provisioned when the Authority approves its adoption).
 
 ### Schema Isolation
 
