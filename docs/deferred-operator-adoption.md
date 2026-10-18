@@ -1,91 +1,77 @@
-# Deferred Operator Adoption — Implementation Plan (wheel-wide)
+# Operator Requests — Adoption, Updates and Leaving
 
-Status: design approved (deferred-courtship model), implementation pending.
-Scope: `tollbooth-dpyc` SDK feature; every operator + Authority inherits it on a pin bump.
+Status: as built in tollbooth-dpyc 0.103. Every operator and Authority inherits it with the SDK pin.
 
-## Decisions baked in (override if wrong)
+An operator and its Authority are two parties, and each request proves exactly one npub. So
+anything that needs both of them is a request by one party and a decision by the other,
+recorded in between. The operator asks; the Authority's owner decides, on their own time.
 
-1. **Request delivery = MCP-to-MCP.** `request_adoption` (operator-side) calls the Authority's `receive_adoption_request` over FastMCP `Client` (request/response, Horizon-friendly — no Authority-side inbox polling). The secure-courier DM is used only for the *owner notification*.
-2. **Operator proof = inline self-sign.** `request_adoption` runs on the operator, which holds its own nsec on Horizon, so it mints an inline Schnorr (kind-27235) adoption proof binding `operator_npub → authority_npub` and forwards it. The Authority verifies it inline with the existing `identity_proof` verify primitive — no DM round-trip. (Symmetric to how `authority_proof` is produced by the nsec-holder.) The human-in-the-loop moment is the `request_adoption` invocation itself.
-3. **Approval phasing.** Phase 1 = route (A) Studio approve via `authority_proof` + durable queue + owner-notification DM. Phase 2 (additive) = route (B) `check_adoption_replies` async-DM approval.
-4. **Owner-notify target = the Authority's own npub** (`runtime.operator_npub()`); the Studio, holding that nsec, surfaces it.
-5. **Registry timing.** Oracle/dpyc-community registration moves from request-time to **approval-time**, so pending (un-adopted) operators never appear in the public roster.
+| What | Who acts | How |
+|---|---|---|
+| Be adopted | Operator asks, Authority owner approves | `request_adoption` → `approve_operator_request(kind="adoption")` |
+| Change service URL or display name | Operator asks, Authority owner approves | `update_operator` → `approve_operator_request(kind="update")` |
+| Leave, or be removed | Either party alone | `deregister_operator(npub)` |
 
-## State — Authority-side Neon table (durable, replaces the in-memory `_onboarding` singleton weakness)
+There is no one-step registration. An Authority joining its own parent takes the same path:
+its runtime carries `request_adoption` like any operator's.
 
-`operator_adoption_requests`:
+## Proof
+
+Each call proves its one npub on the connection (see the README's *Identity & Proofs*):
+
+- **The operator** holds its own nsec, so `request_adoption` and `adoption_status` run on the
+  operator's service and reach the Authority over `service_client(authority_url, nsec)`,
+  whose every request is signed with the operator's key (NIP-98). The Authority's
+  `receive_adoption_request` admits a request only when it is signed by `operator_npub`.
+  `request_adoption` itself answers only a request signed with the operator's key.
+- **The Authority's owner** acts with requests that prove the Authority's own npub (signed
+  with its nsec, as the Pricing Studio does). `list_operator_requests`,
+  `approve_operator_request` and `reject_operator_request` refuse anyone else with
+  `authority_consent_required`.
+- **Registry writes** go from the Authority to the dpyc-oracle on a connection signed with
+  the Authority's key; the Oracle (behind `SignedRequestProvider`) accepts
+  `register_operator`, `update_operator` and `deregister_operator` only when the request is
+  signed by the Authority it names.
+
+## The flow
+
+1. **Ask.** On the operator: `request_adoption(authority_npub, service_url, display_name, note)`.
+   The operator resolves the Authority's MCP endpoint from the community registry and calls
+   its `receive_adoption_request`, which records a pending row and sends the owner a
+   best-effort "check your queue" DM. Nothing is provisioned yet.
+2. **Wait.** The operator polls `adoption_status(authority_npub)`; it reads the Authority's
+   `get_adoption_status` for this operator. The operator's lifecycle stays `not_registered`.
+3. **Decide.** The owner reads `list_operator_requests` (the Pricing Studio's *Pending
+   Requests*) and calls `approve_operator_request(operator_npub, kind)` or
+   `reject_operator_request(operator_npub, kind, reason)`.
+   - An approved **adoption** provisions the operator: ledger row, isolated Neon tenant
+     (`op_{hash}` schema with its own LOGIN role) and the registry entry via the Oracle, then
+     the bootstrap DM. The operator moves `warming_up` → `ready`.
+   - An approved **update** applies the requested service URL and/or display name to the
+     registry entry.
+4. **Leave.** `deregister_operator(npub)` passes when the request proves `npub` (the operator
+   leaving) or the Authority's npub (the owner removing it). It removes the registry entry
+   and closes the adoption row. The ledger and the Neon tenant stay, so a later adoption
+   resumes where it left off.
+
+A rejected operator may ask again; asking again refreshes the row to pending.
+
+## State — the Authority's Neon vault
+
+`tollbooth.authority.operator_requests` keeps one table per kind of request,
+`operator_adoption_requests` and `operator_update_requests`, each keyed by `operator_npub`:
+
 ```
 operator_npub  TEXT PRIMARY KEY
 service_url    TEXT NOT NULL DEFAULT ''
-status         TEXT NOT NULL DEFAULT 'pending'   -- pending|approved|rejected|provisioned
-poison_hash    TEXT NOT NULL DEFAULT ''          -- for Phase-2 async-DM reply match
+display_name   TEXT NOT NULL DEFAULT ''
+status         TEXT NOT NULL DEFAULT 'pending'   -- pending|rejected|provisioned|applied|closed
 note           TEXT NOT NULL DEFAULT ''
 requested_at   TIMESTAMPTZ DEFAULT now()
 decided_at     TIMESTAMPTZ
-expires_at     TIMESTAMPTZ                        -- requested_at + 7d
+expires_at     TIMESTAMPTZ                        -- requested_at + 7 days
 ```
-Keyed per operator → concurrent requests are fine and survive cold starts (the precedent's singleton was one-at-a-time and process-local).
 
----
-
-## Work units (each a releasable checkpoint; SDK-first)
-
-### Unit 0 — Characterize `register_operator` (safety net, no behavior change)
-Add `tests/test_authority/test_register_operator_characterization.py` pinning today's contract: (a) denies without operator `proof`, (b) denies without `authority_proof` (`AUTHORITY_CONSENT_REQUIRED`), (c) on both valid → ledger row + `provision_operator_schema` called + oracle register + bootstrap DM + `neon_database_url` returned. This makes the Unit 1 extraction provably faithful (characterize-then-extract).
-
-### Unit 1 — Extract `_provision_operator(npub, service_url)` (pure refactor)
-In `authority/tools.py`, lift the body of `register_operator` (lines ~685–742: ledger → `provision_operator_schema` → `store_operator_config` → `_register_operator_via_oracle` → `_resend_bootstrap_dm` → result dict) into a module-private `async def _provision_operator(runtime, npub, service_url) -> dict`. `register_operator` becomes:
-```python
-err = await require_proof(npub, proof, runtime.runtime_name("register_operator"), …);            if err: return err
-err = await _require_authority_consent(runtime, authority_proof, runtime.runtime_name("register_operator")); if err: return err
-return await _provision_operator(runtime, npub, service_url)
-```
-Unit 0 tests stay green = faithful. **Wire API unchanged.** Releasable alone.
-
-### Unit 2 — Adoption store (`authority/adoption_store.py`)
-CRUD over `operator_adoption_requests`, mirroring `pricing_store.py` conventions (`vault._t(...)`, `vault._execute(...)`, `rowCount` camelCase):
-- `ensure_schema(vault)`
-- `upsert_pending(vault, operator_npub, service_url, poison_hash, note) -> None` (idempotent; refreshes `expires_at`)
-- `get(vault, operator_npub) -> dict|None`
-- `list_pending(vault) -> list[dict]`
-- `mark(vault, operator_npub, status) -> bool` (sets `decided_at`)
-- `prune_expired(vault) -> int`
-Unit tests against a fake vault (assert SQL params, status transitions, rowCount handling).
-
-### Unit 3 — Authority tools + identities + errors
-`authority/tools.py`:
-- `receive_adoption_request(operator_npub, proof, service_url)` — category `free`, **gated by inline operator-npub proof** (verify the kind-27235 adoption proof signed by `operator_npub`, bound to this Authority's npub). Effect: `ensure_schema` + `upsert_pending`; fire-and-forget `open_channel("operator_adoption", greeting="Operator <npub> (<url>) requests adoption — approve in Studio or reply yes + <poison>", recipient_npub=runtime.operator_npub())`; store `poison_hash`. Returns `{success, status:"pending"}`. **Never provisions.**
-- `list_adoption_requests(authority_proof)` — `restricted` (`_require_authority_consent`). Returns `list_pending`.
-- `approve_adoption(operator_npub, authority_proof)` — `restricted`. → `_provision_operator(runtime, operator_npub, row.service_url)`; `mark(..., "provisioned")`. Returns the provisioning result.
-- `reject_adoption(operator_npub, authority_proof, reason="")` — `restricted`. `mark(..., "rejected")`; optional reject DM to the operator.
-- `get_adoption_status(operator_npub)` — `free`. Read-only status for the operator's poll (no proof; status isn't sensitive, it's the operator's own request).
-
-`tool_identity.py`: frozen UUIDs + `ToolIdentity` entries (categories above). `constants.py`: `ADOPTION_PENDING`, `ADOPTION_NOT_FOUND`, `ADOPTION_ALREADY_PROVISIONED`.
-
-Tests: inbound proof gate, owner-consent gate on approve/reject/list, approve→`_provision_operator` called once, reject path, idempotent re-request.
-
-### Unit 4 — Operator-side tools (`register_standard_tools` in `runtime.py`)
-- `request_adoption(authority_npub, proof, note="")` — `restricted` (operator-proof gated on the operator's own npub). Steps: resolve the Authority's MCP URL from the registry (`resolve_authority_service` / Oracle `lookup_member(authority_npub)`); mint inline adoption proof with the operator nsec bound to `authority_npub`; `Client(authority_url).call_tool("<authority_slug>_receive_adoption_request", {...})`; return `{status:"pending", authority_npub}`. Defensive (timeout, structured error if the Authority is unreachable).
-- `adoption_status(authority_npub, proof)` — `free`. MCP-to-MCP `get_adoption_status` poll; returns pending/approved/provisioned/rejected.
-
-FastMCP `Client` MCP-to-MCP is the same pattern proven in dpyc-oracle `list_services`. Tests mock the Authority `Client`.
-
-### Unit 5 — Phase 2: async-DM approval (additive)
-`check_adoption_replies(authority_proof)` — `restricted`. Drains `exchange.receive(sender_npub=runtime.operator_npub(), service="operator_adoption")`; for each reply whose poison matches a pending row's `poison_hash`, finalize via `_provision_operator` + `mark provisioned`. Lets the owner approve by replying to the Nostr DM without the Studio. Ship after Phase 1 is proven.
-
-### Unit 6 — Release + propagation + client
-- SDK release (`/release`): minor bump (additive feature), CHANGELOG.
-- Fleet pin bump → every operator gains `request_adoption`/`adoption_status`; every Authority gains the adoption tools. (cypher-mcp inherits it for free.)
-- **Studio (Swift, separate repo):** a "Pending Adoptions" queue (`list_adoption_requests`) with Approve/Reject actions that mint `authority_proof` from the stored Authority nsec → `approve_adoption`/`reject_adoption`. Plus surface the `operator_adoption` notification DM.
-
----
-
-## Lifecycle (unchanged — confirmed)
-Operator stays `not_registered` (session_status, runtime.py:2641) until `approve_adoption` provisions the Neon tenant; then bootstrap DM → `warming_up` → `ready`. No lifecycle code changes.
-
-## Sequencing / dependencies
-Unit 0 → 1 (refactor) is the foundation and ships first. Unit 2 (store) precedes Unit 3 (Authority tools). Unit 3 precedes Unit 4 (operator side needs the Authority endpoint to call). Unit 5 is optional/after. Unit 6 last.
-
-## Open sub-details to finalize during Unit 3
-- Exact canonical message for the inline adoption proof (bind operator_npub + authority_npub + service_url; reuse `identity_proof` verify). Keep it a self-contained kind-27235 event, no relay round-trip.
-- Whether `reject_adoption` notifies the operator by DM or only sets status (operator's `adoption_status` poll would see `rejected` either way).
+`provisioned` closes an approved adoption, `applied` an approved update, and `closed` a
+deregistered operator. Rows are durable, so concurrent requests and serverless cold starts
+are both fine. The owner DM is a convenience; the table is the source of truth.
