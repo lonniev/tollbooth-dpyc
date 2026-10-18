@@ -53,12 +53,12 @@ def _exchange_denied_situation(exc: Any) -> OAuthSituation:
     )
 
 
-async def begin_oauth_tool(rt: Any, npub: str, dpop_token: str) -> dict[str, Any]:
+async def begin_oauth_tool(rt: Any, npub: str) -> dict[str, Any]:
     """Start the OAuth2 authorization flow; return an authorize URL."""
     opc = rt._oauth_provider
     oauth_service = opc.service_name
 
-    if err := await rt.require_caller_proof(npub, dpop_token, "begin_oauth"):
+    if err := await rt.require_caller_proof(npub):
         return err
     resolved = rt.resolve_npub(npub)
 
@@ -154,12 +154,12 @@ async def begin_oauth_tool(rt: Any, npub: str, dpop_token: str) -> dict[str, Any
     return result
 
 
-async def check_oauth_status_tool(rt: Any, npub: str, dpop_token: str) -> dict[str, Any]:
+async def check_oauth_status_tool(rt: Any, npub: str) -> dict[str, Any]:
     """Poll the collector for the auth code, exchange it, persist tokens."""
     opc = rt._oauth_provider
     oauth_service = opc.service_name
 
-    if err := await rt.require_caller_proof(npub, dpop_token, "check_oauth_status"):
+    if err := await rt.require_caller_proof(npub):
         return err
     resolved = rt.resolve_npub(npub)
 

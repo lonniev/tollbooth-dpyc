@@ -57,23 +57,23 @@ async def receive_credentials_tool(
     rt: Any,
     sender_npub: str,
     service: str,
-    dpop_token: str,
+    nonce: str,
     credential_card: str,
     *,
     service_name: str,
     slug: str,
 ) -> dict[str, Any]:
-    """Pick up operator credentials (dpop_token drain or ncred card) + validate."""
+    """Pick up operator credentials (nonce drain or ncred card) + validate."""
     if not sender_npub:
         return {
             "success": False,
             "error": "sender_npub is required.",
         }
-    # Bound untrusted string args before any parsing. A dpop_token is a short
+    # Bound untrusted string args before any parsing. A nonce is a short
     # phrase and an ncred card is a small JSON blob; anything larger is an
     # adversarial oversized payload from AI tool input.
     _MAX_ARG_BYTES = 256 * 1024
-    if len(dpop_token or "") > 1024 or len(credential_card or "") > _MAX_ARG_BYTES:
+    if len(nonce or "") > 1024 or len(credential_card or "") > _MAX_ARG_BYTES:
         return {
             "success": False,
             "error": "Argument too large.",
@@ -92,13 +92,13 @@ async def receive_credentials_tool(
                 )
             ),
         }
-    if not dpop_token and not credential_card:
+    if not nonce and not credential_card:
         from tollbooth.constants import ErrorCode as _EC
         return {
             "success": False,
-            "error_code": _EC.DPOP_TOKEN_MISSING,
+            "error_code": _EC.NONCE_MISSING,
             "error": (
-                "dpop_token is required — pass the session phrase returned by "
+                "nonce is required — pass the session phrase returned by "
                 "request_credential_channel (or provide a credential_card)."
             ),
         }
@@ -114,7 +114,7 @@ async def receive_credentials_tool(
             )
         else:
             result = await courier.receive(
-                sender_npub, service=service, dpop_token=dpop_token,
+                sender_npub, service=service, nonce=nonce,
             )
 
         # Validate credentials via operator callback before accepting.
@@ -188,7 +188,7 @@ async def receive_credentials_tool(
 
 
 async def forget_credentials_tool(
-    rt: Any, service: str, npub: str, dpop_token: str,
+    rt: Any, service: str, npub: str,
 ) -> dict[str, Any]:
     """Delete vaulted credentials for (service, npub); proof of ownership required."""
     if not service:
@@ -204,7 +204,7 @@ async def forget_credentials_tool(
                 )
             ),
         }
-    if err := await rt.require_caller_proof(npub, dpop_token, "forget_credentials"):
+    if err := await rt.require_caller_proof(npub):
         return err
     target_npub = npub
     courier = await rt.courier()
@@ -269,18 +269,18 @@ async def request_patron_credentials_tool(
 
 
 async def receive_patron_credentials_tool(
-    rt: Any, sender_npub: str, dpop_token: str, credential_card: str,
+    rt: Any, sender_npub: str, nonce: str, credential_card: str,
 ) -> dict[str, Any]:
-    """Pick up patron credentials (dpop_token drain or ncred card)."""
+    """Pick up patron credentials (nonce drain or ncred card)."""
     if not sender_npub:
         return {"success": False, "error": "sender_npub is required."}
-    if not dpop_token and not credential_card:
+    if not nonce and not credential_card:
         from tollbooth.constants import ErrorCode as _EC
         return {
             "success": False,
-            "error_code": _EC.DPOP_TOKEN_MISSING,
+            "error_code": _EC.NONCE_MISSING,
             "error": (
-                "dpop_token is required — pass the session phrase returned "
+                "nonce is required — pass the session phrase returned "
                 "by request_patron_credentials (or a credential_card)."
             ),
         }
@@ -296,7 +296,7 @@ async def receive_patron_credentials_tool(
                 credential_card, service=service,
             )
         return await courier.receive(
-            sender_npub, service, dpop_token=dpop_token,
+            sender_npub, service, nonce=nonce,
             request_tool="request_patron_credentials",
         )
     except Exception as e:  # noqa: BLE001

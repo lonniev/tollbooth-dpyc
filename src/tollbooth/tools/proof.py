@@ -3,7 +3,7 @@
 Extracted verbatim from the ``request_npub_proof`` / ``receive_npub_proof`` /
 ``check_proof_status`` closures in ``register_standard_tools``. These are
 orchestrators over ``NostrCredentialExchange`` internals (the deterministic,
-dpop_token-scoped drain loop) plus the proven-npub cache — §2-sensitive identity
+nonce-scoped drain loop) plus the proven-npub cache — §2-sensitive identity
 code, so the move is behavior-preserving: ``resolve_npub`` became
 ``rt.resolve_npub`` and the ``_PROOF_SERVICE`` closure local became the module
 constant below; nothing else changed. The drain loop is pinned by
@@ -238,13 +238,13 @@ async def request_npub_proof_tool(
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"Failed to send proof request: {e}"}
 
-    # Extract the dpop_token phrase and rendezvous relay from the channel result.
-    dpop_token = result.get("dpop_token", "")
+    # The challenge phrase and rendezvous relay from the channel result.
+    nonce = result.get("nonce", "")
     rendezvous_relay = result.get("rendezvous_relay", "")
 
     response: dict[str, Any] = {
         "success": True,
-        "dpop_token": dpop_token,
+        "nonce": nonce,
         "message": (
             "Proof request sent via Secure Courier. "
             "Call receive_npub_proof to complete."
@@ -263,20 +263,32 @@ async def request_npub_proof_tool(
 async def receive_npub_proof_tool(
     rt: Any,
     patron_npub: str,
-    dpop_token: str,
+    nonce: str,
 ) -> dict[str, Any]:
-    """Drain the pinned relay, verify the proof reply, and cache proven status."""
+    """Drain the pinned relay, verify the proof reply, and put the proven npub
+    into the calling holder's wallet."""
     err = rt.npub_validation_error(patron_npub, param="patron_npub")
     if err is not None:
         return err
     from tollbooth.constants import ErrorCode as _EC
-    if not dpop_token:
+    if not nonce:
         return {
             "success": False,
-            "error_code": _EC.DPOP_TOKEN_MISSING,
+            "error_code": _EC.NONCE_MISSING,
+            "error": "nonce is required — pass the nonce request_npub_proof returned.",
+        }
+    # Refuse before draining: the reply is consumed once, and only a holder
+    # connection has a wallet to keep the proof in.
+    from tollbooth.holder_auth import current_holder
+    holder = current_holder() if rt.holder_auth_enabled else None
+    if holder is None:
+        return {
+            "success": False,
+            "error_code": _EC.PROOF_REQUIRED,
             "error": (
-                "dpop_token is required — pass the dpop_token returned by "
-                "request_npub_proof."
+                "receive_npub_proof needs an OAuth (holder) connection to keep "
+                "the proof in. Connect with OAuth and call it again; a client "
+                "holding the npub's nsec needs no proof — it signs each request."
             ),
         }
     resolved = rt.resolve_npub(patron_npub)
@@ -301,13 +313,13 @@ async def receive_npub_proof_tool(
     patron_hex = _npub_to_hex(resolved)
     # Channel state is keyed by the RAW proof service (matching open_channel
     # and _resolve_pinned_record), never the resolved credential template.
-    dpop_token_key = (resolved, PROOF_SERVICE)
+    nonce_key = (resolved, PROOF_SERVICE)
 
     # Resolve + verify the pinned rendezvous relay for this exact
-    # (patron, dpop_token-service, dpop_token). Handles cold-start vault rehydration
+    # (patron, nonce-service, nonce). Handles cold-start vault rehydration
     # and returns a structured error — popping nothing — when unresolved.
     pinned, error_code = await exchange._resolve_pinned_record(
-        resolved, PROOF_SERVICE, dpop_token,
+        resolved, PROOF_SERVICE, nonce,
     )
     if error_code is not None:
         return {
@@ -316,7 +328,7 @@ async def receive_npub_proof_tool(
             "popped_dms": 0,
             "error": _courier_resolve_error(error_code, "request_npub_proof"),
         }
-    expected_phrase = dpop_token
+    expected_phrase = nonce
 
     # Single drain of ONLY the pinned relay — human-gated, no retry loop.
     # Off the event loop — blocking websocket I/O (0.44.3 / M1.2 reasoning).
@@ -337,8 +349,8 @@ async def receive_npub_proof_tool(
             ),
         }
 
-    # Drain loop, stop-at-match. The dpop_token phrase is the sole scoping
-    # mechanism — a reply carrying the current one-time dpop_token is by definition
+    # Drain loop, stop-at-match. The nonce phrase is the sole scoping
+    # mechanism — a reply carrying the current one-time nonce is by definition
     # the right reply, regardless of wall-clock timing (no timestamp gate, which
     # raced clock skew + human-paced replies and silently dropped valid proofs).
     # Mismatched DMs are NACK'd up to the cap. For self-DM proofs the reply is
@@ -349,7 +361,7 @@ async def receive_npub_proof_tool(
     last_failure = None
     popped = 0
     nacks_sent = 0
-    agent_key = exchange._ephemeral_agents.get(dpop_token_key)
+    agent_key = exchange._ephemeral_agents.get(nonce_key)
     decrypt_key = agent_key.hex() if agent_key else exchange._privkey_hex
 
     for candidate in candidates:
@@ -371,7 +383,7 @@ async def receive_npub_proof_tool(
             if payload is None:
                 nack_reason = _NACK_TOKEN
                 last_failure = "no @@@ fields"
-            elif payload.get("dpop_token", "") != expected_phrase:
+            elif payload.get("nonce", "") != expected_phrase:
                 nack_reason = _NACK_TOKEN
                 last_failure = "wrong token"
         elif nack_reason is None:
@@ -392,10 +404,10 @@ async def receive_npub_proof_tool(
             exchange._pop_event(event_id)
         popped += 1
 
-    # Clean up dpop_token state and rendezvous pin (one-time use)
-    exchange._pending_dpop_tokens.pop(dpop_token_key, None)
-    exchange._pinned_relays.pop(dpop_token_key, None)
-    exchange._ephemeral_agents.pop(dpop_token_key, None)
+    # Clean up nonce state and rendezvous pin (one-time use)
+    exchange._pending_nonces.pop(nonce_key, None)
+    exchange._pinned_relays.pop(nonce_key, None)
+    exchange._ephemeral_agents.pop(nonce_key, None)
 
     # One summary DM to patron
     if matched_payload is not None:
@@ -419,7 +431,7 @@ async def receive_npub_proof_tool(
 
         # Challenge hash — the nonce selects the grant; it never unlocks alone.
         import hashlib as _hashlib
-        dpop_token_hash = _hashlib.sha256(expected_phrase.encode()).hexdigest()
+        nonce_hash = _hashlib.sha256(expected_phrase.encode()).hexdigest()
 
         # The patron's consent window, from their own reply (default 2 h).
         from tollbooth.proven_npub import grant_ttl_seconds
@@ -442,14 +454,14 @@ async def receive_npub_proof_tool(
                 ),
             }
 
-        # Mint the Operator-signed kind-30080 proof grant. The agent presents
-        # the envelope {grant, nonce} as dpop_token; the nonce only selects.
+        # Mint the Operator-signed kind-30080 proof grant. The holder's wallet
+        # keeps the envelope {grant, nonce}; the nonce only selects.
         from tollbooth.identity_credential import sign_proof_grant
         try:
             grant_json = sign_proof_grant(
                 patron_npub=resolved,
                 operator_nsec=rt._get_nsec(),
-                challenge_hash=dpop_token_hash,
+                challenge_hash=nonce_hash,
                 patron_sig=patron_sig,
                 patron_event_id=patron_event_id,
                 ttl_seconds=grant_ttl,
@@ -463,7 +475,7 @@ async def receive_npub_proof_tool(
             }
 
         import json as _json
-        dpop_envelope = _json.dumps(
+        envelope = _json.dumps(
             {"grant": _json.loads(grant_json), "nonce": expected_phrase},
             separators=(",", ":"),
         )
@@ -508,22 +520,10 @@ async def receive_npub_proof_tool(
             "message": confirmation_msg,
         }
 
-        # A holder keeps the grant in its wallet, so it never enters the
+        # The grant stays in the holder's wallet, so it never enters the
         # caller's transcript; paid calls then name only the npub.
-        from tollbooth.holder_auth import current_holder
-        holder = current_holder() if rt.holder_auth_enabled else None
-        if holder is not None:
-            await (await rt.holder_store()).hold(holder, resolved, dpop_envelope, expires_at_ts)
-            return {**proven, "held_by_connection": True}
-
-        return {
-            **proven,
-            # Grant envelope — pass this whole string as dpop_token on paid calls.
-            "dpop_token": dpop_envelope,
-            # Nonce alone selects the grant; never authorizes by itself.
-            "nonce": expected_phrase,
-            "grant": grant_json,
-        }
+        await (await rt.holder_store()).hold(holder, resolved, envelope, expires_at_ts)
+        return {**proven, "held_by_connection": True}
     else:
         # NACKs already went to each mismatched sender during the drain;
         # the returned error never reveals the expected phrase.
@@ -543,114 +543,107 @@ async def receive_npub_proof_tool(
         }
 
 
-async def check_proof_status_tool(
-    rt: Any,
-    patron_npub: str,
-    dpop_token: str,
-) -> dict[str, Any]:
-    """Report whether a proof grant is still valid (no side effects).
+async def check_proof_status_tool(rt: Any, patron_npub: str) -> dict[str, Any]:
+    """Report whether this connection proves ``patron_npub`` (no side effects).
 
-    Status and expiry are read from the grant itself; the only store consulted
-    is the patron's revocation watermark. A bare challenge phrase is never a
-    credential and reports ``refresh_needed``.
+    A request signed by the npub's key always does. A holder does while the
+    grant its wallet holds is unexpired and unrevoked; expiry is read from the
+    grant itself, and the only store consulted is the revocation watermark.
     """
     err = rt.npub_validation_error(patron_npub, param="patron_npub")
     if err is not None:
         return err
-    err = rt.proof_validation_error(dpop_token, param="dpop_token")
-    if err is not None:
-        return err
     resolved = rt.resolve_npub(patron_npub)
 
-    import hashlib as _hashlib
-
-    from tollbooth.identity_proof import _DPOP_TOKEN_RE, _parse_grant_envelope
-
-    grant_parsed = _parse_grant_envelope(dpop_token)
-    if grant_parsed is not None:
-        grant_json, nonce = grant_parsed
-        challenge_hash = _hashlib.sha256(nonce.encode()).hexdigest() if nonce else None
-
-        from tollbooth.identity_credential import (
-            IdentityCredentialError,
-            verify_proof_grant,
-        )
-        try:
-            claims = verify_proof_grant(
-                grant_json,
-                expected_patron_npub=resolved,
-                challenge_hash=challenge_hash,
-                expected_operator_hex=rt.operator_pubkey_hex(),
-            )
-        except IdentityCredentialError as exc:
-            reason = str(exc) or "malformed"
-            status = "expired" if reason == "expired" else "invalid"
-            return {
-                "success": True,
-                "status": status,
-                "expires_in_seconds": 0,
-                "reason": reason,
-                "message": (
-                    f"Proof grant is {status} ({reason}). Call request_npub_proof "
-                    "and receive_npub_proof for a fresh grant."
-                ),
-            }
-
-        from tollbooth.proven_npub import RevocationStoreUnavailable
-        try:
-            revoked = await (await rt.proof_grant_revocations()).is_revoked(
-                resolved, claims["created_at"],
-            )
-        except RevocationStoreUnavailable as exc:
-            return {
-                "success": False,
-                "error_code": _EC_MODULE.WARMING_UP,
-                "error": (
-                    "Could not read the revocation store, so the grant's status "
-                    f"is unknown right now. Retry shortly. ({exc})"
-                ),
-            }
-        if revoked:
-            return {
-                "success": True,
-                "status": "revoked",
-                "expires_in_seconds": 0,
-                "reason": "revoked",
-                "message": (
-                    "Proof grant was revoked by forget_credentials. Call "
-                    "request_npub_proof and receive_npub_proof for a fresh grant."
-                ),
-            }
-
-        remaining = max(0, int(claims["expiration"] - _time.time()))
+    from tollbooth.holder_auth import signed_npub
+    if signed_npub() == resolved:
         return {
             "success": True,
             "status": "valid",
-            "expires_in_seconds": remaining,
-            "jti": claims["jti"],
+            "message": "This request is signed with the npub's key; it needs no grant.",
+        }
+
+    try:
+        envelope = await rt._held_envelope(resolved) if rt.holder_auth_enabled else ""
+    except Exception as exc:  # noqa: BLE001 — unknown is not "not held"
+        logger.warning("holder wallet unavailable: %s", type(exc).__name__)
+        return {
+            "success": False,
+            "error_code": _EC_MODULE.WARMING_UP,
+            "error": "Could not read this connection's wallet right now. Retry shortly.",
+        }
+    from tollbooth.identity_proof import _parse_grant_envelope
+    grant_parsed = _parse_grant_envelope(envelope) if envelope else None
+    if grant_parsed is None:
+        return {
+            "success": True,
+            "status": "not_held",
+            "expires_in_seconds": 0,
             "message": (
-                "Proof grant is valid. Pass the grant envelope as the "
-                "dpop_token parameter on paid tool calls."
+                "This connection does not hold that npub. Sign requests with "
+                "its key, or call request_npub_proof and receive_npub_proof on "
+                "an OAuth connection."
+            ),
+        }
+    grant_json, nonce = grant_parsed
+
+    import hashlib as _hashlib
+
+    from tollbooth.identity_credential import (
+        IdentityCredentialError,
+        verify_proof_grant,
+    )
+    try:
+        claims = verify_proof_grant(
+            grant_json,
+            expected_patron_npub=resolved,
+            challenge_hash=_hashlib.sha256(nonce.encode()).hexdigest() if nonce else None,
+            expected_operator_hex=rt.operator_pubkey_hex(),
+        )
+    except IdentityCredentialError as exc:
+        reason = str(exc) or "malformed"
+        status = "expired" if reason == "expired" else "invalid"
+        return {
+            "success": True,
+            "status": status,
+            "expires_in_seconds": 0,
+            "reason": reason,
+            "message": (
+                f"The held grant is {status} ({reason}). Call request_npub_proof "
+                "and receive_npub_proof for a fresh one."
             ),
         }
 
-    if _DPOP_TOKEN_RE.match(dpop_token):
+    from tollbooth.proven_npub import RevocationStoreUnavailable
+    try:
+        revoked = await (await rt.proof_grant_revocations()).is_revoked(
+            resolved, claims["created_at"],
+        )
+    except RevocationStoreUnavailable as exc:
+        return {
+            "success": False,
+            "error_code": _EC_MODULE.WARMING_UP,
+            "error": (
+                "Could not read the revocation store, so the grant's status "
+                f"is unknown right now. Retry shortly. ({exc})"
+            ),
+        }
+    if revoked:
         return {
             "success": True,
-            "status": "refresh_needed",
+            "status": "revoked",
             "expires_in_seconds": 0,
+            "reason": "revoked",
             "message": (
-                "A challenge nonce alone is not a credential. Call "
-                "receive_npub_proof for an Operator-signed grant envelope."
+                "The held grant was revoked by forget_credentials. Call "
+                "request_npub_proof and receive_npub_proof for a fresh one."
             ),
         }
 
     return {
         "success": True,
-        "status": "unknown",
-        "expires_in_seconds": 0,
-        "message": (
-            "No proof grant recognized for this dpop_token. Call "
-            "request_npub_proof and receive_npub_proof first."
-        ),
+        "status": "valid",
+        "expires_in_seconds": max(0, int(claims["expiration"] - _time.time())),
+        "jti": claims["jti"],
+        "message": "This connection holds the npub; paid calls need only npub.",
     }

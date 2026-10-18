@@ -24,7 +24,7 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
-from tollbooth.params import DpopToken, PatronNpub
+from tollbooth.params import PatronNpub
 
 # The param-schema language for dynamic tools (and operator catalogs).
 # A richer language (jsonschema / nested objects) is a later upgrade.
@@ -39,8 +39,8 @@ PYTHON_TYPES: dict[str, type] = {
 # A published tool name becomes a wire identifier: ``{slug}_{name}``.
 VALID_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
-# runner(params, npub, dpop_token) -> awaitable[dict]
-Runner = Callable[[dict[str, Any], str, str], Awaitable[dict[str, Any]]]
+# runner(params, npub) -> awaitable[dict]
+Runner = Callable[[dict[str, Any], str], Awaitable[dict[str, Any]]]
 
 # Distinguishes "no default declared" from "default declared as None", which are
 # different instructions: drop the param, versus bind an explicit null.
@@ -182,9 +182,8 @@ def build_dynamic_handler(
     """Build a typed async MCP handler that delegates to ``runner``.
 
     The handler exposes one flat keyword param per ``param_schema`` entry
-    (typed via :data:`PYTHON_TYPES`) plus ``npub`` and ``dpop_token``. Its body
-    collects the supplied declared params into a dict and awaits
-    ``runner(params, npub, dpop_token)``.
+    (typed via :data:`PYTHON_TYPES`) plus ``npub``. Its body collects the
+    supplied declared params into a dict and awaits ``runner(params, npub)``.
 
     **An omitted optional param binds its declared ``default`` if it has one.**
     Dropping it instead is what broke cypher-mcp's ``list_capabilities`` for four
@@ -205,7 +204,6 @@ def build_dynamic_handler(
         return await runner(
             apply_param_defaults(schema, kwargs),
             kwargs.get("npub") or "",
-            kwargs.get("dpop_token") or "",
         )
 
     sig_params: list[inspect.Parameter] = []
@@ -231,13 +229,10 @@ def build_dynamic_handler(
             )
         )
         annotations[pname] = ann
-    for extra, extra_ann in (("npub", PatronNpub), ("dpop_token", DpopToken)):
-        sig_params.append(
-            inspect.Parameter(
-                extra, inspect.Parameter.KEYWORD_ONLY, annotation=extra_ann, default=""
-            )
-        )
-        annotations[extra] = extra_ann
+    sig_params.append(
+        inspect.Parameter("npub", inspect.Parameter.KEYWORD_ONLY, annotation=PatronNpub, default="")
+    )
+    annotations["npub"] = PatronNpub
     annotations["return"] = dict
 
     handler.__name__ = name

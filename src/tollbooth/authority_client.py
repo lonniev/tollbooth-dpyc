@@ -10,7 +10,6 @@ import logging
 from typing import Any
 
 from tollbooth.mcp_client import service_client
-from tollbooth.patron_signer import PatronSigner
 
 try:
     from fastmcp import Client  # type: ignore[import-untyped]
@@ -53,8 +52,8 @@ class AuthorityCertifier:
     ) -> None:
         self._authority_url = authority_url
         self._certify_tool_name = certify_tool_name
-        # The one home for patron-side signing (shared with the agent keyring).
-        self._signer = PatronSigner(operator_npub, operator_nsec)
+        self._npub = operator_npub
+        # Signs every request to the Authority (NIP-98): the operator's identity.
         self._nsec = operator_nsec
 
     async def certify_credits(self, amount_sats: int) -> dict[str, Any]:
@@ -73,14 +72,9 @@ class AuthorityCertifier:
 
         try:
             async with service_client(self._authority_url, self._nsec) as client:
-                # The Authority's verify_proof gate binds the proof to the runtime
-                # mcp_name (`<slug>_<func>`, e.g. "authority_certify_credits") since
-                # wheel 0.24.0 — so we sign for the exact wire name we invoke.
                 result = await client.call_tool(
                     self._certify_tool_name,
-                    self._signer.authenticate(
-                        self._certify_tool_name, {"amount_sats": amount_sats}
-                    ),
+                    {"npub": self._npub, "amount_sats": amount_sats},
                 )
         except AuthorityCertifyError:
             raise
@@ -97,8 +91,7 @@ class AuthorityCertifier:
 
         Best-effort telemetry: the Authority provisions and is responsible for
         the books, so it should learn the instant they lock — from the operator,
-        not from a patron complaint. Signs for the exact wire name the same way
-        ``certify_credits`` does. Returns the Authority's ack dict; raises
+        not from a patron complaint. Returns the Authority's ack dict; raises
         ``AuthorityCertifyError`` on transport failure so the caller can decide
         (the caller runs this fire-and-forget, so a raise is only logged)."""
         if Client is None:
@@ -107,7 +100,7 @@ class AuthorityCertifier:
         try:
             async with service_client(self._authority_url, self._nsec) as client:
                 result = await client.call_tool(
-                    tool, self._signer.authenticate(tool, {"detail": detail[:500]})
+                    tool, {"npub": self._npub, "detail": detail[:500]}
                 )
         except Exception as e:
             raise AuthorityCertifyError(
@@ -177,13 +170,8 @@ class AuthorityCertifier:
 
         try:
             async with service_client(self._authority_url, self._nsec) as client:
-                # The Authority's verify_proof gate binds the proof to the runtime
-                # mcp_name (`<slug>_<func>`, e.g. "authority_check_balance") — so we
-                # sign for the exact wire name we invoke (same rule as certify_credits).
-                tool = "authority_check_balance"
                 result = await client.call_tool(
-                    tool,
-                    self._signer.authenticate(tool),
+                    "authority_check_balance", {"npub": self._npub},
                 )
         except Exception as e:
             raise AuthorityCertifyError(

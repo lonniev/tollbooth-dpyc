@@ -1,18 +1,14 @@
 """An authenticated passthrough to a DPYC operator — the agent's own signing hand.
 
-A DPYC agent is a patron that holds its own nsec. When it calls a paid operator it must
-present a proof of possession; this keyring is where that proof is minted so the agent
-never handles the key or a token itself. It fronts one upstream operator as a FastMCP
-proxy and, on every forwarded call, injects the agent's npub plus a **freshly-signed,
-in-memory** kind-27235 proof bound to the tool being called. Nothing is stored; nothing
-new is *granted* per call — the standing grant is possession of the nsec and a funded
-balance. The proof is just the mechanical demonstration of possession, minted on the spot.
+A DPYC agent is a patron that holds its own nsec. This keyring fronts one upstream
+operator as a FastMCP proxy whose connection signs every forwarded request with that
+nsec (NIP-98), so the operator knows the agent by its npub while the key stays in this
+process — out of the agent's own reasoning context. It also names the agent's npub on
+each call that does not name one. Nothing is stored; nothing new is *granted* per call —
+the standing grant is possession of the nsec and a funded balance.
 
-This is the peer of :class:`tollbooth.authority_client.AuthorityClient` (which signs a
-proof per ``certify`` call): the same primitive (``create_proof``), exposed as a local MCP
-endpoint so the agent calls the operator's verbs plainly while the nsec stays in this
-process — out of the agent's own reasoning context. Reusable by any agent against any
-DPYC operator; it is not specific to the Software Factory.
+Reusable by any agent against any DPYC operator; it is not specific to the Software
+Factory.
 
 Run (stdio — e.g. as a local MCP server in claude-code-action's ``--mcp-config``):
 
@@ -29,22 +25,16 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from tollbooth.patron_signer import PatronSigner
 
-
-def signed_arguments(
-    tool_name: str, arguments: dict[str, Any] | None, npub: str, nsec: str
-) -> dict[str, Any]:
-    """Convenience free-function form of :meth:`PatronSigner.authenticate`.
-
-    The signing logic lives in :class:`~tollbooth.patron_signer.PatronSigner` (the single
-    patron-signing home); this is a thin wrapper for one-shot use and for tests.
-    """
-    return PatronSigner(npub, nsec).authenticate(tool_name, arguments)
+def with_npub(arguments: dict[str, Any] | None, npub: str) -> dict[str, Any]:
+    """``arguments`` naming ``npub`` unless the call already names one."""
+    args = dict(arguments or {})
+    args.setdefault("npub", npub)
+    return args
 
 
 def build_keyring(upstream_url: str, npub: str, nsec: str) -> Any:
-    """Build a FastMCP proxy of *upstream_url* that signs each forwarded call.
+    """Build a FastMCP proxy of *upstream_url* whose every request ``nsec`` signs.
 
     Lazy-imports FastMCP so importing this module never requires the ``keyring`` extra.
     """
@@ -53,19 +43,18 @@ def build_keyring(upstream_url: str, npub: str, nsec: str) -> Any:
 
     from tollbooth.mcp_client import service_client
 
-    signer = PatronSigner(npub, nsec)  # one signing hand for this keyring
-
-    class _DpopAuthMiddleware(Middleware):
-        """Inject (npub, fresh kind-27235 proof) into every tool call before forwarding."""
+    class _NameTheAgent(Middleware):
+        """Name the agent's npub on every forwarded call that names none."""
 
         async def on_call_tool(self, context: Any, call_next: Any) -> Any:
             params = context.message
-            new_args = signer.authenticate(params.name, params.arguments)
-            forwarded = context.copy(message=params.model_copy(update={"arguments": new_args}))
+            forwarded = context.copy(
+                message=params.model_copy(update={"arguments": with_npub(params.arguments, npub)})
+            )
             return await call_next(forwarded)
 
     proxy = create_proxy(service_client(upstream_url, nsec), name="dpyc-keyring")
-    proxy.add_middleware(_DpopAuthMiddleware())
+    proxy.add_middleware(_NameTheAgent())
     return proxy
 
 

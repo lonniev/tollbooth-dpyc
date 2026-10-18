@@ -128,7 +128,7 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
             "Replaces activate_session(passphrase). Passphrase-based "
             "session activation has been removed. Use the Secure "
             "Courier flow: request_credential_channel + "
-            "receive_credentials(sender_npub, service, dpop_token)."
+            "receive_credentials(sender_npub, service, nonce)."
         ),
     ),
     ToolPathInfo(
@@ -314,7 +314,7 @@ OPERATOR_OBSOLETE_PRACTICES: list[ObsoletePractice] = [
     ObsoletePractice(
         pattern="activate_session(passphrase)",
         replaced_by=(
-            "receive_credentials(sender_npub, service, dpop_token) via the Secure "
+            "receive_credentials(sender_npub, service, nonce) via the Secure "
             "Courier flow. Call session_status to check state, then "
             "request_credential_channel + receive_credentials if needed."
         ),
@@ -330,7 +330,7 @@ OPERATOR_OBSOLETE_PRACTICES: list[ObsoletePractice] = [
         replaced_by=(
             "request_credential_channel(recipient_npub) to open a Secure "
             "Courier channel, then receive_credentials(sender_npub, service, "
-            "dpop_token) to pick up the encrypted credentials from the Nostr relay."
+            "nonce) to pick up the encrypted credentials from the Nostr relay."
         ),
         reason=(
             "Typing credentials into the chat window is a security risk. "
@@ -427,12 +427,12 @@ class OperatorProtocol(Protocol):
         ...
 
     async def receive_credentials(
-        self, sender_npub: str, service: str, dpop_token: str,
+        self, sender_npub: str, service: str, nonce: str,
         credential_card: str,
     ) -> dict[str, Any]:
         """(hot) Pick up credentials from the Secure Courier.
 
-        ``dpop_token`` is the session phrase returned by
+        ``nonce`` is the session phrase returned by
         ``request_credential_channel`` — required for the deterministic,
         pinned-relay drain (or omit it when redeeming a ``credential_card``).
         """
