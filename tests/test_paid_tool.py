@@ -1,6 +1,7 @@
 """Tests for the @runtime.paid_tool() decorator."""
 
 from datetime import UTC
+from unittest.mock import patch
 
 import pytest
 from pynostr.key import PrivateKey as _PK
@@ -154,10 +155,12 @@ VALID_NPUB = _TEST_KEY.public_key.bech32()
 _TEST_NSEC = _TEST_KEY.bech32()
 
 
-def _make_proof(tool_name: str = "my_tool") -> str:
-    """Create a valid proof for the test keypair."""
-    from tollbooth.identity_proof import create_proof
-    return create_proof(_TEST_NSEC, tool_name)
+@pytest.fixture(autouse=True)
+def _signed_by_the_test_key():
+    """Every call here is a request signed by the test keypair, unless a test
+    says otherwise."""
+    with patch("tollbooth.holder_auth.signed_npub", return_value=VALID_NPUB):
+        yield
 
 
 async def _inject_fake_cache(rt: OperatorRuntime, balance: int = 1000):
@@ -180,10 +183,10 @@ class TestPaidToolDecorator:
         await _inject_fake_cache(rt)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(x: int, npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(x: int, npub: str = "") -> dict:
             return {"value": x * 2}
 
-        result = await my_tool(21, npub=VALID_NPUB, dpop_token=_make_proof())
+        result = await my_tool(21, npub=VALID_NPUB)
         assert result["value"] == 42
 
     @pytest.mark.asyncio
@@ -192,10 +195,10 @@ class TestPaidToolDecorator:
         await _inject_fake_cache(rt, balance=10)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             return {"should": "not reach"}
 
-        result = await my_tool(npub=VALID_NPUB, dpop_token=_make_proof())
+        result = await my_tool(npub=VALID_NPUB)
         assert result["success"] is False
         assert "Insufficient balance" in result["error"]
 
@@ -205,7 +208,7 @@ class TestPaidToolDecorator:
         await _inject_fake_cache(rt)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             return {"should": "not reach"}
 
         result = await my_tool(npub="")
@@ -218,14 +221,14 @@ class TestPaidToolDecorator:
         cache = await _inject_fake_cache(rt, balance=100)
 
         @rt.paid_tool(capability_uuid("my_tool"), catch_errors=True)
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             raise RuntimeError("boom")
 
         # Get initial balance
         ledger = await cache.get(VALID_NPUB)
         initial = ledger.balance_api_sats
 
-        result = await my_tool(npub=VALID_NPUB, dpop_token=_make_proof())
+        result = await my_tool(npub=VALID_NPUB)
         assert result["success"] is False
         assert "Tool execution failed" in result["error"]
 
@@ -239,14 +242,14 @@ class TestPaidToolDecorator:
         cache = await _inject_fake_cache(rt, balance=100)
 
         @rt.paid_tool(capability_uuid("my_tool"), catch_errors=False)
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             raise RuntimeError("boom")
 
         ledger = await cache.get(VALID_NPUB)
         initial = ledger.balance_api_sats
 
         with pytest.raises(RuntimeError, match="boom"):
-            await my_tool(npub=VALID_NPUB, dpop_token=_make_proof())
+            await my_tool(npub=VALID_NPUB)
 
         # Balance should be restored after rollback
         ledger = await cache.get(VALID_NPUB)
@@ -258,7 +261,7 @@ class TestPaidToolDecorator:
         # No cache needed — free tools skip debit entirely
 
         @rt.paid_tool(capability_uuid("free_tool"))
-        async def free_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def free_tool(npub: str = "") -> dict:
             return {"free": True}
 
         result = await free_tool(npub="")
@@ -269,7 +272,7 @@ class TestPaidToolDecorator:
         rt = _make_runtime()
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             """My docstring."""
             return {}
 
@@ -282,10 +285,10 @@ class TestPaidToolDecorator:
         await _inject_fake_cache(rt, balance=2)  # low balance after debit
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             return {"data": "ok"}
 
-        result = await my_tool(npub=VALID_NPUB, dpop_token=_make_proof())
+        result = await my_tool(npub=VALID_NPUB)
         assert result["data"] == "ok"
         # Warning may or may not be present depending on threshold,
         # but the decorator shouldn't crash
@@ -304,10 +307,10 @@ class TestPaidToolDecorator:
         rt._proof_grant_revocations = FakeRevocations()
 
         @rt.paid_tool(identity.tool_id)
-        async def unpriced(npub: str = "", dpop_token: str = "") -> dict:
+        async def unpriced(npub: str = "") -> dict:
             return {"should": "not reach"}
 
-        result = await unpriced(npub=VALID_NPUB, dpop_token=_make_proof("unpriced"))
+        result = await unpriced(npub=VALID_NPUB)
         assert result["success"] is False
         assert "not been priced" in result["error"]
 
@@ -325,10 +328,10 @@ class TestPaidToolDecorator:
         rt._ledger_cache = FakeLedgerCache()
 
         @rt.paid_tool(identity.tool_id)
-        async def promo(npub: str = "", dpop_token: str = "") -> dict:
+        async def promo(npub: str = "") -> dict:
             return {"free": True}
 
-        result = await promo(npub=VALID_NPUB, dpop_token=_make_proof("promo"))
+        result = await promo(npub=VALID_NPUB)
         assert result["free"] is True
 
 
@@ -347,10 +350,10 @@ class TestErrorCodeMapping:
         await _inject_fake_cache(rt, balance=10)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             return {"unreachable": True}
 
-        result = await my_tool(npub=VALID_NPUB, dpop_token=_make_proof())
+        result = await my_tool(npub=VALID_NPUB)
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.INSUFFICIENT_BALANCE
         assert isinstance(result["next_steps"], list)
@@ -372,34 +375,33 @@ class TestErrorCodeMapping:
         await _inject_fake_cache(rt)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             return {"unreachable": True}
 
-        result = await my_tool(npub=VALID_NPUB, dpop_token="")
+        with patch("tollbooth.holder_auth.signed_npub", return_value=None):
+            result = await my_tool(npub=VALID_NPUB)
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.PROOF_REQUIRED
         assert isinstance(result["next_steps"], list)
         assert any("request_npub_proof" in s for s in result["next_steps"])
 
     @pytest.mark.asyncio
-    async def test_invalid_proof_returns_proof_invalid_code(self):
+    async def test_a_request_signed_by_another_key_proves_nothing(self):
         from tollbooth.constants import ErrorCode
         rt = _make_runtime()
         await _inject_fake_cache(rt)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             return {"unreachable": True}
 
-        # Inline proof (Schnorr-shaped, not a dpop_token phrase) signed by a different key
         from pynostr.key import PrivateKey
-        other = PrivateKey()
-        from tollbooth.identity_proof import create_proof
-        wrong_proof = create_proof(other.bech32(), "my_tool")
+        other = PrivateKey().public_key.bech32()
 
-        result = await my_tool(npub=VALID_NPUB, dpop_token=wrong_proof)
+        with patch("tollbooth.holder_auth.signed_npub", return_value=other):
+            result = await my_tool(npub=VALID_NPUB)
         assert result["success"] is False
-        assert result["error_code"] == ErrorCode.PROOF_INVALID
+        assert result["error_code"] == ErrorCode.PROOF_REQUIRED
 
     @pytest.mark.asyncio
     async def test_unpriced_tool_returns_tool_not_priced_code(self):
@@ -414,10 +416,10 @@ class TestErrorCodeMapping:
         rt._proof_grant_revocations = FakeRevocations()
 
         @rt.paid_tool(identity.tool_id)
-        async def unpriced(npub: str = "", dpop_token: str = "") -> dict:
+        async def unpriced(npub: str = "") -> dict:
             return {"unreachable": True}
 
-        result = await unpriced(npub=VALID_NPUB, dpop_token=_make_proof("unpriced2"))
+        result = await unpriced(npub=VALID_NPUB)
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.TOOL_NOT_PRICED
 
@@ -428,10 +430,10 @@ class TestErrorCodeMapping:
         await _inject_fake_cache(rt, balance=1000)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             raise RuntimeError("something opaque happened")
 
-        result = await my_tool(npub=VALID_NPUB, dpop_token=_make_proof())
+        result = await my_tool(npub=VALID_NPUB)
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.TOOL_EXECUTION_FAILED
 
@@ -446,10 +448,10 @@ class TestErrorCodeMapping:
         await _inject_fake_cache(rt, balance=1000)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             raise ValueError("No published query named 'nope'. Ask the operator which keys are available.")
 
-        result = await my_tool(npub=VALID_NPUB, dpop_token=_make_proof())
+        result = await my_tool(npub=VALID_NPUB)
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.TOOL_INPUT_INVALID
         assert "No published query named 'nope'" in result["error"]
@@ -462,10 +464,10 @@ class TestErrorCodeMapping:
         await _inject_fake_cache(rt, balance=1000)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             raise RuntimeError("HTTP 401 Unauthorized from upstream")
 
-        result = await my_tool(npub=VALID_NPUB, dpop_token=_make_proof())
+        result = await my_tool(npub=VALID_NPUB)
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.UPSTREAM_AUTH_REFRESH_NEEDED
         assert isinstance(result["next_steps"], list)
@@ -478,10 +480,10 @@ class TestErrorCodeMapping:
         await _inject_fake_cache(rt, balance=1000)
 
         @rt.paid_tool(capability_uuid("my_tool"))
-        async def my_tool(npub: str = "", dpop_token: str = "") -> dict:
+        async def my_tool(npub: str = "") -> dict:
             raise RuntimeError("OAuth invalid_grant: token has expired")
 
-        result = await my_tool(npub=VALID_NPUB, dpop_token=_make_proof())
+        result = await my_tool(npub=VALID_NPUB)
         assert result["error_code"] == ErrorCode.UPSTREAM_AUTH_REFRESH_NEEDED
 
 
@@ -633,7 +635,7 @@ class TestOAuthSituationResponse:
 
 class TestNpubAndProofValidationHelpers:
     """The DRY helpers that every wheel-side and consumer-side tool uses
-    to validate npub / dpop_token parameters consistently."""
+    to validate npub parameters consistently."""
 
     @pytest.mark.asyncio
     async def test_npub_missing_returns_npub_missing_code(self):
@@ -666,24 +668,6 @@ class TestNpubAndProofValidationHelpers:
         result = rt.npub_validation_error("", param="patron_npub")
         assert result is not None
         assert "patron_npub" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_proof_missing_returns_proof_missing_code(self):
-        from tollbooth.constants import ErrorCode
-        rt = _make_runtime()
-        rt._slug = "schwab"
-        result = rt.proof_validation_error("")
-        assert result is not None
-        assert result["error_code"] == ErrorCode.PROOF_MISSING
-        # next_steps recipe is slug-qualified
-        assert any("schwab_request_npub_proof" in s for s in result["next_steps"])
-
-    @pytest.mark.asyncio
-    async def test_proof_present_returns_none(self):
-        rt = _make_runtime()
-        # Any non-empty string passes the param-presence check; cache-lookup
-        # validity is checked later in debit_or_deny.
-        assert rt.proof_validation_error("bold-hawk-42") is None
 
 
 # ---------------------------------------------------------------------------

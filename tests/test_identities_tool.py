@@ -156,7 +156,7 @@ async def test_runtime_list_surfaces_paid_tool_not_in_registry():
     paid_only_id = capability_uuid("post_performance")
 
     @rt.paid_tool(paid_only_id)
-    async def post_performance(npub: str = "", dpop_token: str = "") -> dict:
+    async def post_performance(npub: str = "") -> dict:
         return {"ok": True}
 
     # debit_or_deny still refuses — that is the live failure mode

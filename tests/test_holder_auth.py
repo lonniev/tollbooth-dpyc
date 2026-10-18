@@ -3,9 +3,9 @@
 Pins:
   - the OAuth 2.1 flow a client like Claude.ai runs at connect (DCR, PKCE code,
     rotating refresh tokens, reuse disconnects the holder);
-  - every bearer that is not ours is an anonymous caller, proven by arguments;
-  - a held grant is checked by the same require_proof as one passed inline,
-    and only for the npub it was proven for;
+  - every bearer that is not ours is an anonymous caller, proving nobody;
+  - a held grant is checked by require_held_grant, and only for the npub it
+    was proven for;
   - receive_npub_proof puts the grant in the wallet and keeps it out of the reply;
   - forget_credentials drops the npub from every wallet.
 """
@@ -233,8 +233,8 @@ async def test_connect_then_act_as_held_npubs_over_http():
     register_standard_tools(mcp, "test", rt, service_name="test")
 
     @mcp.tool
-    async def act_as(npub: str, dpop_token: str = "") -> dict[str, Any]:
-        return await rt.require_caller_proof(npub, dpop_token, "check_balance") or {"acted_as": npub}
+    async def act_as(npub: str) -> dict[str, Any]:
+        return await rt.require_caller_proof(npub) or {"acted_as": npub}
 
     async def call(bearer: str | None, tool: str, args: dict[str, Any]) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
@@ -282,10 +282,8 @@ async def test_connect_then_act_as_held_npubs_over_http():
         refused = await call(access, "act_as", {"npub": bob})
         assert refused["error_code"] == ErrorCode.PROOF_REQUIRED
 
-        # Any other bearer is anonymous: the argument still carries the proof.
-        envelope = _envelope(op.bech32(), bob)
-        assert (await call("anonymous", "act_as", {"npub": bob}))["error_code"] == ErrorCode.PROOF_REQUIRED
-        assert await call("anonymous", "act_as", {"npub": bob, "dpop_token": envelope}) == {"acted_as": bob}
+        # Any other bearer is anonymous: it proves nobody.
+        assert (await call("anonymous", "act_as", {"npub": alice}))["error_code"] == ErrorCode.PROOF_REQUIRED
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +304,7 @@ async def test_a_holder_receives_its_proof_into_the_wallet_never_the_reply():
 
     patron = PrivateKey().public_key.bech32()
     ex = FakeExchange(candidates=[{
-        "id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(dpop_token=NONCE),
+        "id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=NONCE),
     }])
     rt, _ = _runtime_with_exchange(ex)
     rt._holder_auth_url = "https://op.example"
@@ -315,11 +313,11 @@ async def test_a_holder_receives_its_proof_into_the_wallet_never_the_reply():
     tools = _register(rt)
 
     with patch("tollbooth.holder_auth.current_holder", return_value="h1"):
-        reply = await tools["receive_npub_proof"](patron_npub=patron, dpop_token=NONCE)
-        assert await rt.require_caller_proof(patron, "", "check_balance") is None
+        reply = await tools["receive_npub_proof"](patron_npub=patron, nonce=NONCE)
+        assert await rt.require_caller_proof(patron) is None
 
     assert reply["success"] is True and reply["held_by_connection"] is True
-    assert not {"dpop_token", "grant", "nonce"} & set(reply)
+    assert not {"grant", "nonce", "envelope"} & set(reply)
     held = await store.envelope("h1", patron)
     assert held is not None and json.loads(held)["nonce"] == NONCE
 
@@ -341,7 +339,7 @@ async def test_forgetting_an_npub_drops_it_from_every_wallet():
         _on_forget=None,
     )
 
-    result = await forget_credentials_tool(rt, "patron", "npub1a", "")
+    result = await forget_credentials_tool(rt, "patron", "npub1a")
 
     assert result["proof_grants_revoked"] is True
     assert set(store.wallet) == {("h2", "npub1b")}
@@ -421,5 +419,5 @@ async def test_an_unreadable_wallet_is_warming_up_never_proof_required():
     rt = OperatorRuntime(nsec_env_var="__UNUSED__", holder_auth_url="https://op.example")
     rt.holder_store = AsyncMock(side_effect=RuntimeError("neon asleep"))  # type: ignore[method-assign]
     with patch("tollbooth.holder_auth.current_holder", return_value="h1"):
-        denial = await rt.prove_caller(PrivateKey().public_key.bech32(), "", "check_balance")
+        denial = await rt.prove_caller(PrivateKey().public_key.bech32())
     assert denial is not None and denial["error_code"] == ErrorCode.WARMING_UP

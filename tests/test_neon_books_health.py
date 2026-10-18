@@ -35,7 +35,7 @@ def _text_block(data: dict) -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_report_neon_quota_signs_for_wire_name():
-    """The alert calls authority_receive_neon_402_alert with an injected proof."""
+    """The alert calls authority_receive_neon_402_alert naming the operator."""
     mock_client = AsyncMock()
     mock_client.call_tool = AsyncMock(return_value=[_text_block({"success": True})])
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -51,7 +51,7 @@ async def test_report_neon_quota_signs_for_wire_name():
     tool_name, args = mock_client.call_tool.await_args.args
     assert tool_name == "authority_receive_neon_402_alert"
     assert args["npub"] == "npub1operator"
-    assert "dpop_token" in args            # proof injected by the signer
+    assert "dpop_token" not in args        # identity rides the signed connection
     assert args["detail"].startswith("Neon HTTP 402")
 
 

@@ -10,19 +10,18 @@ and that genuine replay protection is unaffected.
 
 from __future__ import annotations
 
-import json
+import hashlib
 import time
 
 import pytest
-from pynostr.event import Event  # type: ignore[import-untyped]
 from pynostr.key import PrivateKey  # type: ignore[import-untyped]
 
 import tollbooth.identity_proof as idp
 from tollbooth.identity_proof import (
-    PROOF_EVENT_KIND,
     _consumed_proofs,
     _record_consumed,
-    verify_proof,
+    sign_request,
+    verify_request_signature,
 )
 
 
@@ -32,18 +31,6 @@ def _clear_cache():
     _consumed_proofs.clear()
     yield
     _consumed_proofs.clear()
-
-
-def _make_proof(private_key: PrivateKey, tool_name: str = "my_tool") -> str:
-    event = Event(
-        kind=PROOF_EVENT_KIND,
-        content="",
-        tags=[["u", tool_name]],
-        pubkey=private_key.public_key.hex(),
-    )
-    event.created_at = int(time.time())
-    event.sign(private_key.hex())
-    return json.dumps(event.to_dict())
 
 
 def test_cap_holds_under_flood() -> None:
@@ -82,12 +69,12 @@ def test_eviction_targets_soonest_to_expire_when_all_live() -> None:
 
 
 def test_replay_protection_still_works() -> None:
-    """A valid proof verifies once; the same proof replays as rejected."""
+    """A signed request verifies once; the same event replays as rejected."""
     pk = PrivateKey()
-    npub = pk.public_key.bech32()
-    dpop_token = _make_proof(pk, "my_tool")
+    header = sign_request(pk.hex(), method="POST", url="https://op.example/mcp", body=b"{}")
+    check = {"method": "POST", "path": "/mcp", "body_sha256": hashlib.sha256(b"{}").hexdigest()}
 
-    assert verify_proof(dpop_token, npub, "my_tool") is True
+    assert verify_request_signature(header.removeprefix("Nostr "), **check)[0] == pk.public_key.bech32()
     # Same event id presented again → replay rejected.
-    assert verify_proof(dpop_token, npub, "my_tool") is False
+    assert verify_request_signature(header.removeprefix("Nostr "), **check) == (None, "replayed")
     assert len(_consumed_proofs) == 1

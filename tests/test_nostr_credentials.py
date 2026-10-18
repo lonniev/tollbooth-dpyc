@@ -84,9 +84,9 @@ def _to_delimited(payload: dict) -> str:
 
 
 # Default open-channel parameters shared across receive() tests. The
-# deterministic retrieve contract requires (sender_npub, service, dpop_token) and a
+# deterministic retrieve contract requires (sender_npub, service, nonce) and a
 # pinned rendezvous relay, so tests seed a channel with these before receiving.
-_TEST_DPOP_TOKEN = "bold-hawk-42"
+_TEST_NONCE = "bold-hawk-42"
 _TEST_RELAY = "wss://relay.test.com"
 
 
@@ -95,12 +95,12 @@ def _seed_channel(
     sender_bech32: str,
     *,
     service: str = "x",
-    dpop_token: str = _TEST_DPOP_TOKEN,
+    nonce: str = _TEST_NONCE,
     relay: str = _TEST_RELAY,
     expiry_offset: float = 600,
 ) -> None:
     """Seed an open Secure Courier channel so receive() can resolve the pin."""
-    ex._pending_dpop_tokens[(sender_bech32, service)] = (dpop_token, time.time() + expiry_offset)
+    ex._pending_nonces[(sender_bech32, service)] = (nonce, time.time() + expiry_offset)
     ex._pinned_relays[(sender_bech32, service)] = relay
 
 
@@ -109,16 +109,16 @@ def _make_nip04_event(
     recipient_pubkey_hex: str,
     payload: dict | str,
     created_at: int | None = None,
-    dpop_token: str | None = _TEST_DPOP_TOKEN,
+    nonce: str | None = _TEST_NONCE,
 ) -> dict:
     """Build a kind 4 NIP-04 event dict for testing.
 
-    When *payload* is a dict and *dpop_token* is set, the dpop_token is folded into the
+    When *payload* is a dict and *nonce* is set, the nonce is folded into the
     payload (unless already present) so the DM carries the channel's session
-    phrase. Pass ``dpop_token=None`` to omit it (e.g. missing-dpop_token tests).
+    phrase. Pass ``nonce=None`` to omit it (e.g. missing-nonce tests).
     """
-    if isinstance(payload, dict) and dpop_token is not None and "dpop_token" not in payload:
-        payload = {**payload, "dpop_token": dpop_token}
+    if isinstance(payload, dict) and nonce is not None and "nonce" not in payload:
+        payload = {**payload, "nonce": nonce}
 
     import base64
     import os
@@ -167,7 +167,7 @@ def _make_gift_wrap_event(
     recipient_pubkey_hex: str,
     payload: dict,
     created_at: int | None = None,
-    dpop_token: str | None = _TEST_DPOP_TOKEN,
+    nonce: str | None = _TEST_NONCE,
 ) -> dict:
     """Build a kind 1059 NIP-17 gift wrap event dict for testing.
 
@@ -176,10 +176,10 @@ def _make_gift_wrap_event(
     2. Seal (kind 13): DM encrypted with NIP-44 (sender → recipient)
     3. Gift wrap (kind 1059): Seal encrypted with NIP-44 (random → recipient)
 
-    When *dpop_token* is set it is folded into the payload (unless already present).
+    When *nonce* is set it is folded into the payload (unless already present).
     """
-    if isinstance(payload, dict) and dpop_token is not None and "dpop_token" not in payload:
-        payload = {**payload, "dpop_token": dpop_token}
+    if isinstance(payload, dict) and nonce is not None and "nonce" not in payload:
+        payload = {**payload, "nonce": nonce}
     now = created_at or int(time.time())
 
     # Layer 3: The actual DM content
@@ -314,7 +314,7 @@ class TestReceiveNip04:
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
@@ -341,7 +341,7 @@ class TestReceiveNip04:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         # NIP-04 popped + NACK'd, no match → structured not-found
@@ -376,7 +376,7 @@ class TestReceiveNip17:
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
@@ -408,7 +408,7 @@ class TestReceiveNip17:
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_pop_event") as mock_pop:
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is False
@@ -466,9 +466,9 @@ class TestReceiveValidation:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
-        # Non-@@@ content can't carry the dpop_token → popped, NACK'd, not found
+        # Non-@@@ content can't carry the nonce → popped, NACK'd, not found
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
 
@@ -494,7 +494,7 @@ class TestReceiveValidation:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
         assert result["success"] is True
         creds = result["credentials"]
@@ -522,7 +522,7 @@ class TestReceiveValidation:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
@@ -551,7 +551,7 @@ class TestReceiveValidation:
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(npub, service="x", dpop_token=_TEST_DPOP_TOKEN)
+            result = await ex.receive(npub, service="x", nonce=_TEST_NONCE)
 
         assert result["success"] is True
         assert result["still_missing_required"] == []  # api_secret was preserved
@@ -590,7 +590,7 @@ class TestFreshnessAndReplay:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
             assert result["success"] is True
 
@@ -613,7 +613,7 @@ class TestFreshnessAndReplay:
              patch.object(ex, "_request_deletion"):
             # First receive succeeds and consumes the channel + event
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
             assert result["success"]
 
@@ -621,7 +621,7 @@ class TestFreshnessAndReplay:
             # second drain finds nothing → not-found (double-pickup prevented)
             _seed_channel(ex, sender.public_key.bech32())
             result2 = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
             assert result2["success"] is False
             assert result2["error_code"] == ErrorCode.COURIER_NOT_FOUND
@@ -636,7 +636,7 @@ class TestFreshnessAndReplay:
 
         with patch.object(ex, "_fetch_dms_from_relays"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
@@ -758,7 +758,7 @@ class TestTemplateMatching:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="openai", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="openai", nonce=_TEST_NONCE,
             )
             assert result["service"] == "openai"
 
@@ -780,7 +780,7 @@ class TestTemplateMatching:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
             assert result["service"] == "x"
 
@@ -840,7 +840,7 @@ class TestCredentialVault:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
@@ -865,17 +865,17 @@ class TestCredentialVault:
             ex._received_events.append(event)
         _seed_channel(ex, sender.public_key.bech32())
 
-        # First receive — from relay (dpop_token-scoped drain)
+        # First receive — from relay (nonce-scoped drain)
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result1 = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result1["encryption"] == "nip04"
 
-        # Returning session — vault-only read, no dpop_token, no relay I/O
+        # Returning session — vault-only read, no nonce, no relay I/O
         with patch.object(ex, "_fetch_dms_from_relays") as mock_fetch, \
              patch.object(ex, "_find_dm_candidates") as mock_find:
             result2 = await ex.receive_from_vault(
@@ -909,7 +909,7 @@ class TestCredentialVault:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         blob = await vault.fetch_credentials("x", sender.public_key.bech32())
@@ -965,7 +965,7 @@ class TestCredentialVault:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         # Vault should have credentials
@@ -1019,7 +1019,7 @@ class TestCredentialVault:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
@@ -1046,7 +1046,7 @@ class TestCredentialVault:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
@@ -1073,7 +1073,7 @@ class TestCredentialVault:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         # Forget
@@ -1096,7 +1096,7 @@ class TestCredentialVault:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["credentials"]["api_key"] == "rotated"
@@ -1104,7 +1104,7 @@ class TestCredentialVault:
 
     @pytest.mark.asyncio
     async def test_receive_restores_pending_state_from_vault(self):
-        """Cold-start recovery: pending dpop_token + agent key restored from vault."""
+        """Cold-start recovery: pending nonce + agent key restored from vault."""
         operator = PrivateKey()
         sender = PrivateKey()
         vault = MockCredentialVault()
@@ -1119,7 +1119,7 @@ class TestCredentialVault:
                 recipient_npub=sender.public_key.bech32(),
             )
 
-        dpop_token = channel["dpop_token"]
+        nonce = channel["nonce"]
 
         # Verify vault received the pending blob
         vault_blob = await vault.fetch_credentials(
@@ -1128,12 +1128,12 @@ class TestCredentialVault:
         assert vault_blob is not None
 
         # 2) Simulate cold start — wipe in-memory state
-        ex._pending_dpop_tokens.clear()
+        ex._pending_nonces.clear()
         ex._ephemeral_agents.clear()
 
-        # 3) Inject a valid DM containing the dpop_token
+        # 3) Inject a valid DM containing the nonce
         payload = {"api_key": "restored-key", "api_secret": "restored-secret"}
-        delimited = _to_delimited({**payload, "dpop_token": dpop_token})
+        delimited = _to_delimited({**payload, "nonce": nonce})
         event = _make_nip04_event(
             sender, operator.public_key.hex(), delimited,
         )
@@ -1146,7 +1146,7 @@ class TestCredentialVault:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=dpop_token,
+                sender.public_key.bech32(), service="x", nonce=nonce,
             )
 
         assert result["success"] is True
@@ -1174,7 +1174,7 @@ class TestCredentialVault:
                 recipient_npub=operator.public_key.bech32(),
             )
 
-        dpop_token = channel["dpop_token"]
+        nonce = channel["nonce"]
         agent_npub = channel.get("agent_npub")
         assert agent_npub is not None  # self-DM creates an agent
 
@@ -1185,17 +1185,17 @@ class TestCredentialVault:
         assert vault_blob_raw is not None
 
         # Grab the agent key before clearing (we need it for encryption)
-        dpop_token_key = (operator.public_key.bech32(), "x")
-        agent_key = ex._ephemeral_agents[dpop_token_key]
+        nonce_key = (operator.public_key.bech32(), "x")
+        agent_key = ex._ephemeral_agents[nonce_key]
         agent_pubkey_hex = agent_key.public_key.hex()
 
         # 2) Simulate cold start
-        ex._pending_dpop_tokens.clear()
+        ex._pending_nonces.clear()
         ex._ephemeral_agents.clear()
 
         # 3) Inject DM encrypted to the ephemeral agent (self-DM scenario)
         payload = {"api_key": "agent-key", "api_secret": "agent-secret"}
-        delimited = _to_delimited({**payload, "dpop_token": dpop_token})
+        delimited = _to_delimited({**payload, "nonce": nonce})
         event = _make_nip04_event(
             operator, agent_pubkey_hex, delimited,
         )
@@ -1208,7 +1208,7 @@ class TestCredentialVault:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                operator.public_key.bech32(), service="x", dpop_token=dpop_token,
+                operator.public_key.bech32(), service="x", nonce=nonce,
             )
 
         assert result["success"] is True
@@ -1546,17 +1546,17 @@ class TestRendezvousRelayPinning:
 
     @pytest.mark.asyncio
     async def test_pinned_relay_cleared_on_receive_success(self):
-        """One-time-use semantics: the pin is released alongside the dpop_token."""
+        """One-time-use semantics: the pin is released alongside the nonce."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
 
         # Simulate state from a prior open_channel
         sender_npub = sender.public_key.bech32()
-        ex._pending_dpop_tokens[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
+        ex._pending_nonces[(sender_npub, "x")] = ("bold-hawk-42", time.time() + 600)
         ex._pinned_relays[(sender_npub, "x")] = "wss://relay.test.com"
 
-        payload = {"api_key": "k", "api_secret": "s", "dpop_token": "bold-hawk-42"}
+        payload = {"api_key": "k", "api_secret": "s", "nonce": "bold-hawk-42"}
         event = _make_nip04_event(sender, operator.public_key.hex(), payload)
         with ex._lock:
             ex._received_events.append(event)
@@ -1565,7 +1565,7 @@ class TestRendezvousRelayPinning:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender_npub, service="x", dpop_token="bold-hawk-42",
+                sender_npub, service="x", nonce="bold-hawk-42",
             )
 
         assert result["success"] is True
@@ -1576,11 +1576,11 @@ class TestRendezvousRelayPinning:
 
 
 class TestDpop_tokenSlug:
-    """Tests for the anti-replay dpop_token token in the Secure Courier flow."""
+    """Tests for the anti-replay nonce token in the Secure Courier flow."""
 
     @pytest.mark.asyncio
-    async def test_open_channel_returns_dpop_token(self):
-        """open_channel includes a dpop_token slug in the result."""
+    async def test_open_channel_returns_nonce(self):
+        """open_channel includes a nonce slug in the result."""
         ex = _make_exchange()
 
         with patch.object(ex, "_start_subscription"), \
@@ -1589,27 +1589,27 @@ class TestDpop_tokenSlug:
                 "x", greeting="Test greeting", recipient_npub="npub1test123",
             )
 
-        assert "dpop_token" in result
+        assert "nonce" in result
         # Format: adjective-noun-number
-        parts = result["dpop_token"].split("-")
+        parts = result["nonce"].split("-")
         assert len(parts) == 3
         assert parts[2].isdigit()
 
     @pytest.mark.asyncio
-    async def test_dpop_token_validated_on_receive(self):
-        """Receive pops + NACKs a wrong-dpop_token DM without leaking the phrase."""
+    async def test_nonce_validated_on_receive(self):
+        """Receive pops + NACKs a wrong-nonce DM without leaking the phrase."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
 
-        # Open a channel with the expected dpop_token
+        # Open a channel with the expected nonce
         sender_npub = sender.public_key.bech32()
         _seed_channel(ex, sender_npub)
 
-        # Build a NIP-04 event with wrong dpop_token
-        payload = {"api_key": "k", "api_secret": "s", "dpop_token": "wrong-slug-99"}
+        # Build a NIP-04 event with wrong nonce
+        payload = {"api_key": "k", "api_secret": "s", "nonce": "wrong-slug-99"}
         event = _make_nip04_event(
-            sender, operator.public_key.hex(), payload, dpop_token=None,
+            sender, operator.public_key.hex(), payload, nonce=None,
         )
         with ex._lock:
             ex._received_events.append(event)
@@ -1617,22 +1617,22 @@ class TestDpop_tokenSlug:
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_pop_event") as mock_pop:
             result = await ex.receive(
-                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender_npub, service="x", nonce=_TEST_NONCE,
             )
 
-        # Wrong dpop_token → not found, DM popped with a redacted NACK
+        # Wrong nonce → not found, DM popped with a redacted NACK
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
         mock_pop.assert_called_once()
         reason = mock_pop.call_args[0][2]
         # The NACK must NOT reveal the expected phrase or echo the wrong one
-        assert _TEST_DPOP_TOKEN not in reason
+        assert _TEST_NONCE not in reason
         assert "wrong-slug-99" not in reason
         assert "session phrase" in reason
 
     @pytest.mark.asyncio
-    async def test_dpop_token_accepted_on_match(self):
-        """Receive accepts payload with correct dpop_token."""
+    async def test_nonce_accepted_on_match(self):
+        """Receive accepts payload with correct nonce."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -1640,9 +1640,9 @@ class TestDpop_tokenSlug:
         sender_npub = sender.public_key.bech32()
         _seed_channel(ex, sender_npub)
 
-        payload = {"api_key": "k", "api_secret": "s", "dpop_token": _TEST_DPOP_TOKEN}
+        payload = {"api_key": "k", "api_secret": "s", "nonce": _TEST_NONCE}
         event = _make_nip04_event(
-            sender, operator.public_key.hex(), payload, dpop_token=None,
+            sender, operator.public_key.hex(), payload, nonce=None,
         )
         with ex._lock:
             ex._received_events.append(event)
@@ -1651,15 +1651,15 @@ class TestDpop_tokenSlug:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender_npub, service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
         # Dpop_token should be consumed
-        assert (sender_npub, "x") not in ex._pending_dpop_tokens
+        assert (sender_npub, "x") not in ex._pending_nonces
 
     @pytest.mark.asyncio
-    async def test_dpop_token_expired(self):
+    async def test_nonce_expired(self):
         """Receive returns token-expired when the channel window has elapsed."""
         operator = PrivateKey()
         sender = PrivateKey()
@@ -1669,16 +1669,16 @@ class TestDpop_tokenSlug:
         # Expired 10 seconds ago
         _seed_channel(ex, sender_npub, expiry_offset=-10)
 
-        payload = {"api_key": "k", "api_secret": "s", "dpop_token": _TEST_DPOP_TOKEN}
+        payload = {"api_key": "k", "api_secret": "s", "nonce": _TEST_NONCE}
         event = _make_nip04_event(
-            sender, operator.public_key.hex(), payload, dpop_token=None,
+            sender, operator.public_key.hex(), payload, nonce=None,
         )
         with ex._lock:
             ex._received_events.append(event)
 
         with patch.object(ex, "_fetch_dms_from_relays"):
             result = await ex.receive(
-                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender_npub, service="x", nonce=_TEST_NONCE,
             )
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.COURIER_TOKEN_EXPIRED
@@ -1698,7 +1698,7 @@ class TestDpop_tokenSlug:
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is False
@@ -1706,8 +1706,8 @@ class TestDpop_tokenSlug:
         assert result["popped"] == 0
 
     @pytest.mark.asyncio
-    async def test_dpop_token_picks_correct_dm_from_multiple(self):
-        """When multiple DMs exist, receive picks the one with matching dpop_token."""
+    async def test_nonce_picks_correct_dm_from_multiple(self):
+        """When multiple DMs exist, receive picks the one with matching nonce."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -1715,17 +1715,17 @@ class TestDpop_tokenSlug:
         sender_npub = sender.public_key.bech32()
         _seed_channel(ex, sender_npub)
 
-        # Stale DM with old/wrong dpop_token (injected first)
-        stale_payload = {"api_key": "old_k", "api_secret": "old_s", "dpop_token": "true-quill-26"}
+        # Stale DM with old/wrong nonce (injected first)
+        stale_payload = {"api_key": "old_k", "api_secret": "old_s", "nonce": "true-quill-26"}
         stale_event = _make_nip04_event(
-            sender, operator.public_key.hex(), stale_payload, dpop_token=None,
+            sender, operator.public_key.hex(), stale_payload, nonce=None,
         )
         stale_event["id"] = "stale_event_001"
 
-        # Valid DM with correct dpop_token (injected second)
-        valid_payload = {"api_key": "correct_k", "api_secret": "correct_s", "dpop_token": _TEST_DPOP_TOKEN}
+        # Valid DM with correct nonce (injected second)
+        valid_payload = {"api_key": "correct_k", "api_secret": "correct_s", "nonce": _TEST_NONCE}
         valid_event = _make_nip04_event(
-            sender, operator.public_key.hex(), valid_payload, dpop_token=None,
+            sender, operator.public_key.hex(), valid_payload, nonce=None,
         )
         valid_event["id"] = "valid_event_002"
 
@@ -1737,17 +1737,17 @@ class TestDpop_tokenSlug:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion") as _mock_delete:
             result = await ex.receive(
-                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender_npub, service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
         assert result["credentials"]["api_key"] == "correct_k"
         # Dpop_token should be consumed
-        assert (sender_npub, "x") not in ex._pending_dpop_tokens
+        assert (sender_npub, "x") not in ex._pending_nonces
 
     @pytest.mark.asyncio
     async def test_stale_dms_get_deletion_requests(self):
-        """Wrong-dpop_token DMs scanned before the match get NIP-09 deletions."""
+        """Wrong-nonce DMs scanned before the match get NIP-09 deletions."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -1759,14 +1759,14 @@ class TestDpop_tokenSlug:
         now = int(time.time())
         stale1 = _make_nip04_event(
             sender, operator.public_key.hex(),
-            {"api_key": "k", "api_secret": "s", "dpop_token": "old-slug-01"},
-            created_at=now - 20, dpop_token=None,
+            {"api_key": "k", "api_secret": "s", "nonce": "old-slug-01"},
+            created_at=now - 20, nonce=None,
         )
         stale1["id"] = "stale_001"
         stale2 = _make_nip04_event(
             sender, operator.public_key.hex(),
-            {"api_key": "k", "api_secret": "s", "dpop_token": "old-slug-02"},
-            created_at=now - 10, dpop_token=None,
+            {"api_key": "k", "api_secret": "s", "nonce": "old-slug-02"},
+            created_at=now - 10, nonce=None,
         )
         stale2["id"] = "stale_002"
 
@@ -1774,8 +1774,8 @@ class TestDpop_tokenSlug:
         # scanned, so make it oldest)
         valid = _make_nip04_event(
             sender, operator.public_key.hex(),
-            {"api_key": "k", "api_secret": "s", "dpop_token": _TEST_DPOP_TOKEN},
-            created_at=now - 30, dpop_token=None,
+            {"api_key": "k", "api_secret": "s", "nonce": _TEST_NONCE},
+            created_at=now - 30, nonce=None,
         )
         valid["id"] = "valid_003"
 
@@ -1786,7 +1786,7 @@ class TestDpop_tokenSlug:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion") as mock_delete:
             result = await ex.receive(
-                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender_npub, service="x", nonce=_TEST_NONCE,
             )
 
         # newest-first: stale_002, stale_001 (wrong → popped) then valid (match)
@@ -1798,7 +1798,7 @@ class TestDpop_tokenSlug:
         assert "stale_002" in ex._consumed_ids
 
     @pytest.mark.asyncio
-    async def test_no_dpop_token_match_returns_not_found(self):
+    async def test_no_nonce_match_returns_not_found(self):
         """When no DM matches, all are popped + NACK'd without leaking phrases."""
         operator = PrivateKey()
         sender = PrivateKey()
@@ -1807,17 +1807,17 @@ class TestDpop_tokenSlug:
         sender_npub = sender.public_key.bech32()
         _seed_channel(ex, sender_npub)
 
-        # Two DMs, neither with the correct dpop_token
+        # Two DMs, neither with the correct nonce
         dm1 = _make_nip04_event(
             sender, operator.public_key.hex(),
-            {"api_key": "k", "api_secret": "s", "dpop_token": "true-quill-26"},
-            dpop_token=None,
+            {"api_key": "k", "api_secret": "s", "nonce": "true-quill-26"},
+            nonce=None,
         )
         dm1["id"] = "dm_001"
         dm2 = _make_nip04_event(
             sender, operator.public_key.hex(),
-            {"api_key": "k", "api_secret": "s", "dpop_token": "lazy-fox-99"},
-            dpop_token=None,
+            {"api_key": "k", "api_secret": "s", "nonce": "lazy-fox-99"},
+            nonce=None,
         )
         dm2["id"] = "dm_002"
 
@@ -1827,7 +1827,7 @@ class TestDpop_tokenSlug:
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_pop_event") as mock_pop:
             result = await ex.receive(
-                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender_npub, service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is False
@@ -1836,17 +1836,17 @@ class TestDpop_tokenSlug:
         # Both DMs were popped with redacted NACK reasons (no leaked phrases)
         assert mock_pop.call_count == 2
         reasons = [c[0][2] for c in mock_pop.call_args_list if len(c[0]) > 2]
-        assert all(_TEST_DPOP_TOKEN not in r for r in reasons)
+        assert all(_TEST_NONCE not in r for r in reasons)
         assert all("true-quill-26" not in r and "lazy-fox-99" not in r for r in reasons)
         # The returned error must not reveal the expected phrase either
-        assert _TEST_DPOP_TOKEN not in result["error"]
+        assert _TEST_NONCE not in result["error"]
 
 
 # ── Concurrent Multi-Service Exchange Tests ──────────────────────────────
 
 
 class TestConcurrentExchanges:
-    """Tests for multi-service dpop_token independence."""
+    """Tests for multi-service nonce independence."""
 
     @staticmethod
     def _two_service_templates() -> dict[str, CredentialTemplate]:
@@ -1871,8 +1871,8 @@ class TestConcurrentExchanges:
         }
 
     @pytest.mark.asyncio
-    async def test_two_services_independent_dpop_tokens(self):
-        """Two open_channel calls for different services store separate dpop_tokens."""
+    async def test_two_services_independent_nonces(self):
+        """Two open_channel calls for different services store separate nonces."""
         ex = _make_exchange(templates=self._two_service_templates())
         npub = "npub1test123"
 
@@ -1885,15 +1885,15 @@ class TestConcurrentExchanges:
                 "openai", greeting="OpenAI greeting", recipient_npub=npub,
             )
 
-        assert r1["dpop_token"] != r2["dpop_token"]
-        assert (npub, "x") in ex._pending_dpop_tokens
-        assert (npub, "openai") in ex._pending_dpop_tokens
-        assert ex._pending_dpop_tokens[(npub, "x")][0] == r1["dpop_token"]
-        assert ex._pending_dpop_tokens[(npub, "openai")][0] == r2["dpop_token"]
+        assert r1["nonce"] != r2["nonce"]
+        assert (npub, "x") in ex._pending_nonces
+        assert (npub, "openai") in ex._pending_nonces
+        assert ex._pending_nonces[(npub, "x")][0] == r1["nonce"]
+        assert ex._pending_nonces[(npub, "openai")][0] == r2["nonce"]
 
     @pytest.mark.asyncio
-    async def test_receive_matches_correct_service_dpop_token(self):
-        """Receive for service X uses X's dpop_token, leaving OpenAI's intact."""
+    async def test_receive_matches_correct_service_nonce(self):
+        """Receive for service X uses X's nonce, leaving OpenAI's intact."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(
@@ -1901,12 +1901,12 @@ class TestConcurrentExchanges:
         )
 
         sender_npub = sender.public_key.bech32()
-        _seed_channel(ex, sender_npub, service="x", dpop_token="x-hawk-42")
-        _seed_channel(ex, sender_npub, service="openai", dpop_token="ai-fox-99")
+        _seed_channel(ex, sender_npub, service="x", nonce="x-hawk-42")
+        _seed_channel(ex, sender_npub, service="openai", nonce="ai-fox-99")
 
-        payload = {"api_key": "k", "api_secret": "s", "dpop_token": "x-hawk-42"}
+        payload = {"api_key": "k", "api_secret": "s", "nonce": "x-hawk-42"}
         event = _make_nip04_event(
-            sender, operator.public_key.hex(), payload, dpop_token=None,
+            sender, operator.public_key.hex(), payload, nonce=None,
         )
         with ex._lock:
             ex._received_events.append(event)
@@ -1914,13 +1914,13 @@ class TestConcurrentExchanges:
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
-            result = await ex.receive(sender_npub, service="x", dpop_token="x-hawk-42")
+            result = await ex.receive(sender_npub, service="x", nonce="x-hawk-42")
 
         assert result["success"] is True
-        # X dpop_token consumed
-        assert (sender_npub, "x") not in ex._pending_dpop_tokens
-        # OpenAI dpop_token still intact
-        assert (sender_npub, "openai") in ex._pending_dpop_tokens
+        # X nonce consumed
+        assert (sender_npub, "x") not in ex._pending_nonces
+        # OpenAI nonce still intact
+        assert (sender_npub, "openai") in ex._pending_nonces
 
     @pytest.mark.asyncio
     async def test_receive_uses_service_hint_for_template_matching(self):
@@ -1938,13 +1938,13 @@ class TestConcurrentExchanges:
 
         sender_npub = sender.public_key.bech32()
         # Only open the OpenAI channel — we're testing service="openai"
-        _seed_channel(ex, sender_npub, service="openai", dpop_token="ai-fox-99")
+        _seed_channel(ex, sender_npub, service="openai", nonce="ai-fox-99")
 
         # Payload has only api_key — valid for openai, also subset of x
         # No "service" field in payload
-        payload = {"api_key": "sk-test-key", "dpop_token": "ai-fox-99"}
+        payload = {"api_key": "sk-test-key", "nonce": "ai-fox-99"}
         event = _make_nip04_event(
-            sender, operator.public_key.hex(), payload, dpop_token=None,
+            sender, operator.public_key.hex(), payload, nonce=None,
         )
         with ex._lock:
             ex._received_events.append(event)
@@ -1953,7 +1953,7 @@ class TestConcurrentExchanges:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender_npub, service="openai", dpop_token="ai-fox-99",
+                sender_npub, service="openai", nonce="ai-fox-99",
             )
 
         assert result["success"] is True
@@ -1961,8 +1961,8 @@ class TestConcurrentExchanges:
         assert result["service"] == "openai"
 
     @pytest.mark.asyncio
-    async def test_second_open_channel_same_service_replaces_dpop_token(self):
-        """Re-opening a channel for the same service overwrites the old dpop_token."""
+    async def test_second_open_channel_same_service_replaces_nonce(self):
+        """Re-opening a channel for the same service overwrites the old nonce."""
         ex = _make_exchange(templates=self._two_service_templates())
         npub = "npub1test123"
 
@@ -1975,9 +1975,9 @@ class TestConcurrentExchanges:
                 "x", greeting="Second attempt", recipient_npub=npub,
             )
 
-        # Only the second dpop_token should be stored
-        assert ex._pending_dpop_tokens[(npub, "x")][0] == r2["dpop_token"]
-        assert ex._pending_dpop_tokens[(npub, "x")][0] != r1["dpop_token"]
+        # Only the second nonce should be stored
+        assert ex._pending_nonces[(npub, "x")][0] == r2["nonce"]
+        assert ex._pending_nonces[(npub, "x")][0] != r1["nonce"]
 
 
 # ── Conversational DM Flow Tests ──────────────────────────────────────────
@@ -2025,7 +2025,7 @@ class TestConversationalDmFlow:
              patch.object(ex, "_request_deletion"), \
              patch.object(ex, "send_dm") as mock_send:
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
@@ -2079,7 +2079,7 @@ class TestConversationalDmFlow:
              patch.object(ex, "send_dm") as mock_send, \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is False
@@ -2106,7 +2106,7 @@ class TestConversationalDmFlow:
              patch.object(ex, "_request_deletion"), \
              patch.object(ex, "send_dm", side_effect=Exception("relay down")):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
@@ -2158,7 +2158,7 @@ class TestConversationalDmFlow:
              patch.object(ex, "_request_deletion"), \
              patch.object(ex, "send_dm", side_effect=Exception("relay down")):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
@@ -2301,7 +2301,7 @@ class TestReceiveFormatEnforcement:
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_pop_event") as mock_pop:
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         # JSON payload (no @@@) popped with the @@@ hint in the NACK reason
@@ -2320,7 +2320,7 @@ class TestReceiveFormatEnforcement:
 
         raw = (
             "api_key = @@@sk-test@@@\napi_secret = @@@secret@@@\n"
-            f"dpop_token = @@@{_TEST_DPOP_TOKEN}@@@"
+            f"nonce = @@@{_TEST_NONCE}@@@"
         )
         event = _make_nip04_event(sender, operator.public_key.hex(), raw)
         with ex._lock:
@@ -2331,7 +2331,7 @@ class TestReceiveFormatEnforcement:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender.public_key.bech32(), service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender.public_key.bech32(), service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
@@ -2358,16 +2358,16 @@ class TestParseDelimitedCredentials:
         result = _parse_delimited_credentials(text)
         assert result == {"api_key": "sk-123"}
 
-    def test_with_dpop_token(self):
+    def test_with_nonce(self):
         """Dpop_token field extracted alongside credentials."""
         text = (
             "api_key = @@@sk-123@@@\n"
             "api_secret = @@@sec-456@@@\n"
-            "dpop_token = @@@bold-hawk-42@@@"
+            "nonce = @@@bold-hawk-42@@@"
         )
         result = _parse_delimited_credentials(text)
         assert result is not None
-        assert result["dpop_token"] == "bold-hawk-42"
+        assert result["nonce"] == "bold-hawk-42"
         assert result["api_key"] == "sk-123"
 
     def test_whitespace_stripped(self):
@@ -2607,16 +2607,16 @@ class TestEphemeralAgentSelfDm:
         # Simulate self-DM: operator is both sender and recipient
         agent_key = PrivateKey()
         ex._ephemeral_agents[(operator.public_key.bech32(), "x")] = agent_key
-        _seed_channel(ex, operator.public_key.bech32(), dpop_token="test-dpop_token-42")
+        _seed_channel(ex, operator.public_key.bech32(), nonce="test-nonce-42")
 
         # Patron (operator) sends DM encrypted to the ephemeral agent's pubkey
         payload = {
             "api_key": "sk-self-123",
             "api_secret": "self-secret",
-            "dpop_token": "test-dpop_token-42",
+            "nonce": "test-nonce-42",
         }
         event = _make_nip04_event(
-            operator, agent_key.public_key.hex(), payload, dpop_token=None,
+            operator, agent_key.public_key.hex(), payload, nonce=None,
         )
 
         with ex._lock:
@@ -2626,7 +2626,7 @@ class TestEphemeralAgentSelfDm:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                operator.public_key.bech32(), service="x", dpop_token="test-dpop_token-42",
+                operator.public_key.bech32(), service="x", nonce="test-nonce-42",
             )
 
         assert result["success"] is True
@@ -2641,17 +2641,17 @@ class TestEphemeralAgentSelfDm:
 
         agent_key = PrivateKey()
         ex._ephemeral_agents[(operator.public_key.bech32(), "x")] = agent_key
-        _seed_channel(ex, operator.public_key.bech32(), dpop_token="test-dpop_token-99")
+        _seed_channel(ex, operator.public_key.bech32(), nonce="test-nonce-99")
 
         payload = {
             "api_key": "sk-wrapped-self",
             "api_secret": "wrapped-secret",
-            "dpop_token": "test-dpop_token-99",
+            "nonce": "test-nonce-99",
         }
         # Gift wrap encrypted to agent key (not operator key)
         event = _make_gift_wrap_event(
             operator, agent_key.hex(), agent_key.public_key.hex(), payload,
-            dpop_token=None,
+            nonce=None,
         )
 
         with ex._lock:
@@ -2661,7 +2661,7 @@ class TestEphemeralAgentSelfDm:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                operator.public_key.bech32(), service="x", dpop_token="test-dpop_token-99",
+                operator.public_key.bech32(), service="x", nonce="test-nonce-99",
             )
 
         assert result["success"] is True
@@ -2675,17 +2675,17 @@ class TestEphemeralAgentSelfDm:
         ex = _make_exchange(nsec=operator.nsec)
 
         agent_key = PrivateKey()
-        dpop_token_key = (operator.public_key.bech32(), "x")
-        ex._ephemeral_agents[dpop_token_key] = agent_key
-        _seed_channel(ex, operator.public_key.bech32(), dpop_token="cleanup-test-11")
+        nonce_key = (operator.public_key.bech32(), "x")
+        ex._ephemeral_agents[nonce_key] = agent_key
+        _seed_channel(ex, operator.public_key.bech32(), nonce="cleanup-test-11")
 
         payload = {
             "api_key": "key",
             "api_secret": "secret",
-            "dpop_token": "cleanup-test-11",
+            "nonce": "cleanup-test-11",
         }
         event = _make_nip04_event(
-            operator, agent_key.public_key.hex(), payload, dpop_token=None,
+            operator, agent_key.public_key.hex(), payload, nonce=None,
         )
 
         with ex._lock:
@@ -2695,12 +2695,12 @@ class TestEphemeralAgentSelfDm:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             await ex.receive(
-                operator.public_key.bech32(), service="x", dpop_token="cleanup-test-11",
+                operator.public_key.bech32(), service="x", nonce="cleanup-test-11",
             )
 
-        # Both dpop_token and ephemeral agent should be cleaned up
-        assert dpop_token_key not in ex._ephemeral_agents
-        assert dpop_token_key not in ex._pending_dpop_tokens
+        # Both nonce and ephemeral agent should be cleaned up
+        assert nonce_key not in ex._ephemeral_agents
+        assert nonce_key not in ex._pending_nonces
 
     def test_build_gift_wrap_with_explicit_key(self):
         """_build_gift_wrap_with uses the provided key for rumor + seal."""
@@ -2796,7 +2796,7 @@ class TestStrictPinnedRelayDrain:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender_npub, service="x", nonce=_TEST_NONCE,
             )
 
         # Strict pinned drain ignores the other-relay copy → not found
@@ -2822,7 +2822,7 @@ class TestStrictPinnedRelayDrain:
             return_value={_TEST_RELAY: (False, "Connection refused")},
         ), patch.object(ex, "send_dm"), patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender_npub, service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is False
@@ -2850,7 +2850,7 @@ class TestStrictPinnedRelayDrain:
             ex, "_fetch_dms_from_relays",
             return_value={_TEST_RELAY: (False, "Connection refused")},
         ), patch.object(ex, "send_dm"), patch.object(ex, "_request_deletion"):
-            await ex.receive(sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN)
+            await ex.receive(sender_npub, service="x", nonce=_TEST_NONCE)
 
         assert relay_reports.pending_relay_failures() == {_TEST_RELAY: "read"}
         relay_reports.reset_relay_reports()
@@ -2868,7 +2868,7 @@ class TestStrictPinnedRelayDrain:
             ex, "_fetch_dms_from_relays", return_value={_TEST_RELAY: (True, "")},
         ), patch.object(ex, "send_dm"), patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender_npub, service="x", nonce=_TEST_NONCE,
             )
 
         assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
@@ -2885,7 +2885,7 @@ class TestStrictPinnedRelayDrain:
         with patch.object(ex, "_fetch_dms_from_relays", return_value={}), \
              patch.object(ex, "send_dm"), patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender_npub, service="x", nonce=_TEST_NONCE,
             )
 
         assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
@@ -2910,7 +2910,7 @@ class TestStrictPinnedRelayDrain:
              patch.object(ex, "send_dm"), \
              patch.object(ex, "_request_deletion"):
             result = await ex.receive(
-                sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+                sender_npub, service="x", nonce=_TEST_NONCE,
             )
 
         assert result["success"] is True
@@ -2923,45 +2923,45 @@ class TestStrictPinnedRelayDrain:
         ex = _make_exchange(nsec=operator.nsec)
         sender_npub = sender.public_key.bech32()
         # Dpop_token present but NO pin (and no vault to rehydrate one)
-        ex._pending_dpop_tokens[(sender_npub, "x")] = (_TEST_DPOP_TOKEN, time.time() + 600)
+        ex._pending_nonces[(sender_npub, "x")] = (_TEST_NONCE, time.time() + 600)
 
         result = await ex.receive(
-            sender_npub, service="x", dpop_token=_TEST_DPOP_TOKEN,
+            sender_npub, service="x", nonce=_TEST_NONCE,
         )
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.COURIER_NO_PINNED_RELAY
         assert result["popped"] == 0
 
     @pytest.mark.asyncio
-    async def test_dpop_token_mismatch_pops_nothing(self):
-        """A dpop_token that doesn't match the open channel pops nothing."""
+    async def test_nonce_mismatch_pops_nothing(self):
+        """A nonce that doesn't match the open channel pops nothing."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
         sender_npub = sender.public_key.bech32()
-        _seed_channel(ex, sender_npub, dpop_token="the-right-one-12")
+        _seed_channel(ex, sender_npub, nonce="the-right-one-12")
 
         with patch.object(ex, "_pop_event") as mock_pop:
             result = await ex.receive(
-                sender_npub, service="x", dpop_token="a-wrong-guess-99",
+                sender_npub, service="x", nonce="a-wrong-guess-99",
             )
 
         assert result["success"] is False
-        assert result["error_code"] == ErrorCode.COURIER_DPOP_TOKEN_MISMATCH
+        assert result["error_code"] == ErrorCode.COURIER_NONCE_MISMATCH
         assert result["popped"] == 0
         mock_pop.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_missing_dpop_token_returns_error(self):
-        """An empty dpop_token argument is rejected before any drain."""
+    async def test_missing_nonce_returns_error(self):
+        """An empty nonce argument is rejected before any drain."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
         result = await ex.receive(
-            sender.public_key.bech32(), service="x", dpop_token="",
+            sender.public_key.bech32(), service="x", nonce="",
         )
         assert result["success"] is False
-        assert result["error_code"] == ErrorCode.DPOP_TOKEN_MISSING
+        assert result["error_code"] == ErrorCode.NONCE_MISSING
 
 
 class TestSignedLayerSurfaced:
@@ -2972,7 +2972,7 @@ class TestSignedLayerSurfaced:
     exactly this signature, so it must be the patron's and it must verify.
     """
 
-    def _wrap_from(self, ex, sender, text="dpop_token = @@@bold-hawk-42@@@"):
+    def _wrap_from(self, ex, sender, text="nonce = @@@bold-hawk-42@@@"):
         message = ex._build_gift_wrap_with(
             sender.hex(), sender.public_key.hex(), ex._pubkey_hex, text,
         )

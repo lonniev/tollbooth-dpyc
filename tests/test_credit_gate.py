@@ -25,7 +25,7 @@ from tollbooth.tool_identity import READS, ToolIdentity, capability_uuid
 PATRON = PrivateKey().public_key.bech32()
 OTHER = PrivateKey().public_key.bech32()
 
-_PASS_PROOF = patch("tollbooth.runtime.require_proof", AsyncMock(return_value=None))
+_PASS_PROOF = patch("tollbooth.runtime.require_held_grant", AsyncMock(return_value=None))
 
 
 class FakeResolver:
@@ -139,7 +139,7 @@ def _runtime(registry, *, balance=1000, resolver=None, gate=None, operator_npub=
 @pytest.mark.asyncio
 async def test_unknown_tool_denied():
     rt = _runtime({})
-    r = await rt.debit_or_deny("not-a-real-uuid", PATRON, dpop_token="p")
+    r = await rt.debit_or_deny("not-a-real-uuid", PATRON)
     assert r["error_code"] == ErrorCode.TOOL_NOT_REGISTERED
 
 
@@ -148,8 +148,8 @@ async def test_proof_failure_is_returned_verbatim():
     registry, tid = _registry()
     rt = _runtime(registry)
     err = {"success": False, "error_code": ErrorCode.PROOF_REQUIRED, "error": "need proof"}
-    with patch("tollbooth.runtime.require_proof", AsyncMock(return_value=err)):
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="")
+    with patch("tollbooth.runtime.require_held_grant", AsyncMock(return_value=err)):
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r is err
 
 
@@ -158,7 +158,7 @@ async def test_restricted_allows_operator_free():
     registry, tid = _registry(category="restricted")
     rt = _runtime(registry, operator_npub=PATRON)
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r == 0  # operator calling its own restricted tool — free
 
 
@@ -167,7 +167,7 @@ async def test_restricted_denies_non_operator():
     registry, tid = _registry(category="restricted")
     rt = _runtime(registry, operator_npub=OTHER)
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r["error_code"] == ErrorCode.RESTRICTED
 
 
@@ -177,7 +177,7 @@ async def test_restricted_non_operator_is_restricted_before_proof():
     with a misleading proof_refresh_needed. Restricted tools verify proof against
     the operator npub, so a non-operator's (valid) proof would fail that check
     and read as "your proof is invalid, re-sign-in". The access check must run
-    first: require_proof is never reached for a non-operator caller."""
+    first: require_held_grant is never reached for a non-operator caller."""
     registry, tid = _registry(category="restricted")
     rt = _runtime(registry, operator_npub=OTHER)
     proof_err = {
@@ -186,8 +186,8 @@ async def test_restricted_non_operator_is_restricted_before_proof():
         "error": "Your npub-proof cache entry is no longer valid.",
     }
     mock_proof = AsyncMock(return_value=proof_err)
-    with patch("tollbooth.runtime.require_proof", mock_proof):
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+    with patch("tollbooth.runtime.require_held_grant", mock_proof):
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r["error_code"] == ErrorCode.RESTRICTED
     mock_proof.assert_not_called()
 
@@ -199,7 +199,7 @@ async def test_pricing_warming_up_when_neon_unavailable():
     registry, tid = _registry()
     rt = _runtime(registry, resolver=FakeResolver(neon=False, permanent=False))
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r["error_code"] == ErrorCode.WARMING_UP
 
 
@@ -208,7 +208,7 @@ async def test_pricing_misconfigured_when_permanent_error():
     registry, tid = _registry()
     rt = _runtime(registry, resolver=FakeResolver(neon=False, permanent=True))
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r["error_code"] == ErrorCode.PERSISTENCE_MISCONFIGURED
 
 
@@ -221,7 +221,7 @@ async def test_pricing_quota_exceeded_is_not_warming_up():
     rt = _runtime(registry, resolver=FakeResolver(neon=False, quota=True))
     alert = AsyncMock(return_value=None)
     with _PASS_PROOF, patch.object(rt, "_alert_authority_quota_exceeded", alert):
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r["error_code"] == ErrorCode.PERSISTENCE_QUOTA_EXCEEDED
     # The honest message states non-transience — it must NOT tell the patron to
     # simply retry (the old warming_up copy did exactly that through an outage).
@@ -236,7 +236,7 @@ async def test_tool_not_priced():
     registry, tid = _registry()
     rt = _runtime(registry, resolver=FakeResolver(priced=False))
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r["error_code"] == ErrorCode.TOOL_NOT_PRICED
 
 
@@ -245,7 +245,7 @@ async def test_free_tool_returns_zero():
     registry, tid = _registry(category="free")
     rt = _runtime(registry)
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r == 0
 
 
@@ -256,7 +256,7 @@ async def test_happy_path_debits_and_returns_cost():
     registry, tid = _registry()
     rt = _runtime(registry, balance=1000, resolver=FakeResolver(cost=10))
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r == 10
     ledger = await (await rt.ledger_cache()).get(PATRON)
     assert ledger.balance_api_sats == 990  # debited
@@ -267,7 +267,7 @@ async def test_insufficient_balance_denied():
     registry, tid = _registry()
     rt = _runtime(registry, balance=5, resolver=FakeResolver(cost=100))
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r["error_code"] == ErrorCode.INSUFFICIENT_BALANCE
     assert r["balance_sats"] == 5 and r["cost_sats"] == 100
 
@@ -281,7 +281,7 @@ async def test_constraint_denial_returns_constraint_denied():
     gate = FakeGate(denial={"success": False, "constraint_reason": "rate limited"})
     rt = _runtime(registry, resolver=resolver, gate=gate)
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r["error_code"] == ErrorCode.CONSTRAINT_DENIED
     assert r["constraint_reason"] == "rate limited"
 
@@ -293,7 +293,7 @@ async def test_constraint_discount_debits_effective_cost():
     gate = FakeGate(effective=30)  # chain discounted 100 → 30
     rt = _runtime(registry, balance=1000, resolver=resolver, gate=gate)
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r == 30
     ledger = await (await rt.ledger_cache()).get(PATRON)
     assert ledger.balance_api_sats == 970
@@ -303,7 +303,7 @@ async def test_constraint_discount_debits_effective_cost():
 async def test_invalid_npub_denied_for_paid_tool():
     registry, tid = _registry()
     rt = _runtime(registry)
-    r = await rt.debit_or_deny(tid, "not-an-npub", dpop_token="p")
+    r = await rt.debit_or_deny(tid, "not-an-npub")
     assert r["error_code"] == ErrorCode.NPUB_INVALID
 
 
@@ -316,7 +316,7 @@ async def test_consumed_coupons_are_burned():
     burn = AsyncMock()
     rt.coupons_vault = AsyncMock(return_value=MagicMock(burn_use=burn))
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r == 0
     burn.assert_awaited_once_with("coupon-1", PATRON)
 
@@ -372,7 +372,7 @@ async def test_constraint_credit_deposits_and_returns_signed():
     gate = FakeGate(effective=-50)  # chain drove price negative → credit
     rt = _runtime(registry, balance=1000, resolver=resolver, gate=gate)
     with _PASS_PROOF:
-        r = await rt.debit_or_deny(tid, PATRON, dpop_token="p")
+        r = await rt.debit_or_deny(tid, PATRON)
     assert r == -50  # signed — caller detects the credit case
     ledger = await (await rt.ledger_cache()).get(PATRON)
     assert ledger.balance_api_sats == 1050  # credited 50

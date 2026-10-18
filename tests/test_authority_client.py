@@ -55,7 +55,7 @@ async def test_certify_success():
     assert result["net_sats"] == 90
     mock_client.call_tool.assert_awaited_once_with(
         "authority_certify_credits",
-        {"npub": "npub1operator", "amount_sats": 100, "dpop_token": ""},
+        {"npub": "npub1operator", "amount_sats": 100},
     )
 
 
@@ -188,17 +188,14 @@ async def test_certify_custom_tool_name():
 
     mock_client.call_tool.assert_awaited_once_with(
         "custom_certify",
-        {"npub": "npub1operator", "amount_sats": 50, "dpop_token": ""},
+        {"npub": "npub1operator", "amount_sats": 50},
     )
 
 
 @pytest.mark.asyncio
-async def test_certify_sends_dpop_token_not_proof():
-    """Regression: the certify_credits call must send the operator's identity
-    token under the ``dpop_token`` kwarg (the wheel-0.57.0 rename), never the old
-    ``proof``. Sending ``proof`` makes the Authority's pydantic-typed tool reject
-    the call with 'unexpected keyword argument: proof', breaking every patron
-    credit purchase."""
+async def test_certify_carries_no_proof_argument():
+    """The operator's identity rides the signed connection: the certify call
+    names its npub and amount, and no proof argument."""
     mock_client = AsyncMock()
     mock_client.call_tool = AsyncMock(
         return_value=[_text_block({"success": True, "certificate": "c"})]
@@ -206,16 +203,17 @@ async def test_certify_sends_dpop_token_not_proof():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("tollbooth.authority_client.service_client", return_value=mock_client):
+    with patch("tollbooth.authority_client.service_client", return_value=mock_client) as client_for:
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
+            operator_nsec="nsec1operator",
         )
         await certifier.certify_credits(100)
 
+    client_for.assert_called_once_with("https://authority.example.com/mcp", "nsec1operator")
     sent_args = mock_client.call_tool.await_args.args[1]
-    assert "dpop_token" in sent_args, "certify must send the token as dpop_token"
-    assert "proof" not in sent_args, "the pre-0.57.0 'proof' kwarg must not return"
+    assert sent_args == {"npub": "npub1operator", "amount_sats": 100}
 
 
 # ---------------------------------------------------------------------------
@@ -340,24 +338,17 @@ async def test_check_balance_signs_for_wire_tool_name():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    mock_signer = MagicMock()
-    mock_signer.authenticate.return_value = {
-        "npub": "npub1operator",
-        "dpop_token": "",
-    }
-
     with patch("tollbooth.authority_client.service_client", return_value=mock_client):
         certifier = AuthorityCertifier(
             authority_url="https://authority.example.com/mcp",
             operator_npub="npub1operator",
         )
-        certifier._signer = mock_signer
         result = await certifier.check_balance()
 
     assert result["success"] is True
     assert result["balance_sats"] == 500
     mock_client.call_tool.assert_awaited_once_with(
         "authority_check_balance",
-        {"npub": "npub1operator", "dpop_token": ""},
+        {"npub": "npub1operator"},
     )
-    mock_signer.authenticate.assert_called_once_with("authority_check_balance")
+

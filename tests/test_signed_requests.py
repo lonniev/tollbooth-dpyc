@@ -3,9 +3,9 @@
 Pins:
   - a NIP-98 signature is bound to the request's method, path and body, is
     fresh, and is good once; the host may differ (a site's proxy forwards it);
-  - over HTTP, a request signed by alice acts as alice with no argument proof,
-    and as nobody else;
-  - the connection answers before the argument, and argument proofs are counted;
+  - over HTTP, a request signed by alice acts as alice, and as nobody else;
+  - a service with no holders (SignedRequestProvider) serves every caller and
+    knows a signer by its npub, never refusing an unsigned or bad request;
   - a high-value tool's patron-proof constraint is met by the patron's own key.
 """
 
@@ -94,7 +94,7 @@ def test_a_header_that_is_not_base64_json_is_malformed():
 
 
 @pytest.mark.asyncio
-async def test_a_signer_acts_as_its_own_npub_with_no_argument_proof():
+async def test_a_signer_acts_as_its_own_npub():
     op, alice, bob = PrivateKey(), PrivateKey(), PrivateKey()
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
@@ -109,8 +109,8 @@ async def test_a_signer_acts_as_its_own_npub_with_no_argument_proof():
     register_standard_tools(mcp, "test", rt, service_name="test")
 
     @mcp.tool
-    async def act_as(npub: str, dpop_token: str = "") -> dict[str, Any]:
-        return await rt.require_caller_proof(npub, dpop_token, "check_balance") or {"acted_as": npub}
+    async def act_as(npub: str) -> dict[str, Any]:
+        return await rt.require_caller_proof(npub) or {"acted_as": npub}
 
     async def call(nsec: str | None, args: dict[str, Any]) -> dict[str, Any]:
         async with service_client(f"{base}/mcp", nsec) as client:
@@ -124,32 +124,45 @@ async def test_a_signer_acts_as_its_own_npub_with_no_argument_proof():
         assert refused["error_code"] == ErrorCode.PROOF_REQUIRED
         # Anonymous is nobody.
         assert (await call(None, {"npub": alice_npub}))["error_code"] == ErrorCode.PROOF_REQUIRED
-        assert rt.argument_proofs_seen == 0
 
 
 @pytest.mark.asyncio
-async def test_an_argument_proof_still_works_and_is_counted():
-    from tollbooth.identity_proof import create_proof
+async def test_a_service_with_no_holders_serves_everyone_and_knows_a_signer():
+    from fastmcp import Client
+    from fastmcp.client.transports import StreamableHttpTransport
+
+    from tollbooth.holder_auth import SignedRequestProvider, signed_npub
+
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}/mcp"
+    mcp = FastMCP("oracle-like", auth=SignedRequestProvider())
+
+    @mcp.tool
+    def whoami() -> str:
+        return signed_npub() or "anonymous"
+
+    async def ask(**transport: Any) -> str:
+        async with Client(StreamableHttpTransport(url, **transport)) as client:
+            return str((await client.call_tool("whoami", {})).data)
 
     alice = PrivateKey()
-    rt = OperatorRuntime(nsec_env_var="__UNUSED__", holder_auth_url="https://op.example")
-    rt._nsec = PrivateKey().bech32()
-    rt.proof_grant_revocations = AsyncMock(  # type: ignore[method-assign]
-        return_value=SimpleNamespace(is_revoked=AsyncMock(return_value=False)),
-    )
-    rt._slug = "test"
-    with patch("tollbooth.holder_auth.signed_npub", return_value=None), \
-            patch("tollbooth.holder_auth.current_holder", return_value=None):
-        name = rt.runtime_name("check_balance")
-        assert await rt.prove_caller(alice.public_key.bech32(), create_proof(alice.bech32(), name), name) is None
-    assert rt.argument_proofs_seen == 1
+    elsewhere = sign_request(alice.bech32(), method="POST", url=url, body=b"{}")
+    async with run_server_async(mcp, port=port):
+        # No Authorization header at all: served, as nobody.
+        assert await ask() == "anonymous"
+        assert await ask(headers={"Authorization": "Bearer anonymous"}) == "anonymous"
+        # A signature for some other body is no proof — but it is not refused.
+        assert await ask(headers={"Authorization": elsewhere}) == "anonymous"
+        # A request alice signs is known as alice.
+        async with service_client(url, alice.bech32()) as client:
+            assert (await client.call_tool("whoami", {})).data == alice.public_key.bech32()
 
 
 def test_the_patron_proof_constraint_is_met_by_the_patrons_own_key():
     from tollbooth.constraints.patron_proof import PatronProofConstraint
 
     npub = PrivateKey().public_key.bech32()
-    context = SimpleNamespace(patron=SimpleNamespace(npub=npub), dpop_token="", env=SimpleNamespace(tool_name="t"))
+    context = SimpleNamespace(patron=SimpleNamespace(npub=npub), env=SimpleNamespace(tool_name="t"))
     with patch("tollbooth.holder_auth.signed_npub", return_value=npub):
         assert PatronProofConstraint().evaluate(context).allowed  # type: ignore[arg-type]
     with patch("tollbooth.holder_auth.signed_npub", return_value=None):

@@ -303,6 +303,14 @@ AUTHORITY_DOMAIN_TOOLS: list[ToolIdentity] = [
     ),
 ]
 
+# The kind of operator request a queue tool acts on. Module level: tool
+# annotations are strings here (``from __future__ import annotations``) and
+# FastMCP resolves them against this module's globals.
+_KIND = Annotated[
+    str,
+    Field(description="The request's kind, as list_operator_requests names it: 'adoption' or 'update'."),
+]
+
 AUTHORITY_TOOL_REGISTRY: dict[str, ToolIdentity] = {
     ti.tool_id: ti for ti in AUTHORITY_DOMAIN_TOOLS
 }
@@ -1460,11 +1468,6 @@ def register_authority_tools(
             "operator_alert_count": len(operator_alerts),
             "neon_api": neon_api,
         }
-
-    _KIND = Annotated[
-        str,
-        Field(description="The request's kind, as list_operator_requests names it: 'adoption' or 'update'."),
-    ]
 
     @tool
     async def approve_operator_request(

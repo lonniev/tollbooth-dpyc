@@ -1,7 +1,7 @@
 """Characterization net for the proof tools (audit M2.1f Phase 1).
 
-receive_npub_proof's inline drain loop — decrypt, dpop_token-match, NACK cap,
-stop-at-match, proven-npub cache write — is security-critical and was at ~0%
+receive_npub_proof's inline drain loop — decrypt, nonce-match, NACK cap,
+stop-at-match, the grant kept in the holder's wallet — is security-critical and was at ~0%
 coverage. These tests pin its current behavior at the tool-closure level (real
 rt for validation/resolve, fake courier exchange, stubbed persistence) so the
 Phase 2 extraction onto rt can be verified behavior-preserving.
@@ -51,17 +51,17 @@ class FakeExchange:
         self._fetch_delay = fetch_delay
         self._privkey_hex = "ab" * 32
         self._ephemeral_agents: dict = {}
-        self._pending_dpop_tokens: dict = {}
+        self._pending_nonces: dict = {}
         self._pinned_relays: dict = {}
         self._credential_vault = None
         self.popped: list[tuple] = []      # (event_id, nacked: bool)
         self.sent_dms: list[str] = []
 
-    async def _resolve_pinned_record(self, npub, service, dpop_token):
+    async def _resolve_pinned_record(self, npub, service, nonce):
         if self._resolve_error is not None:
             return None, self._resolve_error
         # seed channel state so the cleanup .pop()s have something to remove
-        self._pending_dpop_tokens[(npub, service)] = (dpop_token, 0)
+        self._pending_nonces[(npub, service)] = (nonce, 0)
         self._pinned_relays[(npub, service)] = self._pinned
         return self._pinned, None
 
@@ -88,8 +88,23 @@ class FakeExchange:
         self.sent_dms.append(msg)
 
 
+HOLDER = "h1"
+
+
+@pytest.fixture(autouse=True)
+def _a_holder_connection():
+    """receive_npub_proof serves holder connections; every call here is one."""
+    with patch("tollbooth.holder_auth.current_holder", return_value=HOLDER):
+        yield
+
+
 def _runtime_with_exchange(exchange, *, on_proven=None):
-    rt = OperatorRuntime(tool_registry={}, service_name="Test Operator")
+    from tests.test_holder_auth import MemoryHolderStore
+
+    rt = OperatorRuntime(tool_registry={}, service_name="Test Operator",
+                         holder_auth_url="https://op.example")
+    rt.wallet = MemoryHolderStore()  # type: ignore[attr-defined]
+    rt.holder_store = AsyncMock(return_value=rt.wallet)  # type: ignore[method-assign]
     rt._courier = SimpleNamespace(_exchange=exchange)
     rt._on_npub_proven = on_proven
     # Operator nsec so receive_npub_proof can mint a kind-30080 grant.
@@ -122,34 +137,34 @@ def patron():
 
 
 @pytest.mark.asyncio
-async def test_match_marks_proven_and_returns_token(patron):
-    dpop_token = "bold-hawk-42"
+async def test_match_holds_the_grant_and_never_returns_it(patron):
+    nonce = "bold-hawk-42"
     ex = FakeExchange(candidates=[{
         "id": "e1", "_relay": PIN, **SIGNED,
-        "_plaintext": _delimited(dpop_token=dpop_token),
+        "_plaintext": _delimited(nonce=nonce),
     }])
     rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
 
     assert r["success"] is True
     assert r["proven_npub"] == patron
-    # #267: dpop_token is the grant envelope {grant, nonce}, not the bare phrase.
-    assert r["nonce"] == dpop_token
+    assert r["held_by_connection"] is True
+    assert not {"grant", "nonce", "envelope"} & set(r)
     import hashlib
     import json
-    envelope = json.loads(r["dpop_token"])
-    assert envelope["nonce"] == dpop_token
+    envelope = json.loads(await rt.wallet.envelope(HOLDER, patron))
+    assert envelope["nonce"] == nonce
     grant = envelope["grant"]
     assert grant["kind"] == 30080
     tags = {t[0]: t[1] for t in grant["tags"]}
     # The grant binds the challenge hash and the VERIFIED reply signature —
     # never the raw nonce, never a placeholder.
-    assert tags["challenge"] == hashlib.sha256(dpop_token.encode()).hexdigest()
+    assert tags["challenge"] == hashlib.sha256(nonce.encode()).hexdigest()
     assert tags["patron_sig"] == SIGNED["_sender_sig"]
     assert tags["patron_event_id"] == SIGNED["_sender_event_id"]
-    assert dpop_token not in json.dumps(grant)
+    assert nonce not in json.dumps(grant)
     assert r["expires_in_seconds"] == 7200  # default consent window
     # matched DM popped without a NACK; confirmation DM sent
     assert ex.popped == [("e1", False)]
@@ -158,30 +173,30 @@ async def test_match_marks_proven_and_returns_token(patron):
 
 @pytest.mark.asyncio
 async def test_on_npub_proven_callback_fires_on_match(patron):
-    dpop_token = "bold-hawk-42"
+    nonce = "bold-hawk-42"
     cb = AsyncMock()
-    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(dpop_token=dpop_token)}])
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=nonce)}])
     rt, _ = _runtime_with_exchange(ex, on_proven=cb)
     tools = _register(rt)
 
-    await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
+    await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
     cb.assert_awaited_once()
     assert cb.await_args.args[0] == patron
 
 
 @pytest.mark.asyncio
-async def test_wrong_dpop_token_nacks_and_reports_not_found(patron):
-    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, "_plaintext": _delimited(dpop_token="WRONG")}])
+async def test_wrong_nonce_nacks_and_reports_not_found(patron):
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, "_plaintext": _delimited(nonce="WRONG")}])
     rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token="bold-hawk-42")
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce="bold-hawk-42")
 
     assert r["success"] is False
     assert r["error_code"] == ErrorCode.COURIER_NOT_FOUND
     assert "wrong token" in r["error"]
     assert ex.popped == [("e1", True)]      # NACK'd
-    assert "dpop_token" not in r
+    assert "nonce" not in r
 
 
 @pytest.mark.asyncio
@@ -190,7 +205,7 @@ async def test_undecryptable_dm_nacks(patron):
     rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token="bold-hawk-42")
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce="bold-hawk-42")
     assert r["success"] is False
     assert "undecryptable DM" in r["error"]
     assert ex.popped == [("e1", True)]
@@ -202,7 +217,7 @@ async def test_no_candidates_returns_not_found(patron):
     rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token="bold-hawk-42")
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce="bold-hawk-42")
     assert r["success"] is False
     assert r["error_code"] == ErrorCode.COURIER_NOT_FOUND
     assert r["popped_dms"] == 0
@@ -211,12 +226,12 @@ async def test_no_candidates_returns_not_found(patron):
 
 @pytest.mark.asyncio
 async def test_pinned_resolve_error_pops_nothing(patron):
-    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, "_plaintext": _delimited(dpop_token="x")}],
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, "_plaintext": _delimited(nonce="x")}],
                       resolve_error=ErrorCode.COURIER_TOKEN_EXPIRED)
     rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token="bold-hawk-42")
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce="bold-hawk-42")
     assert r["success"] is False
     assert r["error_code"] == ErrorCode.COURIER_TOKEN_EXPIRED
     assert r["popped_dms"] == 0
@@ -224,52 +239,53 @@ async def test_pinned_resolve_error_pops_nothing(patron):
 
 
 @pytest.mark.asyncio
-async def test_missing_dpop_token_rejected(patron):
+async def test_missing_nonce_rejected(patron):
     ex = FakeExchange(candidates=[])
     rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token="")
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce="")
     assert r["success"] is False
-    assert r["error_code"] == ErrorCode.DPOP_TOKEN_MISSING
+    assert r["error_code"] == ErrorCode.NONCE_MISSING
 
 
 @pytest.mark.asyncio
-async def test_old_timestamp_dm_with_correct_dpop_token_matches(patron):
+async def test_old_timestamp_dm_with_correct_nonce_matches(patron):
     # Regression for the 0.44.10 fix: a reply whose created_at predates the
     # challenge (clock skew / human-paced reply / relay lag) used to be
-    # silently dropped by a 5s timestamp gate. The one-time dpop_token is the sole
+    # silently dropped by a 5s timestamp gate. The one-time nonce is the sole
     # scoping mechanism now, so an old-but-correct reply MUST match.
-    dpop_token = "bold-hawk-42"
+    nonce = "bold-hawk-42"
     ex = FakeExchange(candidates=[
         {"id": "old", "_relay": PIN, "created_at": 100, **SIGNED,
-         "_plaintext": _delimited(dpop_token=dpop_token)},
+         "_plaintext": _delimited(nonce=nonce)},
     ])
     rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
     assert r["success"] is True
     assert r["proven_npub"] == patron
     assert ex.popped == [("old", False)]  # matched, popped without NACK
-    assert r["dpop_token"]
+    assert r["held_by_connection"] is True
 
 
 @pytest.mark.asyncio
 async def test_cache_duration_overrides_ttl(patron):
-    dpop_token = "bold-hawk-42"
+    nonce = "bold-hawk-42"
     ex = FakeExchange(candidates=[
         {"id": "e1", "_relay": PIN, **SIGNED,
-         "_plaintext": _delimited(dpop_token=dpop_token, cache_duration="1 day")},
+         "_plaintext": _delimited(nonce=nonce, cache_duration="1 day")},
     ])
     rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
     # The patron's stated consent window is the grant's lifetime.
     import json
     import time as _t
-    tags = {t[0]: t[1] for t in json.loads(r["grant"])["tags"]}
+    held = json.loads(await rt.wallet.envelope(HOLDER, patron))
+    tags = {t[0]: t[1] for t in held["grant"]["tags"]}
     assert r["expires_in_seconds"] == 86400
     assert abs(int(tags["expiration"]) - (_t.time() + 86400)) < 5
 
@@ -278,32 +294,33 @@ async def test_cache_duration_overrides_ttl(patron):
 async def test_reply_without_a_verified_signature_issues_no_grant(patron):
     # The grant attests the patron's verified signature; if the courier could
     # not surface one, there is nothing to attest and no grant is minted.
-    dpop_token = "bold-hawk-42"
+    nonce = "bold-hawk-42"
     ex = FakeExchange(candidates=[
         {"id": "e1", "_relay": PIN, "_sender_sig": "", "_sender_event_id": "",
-         "_plaintext": _delimited(dpop_token=dpop_token)},
+         "_plaintext": _delimited(nonce=nonce)},
     ])
     rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    r = await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
     assert r["success"] is False
     assert r["error_code"] == ErrorCode.PROOF_INVALID
-    assert "dpop_token" not in r and "grant" not in r
+    assert "grant" not in r
+    assert await rt.wallet.envelope(HOLDER, patron) is None
     assert "no verifiable patron signature" in r["error"]
 
 
 @pytest.mark.asyncio
 async def test_match_clears_channel_state(patron):
-    dpop_token = "bold-hawk-42"
-    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(dpop_token=dpop_token)}])
+    nonce = "bold-hawk-42"
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=nonce)}])
     rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    await tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token)
+    await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
     key = (patron, "npub_ownership")
-    # one-time-use cleanup removed the dpop_token/pin state
-    assert key not in ex._pending_dpop_tokens
+    # one-time-use cleanup removed the nonce/pin state
+    assert key not in ex._pending_nonces
     assert key not in ex._pinned_relays
 
 
@@ -316,7 +333,7 @@ async def test_request_sends_challenge_and_returns_token(patron):
     rt._courier = SimpleNamespace(
         _exchange=ex,
         open_channel=AsyncMock(return_value={
-            "success": True, "dpop_token": "bold-hawk-42", "rendezvous_relay": PIN,
+            "success": True, "nonce": "bold-hawk-42", "rendezvous_relay": PIN,
         }),
     )
     rt.store_patron_session = AsyncMock()
@@ -324,7 +341,7 @@ async def test_request_sends_challenge_and_returns_token(patron):
 
     r = await tools["request_npub_proof"](patron_npub=patron)
     assert r["success"] is True
-    assert r["dpop_token"] == "bold-hawk-42"
+    assert r["nonce"] == "bold-hawk-42"
     assert r["rendezvous_relay"] == PIN
     assert PIN in r["message"]
     # opened the channel on the proof service
@@ -341,7 +358,7 @@ async def test_request_greeting_includes_request_timestamp(patron):
     rt._courier = SimpleNamespace(
         _exchange=ex,
         open_channel=AsyncMock(return_value={
-            "success": True, "dpop_token": "bold-hawk-42", "rendezvous_relay": PIN,
+            "success": True, "nonce": "bold-hawk-42", "rendezvous_relay": PIN,
         }),
     )
     rt.store_patron_session = AsyncMock()
@@ -374,28 +391,54 @@ async def test_request_propagates_open_channel_failure(patron):
 # ── check_proof_status ────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_check_proof_status_phrase_needs_refresh(patron):
-    # #267: a bare phrase is never a credential — status is refresh_needed.
-    rt = OperatorRuntime(tool_registry={}, service_name="Test")
-    rt.proof_grant_revocations = AsyncMock(side_effect=AssertionError("no store for a phrase"))
+async def test_a_connection_that_is_no_holder_is_refused_before_draining(patron):
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce="n")}])
+    rt, _ = _runtime_with_exchange(ex)
     tools = _register(rt)
 
-    r = await tools["check_proof_status"](patron_npub=patron, dpop_token="bold-hawk-42")
-    assert r["success"] is True
-    assert r["status"] == "refresh_needed"
-    assert r["expires_in_seconds"] == 0
-    assert "nonce alone is not a credential" in r["message"]
+    with patch("tollbooth.holder_auth.current_holder", return_value=None):
+        r = await tools["receive_npub_proof"](patron_npub=patron, nonce="n")
+    assert r["success"] is False
+    assert r["error_code"] == ErrorCode.PROOF_REQUIRED
+    assert ex.popped == []  # the reply is still there for a holder to collect
+
+
+@pytest.mark.asyncio
+async def test_check_proof_status_signed_request_is_valid(patron):
+    rt = OperatorRuntime(tool_registry={}, service_name="Test")
+    tools = _register(rt)
+    with patch("tollbooth.holder_auth.signed_npub", return_value=patron):
+        r = await tools["check_proof_status"](patron_npub=patron)
+    assert r["success"] is True and r["status"] == "valid"
+
+
+@pytest.mark.asyncio
+async def test_check_proof_status_reads_the_holders_wallet(patron):
+    nonce = "bold-hawk-42"
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=nonce)}])
+    rt, revocations = _runtime_with_exchange(ex)
+    tools = _register(rt)
+
+    before = await tools["check_proof_status"](patron_npub=patron)
+    assert before["status"] == "not_held"
+
+    await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
+    held = await tools["check_proof_status"](patron_npub=patron)
+    assert held["status"] == "valid" and held["expires_in_seconds"] > 0
+
+    revocations.is_revoked = AsyncMock(return_value=True)
+    assert (await tools["check_proof_status"](patron_npub=patron))["status"] == "revoked"
 
 
 # ── event loop not blocked by the relay drain (to_thread follow-up) ────
 
 @pytest.mark.asyncio
 async def test_receive_drain_does_not_block_event_loop(patron):
-    dpop_token = "bold-hawk-42"
+    nonce = "bold-hawk-42"
     # Slow relay fetch: if it ran inline, a concurrent coroutine couldn't run
     # until it finished. With asyncio.to_thread the loop stays responsive.
     ex = FakeExchange(
-        candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(dpop_token=dpop_token)}],
+        candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=nonce)}],
         fetch_delay=0.25,
     )
     rt, _ = _runtime_with_exchange(ex)
@@ -409,7 +452,7 @@ async def test_receive_drain_does_not_block_event_loop(patron):
 
     start = time.monotonic()
     r, _ = await asyncio.gather(
-        tools["receive_npub_proof"](patron_npub=patron, dpop_token=dpop_token),
+        tools["receive_npub_proof"](patron_npub=patron, nonce=nonce),
         _ticker(),
     )
     assert r["success"] is True

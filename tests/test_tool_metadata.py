@@ -7,7 +7,7 @@ from fastmcp import Client, FastMCP
 
 from tollbooth.authority.tools import AUTHORITY_TOOL_REGISTRY, register_authority_tools
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
-from tollbooth.params import DpopToken, PatronNpub
+from tollbooth.params import PatronNpub
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
 from tollbooth.tool_identity import READS, READS_REMOTE, STANDARD_IDENTITIES, ToolIdentity
 
@@ -30,7 +30,7 @@ async def listed_tools(monkeypatch):
     register_standard_tools(mcp, "x", rt)
     register_authority_tools(mcp, rt, slug="x")
 
-    async def runner(params: dict, npub: str, dpop_token: str) -> dict:
+    async def runner(params: dict, npub: str) -> dict:
         return {}
 
     rt.register_dynamic_tool(
@@ -86,6 +86,5 @@ def test_identity_for_finds_paid_tools_by_uuid_and_others_by_capability():
 
 
 def test_shared_params_describe_themselves():
-    for annotated in (DpopToken, PatronNpub):
-        (field,) = annotated.__metadata__
-        assert field.description
+    (field,) = PatronNpub.__metadata__
+    assert field.description
