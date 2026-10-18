@@ -5660,7 +5660,7 @@ def register_standard_tools(
 
     @tool
     async def request_adoption(
-        authority_npub: str, service_url: str = "", note: str = "",
+        authority_npub: str, service_url: str = "", display_name: str = "", note: str = "",
     ) -> dict[str, Any]:
         """Ask a chosen Authority to adopt this operator (deferred courtship).
 
@@ -5675,6 +5675,7 @@ def register_standard_tools(
         Args:
             authority_npub: npub of the Authority to request adoption from.
             service_url: this operator's MCP endpoint (advertised to the Authority).
+            display_name: this operator's name for the community roster.
             note: optional message for the Authority owner.
         """
         # Only the operator's own key may ask. Never a grant: checking one
@@ -5692,7 +5693,10 @@ def register_standard_tools(
             result = await _remote_authority_call(
                 authority_npub,
                 "receive_adoption_request",
-                {"operator_npub": rt.operator_npub(), "service_url": service_url, "note": note},
+                {
+                    "operator_npub": rt.operator_npub(), "service_url": service_url,
+                    "display_name": display_name, "note": note,
+                },
             )
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not reach the Authority: {exc}"}

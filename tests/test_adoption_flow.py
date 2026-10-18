@@ -242,6 +242,41 @@ async def test_a_signed_request_never_touches_the_vault():
     assert r["success"] is False and "valid npub1" in r["error"]
 
 
+async def test_a_signed_request_carries_the_operators_details_to_the_authority():
+    sent = {}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def list_tools(self):
+            return [SimpleNamespace(name="authority_receive_adoption_request")]
+
+        async def call_tool(self, name, args):
+            sent.update(name=name, args=args)
+            return SimpleNamespace(structured_content={"success": True, "status": "pending"})
+
+    oracle = SimpleNamespace(resolve_service=AsyncMock(return_value={"url": "https://auth.example/mcp"}))
+    tools = _register_operator_tools(_operator_rt())
+    with (
+        patch("tollbooth.holder_auth.signed_npub", return_value="npub1op"),
+        patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle),
+        patch("tollbooth.mcp_client.service_client", return_value=FakeClient()),
+    ):
+        await tools["request_adoption"](
+            authority_npub="npub1" + "a" * 58, service_url="https://op.example/mcp",
+            display_name="Op", note="hello",
+        )
+    assert sent["name"] == "authority_receive_adoption_request"
+    assert sent["args"] == {
+        "operator_npub": "npub1op", "service_url": "https://op.example/mcp",
+        "display_name": "Op", "note": "hello",
+    }
+
+
 async def test_adoption_status_rejects_bad_authority_npub():
     tools = _register_operator_tools(_operator_rt())
     r = await tools["adoption_status"](authority_npub="not-an-npub")
