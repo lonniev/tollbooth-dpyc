@@ -441,7 +441,7 @@ async def receive_npub_proof_tool(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("on_npub_proven callback failed: %s", exc)
 
-        # Challenge hash — the nonce selects the grant; it never unlocks alone.
+        # The grant records which exchange the patron answered.
         import hashlib as _hashlib
         nonce_hash = _hashlib.sha256(expected_phrase.encode()).hexdigest()
 
@@ -466,8 +466,7 @@ async def receive_npub_proof_tool(
                 ),
             }
 
-        # Mint the Operator-signed kind-30080 proof grant. The holder's wallet
-        # keeps the envelope {grant, nonce}; the nonce only selects.
+        # Mint the Operator-signed kind-30080 proof grant for the holder's wallet.
         from tollbooth.identity_credential import sign_proof_grant
         try:
             grant_json = sign_proof_grant(
@@ -488,7 +487,7 @@ async def receive_npub_proof_tool(
 
         import json as _json
         envelope = _json.dumps(
-            {"grant": _json.loads(grant_json), "nonce": expected_phrase},
+            {"grant": _json.loads(grant_json)},
             separators=(",", ":"),
         )
 
@@ -584,9 +583,9 @@ async def check_proof_status_tool(rt: Any, patron_npub: str) -> dict[str, Any]:
             "error_code": _EC_MODULE.WARMING_UP,
             "error": "Could not read this connection's wallet right now. Retry shortly.",
         }
-    from tollbooth.identity_proof import _parse_grant_envelope
-    grant_parsed = _parse_grant_envelope(envelope) if envelope else None
-    if grant_parsed is None:
+    from tollbooth.identity_proof import _held_grant
+    grant_json = _held_grant(envelope) if envelope else None
+    if grant_json is None:
         return {
             "success": True,
             "status": "not_held",
@@ -597,10 +596,6 @@ async def check_proof_status_tool(rt: Any, patron_npub: str) -> dict[str, Any]:
                 "an OAuth connection."
             ),
         }
-    grant_json, nonce = grant_parsed
-
-    import hashlib as _hashlib
-
     from tollbooth.identity_credential import (
         IdentityCredentialError,
         verify_proof_grant,
@@ -609,7 +604,6 @@ async def check_proof_status_tool(rt: Any, patron_npub: str) -> dict[str, Any]:
         claims = verify_proof_grant(
             grant_json,
             expected_patron_npub=resolved,
-            challenge_hash=_hashlib.sha256(nonce.encode()).hexdigest() if nonce else None,
             expected_operator_hex=rt.operator_pubkey_hex(),
         )
     except IdentityCredentialError as exc:

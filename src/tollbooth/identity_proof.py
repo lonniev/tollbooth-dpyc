@@ -8,9 +8,10 @@ Two ways a request proves an npub:
    nsec needs no grant.
 2. **A held grant**: an OAuth (holder) connection's wallet keeps, per npub, the
    Operator-signed kind-30080 grant ``receive_npub_proof`` issued after the
-   patron's DM reply — the envelope ``{"grant": <event>, "nonce": "<phrase>"}``.
-   The grant is self-verifying (Operator sig, patron binding, expiry,
-   challenge = sha256(nonce)); ``require_held_grant`` checks it.
+   patron's DM reply, stored as ``{"grant": <event>}``. The grant is
+   self-verifying (Operator sig, patron binding, expiry); its ``challenge``
+   tag records sha256 of the nonce the patron answered. ``require_held_grant``
+   checks it.
 
 The checks are actor-agnostic — Operators, Authorities, and any future runtime
 use the same functions. A runtime passes its own ``operator_hex`` (only its
@@ -46,7 +47,6 @@ PROOF_REASON_GRANT_WRONG_KIND = "wrong_kind"
 PROOF_REASON_GRANT_NOT_GRANT = "not_proof_grant"
 PROOF_REASON_GRANT_OPERATOR = "operator_mismatch"
 PROOF_REASON_GRANT_MALFORMED = "malformed"
-PROOF_REASON_GRANT_MISSING_NONCE = "missing_nonce"
 PROOF_REASON_GRANT_OPERATOR_UNKNOWN = "operator_unknown"
 """This runtime could not establish its own identity, so it cannot tell its
 grants from a stranger's. A server-side fault — never authorize past it."""
@@ -551,17 +551,9 @@ def verify_request_signature(
     return _hex_to_npub(signer_hex), None
 
 
-def _parse_grant_envelope(envelope: str) -> tuple[str, str | None] | None:
-    """Parse a proof-grant envelope or bare kind-30080 grant from ``envelope``.
-
-    Returns ``(grant_json, nonce_or_none)`` when the payload is grant-shaped,
-    else ``None`` so the caller can try Tactic-2 (kind 27235).
-
-    Accepted shapes:
-      - envelope ``{"grant": <event dict|json str>, "nonce": "<phrase>"}``
-      - bare kind-30080 event JSON (nonce required separately — returns
-        ``nonce=None`` so the gate can demand it)
-    """
+def _held_grant(envelope: str) -> str | None:
+    """The kind-30080 grant JSON inside a held ``{"grant": ...}`` envelope,
+    or ``None`` when ``envelope`` is not one."""
     if not isinstance(envelope, str) or not envelope or envelope[0] not in "{[":
         return None
     if len(envelope) > MAX_PROOF_JSON_BYTES:
@@ -573,24 +565,11 @@ def _parse_grant_envelope(envelope: str) -> tuple[str, str | None] | None:
     if not isinstance(payload, dict):
         return None
 
-    # Envelope: grant + nonce (the receive_npub_proof return shape).
-    if "grant" in payload:
-        grant = payload["grant"]
-        if isinstance(grant, dict):
-            grant_json = json.dumps(grant, separators=(",", ":"))
-        elif isinstance(grant, str):
-            grant_json = grant
-        else:
-            return None
-        nonce = payload.get("nonce")
-        if nonce is not None and not isinstance(nonce, str):
-            nonce = str(nonce) if nonce else None
-        return grant_json, nonce
-
-    # Bare kind-30080 event.
-    kind = payload.get("kind")
-    if kind == 30080:
-        return envelope, None
+    grant = payload.get("grant")
+    if isinstance(grant, dict):
+        return json.dumps(grant, separators=(",", ":"))
+    if isinstance(grant, str):
+        return grant
     return None
 
 
@@ -624,10 +603,6 @@ _GRANT_REASON_MESSAGES = {
     ),
     PROOF_REASON_GRANT_MALFORMED: (
         "Invalid proof grant: the payload is malformed."
-    ),
-    PROOF_REASON_GRANT_MISSING_NONCE: (
-        "Invalid proof grant: a nonce is required to select the grant. "
-        "Prove the npub again with request_npub_proof / receive_npub_proof."
     ),
     PROOF_REASON_GRANT_OPERATOR_UNKNOWN: (
         "This service could not establish its own identity, so it cannot "
@@ -669,9 +644,8 @@ async def require_held_grant(
     ``None`` on success or a structured error dict to return verbatim.
 
     ``envelope`` is what ``receive_npub_proof`` put in the holder's wallet:
-    ``{"grant": <kind-30080 event>, "nonce": "<phrase>"}``. The grant is
-    signed by this runtime (``operator_hex``), names ``npub`` and commits to
-    ``sha256(nonce)``. A grant is accepted only when ``operator_hex`` is known
+    ``{"grant": <kind-30080 event>}``. The grant is signed by this runtime
+    (``operator_hex``) and names ``npub``. A grant is accepted only when ``operator_hex`` is known
     (a grant from a stranger, or from a runtime that cannot name itself,
     never authorizes) and, when ``revocations`` is supplied, only if it
     post-dates the patron's last ``forget_credentials``.
@@ -707,20 +681,14 @@ async def require_held_grant(
             ],
         }
 
-    grant_parsed = _parse_grant_envelope(envelope)
-    if grant_parsed is None:
+    grant_json = _held_grant(envelope)
+    if grant_json is None:
         return _grant_denial(PROOF_REASON_GRANT_MALFORMED)
-    grant_json, nonce = grant_parsed
-    if not nonce:
-        return _grant_denial(PROOF_REASON_GRANT_MISSING_NONCE)
     # Fail closed: a runtime that cannot name itself cannot tell its own
     # grants from a stranger's, and must not guess.
     if not operator_hex:
         return _grant_denial(PROOF_REASON_GRANT_OPERATOR_UNKNOWN)
 
-    import hashlib as _hashlib
-
-    challenge_hash = _hashlib.sha256(nonce.encode()).hexdigest()
     from tollbooth.identity_credential import (
         IdentityCredentialError,
         verify_proof_grant,
@@ -730,7 +698,6 @@ async def require_held_grant(
         claims = verify_proof_grant(
             grant_json,
             expected_patron_npub=npub,
-            challenge_hash=challenge_hash,
             expected_operator_hex=operator_hex,
         )
     except IdentityCredentialError as exc:

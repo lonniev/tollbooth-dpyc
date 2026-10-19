@@ -1,6 +1,6 @@
 """Secure Courier proof grant — kind-30080 Operator-signed bearer (#267).
 
-The challenge nonce selects a grant; it never unlocks one. These tests pin:
+These tests pin:
   - sign/verify round-trip and every rejection reason
   - require_held_grant accepts a held grant envelope and refuses an empty or
     malformed one
@@ -55,8 +55,8 @@ def _grant(op_nsec: str, patron_npub: str, *, ttl: int = 3600, challenge: str = 
     )
 
 
-def _envelope(grant_json: str, nonce: str = NONCE) -> str:
-    return json.dumps({"grant": json.loads(grant_json), "nonce": nonce}, separators=(",", ":"))
+def _envelope(grant_json: str) -> str:
+    return json.dumps({"grant": json.loads(grant_json)}, separators=(",", ":"))
 
 
 class _NoRevocations:
@@ -174,13 +174,6 @@ class TestRequireProofGrant:
         assert r["reason"] == "operator_mismatch"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("bad_nonce,expected", [("calm-reef-77", "challenge_mismatch")])
-    async def test_wrong_nonce_reason(self, operator, patron, bad_nonce, expected):
-        op_nsec, op_hex = operator
-        r = await require_held_grant(patron, _envelope(_grant(op_nsec, patron), bad_nonce), operator_hex=op_hex)
-        assert r["error_code"] == ErrorCode.PROOF_INVALID and r["reason"] == expected
-
-    @pytest.mark.asyncio
     async def test_wrong_npub_reason(self, operator, patron):
         op_nsec, op_hex = operator
         other = PrivateKey().public_key.bech32()
@@ -217,16 +210,23 @@ class TestRequireProofGrant:
         assert "Retry" in r["error"]
 
     @pytest.mark.asyncio
-    async def test_bare_grant_without_nonce_refused(self, operator, patron):
+    async def test_a_bare_grant_is_not_an_envelope(self, operator, patron):
         op_nsec, op_hex = operator
         r = await require_held_grant(patron, _grant(op_nsec, patron), operator_hex=op_hex)
-        assert r["reason"] == "missing_nonce"
+        assert r["reason"] == "malformed"
+
+    @pytest.mark.asyncio
+    async def test_a_row_held_with_its_nonce_still_proves(self, operator, patron):
+        # Wallet rows written before the nonce was dropped stay valid until they expire.
+        op_nsec, op_hex = operator
+        row = json.dumps({"grant": json.loads(_grant(op_nsec, patron)), "nonce": NONCE})
+        assert await require_held_grant(patron, row, operator_hex=op_hex) is None
 
     @pytest.mark.asyncio
     async def test_denials_never_carry_the_grant_or_key_material(self, operator, patron):
         op_nsec, op_hex = operator
         grant = _grant(op_nsec, patron)
-        r = await require_held_grant(patron, _envelope(grant, "calm-reef-77"), operator_hex=op_hex)
+        r = await require_held_grant(PrivateKey().public_key.bech32(), _envelope(grant), operator_hex=op_hex)
         blob = json.dumps(r)
         assert json.loads(grant)["sig"] not in blob
         assert op_nsec not in blob

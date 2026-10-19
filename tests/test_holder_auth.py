@@ -116,7 +116,7 @@ def _envelope(op_nsec: str, npub: str, ttl: int = 3600) -> str:
         patron_event_id="seal-1",
         ttl_seconds=ttl,
     )
-    return json.dumps({"grant": json.loads(grant), "nonce": NONCE}, separators=(",", ":"))
+    return json.dumps({"grant": json.loads(grant)}, separators=(",", ":"))
 
 
 def _pkce() -> tuple[str, str]:
@@ -332,7 +332,7 @@ async def test_a_holder_receives_its_proof_into_the_wallet_never_the_reply():
     assert reply["success"] is True and reply["held_by_connection"] is True
     assert not {"grant", "nonce", "envelope"} & set(reply)
     held = await store.envelope("h1", patron)
-    assert held is not None and json.loads(held)["nonce"] == NONCE
+    assert held is not None and set(json.loads(held)) == {"grant"}
 
 
 @pytest.mark.asyncio
