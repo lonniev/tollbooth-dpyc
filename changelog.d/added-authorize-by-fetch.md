@@ -1,1 +1,0 @@
-- `/authorize` answers a fetch that asks for JSON (`Accept: application/json`) with `{"redirect_uri": …}` and CORS, so a web page connects as a holder without leaving itself. Programs still read the redirect.

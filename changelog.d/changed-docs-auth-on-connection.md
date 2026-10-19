@@ -1,1 +1,0 @@
-- The README and the operator-requests design doc describe 0.103 as built: identity on the connection (signed requests, holder connections and their wallets, `SignedRequestProvider`), tools that take only `npub`, the Courier `nonce`, and the operator request queue in place of `register_operator`.

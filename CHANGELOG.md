@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.104.0] — 2026-10-18
+
+### Added
+
+- `/authorize` answers a fetch that asks for JSON (`Accept: application/json`) with `{"redirect_uri": …}` and CORS, so a web page connects as a holder without leaving itself. Programs still read the redirect.
+
+### Changed
+
+- The README and the operator-requests design doc describe 0.103 as built: identity on the connection (signed requests, holder connections and their wallets, `SignedRequestProvider`), tools that take only `npub`, the Courier `nonce`, and the operator request queue in place of `register_operator`.
+
+### Removed
+
+- Removed the unused error codes `proof_missing` and `proof_refresh_needed`; no 0.103 path returns them.
+
 ## [0.103.0] — 2026-10-17
 
 ### Added
