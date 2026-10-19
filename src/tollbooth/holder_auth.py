@@ -16,7 +16,10 @@ whether the connection may:
   Authorization Code connect.
 
 Connecting asks nothing of the person: a holder holds no npub until one is
-proven into it, so ``authorize`` approves at once.
+proven into it, so ``authorize`` approves at once. Nothing there is for a
+person to see, so a web page asks for it by fetch (``Accept: application/json``)
+and reads the code from the reply, without leaving itself; a program reads the
+same code from the redirect.
 """
 
 from __future__ import annotations
@@ -48,7 +51,7 @@ from starlette.authentication import AuthCredentials, AuthenticationBackend
 from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.requests import HTTPConnection
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tollbooth.vaults.holder_store import (
@@ -122,6 +125,7 @@ class HolderAuthProvider(OAuthProvider):
         return [
             Middleware(_AnswerUnavailable),  # type: ignore[arg-type]
             Middleware(_LimitRegistration),  # type: ignore[arg-type]
+            Middleware(_AuthorizeByFetch),  # type: ignore[arg-type]
             Middleware(_HashSignedBody),  # type: ignore[arg-type]
             Middleware(AuthenticationMiddleware, backend=_ConnectionIdentity(self)),  # type: ignore[arg-type]
             Middleware(AuthContextMiddleware),  # type: ignore[arg-type]
@@ -343,6 +347,50 @@ class _LimitRegistration:
                 return
             self._seen[address] = [*recent, now]
         await self.app(scope, receive, send)
+
+
+class _AuthorizeByFetch:
+    """A page that asks ``/authorize`` for JSON gets its redirect as data.
+
+    A browser cannot read where a cross-origin redirect points, so a page that
+    must follow one leaves itself and comes back. Asked with
+    ``Accept: application/json``, the redirect is answered as
+    ``{"redirect_uri": …}`` instead, readable from any origin: the code in it
+    is good only with the PKCE verifier the asking page kept.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if not (scope["type"] == "http" and scope["path"] == "/authorize" and _wants_json(scope)):
+            await self.app(scope, receive, send)
+            return
+        start: dict[str, Any] = {}
+        body = bytearray()
+
+        async def keep(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                start.update(message)
+            elif message["type"] == "http.response.body":
+                body.extend(message.get("body", b""))
+
+        await self.app(scope, receive, keep)
+        status = int(start.get("status", 500))
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in start.get("headers", [])}
+        cors = {"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"}
+        if 300 <= status < 400 and "location" in headers:
+            answer: Response = JSONResponse({"redirect_uri": headers["location"]}, headers=cors)
+        else:
+            answer = Response(bytes(body), status_code=status, media_type=headers.get("content-type"), headers=cors)
+        await answer(scope, receive, send)
+
+
+def _wants_json(scope: Scope) -> bool:
+    for name, value in scope.get("headers", []):
+        if name == b"accept":
+            return b"application/json" in value
+    return False
 
 
 def _caller_address(scope: Scope) -> str:

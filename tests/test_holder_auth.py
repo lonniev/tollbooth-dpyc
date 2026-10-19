@@ -263,6 +263,19 @@ async def test_connect_then_act_as_held_npubs_over_http():
             "resource": f"{base}/mcp",
         })
         assert auth.status_code == 302
+
+        # A web page asks the same by fetch, and reads the code without leaving itself.
+        fetched = await http.get("/authorize", headers={"Accept": "application/json"}, params={
+            "response_type": "code", "client_id": reg["client_id"],
+            "redirect_uri": "http://localhost/cb", "state": "f",
+            "code_challenge": challenge, "code_challenge_method": "S256",
+            "resource": f"{base}/mcp",
+        })
+        assert fetched.status_code == 200
+        assert fetched.headers["access-control-allow-origin"] == "*"
+        answered = httpx.URL(fetched.json()["redirect_uri"])
+        assert answered.params["state"] == "f" and answered.params["code"].startswith("dpyc_hc_")
+
         tokens = (await http.post("/token", data={
             "grant_type": "authorization_code", "client_id": reg["client_id"],
             "code": httpx.URL(auth.headers["location"]).params["code"],
@@ -404,6 +417,21 @@ def test_client_registration_is_metered_per_caller():
     assert codes[:-1] == [200] * REGISTRATIONS_PER_HOUR and codes[-1] == 429
     assert client.post("/register", headers={"X-Forwarded-For": "198.51.100.7"}).status_code == 200
     assert client.get("/mcp", headers={"X-Forwarded-For": "203.0.113.9"}).status_code == 200
+
+
+def test_an_authorize_refusal_asked_by_fetch_is_readable_and_keeps_its_status():
+    from starlette.responses import JSONResponse
+    from starlette.testclient import TestClient
+
+    from tollbooth.holder_auth import _AuthorizeByFetch
+
+    client = TestClient(_AuthorizeByFetch(JSONResponse({"error": "invalid_request"}, status_code=400)))
+    refused = client.get("/authorize", headers={"Accept": "application/json"})
+    assert refused.status_code == 400 and refused.json() == {"error": "invalid_request"}
+    assert refused.headers["access-control-allow-origin"] == "*"
+    # Without the ask, and on any other path, nothing is changed.
+    assert "access-control-allow-origin" not in client.get("/authorize").headers
+    assert "access-control-allow-origin" not in client.get("/token", headers={"Accept": "application/json"}).headers
 
 
 @pytest.mark.asyncio
