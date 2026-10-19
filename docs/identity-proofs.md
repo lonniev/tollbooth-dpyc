@@ -57,8 +57,9 @@ proven into it, the grant that proves it.
 1. `POST /register` registers the client (dynamic client registration).
 2. `GET /authorize` is a conventional OAuth 2.1 authorization request (Authorization Code
    with PKCE). There is no consent screen: a new holder holds nothing, so the service
-   approves at once and responds with the conversation grant handle as the authorization
-   code, a parameter of the `redirect_uri`. The client's `Accept` header determines how the
+   approves at once and responds with a brief authorization code as a parameter of the
+   `redirect_uri`; the client exchanges it for the bearer token in the subsequent
+   `POST /token` request (step 3). The client's `Accept` header determines how the
    MCP authorization server returns the `redirect_uri`:
    - **Default:** a standard `302` redirect. A program reads the code from the `Location`
      header and does not follow it.
