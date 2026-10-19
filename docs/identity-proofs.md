@@ -55,10 +55,18 @@ proven into it, the grant that proves it.
 **Connecting.** The service is its own authorization server:
 
 1. `POST /register` registers the client (dynamic client registration).
-2. `GET /authorize` (Authorization Code with PKCE) approves at once, because a new holder
-   holds nothing. A program reads the code from the redirect. A web page sends
-   `Accept: application/json` and reads `{"redirect_uri": …}` from the reply, so it never
-   leaves the page.
+2. `GET /authorize` is a conventional OAuth 2.1 authorization request (Authorization Code
+   with PKCE). There is no consent screen: a new holder holds nothing, so the service
+   approves at once and answers with the authorization code, carried in the client's
+   `redirect_uri`. The `Accept` header chooses how that answer arrives:
+   - **Default:** a standard `302` redirect. A program reads the code from the `Location`
+     header and does not follow it.
+   - **`Accept: application/json`:** the same redirect, delivered as a `200` whose body is
+     `{"redirect_uri": "<that URL>"}`. A browser's `fetch` follows a `302` on its own and
+     cannot read where a cross-origin one points, so the JSON form lets a web page take the
+     code without navigating away: no page flash, and no browser needed at all.
+
+   The code is good only with the PKCE verifier the client kept.
 3. `POST /token` exchanges the code for an access token and a refresh token.
 
 The service mints a **holder id** at step 2: a random identifier kept only on the service,
