@@ -155,8 +155,9 @@ async def test_match_holds_the_grant_and_never_returns_it(patron):
     assert not {"grant", "nonce", "envelope"} & set(r)
     import hashlib
     import json
-    envelope = json.loads(await rt.wallet.envelope(HOLDER, patron))
-    assert envelope["nonce"] == nonce
+    held = await rt.wallet.envelope(HOLDER, patron)
+    assert nonce not in held  # the wallet keeps the grant alone
+    envelope = json.loads(held)
     grant = envelope["grant"]
     assert grant["kind"] == 30080
     tags = {t[0]: t[1] for t in grant["tags"]}
