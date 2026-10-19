@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.104.1] — 2026-10-19
+
+### Changed
+
+- A holder's wallet now keeps the proof grant alone, `{"grant": <event>}`. The nonce was stored beside it and re-hashed on every call, but both lived in one encrypted row, so the check could only ever confirm the row against itself. The gate still checks the Operator's signature, the npub, the expiry and revocation; the grant's `challenge` tag still records which DM exchange the patron answered. Rows held with a nonce keep proving until they expire.
+
 ## [0.104.0] — 2026-10-18
 
 ### Added
