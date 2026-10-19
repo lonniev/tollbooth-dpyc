@@ -143,18 +143,30 @@ new DM exchange on the same connection.
 
 ## 6. Actions with more than one party
 
-A request proves one npub. A two-party action is a workflow:
+A request proves exactly one npub, so no single tool call acts for two. A tool whose action
+needs the consent of two npubs is split into steps, each its own request:
 
-- **Adoption:** the operator calls `request_adoption` on its own runtime, signed with its
-  nsec; the Authority's owner sees it in `list_operator_requests` and calls
-  `approve_operator_request` or `reject_operator_request`.
-- **Registry changes:** `update_operator` records a request the Authority approves the same
-  way.
-- **Leaving:** `deregister_operator` is a single-party act by either side.
+1. The first npub makes a **request**. The service records it as pending, and records who
+   asked.
+2. The second npub makes a separate call that **approves** or **rejects** that record. The
+   action takes effect only on approval.
 
-Each approval is one npub's own request. A tool needing three npubs takes three approvals,
-each proven by that npub. One connection holding all three grants may make all three
-requests.
+Each step is proven like any other call, by a signed request or a held grant. A tool needing
+three npubs takes a request and two approvals. One connection holding grants for all of
+them may make every step itself. The second party may also approve by replying to a Secure
+Courier DM instead of calling a tool.
+
+The SDK has no generic approval queue: a service that needs one records its own pending
+requests. Implemented examples:
+
+- **Adoption of an Operator by an Authority:** the operator calls `request_adoption` on
+  its own runtime, signed with its nsec. The Authority's owner sees it in
+  `list_operator_requests` and calls `approve_operator_request` or
+  `reject_operator_request`. `update_operator` records a registry change that is approved
+  the same way. `deregister_operator` needs only one party: either side may act alone.
+- **Onboarding a new Authority:** the candidate claims its npub
+  (`register_authority_npub`, `confirm_authority_claim`). The parent Authority then
+  approves by replying to a Courier DM, and `check_authority_approval` reads that reply.
 
 ## 7. Usage
 
