@@ -537,6 +537,8 @@ Per-tool opt-in: only tool handlers that hit x402 upstreams use the client. Requ
 
 ## Identity & Proofs
 
+The full description — intention, protocol, lifetimes and usage for agents, web pages, keyed programs and operators — is [docs/identity-proofs.md](docs/identity-proofs.md).
+
 Every participant is identified by a [Nostr](https://nostr.com/) keypair. The `npub` is your identity in the DPYC Social Contract. The `nsec` stays with you — never shared, never sent to a service.
 
 Every tool takes the `npub` it acts as, and only that: the connection proves it. Each request acts as exactly one npub. An action that needs two parties (an operator and its Authority) is a request by one and an approval by the other, never one request carrying both.

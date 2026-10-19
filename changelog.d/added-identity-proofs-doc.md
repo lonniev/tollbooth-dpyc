@@ -1,0 +1,1 @@
+- `docs/identity-proofs.md`: one document on identity proofs — why the design is what it is, signed requests and holder connections, the Courier nonce, the grant and what each call checks, the two lifetimes, multi-party approvals, and usage for agents, web pages, keyed programs and operators.
