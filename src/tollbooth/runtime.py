@@ -4181,6 +4181,42 @@ def _holder_store_unavailable() -> dict[str, Any]:
     }
 
 
+def _connecting_guidance(slug: str) -> str:
+    """The instructions' "Connecting" section for a holder-auth service.
+
+    Each line states what ``holder_auth`` and the proof tools actually do, so
+    an agent learns the working path in one read: free tools need only a
+    placeholder bearer, paid tools need a signed request or a holder
+    connection with the npub proven into it.
+    """
+    return (
+        "\n\n## Connecting\n\n"
+        "- **Free tools and `tools/list`** need no sign-in: send any bearer "
+        "this server did not issue, e.g. `Authorization: Bearer anonymous`. "
+        "A request with no `Authorization` header gets 401, whose "
+        "`WWW-Authenticate` names the OAuth metadata.\n"
+        "- **Paid tools act as an npub**, and the connection must prove it, "
+        "one of two ways:\n"
+        "  - **Sign each request** with the npub's key (NIP-98): "
+        "`Authorization: Nostr <base64 kind-27235 event>` with `u`, `method` "
+        "and `payload` (body sha256) tags, or `Bearer nostr.<same>` for a "
+        "client that sends only Bearer. No proof step.\n"
+        "  - **Connect with OAuth** (a *holder* connection): register at "
+        "`/register`, then `/authorize` with PKCE S256. It approves at once; "
+        "there is no login page. With `Accept: application/json`, "
+        "`/authorize` answers `{\"redirect_uri\": …}` carrying the code "
+        "instead of redirecting. Exchange the code at `/token`; that access "
+        "token is the holder. Then call "
+        f"`{slug}_request_npub_proof(patron_npub)`, wait for the human to "
+        "reply to the DM, and call "
+        f"`{slug}_receive_npub_proof(patron_npub, nonce)` once. Both refuse "
+        "a connection that is not a holder.\n"
+        "- After either, paid calls pass only `npub`. "
+        f"`{slug}_check_proof_status(patron_npub)` and "
+        f"`{slug}_held_identities` say what this connection proves."
+    )
+
+
 def register_standard_tools(
     mcp: Any,
     slug: str,
@@ -6297,8 +6333,10 @@ def register_standard_tools(
         "When a tool call fails, **read the error message** — it tells you "
         "what went wrong and what to do next. Common causes:\n\n"
         "- **proof is required** → Call `request_npub_proof` then "
-        "`receive_npub_proof` to prove npub ownership. The cache expires "
-        "after ~1 hour; renew with a fresh request/receive cycle.\n"
+        "`receive_npub_proof` to prove npub ownership. The proof lasts as "
+        "long as the patron chose in their reply (2 hours by default, at most "
+        "30 days); `check_proof_status` says until when. Renew with a fresh "
+        "request/receive cycle.\n"
         "- **Insufficient credit balance** → Call `purchase_credits` to top up.\n"
         "- **Operator credentials not delivered yet** → This is a lifecycle state, "
         "not an error. The operator needs to deliver API credentials via Secure Courier. "
@@ -6327,11 +6365,17 @@ def register_standard_tools(
         "message will be lost. One request, one wait, one receive."
     )
 
+    # How to connect, for a client that speaks raw HTTP rather than an MCP
+    # client with OAuth built in: every step is in the standard metadata, but
+    # an agent reading only the instructions should not have to find each by
+    # trial. Only a holder-auth service has these paths.
+    connecting = _connecting_guidance(slug) if rt.holder_auth_enabled else ""
+
     # FastMCP exposes instructions as a read-only property backed by
     # _mcp_server.instructions. Write through the internal server object.
     try:
         current = mcp.instructions or ""
-        mcp._mcp_server.instructions = current + _DPYC_AGENT_GUIDANCE
+        mcp._mcp_server.instructions = current + connecting + _DPYC_AGENT_GUIDANCE
     except AttributeError:
         logger.debug("Could not append DPYC agent guidance to MCP instructions")
 
