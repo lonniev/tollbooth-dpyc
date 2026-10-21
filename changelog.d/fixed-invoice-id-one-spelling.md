@@ -1,1 +1,2 @@
 - `check_payment`, `restore_credits` and invoice reconciliation could credit one settled invoice once per spelling of its id (`ID#1`, `ID?x`, `x/../ID`). The BTCPay client now refuses a malformed `invoice_id` before any request and refuses an answer about a different invoice, so each paid invoice credits once.
+- A settled invoice without `metadata.user_id` no longer credits whichever caller names it first; it credits no one (`invoice_owner_mismatch`).

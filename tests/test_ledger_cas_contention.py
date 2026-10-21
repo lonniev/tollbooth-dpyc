@@ -120,7 +120,7 @@ class TestRestoreIsRetrySafe:
         cache = _cache(vault)
 
         btcpay = AsyncMock()
-        btcpay.get_invoice = AsyncMock(return_value={"id": "inv-1", "status": "Settled", "amount": "1000"})
+        btcpay.get_invoice = AsyncMock(return_value={"id": "inv-1", "status": "Settled", "amount": "1000", "metadata": {"user_id": "user-1"}})
 
         result = await restore_credits_tool(btcpay, cache, "user-1", "inv-1")
 

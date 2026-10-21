@@ -353,7 +353,7 @@ class TestCheckPayment:
     @pytest.mark.asyncio
     async def test_settled_credits_granted(self) -> None:
         btcpay = _mock_btcpay({
-            "id": "inv-1", "status": "Settled", "amount": "1000",
+            "id": "inv-1", "status": "Settled", "amount": "1000", "metadata": {"user_id": "user1"},
         })
         ledger = UserLedger(pending_invoices=["inv-1"])
         cache = _mock_cache(ledger)
@@ -368,7 +368,7 @@ class TestCheckPayment:
     async def test_settled_creates_tranche(self) -> None:
         """Settlement creates a new tranche in the ledger."""
         btcpay = _mock_btcpay({
-            "id": "inv-1", "status": "Settled", "amount": "500",
+            "id": "inv-1", "status": "Settled", "amount": "500", "metadata": {"user_id": "user1"},
         })
         ledger = UserLedger()
         cache = _mock_cache(ledger)
@@ -380,7 +380,7 @@ class TestCheckPayment:
     async def test_settled_with_ttl(self) -> None:
         """Settlement with default TTL creates expiring tranche."""
         btcpay = _mock_btcpay({
-            "id": "inv-1", "status": "Settled", "amount": "500",
+            "id": "inv-1", "status": "Settled", "amount": "500", "metadata": {"user_id": "user1"},
         })
         ledger = UserLedger()
         cache = _mock_cache(ledger)
@@ -394,7 +394,7 @@ class TestCheckPayment:
     async def test_settled_without_ttl(self) -> None:
         """Settlement without explicit TTL creates perpetual tranche."""
         btcpay = _mock_btcpay({
-            "id": "inv-1", "status": "Settled", "amount": "500",
+            "id": "inv-1", "status": "Settled", "amount": "500", "metadata": {"user_id": "user1"},
         })
         ledger = UserLedger()
         cache = _mock_cache(ledger)
@@ -404,7 +404,7 @@ class TestCheckPayment:
     @pytest.mark.asyncio
     async def test_settled_idempotent(self) -> None:
         btcpay = _mock_btcpay({
-            "id": "inv-1", "status": "Settled", "amount": "1000",
+            "id": "inv-1", "status": "Settled", "amount": "1000", "metadata": {"user_id": "user1"},
         })
         ledger = _ledger_with_balance(1000, credited_invoices=["inv-1"])
         cache = _mock_cache(ledger)
@@ -432,6 +432,19 @@ class TestCheckPayment:
         assert result["error_code"] == "invoice_owner_mismatch"
         assert result["credits_granted"] == 0
         # No tranche minted, mutate never invoked.
+        assert len(ledger.tranches) == 0
+        cache.mutate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_settled_refuses_ownerless_invoice(self) -> None:
+        """A settled invoice with no metadata.user_id credits no one — else the
+        first proven caller to name it would claim it."""
+        btcpay = _mock_btcpay({"id": "inv-orphan", "status": "Settled", "amount": "1000"})
+        ledger = UserLedger()
+        cache = _mock_cache(ledger)
+        result = await check_payment_tool(btcpay, cache, "anyone_npub", "inv-orphan")
+        assert result["success"] is False
+        assert result["error_code"] == "invoice_owner_mismatch"
         assert len(ledger.tranches) == 0
         cache.mutate.assert_not_called()
 
