@@ -128,7 +128,7 @@ issue's author of record is the caller's npub, stamped into the body.
 ### 4. Register Standard Tools + Domain Tools
 
 ```python
-# This single call registers all 40+ standard DPYC tools and returns
+# This single call registers every standard DPYC tool and returns
 # the slug-prefixed @tool decorator for the operator's own paid tools.
 tool = register_standard_tools(mcp, "weather", runtime,
     service_name="my-weather-service",
@@ -203,9 +203,9 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 
 ## Standard Tools
 
-`register_standard_tools(mcp, slug, runtime)` registers these tools, prefixed with the operator's slug (e.g., `weather_check_balance`), and returns the slug-prefixed `@tool` decorator for the operator's own paid tools:
+`register_standard_tools(mcp, slug, runtime)` registers these tools, prefixed with the operator's slug (e.g., `weather_check_balance`), and returns the slug-prefixed `@tool` decorator for the operator's own paid tools. "Operator-only" tools need a connection that proves the operator's npub.
 
-### Credit & Billing (always registered)
+### Credit & Billing
 
 | Tool | Cost | Purpose |
 |------|------|---------|
@@ -213,7 +213,7 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 | `purchase_credits` | Free | Create a Lightning invoice for credit purchase |
 | `check_payment` | Free | Poll invoice status; credit balance on settlement |
 | `check_price` | Free | Preview the effective cost of a tool call (after constraints) |
-| `restore_credits` | Free | Recover credits from a paid invoice lost to cache issues |
+| `restore_credits` | Free (operator-only) | Credit a patron from a BTCPay-settled invoice that never reached the ledger |
 | `account_statement` | Free | 30-day purchase and usage history |
 | `account_statement_infographic` | 1 sat | SVG visual of account statement |
 
@@ -225,6 +225,16 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 | `session_status` | Free | Operator readiness: ready / warming_up / not_registered / no_identity |
 | `get_operator_onboarding_status` | Free | Which operator credentials are configured vs missing |
 | `get_patron_onboarding_status` | Free | Which patron credentials are configured vs missing |
+| `request_echo` | Free | Echo what the client sent (path, headers, cookies, `_meta`) as SHA-256 fingerprints — nothing sent is repeated back |
+| `report_issue` | Priced (seeds at 1 sat) | File a field report as a GitHub issue on the operator's repo (see Quick Start) |
+
+### Adoption & Recovery
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `request_adoption` | Free (operator-signed) | Ask a chosen Authority to adopt this operator; the Authority's owner approves it |
+| `adoption_status` | Free | Status of this operator's adoption request at an Authority |
+| `restore_neon_schema` | Free (operator-only) | Re-run this operator's idempotent schema setup when Neon keeps answering 4xx |
 
 ### Secure Courier (credential exchange)
 
@@ -233,6 +243,17 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 | `request_credential_channel` | Free | Send a credential template DM to a patron or operator |
 | `receive_credentials` | Free | Pick up credentials from vault (instant) or relay (DM) |
 | `forget_credentials` | Free | Delete vaulted credentials for a service |
+| `update_patron_credential` | Free | Add or update a single patron credential field |
+| `delete_patron_credential` | Free | Remove a single patron credential field |
+| `get_patron_credential_fields` | Free | List stored patron credential field names and delivery timestamps |
+| `update_operator_credential` | Free (operator-only) | Add or update one operator secret, preserving the rest of the bundle |
+| `delete_operator_credential` | Free (operator-only) | Remove one operator secret (including stored-but-untemplated leftovers), preserving the rest of the bundle |
+
+Operator fields are `set_once`, so before `update_operator_credential` the only way to
+apply a reissued secret was to re-deliver the entire bundle over Secure Courier — where
+any field left out of the reply is a field destroyed. Prefer the field-level tools when
+rotating or retiring one credential; reserve the full courier flow for first delivery,
+and `forget_credentials` only when the whole row should go.
 
 ### Npub Proof
 
@@ -242,6 +263,13 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 | `receive_npub_proof` | Free | Verify the patron's signed reply and put the npub in this holder's wallet (holder connections only) |
 | `check_proof_status` | Free | `check_proof_status(patron_npub)` — whether this connection proves the npub, and for how long |
 | `held_identities` | Free | The npubs this connection holds, with when each grant expires |
+
+### Nostr Profile
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `get_nostr_profile` | Free | Read an npub's public kind-0 profile |
+| `publish_nostr_profile` | Free | Relay a client-signed kind-0 profile after verifying its signature matches the npub — the wheel never holds a patron nsec |
 
 ### Authority Balance
 
@@ -253,17 +281,29 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 
 | Tool | Cost | Purpose |
 |------|------|---------|
-| `<slug>_oracle_*` | Free | Delegated calls to the DPYC Oracle (community info, tax rates, membership). Mounted under the operator's slug since v0.24.1 — e.g. `schwab_oracle_about`, `brain_oracle_how_to_join`. Keeps every wire-exposed tool on a given operator under a single slug prefix. |
+| `<slug>_oracle_*` | Free | Delegated calls to the DPYC Oracle: `about`, `how_to_join`, `get_tax_rate`, `lookup_member`, `network_advisory`. Mounted under the operator's slug — e.g. `schwab_oracle_about`, `brain_oracle_how_to_join` — so every wire-exposed tool on a given operator shares one slug prefix. |
 
 ### Pricing Model
 
 | Tool | Cost | Purpose |
 |------|------|---------|
 | `get_pricing_model` | Free | Current pricing model with tool registry and constraints |
-| `set_pricing_model` | Free | Update the pricing model (operator-restricted, requires proof) |
-| `reset_pricing_model` | Free | Delete all pricing models and re-initialize (operator-restricted) |
+| `set_pricing_model` | Free (operator-only) | Update the pricing model |
+| `reset_pricing_model` | Free (operator-only) | Delete all pricing models and re-initialize |
 | `list_constraint_types` | Free | Available constraint types and their parameters |
 | `list_canonical_identities` | Free | Canonical `(tool_id, mcp_name, category, intent, registered)` inventory — source of truth for Reconcile; `@paid_tool` UUIDs missing from the ToolIdentity table appear with `registered: false` / in `unregistered[]` |
+
+### Coupons
+
+| Tool | Cost | Purpose |
+|------|------|---------|
+| `mint_coupon` | Free (operator-only) | Create a discount coupon bound to the tools it discounts (`tool_ids`) |
+| `list_coupons` | Free (operator-only) | Every coupon this operator has minted, with redemption counts |
+| `update_coupon` | Free (operator-only) | Change a coupon's name, discount, window, caps or bound tools |
+| `delete_coupon` | Free (operator-only) | Delete a coupon and its redemptions |
+| `redeem_coupon` | Free | Patron claims a coupon by its code; later paid calls apply the discount |
+| `list_my_coupons` | Free | The coupons a patron has redeemed, with each one's status |
+| `forget_coupon` | Free | Remove a coupon from the patron's redemption list (the coupon itself remains) |
 
 ### OpenTimestamps (when `ots_enabled=True`)
 
@@ -281,17 +321,6 @@ Use `rt.runtime_name("check_balance")` whenever you need to refer to a standard 
 | `receive_patron_credentials` | `patron_credential_template` set | Pick up patron credentials |
 | `begin_oauth` | `oauth_provider` set | Start OAuth2 authorization flow |
 | `check_oauth_status` | `oauth_provider` set | Complete OAuth2 flow after browser authorization |
-| `update_patron_credential` | `patron_credential_template` set | Add or update a single patron credential field |
-| `delete_patron_credential` | `patron_credential_template` set | Remove a single patron credential field |
-| `get_patron_credential_fields` | `patron_credential_template` set | List stored patron credential field names and delivery timestamps |
-| `update_operator_credential` | `operator_credential_template` set | Operator-only: add or update one operator secret, preserving the rest of the bundle |
-| `delete_operator_credential` | `operator_credential_template` set | Operator-only: remove one operator secret (including stored-but-untemplated leftovers), preserving the rest of the bundle |
-
-Operator fields are `set_once`, so before `update_operator_credential` the only way to
-apply a reissued secret was to re-deliver the entire bundle over Secure Courier — where
-any field left out of the reply is a field destroyed. Prefer the field-level tools when
-rotating or retiring one credential; reserve the full courier flow for first delivery,
-and `forget_credentials` only when the whole row should go.
 
 ---
 
@@ -397,12 +426,12 @@ OperatorRuntime(
     # Identity & network
     nsec_env_var="TOLLBOOTH_NOSTR_OPERATOR_NSEC",          # Env var name (default)
     service_name="My Service",
-    # Relays are drawn from the shared dpyc-community relays.json registry —
-    # not a constructor argument.
+    holder_auth_url="https://my-service.example.com",      # Enables signed requests + holder connections
+    # Relays come from the DPYC Oracle — not a constructor argument.
 
     # Billing
     vault_source="authority",     # "authority" (default) or "env" (self-provisioned)
-    purchase_mode="auto",         # "certified", "direct", or "auto" (registry-derived)
+    purchase_mode="certified",    # "certified" (default), "direct", or "auto" (registry-derived)
     operator_settings={},         # Arbitrary operator config dict
 
     # Constraints
@@ -440,7 +469,7 @@ OperatorRuntime(
 | `courier()` | `SecureCourierService` | Returns the Secure Courier (lazy) |
 | `operator_npub()` | `str` | Derives the operator's npub from nsec |
 | `resolve_npub(npub)` | `str` | Validates an npub (bech32 decode) |
-| `resolve_tranche_lifetime()` | `int \| None` | Reads tranche lifetime from the pricing model |
+| `resolve_expiry()` | `Expiry` | The operator's credit-expiry decision from the pricing model: `unchosen`, `never`, or `days` |
 | `load_credentials(fields)` | `dict` | Loads operator credentials from the vault |
 | `graceful_shutdown()` | — | Flushes caches and closes connections |
 
@@ -499,10 +528,10 @@ Credit expiry is a property of money, not a per-tool constraint. `TrancheLifetim
 
 All secrets — BTCPay keys, API tokens, OAuth credentials — are delivered via **Secure Courier**, not environment variables. This is a human-in-the-loop flow using NIP-44 encrypted Nostr DMs:
 
-1. AI agent calls `request_credential_channel(sender_npub=..., service=...)`
+1. AI agent calls `request_credential_channel(sender_npub=..., service=...)`, which returns the channel's `nonce`
 2. Operator/patron receives a DM in their Nostr client with a credential template
 3. They fill in the fields and reply manually
-4. AI agent calls `receive_credentials(sender_npub=..., service=...)`
+4. AI agent calls `receive_credentials(sender_npub=..., service=..., nonce=...)`
 5. Credentials are validated, encrypted (AES-256-GCM with AAD), and stored in the Neon vault
 
 Vault-first lookup means returning patrons activate instantly — no relay I/O needed.
@@ -598,8 +627,13 @@ Dependency flows one way: `your-mcp-server --> tollbooth-dpyc`. Authority is a n
 | [cypher-mcp](https://github.com/lonniev/cypher-mcp) | Production operator — monetized graph answers via named Cypher templates over Neo4j/AuraDB |
 | [taxsort-mcp](https://github.com/lonniev/taxsort-mcp) | Production operator — tax sorting + classification with Cloudflare Pages UI |
 | [optionality-mcp](https://github.com/lonniev/optionality-mcp) | Production operator — options analytics |
+| [goodearth-mcp](https://github.com/lonniev/goodearth-mcp) | Production operator — region-scoped farm climate analytics |
+| [beesknees-mcp](https://github.com/lonniev/beesknees-mcp) | Production operator — a multiplayer race to the queen |
+| [roastify-mcp](https://github.com/lonniev/roastify-mcp) | Production operator — Roastify coffee catalog and packaging artwork |
+| [ChartRemotely-mcp](https://github.com/lonniev/ChartRemotely-mcp) | Production operator — relays chart commands to a patron's desktop agent |
 | [tollbooth-shortlinks](https://github.com/lonniev/tollbooth-shortlinks) | Community utility — URL shortener |
 | [tollbooth-oauth2-collector](https://github.com/lonniev/tollbooth-oauth2-collector) | Community utility — OAuth2 callback mailbox |
+| [tollbooth-web](https://github.com/lonniev/tollbooth-web) | Shared browser SDK for operator front ends |
 | [tollbooth-pricing-studio](https://github.com/lonniev/tollbooth-pricing-studio) | iOS pricing editor — Nostr DMs, native crypto |
 
 ---
@@ -632,7 +666,7 @@ pip install tollbooth-dpyc[nostr,x402]
 
 Certified operators (the default) do **not** set `NEON_DATABASE_URL`. They discover it from the Authority via encrypted Nostr DM during bootstrap.
 
-The Nostr relay set is not an env var — it is drawn from the shared `relays.json` registry in the dpyc-community repo (single source of truth, cached with a 3-day TTL).
+The Nostr relay set is not an env var — every server fetches it from the DPYC Oracle (`get_relays`), which serves `relays.json` from the dpyc-community repo. It is cached in process for an hour.
 
 All other secrets (BTCPay, API keys, OAuth tokens) flow through Secure Courier — never env vars.
 
