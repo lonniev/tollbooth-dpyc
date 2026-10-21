@@ -4825,7 +4825,7 @@ def register_standard_tools(
           the books are locked for billing. Paid tools fail; retrying does NOT
           help. The operator's Authority must restore capacity (upgrade the
           plan or wait for the quota reset). Free tools remain available.
-        - not_registered: Operator has no Authority relationship yet. Call register_operator first.
+        - not_registered: Operator has no Authority relationship yet. Call request_adoption first.
         - no_identity: Operator nsec is not configured. Deployment issue.
 
         Args:
