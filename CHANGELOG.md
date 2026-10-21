@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.105.0] — 2026-10-21
+
+### Added
+
+- A "Connecting" section in the server instructions of every operator that
+  runs holder auth. In one read it tells an agent that speaks raw HTTP how to
+  connect:
+  - Free tools and `tools/list` need only `Authorization: Bearer anonymous`.
+  - Paid tools take either a NIP-98 signed request (`Authorization: Nostr …`
+    or `Bearer nostr.…`) or an OAuth holder connection. That connection is
+    made through `/register`, then `/authorize` with PKCE S256 (approved at
+    once, and answered as JSON with `Accept: application/json`), then
+    `/token`. The npub is then proven into it with `<slug>_request_npub_proof`
+    and `<slug>_receive_npub_proof`, both of which refuse a connection that
+    is not a holder.
+
+- `docs/identity-proofs.md`: one document on identity proofs — why the design is what it is, signed requests and holder connections, the Courier nonce, the grant and what each call checks, the two lifetimes, multi-party approvals, and usage for agents, web pages, keyed programs and operators.
+
+### Fixed
+
+- The troubleshooting instructions said a proof lasts about an hour. It lasts
+  as long as the patron chose in their reply: 2 hours by default, at most
+  30 days.
+
 ## [0.104.1] — 2026-10-19
 
 ### Changed
