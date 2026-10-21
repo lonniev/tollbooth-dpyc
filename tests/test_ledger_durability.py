@@ -59,7 +59,7 @@ class TestCreditPathWritesThrough:
         await cache.mutate("user-1", lambda led: led.pending_invoices.append("inv-1") or True)
         cache._vault.store_ledger.reset_mock()
 
-        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "1000"})
+        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "1000", "metadata": {"user_id": "user-1"}})
 
         result = await check_payment_tool(btcpay, cache, "user-1", "inv-1")
 
@@ -105,7 +105,7 @@ class TestCreditPathWritesThrough:
         await cache.mutate("user-1", lambda led: led.pending_invoices.append("inv-1") or True)
 
         # Step 2: check_payment credits and flushes
-        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "500"})
+        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "500", "metadata": {"user_id": "user-1"}})
         await check_payment_tool(btcpay, cache, "user-1", "inv-1")
 
         # Capture what was written to vault
@@ -142,7 +142,7 @@ class TestCreditPathWritesThrough:
         vault.store_ledger = AsyncMock(return_value=2)
         cache = LedgerCache(vault)
 
-        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "500"})
+        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "500", "metadata": {"user_id": "user-1"}})
         result = await check_payment_tool(btcpay, cache, "user-1", "inv-1")
 
         assert result["credits_granted"] == 0
@@ -204,7 +204,7 @@ class TestRestoreCredits:
         from tollbooth.tools.credits import restore_credits_tool
 
         cache = _make_cache()
-        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "1000"})
+        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "1000", "metadata": {"user_id": "user-1"}})
 
         result = await restore_credits_tool(btcpay, cache, "user-1", "inv-1")
 
@@ -228,7 +228,7 @@ class TestRestoreCredits:
         vault.store_ledger = AsyncMock(return_value=2)
         cache = LedgerCache(vault)
 
-        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "1000"})
+        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "1000", "metadata": {"user_id": "user-1"}})
         result = await restore_credits_tool(btcpay, cache, "user-1", "inv-1")
 
         assert result["success"] is True
@@ -259,7 +259,7 @@ class TestRestoreCredits:
         vault.store_ledger = AsyncMock(return_value=1)
         cache = LedgerCache(vault)
 
-        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "750"})
+        btcpay = _mock_btcpay({"id": "inv-1", "status": "Settled", "amount": "750", "metadata": {"user_id": "user-1"}})
         await restore_credits_tool(btcpay, cache, "user-1", "inv-1")
 
         # Capture flushed data

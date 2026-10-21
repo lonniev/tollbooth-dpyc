@@ -294,7 +294,7 @@ class TestCheckPaymentInvoiceRecord:
         ledger = UserLedger()
         ledger.record_invoice_created("inv-settle", 1000, 1, "2026-02-17T00:00:00")
         ledger.pending_invoices.append("inv-settle")
-        btcpay = _mock_btcpay({"id": "inv-settle", "status": "Settled", "amount": "1000"})
+        btcpay = _mock_btcpay({"id": "inv-settle", "status": "Settled", "amount": "1000", "metadata": {"user_id": "user-1"}})
         cache = _mock_cache(ledger)
 
         result = await check_payment_tool(btcpay, cache, "user-1", "inv-settle")
@@ -333,7 +333,7 @@ class TestCheckPaymentInvoiceRecord:
         ledger.record_invoice_created("inv-idem", 1000, 100, "2026-02-17T00:00:00")
         ledger.record_invoice_settled("inv-idem", 100000, "2026-02-17T01:00:00", "Settled")
         ledger.credited_invoices.append("inv-idem")
-        btcpay = _mock_btcpay({"id": "inv-idem", "status": "Settled", "amount": "1000"})
+        btcpay = _mock_btcpay({"id": "inv-idem", "status": "Settled", "amount": "1000", "metadata": {"user_id": "user-1"}})
         cache = _mock_cache(ledger)
 
         result = await check_payment_tool(btcpay, cache, "user-1", "inv-idem")
@@ -371,7 +371,7 @@ class TestRestoreCreditsVaultFirst:
     async def test_restore_falls_back_to_btcpay(self) -> None:
         """No vault record → falls back to BTCPay verification."""
         ledger = UserLedger()
-        btcpay = _mock_btcpay({"id": "inv-btc", "status": "Settled", "amount": "500"})
+        btcpay = _mock_btcpay({"id": "inv-btc", "status": "Settled", "amount": "500", "metadata": {"user_id": "user-1"}})
         cache = _mock_cache(ledger)
 
         result = await restore_credits_tool(btcpay, cache, "user-1", "inv-btc")
@@ -384,7 +384,7 @@ class TestRestoreCreditsVaultFirst:
     async def test_restore_btcpay_fallback_creates_record(self) -> None:
         """BTCPay fallback restoration creates an invoice record."""
         ledger = UserLedger()
-        btcpay = _mock_btcpay({"id": "inv-rec", "status": "Settled", "amount": "1000"})
+        btcpay = _mock_btcpay({"id": "inv-rec", "status": "Settled", "amount": "1000", "metadata": {"user_id": "user-1"}})
         cache = _mock_cache(ledger)
 
         await restore_credits_tool(btcpay, cache, "user-1", "inv-rec")

@@ -26,8 +26,7 @@ def _invoice_owner(invoice: dict[str, Any]) -> str | None:
     another patron's invoice_id (they surface in tool results, DMs, logs) could
     claim it. Every DPYC invoice is stamped with ``metadata.user_id`` at
     creation (see ``_create_purchase_invoice``); ``None`` means the field is
-    absent (anomalous — allowed through so a metadata-less legacy invoice isn't
-    bricked, but the mismatch case below is always refused).
+    absent, and such an invoice credits no one.
     """
     meta = invoice.get("metadata")
     if isinstance(meta, dict):
@@ -343,10 +342,10 @@ async def check_payment_tool(
         # only the victim's ledger, not the claimer's, so it would mint free
         # credits (cross-account double-issuance).
         owner = _invoice_owner(invoice)
-        if owner is not None and owner != user_id:
+        if owner != user_id:
             logger.warning(
                 "check_payment: invoice %s belongs to %s, not caller %s — refusing.",
-                invoice_id, owner[:20], user_id[:20],
+                invoice_id, (owner or "no one")[:20], user_id[:20],
             )
             result["success"] = False
             result["credits_granted"] = 0
@@ -627,10 +626,10 @@ async def restore_credits_tool(
     # settled invoice onto another account (defense-in-depth; restore is
     # operator-gated, so this guards operator error, not an external claim).
     owner = _invoice_owner(invoice)
-    if owner is not None and owner != user_id:
+    if owner != user_id:
         logger.warning(
             "restore_credits: invoice %s belongs to %s, not %s — refusing.",
-            invoice_id, owner[:20], user_id[:20],
+            invoice_id, (owner or "no one")[:20], user_id[:20],
         )
         return {
             "success": False,
