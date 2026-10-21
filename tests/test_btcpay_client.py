@@ -162,6 +162,39 @@ class TestBTCPayClientRequests:
         )
 
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "spelling",
+        ["inv-3#1", "inv-3?n=1", "x/../inv-3", "inv-3/", "inv%2D3", "inv-3 ", "", "a" * 65],
+    )
+    async def test_get_invoice_refuses_other_spellings(self, spelling: str) -> None:
+        """A second spelling of a settled id must never reach BTCPay: credit
+        idempotency is keyed on the id string, so each spelling would credit again."""
+        client = BTCPayClient("https://x.com", "k", "s1")
+        client._client.request = AsyncMock(
+            return_value=_mock_response(200, {"id": "inv-3", "status": "Settled"})
+        )
+        with pytest.raises(BTCPayValidationError):
+            await client.get_invoice(spelling)
+        client._client.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_invoice_refuses_a_different_invoice(self) -> None:
+        client = BTCPayClient("https://x.com", "k", "s1")
+        client._client.request = AsyncMock(
+            return_value=_mock_response(200, {"id": "inv-4", "status": "Settled"})
+        )
+        with pytest.raises(BTCPayValidationError):
+            await client.get_invoice("inv-3")
+
+    @pytest.mark.asyncio
+    async def test_payment_methods_refuses_malformed_id(self) -> None:
+        client = BTCPayClient("https://x.com", "k", "s1")
+        client._client.request = AsyncMock(return_value=_mock_response(200, []))
+        with pytest.raises(BTCPayValidationError):
+            await client.get_invoice_payment_methods("inv-3/../other")
+        client._client.request.assert_not_called()
+
 # ---------------------------------------------------------------------------
 # Exception mapping
 # ---------------------------------------------------------------------------

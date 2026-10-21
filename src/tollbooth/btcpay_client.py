@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Self
 
 import httpx
@@ -58,6 +59,18 @@ class BTCPayConnectionError(BTCPayError):
 
 class BTCPayTimeoutError(BTCPayError):
     """Request timeout (retryable)."""
+
+
+# BTCPay invoice ids are short alphanumeric tokens. Anything else is refused
+# before it reaches a URL: '#', '?', '/' or '%' would let many spellings of one
+# id fetch the same invoice, and callers key credit idempotency on the id.
+_INVOICE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _checked_invoice_id(invoice_id: str) -> str:
+    if not isinstance(invoice_id, str) or not _INVOICE_ID.fullmatch(invoice_id):
+        raise BTCPayValidationError("Malformed invoice_id.")
+    return invoice_id
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +183,17 @@ class BTCPayClient:
         )
 
     async def get_invoice(self, invoice_id: str) -> dict[str, Any]:
-        """GET /stores/{storeId}/invoices/{invoiceId} — invoice details."""
-        return await self._request(
-            "GET", f"/stores/{self._store_id}/invoices/{invoice_id}"
+        """GET /stores/{storeId}/invoices/{invoiceId} — invoice details.
+
+        The returned invoice is the one asked for, id for id, so a caller may
+        key idempotency on *invoice_id* without a second spelling slipping by.
+        """
+        invoice = await self._request(
+            "GET", f"/stores/{self._store_id}/invoices/{_checked_invoice_id(invoice_id)}"
         )
+        if not isinstance(invoice, dict) or invoice.get("id") != invoice_id:
+            raise BTCPayValidationError("BTCPay returned a different invoice than requested.")
+        return invoice
 
     async def get_invoice_payment_methods(self, invoice_id: str) -> list[dict[str, Any]]:
         """GET /stores/{storeId}/invoices/{invoiceId}/payment-methods — payment method details.
@@ -182,7 +202,8 @@ class BTCPayClient:
         a ``destination`` field with the BOLT11 invoice string.
         """
         return await self._request(
-            "GET", f"/stores/{self._store_id}/invoices/{invoice_id}/payment-methods"
+            "GET",
+            f"/stores/{self._store_id}/invoices/{_checked_invoice_id(invoice_id)}/payment-methods",
         )
 
     async def get_lightning_invoice(
