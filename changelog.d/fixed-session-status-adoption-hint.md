@@ -1,1 +1,0 @@
-- `session_status` now tells an operator with no Authority to call `request_adoption`, the tool that exists.

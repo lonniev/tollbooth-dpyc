@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.106.0] — 2026-10-25
+
+### Added
+
+- `oracle_lightning_wallets`: every operator passes on the Oracle's list of Lightning wallets a newcomer can install, so a site's price sheet can offer one. It's free.
+
+### Changed
+
+- README now matches the code: the Standard Tools tables list every tool `register_standard_tools` registers (coupons, `request_echo`, `request_adoption`/`adoption_status`, `restore_neon_schema`, Nostr profile tools), the constructor listing includes `holder_auth_url`, `resolve_expiry` replaces a method that no longer exists, and the relay set is described as fetched from the Oracle.
+
+### Fixed
+
+- `session_status` now tells an operator with no Authority to call `request_adoption`, the tool that exists.
+
 ## [0.105.1] — 2026-10-21
 
 ### Fixed

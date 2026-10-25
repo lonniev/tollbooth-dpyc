@@ -1,1 +1,0 @@
-- `oracle_lightning_wallets`: every operator passes on the Oracle's list of Lightning wallets a newcomer can install, so a site's price sheet can offer one. It's free.
