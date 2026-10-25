@@ -196,6 +196,7 @@ ORACLE_GET_TAX_RATE_UUID             = "290f77f4-6a6c-5aa1-b2a9-382cb50dc687"
 ORACLE_HOW_TO_JOIN_UUID              = "170bd982-daaa-52c1-be78-52100d6311a0"
 ORACLE_LOOKUP_MEMBER_UUID            = "b1e75f58-24f1-5f8b-b52b-01e957aa1d61"
 ORACLE_NETWORK_ADVISORY_UUID         = "d4d20c39-3582-53e4-812d-e7f49bdcd98a"
+ORACLE_LIGHTNING_WALLETS_UUID        = "5e18f870-2a71-5c4e-a68b-8f272b2107c9"
 
 # Authority delegation
 CHECK_AUTHORITY_BALANCE_UUID         = "e5bfa0f5-772b-538e-809e-9e0f69d656d2"
@@ -373,6 +374,9 @@ _STANDARD_LIST: list[ToolIdentity] = [
     ToolIdentity(tool_id=ORACLE_NETWORK_ADVISORY_UUID, capability="oracle_network_advisory", category="free",
                  title="Network advisories", behavior=READS_REMOTE,
                  intent="Get active network advisories from the Oracle."),
+    ToolIdentity(tool_id=ORACLE_LIGHTNING_WALLETS_UUID, capability="oracle_lightning_wallets", category="free",
+                 title="Lightning wallets", behavior=READS_REMOTE,
+                 intent="List Lightning wallets a newcomer can install, with their store links."),
 
     # -- Authority delegation --
     ToolIdentity(tool_id=CHECK_AUTHORITY_BALANCE_UUID, capability="check_authority_balance", category="free",
