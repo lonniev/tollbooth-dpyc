@@ -298,6 +298,14 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
         cost_tier="FREE",
         agent_hint="Get active network advisories from the Oracle.",
     ),
+    ToolPathInfo(
+        tool_name="lightning_wallets",
+        path=ToolPath.DELEGATION,
+        delegates_to=ActorRole.ORACLE,
+        requires_auth=False,
+        cost_tier="FREE",
+        agent_hint="List Lightning wallets a newcomer can install, with their store links.",
+    ),
 ]
 
 
@@ -499,6 +507,10 @@ class OperatorProtocol(Protocol):
 
     async def network_advisory(self) -> str:
         """(cold, delegates to Oracle) Get active network advisories."""
+        ...
+
+    async def lightning_wallets(self) -> dict[str, Any]:
+        """(cold, delegates to Oracle) Lightning wallets a newcomer can install."""
         ...
 
 

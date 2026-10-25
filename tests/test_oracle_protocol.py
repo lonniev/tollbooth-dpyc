@@ -51,6 +51,9 @@ class StubOracle:
     async def network_advisory(self) -> str:
         return "No advisories"
 
+    async def lightning_wallets(self) -> dict[str, Any]:
+        return {"wallets": []}
+
     async def confirm_citizenship(
         self, npub: str, challenge_id: str, signed_event_json: str
     ) -> dict[str, Any]:

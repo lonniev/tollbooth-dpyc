@@ -5527,6 +5527,17 @@ def register_standard_tools(
         """Get active network advisories from the Oracle. Free."""
         return await _call_oracle("network_advisory")
 
+    @oracle_tool
+    async def lightning_wallets() -> dict[str, Any]:
+        """Lightning wallets a newcomer can install to pay an invoice. Free.
+
+        Each comes with its App Store, Google Play and web links, a one-line
+        description, whether it holds the keys for you and whether it can buy
+        bitcoin in the app; the network's pick first, the rest ranked by a
+        live web search when the Oracle has one.
+        """
+        return await _call_oracle("lightning_wallets")
+
     # -- Authority delegation -------------------------------------------
 
     @tool

@@ -80,6 +80,9 @@ class StubOperator:
     async def network_advisory(self) -> str:
         return "No advisories"
 
+    async def lightning_wallets(self) -> dict[str, Any]:
+        return {"wallets": []}
+
     async def session_status(self) -> dict[str, Any]:
         return {"hasPersonalSession": False}
 

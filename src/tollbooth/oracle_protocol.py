@@ -76,6 +76,10 @@ class OracleProtocol(Protocol):
         """(cold) Return any active network advisories."""
         ...
 
+    async def lightning_wallets(self) -> dict[str, Any]:
+        """(cold) Lightning wallets a newcomer can install, ranked."""
+        ...
+
     async def confirm_citizenship(
         self, npub: str, challenge_id: str, signed_event_json: str
     ) -> dict[str, Any]:
