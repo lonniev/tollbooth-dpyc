@@ -7,10 +7,6 @@ Changes not yet released live in `changelog.d/`, one file per change — see the
 
 ## [0.106.0] — 2026-10-25
 
-### Security
-
-- fastmcp 4.1.2, its security release.
-
 ### Added
 
 - `oracle_lightning_wallets`: every operator passes on the Oracle's list of Lightning wallets a newcomer can install, so a site's price sheet can offer one. It's free.
