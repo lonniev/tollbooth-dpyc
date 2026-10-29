@@ -229,6 +229,14 @@ async def forget_credentials_tool(
                     "grants could not be persisted; call forget_credentials "
                     "again once the persistence layer answers."
                 )
+        # A patron who forgets their credentials here forgets their settings
+        # too: properties are theirs, kept by npub. The operator's own are not
+        # a patron's, and stay.
+        if result.get("success") and service != rt.operator_credential_service:
+            try:
+                result["properties_cleared"] = await (await rt.property_store()).clear(target_npub)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("properties not cleared on forget: %s", exc)
         # The watermark already refuses every held grant; dropping them from
         # the wallets is housekeeping, so a failure here changes no answer.
         if result.get("proof_grants_revoked") and rt.holder_auth_enabled:

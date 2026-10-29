@@ -198,6 +198,8 @@ class OperatorRuntime:
         ots_calendars: list[str] | None = None,
         on_forget: Any | None = None,
         operator_settings: dict[str, Any] | None = None,
+        operator_properties: dict[str, Any] | None = None,
+        patron_properties: dict[str, Any] | None = None,
         purchase_mode: str = "certified",
         vault_source: str = "authority",
         credential_validator: Any | None = None,
@@ -236,6 +238,13 @@ class OperatorRuntime:
         self._ots_calendars = ots_calendars
         self._on_forget = on_forget  # callback(service, npub) on credential forget
         self._operator_settings: dict[str, Any] = operator_settings or {}
+        # What the operator and each patron may tune (tollbooth.properties).
+        # Patrons always have the standard ones; an operator adds its own.
+        from tollbooth.properties import STANDARD_PATRON_PROPERTIES, check_declarations
+        self._operator_properties = check_declarations(operator_properties or {})
+        self._patron_properties = check_declarations(
+            {**STANDARD_PATRON_PROPERTIES, **(patron_properties or {})})
+        self._property_store: Any = None
         # Two orthogonal axes (historically conflated under purchase_mode):
         #   purchase_mode — certify-up behavior on a purchase order:
         #     "certified" (obtain a parent Authority cert + pay its fee),
@@ -354,6 +363,43 @@ class OperatorRuntime:
         time and access it here — no global singleton required.
         """
         return self._operator_settings
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def operator_properties(self) -> dict[str, Any]:
+        """What the operator may tune, by name (``PropertySpec``)."""
+        return self._operator_properties
+
+    @property
+    def patron_properties(self) -> dict[str, Any]:
+        """What each patron may tune, by name: the standard ones and the operator's."""
+        return self._patron_properties
+
+    async def property_store(self) -> Any:
+        """The rows behind every property, in this operator's schema."""
+        if self._property_store is None:
+            from tollbooth.properties import PropertyStore
+            self._property_store = PropertyStore(await self.vault())
+        return self._property_store
+
+    async def operator_property(self, name: str) -> Any:
+        """The operator's value for ``name``, or its default.
+
+        Read through a short per-process cache, as the pricing model is. A read
+        that fails answers the default and says so in the log: a tunable that
+        cannot be read must not take a tool down.
+        """
+        from tollbooth.properties import check_name, listing
+        spec = check_name(name, self._operator_properties)
+        try:
+            stored = await (await self.property_store()).values(self.operator_npub(), cached=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("operator property %s unreadable (%s); using its default", name, exc)
+            return spec.default
+        return next(p["value"] for p in listing({name: spec}, stored))
 
     # ------------------------------------------------------------------
     # Identity
@@ -5332,6 +5378,63 @@ def register_standard_tools(
             }
         except Exception as e:  # noqa: BLE001
             return {"success": False, "error": str(e)}
+
+    # -- Properties (tollbooth.properties) -----------------------------------
+
+    @tool
+    async def get_my_properties(npub: str) -> dict[str, Any]:
+        """What you may tune here, and what you set. Free; proof of npub required.
+
+        Each property carries its kind, label, default and whether it follows
+        your account (kept here, on every device) or this device (kept in the
+        browser, so no value is returned for it).
+
+        Args:
+            npub: The patron's Nostr public key (npub1...).
+        """
+        from tollbooth.tools.properties import get_my_properties_tool
+        return await get_my_properties_tool(rt, npub)
+
+    @tool
+    async def set_my_property(npub: str, name: str, value: str = "") -> dict[str, Any]:
+        """Set one of your own properties; an empty value returns it to its default.
+
+        Free; proof of npub required. Only properties that follow your account
+        are kept here.
+
+        Args:
+            npub: The patron's Nostr public key (npub1...).
+            name: The property, as get_my_properties lists it.
+            value: Its new value, as text (a list as JSON); empty for the default.
+        """
+        from tollbooth.tools.properties import set_my_property_tool
+        return await set_my_property_tool(rt, npub, name, value)
+
+    if rt.operator_properties:
+        @tool
+        async def get_operator_properties() -> dict[str, Any]:
+            """What the operator may tune — e.g. which LLM model each use runs on —
+            and what each is set to. Free; anyone may read them."""
+            from tollbooth.tools.properties import get_operator_properties_tool
+            return await get_operator_properties_tool(rt)
+
+        @tool
+        async def set_operator_property(name: str, value: str = "") -> dict[str, Any]:
+            """Set one operator property; an empty value returns it to its default.
+
+            RESTRICTED to the operator: the connection must prove the operator's
+            npub. Takes effect on the next call here, and within a minute on
+            every other instance.
+
+            Args:
+                name: The property, as get_operator_properties lists it.
+                value: Its new value, as text (a list as JSON); empty for the default.
+            """
+            from tollbooth.tools.properties import set_operator_property_tool
+            return await set_operator_property_tool(rt, name, value)
+    else:
+        for cap in ("get_operator_properties", "set_operator_property"):
+            rt._tool_registry.pop(capability_uuid(cap), None)
 
     # -- OAuth2 tools (only if oauth_provider is configured) ----------------
 
