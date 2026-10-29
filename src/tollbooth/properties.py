@@ -49,6 +49,7 @@ CACHE_TTL_S = 60.0
 _NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._:-]*$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_ITEM = re.compile(r"^[a-z0-9_:-]{1,40}$")
 _MAX_TEXT = 200
 _MAX_SLUG = 120
 _MAX_LIST = 50
@@ -66,13 +67,15 @@ class PropertySpec:
       - ``llm_model`` — a tier (``writer``, ``reader``) or a provider slug
         (``vendor/model``); ``suggestions`` are offered, any valid slug is kept.
       - ``choice`` — one of ``choices``.
-      - ``list`` — some of ``choices``, in the owner's order.
+      - ``list`` — some of ``choices``, in the owner's order; with no
+        ``choices``, short plain names (lowercase words, digits, ``_:-``).
       - ``number`` — finite, within ``minimum``..``maximum``.
       - ``flag`` — true or false.
       - ``text`` — at most 200 characters, no control characters.
     """
 
     kind: str
+    #: ``None`` means none set: the owner has not chosen, and the reader decides.
     default: Any
     label: str
     description: str = ""
@@ -87,9 +90,10 @@ class PropertySpec:
             raise ValueError(f"unknown property kind {self.kind!r}; use one of {KINDS}")
         if self.follows not in FOLLOWS:
             raise ValueError(f"follows must be one of {FOLLOWS}")
-        if self.kind in ("choice", "list") and not self.choices:
-            raise ValueError(f"a {self.kind} property needs its choices")
-        validate(self, self.default)  # a default that would be refused is a bug
+        if self.kind == "choice" and not self.choices:
+            raise ValueError("a choice property needs its choices")
+        if self.default is not None:
+            validate(self, self.default)  # a default that would be refused is a bug
 
     def describe(self) -> dict[str, Any]:
         """The spec as a page renders it."""
@@ -136,8 +140,10 @@ def validate(spec: PropertySpec, raw: Any) -> Any:
         return raw
     if k == "list":
         items = _json_list(raw)
-        if items is None or len(items) > _MAX_LIST or any(i not in spec.choices for i in items):
-            raise PropertyError(f"{spec.label}: a list drawn from {', '.join(spec.choices)}")
+        ok = (lambda i: i in spec.choices) if spec.choices else (lambda i: bool(_ITEM.match(i)))
+        if items is None or len(items) > _MAX_LIST or not all(ok(i) for i in items):
+            raise PropertyError(f"{spec.label}: a list drawn from {', '.join(spec.choices)}"
+                                if spec.choices else f"{spec.label}: a list of short plain names")
         return list(dict.fromkeys(items))
     if k == "number":
         n = _number(raw)

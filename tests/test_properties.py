@@ -280,3 +280,16 @@ async def test_forgetting_a_patron_clears_their_properties_and_not_the_operators
     out = await forget_credentials_tool(rt, "patron-svc", PATRON)
     assert out["properties_cleared"] == 1
     assert list(vault.rows) == [(OPERATOR, "reference_edit_model")]
+
+
+def test_none_set_is_a_default_and_an_open_list_takes_plain_names():
+    price = PropertySpec(kind="number", default=None, label="kWh price", minimum=0, maximum=200)
+    assert listing({"p": price}, {})[0]["value"] is None
+    assert validate(price, "11") == 11
+    order = PropertySpec(kind="list", default=[], label="Chart order")
+    assert validate(order, '["gdd", "soil_temp", "gdd"]') == ["gdd", "soil_temp"]
+    for bad in ('["GDD"]', '["a b"]', '["<x>"]', '["' + "x" * 41 + '"]'):
+        with pytest.raises(PropertyError):
+            validate(order, bad)
+    with pytest.raises(ValueError):
+        PropertySpec(kind="choice", default="F", label="Units")
