@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.108.1] — 2026-10-29
+
+### Fixed
+
+- A property whose value is text — a model slug, a choice, a time zone — reads back as it was set. Neon returns JSONB already parsed, and the reader parsed it again, so every such property read as its default.
+
 ## [0.108.0] — 2026-10-29
 
 ### Added
