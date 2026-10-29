@@ -397,10 +397,10 @@ class TestHappyHourConstraint:
         assert result.price_modifier.free is True
 
     def test_with_timezone(self):
-        # 12:00 UTC = 07:00 US/Eastern (EST)
+        # 12:00 UTC = 07:00 America/New_York (EST)
         c = HappyHourConstraint(
             in_effect="08:00", until="17:00",
-            timezone="US/Eastern",
+            timezone="America/New_York",
             percent_off=25.0,
         )
         result = c.evaluate(_ctx())  # 07:00 Eastern -> outside
@@ -422,7 +422,7 @@ class TestHappyHourSerialization:
     def test_to_dict(self):
         c = HappyHourConstraint(
             in_effect="11:00", until="14:00",
-            timezone="US/Eastern",
+            timezone="America/New_York",
             percent_off=25.0,
         )
         d = c.to_dict()

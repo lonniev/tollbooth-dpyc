@@ -24,7 +24,7 @@ class TemporalWindowConstraint(ToolConstraint):
         ``"HH:MM-HH:MM"`` (24-hour) range.  The window wraps around midnight
         when end < start (e.g. ``"22:00-06:00"``).
     timezone:
-        IANA timezone name (e.g. ``"US/Eastern"``).  Defaults to ``"UTC"``.
+        IANA timezone name (e.g. ``"America/New_York"``).  Defaults to ``"UTC"``.
     days_of_week:
         Optional list of allowed weekday numbers, 0 = Monday .. 6 = Sunday.
         ``None`` means every day.
