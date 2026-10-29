@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.108.0] — 2026-10-29
+
+### Added
+
+- Properties: named, typed, non-secret values an npub owns and tunes, kept in the operator's own schema (`tollbooth.properties`). An operator declares `operator_properties` (e.g. `llm_model_property(...)` — which model each LLM use runs on) and reads them with `await rt.operator_property(name)`; anyone may read them with `get_operator_properties`, only the operator sets them with `set_operator_property`. Every patron has `theme`, `timezone` and `tour`, plus any `patron_properties` the operator declares; `get_my_properties` / `set_my_property` read and set a patron's own, with proof. A property follows the account (kept here) or the device (kept in the browser). Unset means the default. Forgetting a patron's credentials clears their properties. Schema version 4.
+
 ## [0.107.0] — 2026-10-29
 
 ### Added
