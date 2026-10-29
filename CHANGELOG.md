@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.107.0] — 2026-10-29
+
+### Added
+
+- `tollbooth.web_search`: search the web (`BraveSearch`, key passed in, redacted), read a page politely (`fetch_text`, capped, scripts and navigation dropped), and keep only the paragraphs that matter (`passages`). The steps an operator runs before an LLM edits, so the model reads a few thousand tokens of sources rather than whole pages.
+
 ## [0.106.0] — 2026-10-25
 
 ### Added
