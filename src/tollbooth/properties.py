@@ -248,16 +248,18 @@ class PropertyStore:
         """``{name: (value, updated_at)}`` as stored for ``npub``."""
         if cached and (hit := self._cache.get(npub)) and time.monotonic() - hit[0] < CACHE_TTL_S:
             return hit[1]
+        # As text: Neon hands JSONB back already parsed, so a value that is a
+        # string arrives as a bare str, indistinguishable from JSON text.
+        # 2026-10-29: every text and model property read back as its default.
         r = await self.vault._execute(
-            f"SELECT name, value, updated_at FROM {self.vault._t(TABLE)} WHERE npub = $1", [npub])
+            f"SELECT name, value::text AS value, updated_at FROM {self.vault._t(TABLE)} "
+            "WHERE npub = $1", [npub])
         out: dict[str, tuple[Any, str]] = {}
         for row in r.get("rows") or []:
-            value = row.get("value")
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except ValueError:
-                    continue
+            try:
+                value = json.loads(row.get("value") or "")
+            except (TypeError, ValueError):
+                continue
             out[str(row.get("name"))] = (value, str(row.get("updated_at") or ""))
         if cached:
             self._cache[npub] = (time.monotonic(), out)
