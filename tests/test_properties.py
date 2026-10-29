@@ -108,7 +108,10 @@ class FakeVault:
         p = params or []
         if sql.startswith("SELECT"):
             self.reads += 1
-            return {"rows": [{"name": n, "value": v, "updated_at": "2026-10-29"}
+            # As Neon answers: JSONB comes back parsed unless cast to text.
+            as_text = "value::text" in sql
+            return {"rows": [{"name": n, "value": v if as_text else json.loads(v),
+                              "updated_at": "2026-10-29"}
                              for (o, n), v in self.rows.items() if o == p[0]]}
         if sql.startswith("INSERT"):
             self.rows[(p[0], p[1])] = p[2]
@@ -293,3 +296,16 @@ def test_none_set_is_a_default_and_an_open_list_takes_plain_names():
             validate(order, bad)
     with pytest.raises(ValueError):
         PropertySpec(kind="choice", default="F", label="Units")
+
+
+async def test_a_text_value_reads_back_as_it_was_set():
+    """2026-10-29: Neon returned the JSONB string parsed, the reader parsed it
+    again, and every model property read back as its default."""
+    vault = FakeVault()
+    store = PropertyStore(vault)
+    await store.set(OPERATOR, "reference_edit_model", "nvidia/nemotron-3.5-super-vl:free")
+    await store.set(OPERATOR, "units", "C")
+    await store.set(OPERATOR, "order", ["gdd"])
+    got = await store.values(OPERATOR)
+    assert {n: v for n, (v, _) in got.items()} == {
+        "reference_edit_model": "nvidia/nemotron-3.5-super-vl:free", "units": "C", "order": ["gdd"]}
