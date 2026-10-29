@@ -70,14 +70,14 @@ class TestMidnightWrap:
 
 class TestTimezoneHandling:
     def test_us_eastern_conversion(self):
-        # 17:00 UTC = 12:00 US/Eastern (EST, UTC-5)
-        c = TemporalWindowConstraint(schedule_start="08:00", schedule_end="21:00", timezone="US/Eastern")
+        # 17:00 UTC = 12:00 America/New_York (EST, UTC-5)
+        c = TemporalWindowConstraint(schedule_start="08:00", schedule_end="21:00", timezone="America/New_York")
         result = c.evaluate(_ctx(hour=17))  # 12:00 Eastern
         assert result.allowed is True
 
     def test_us_eastern_outside(self):
-        # 04:00 UTC = 23:00 US/Eastern (EST, UTC-5)
-        c = TemporalWindowConstraint(schedule_start="08:00", schedule_end="21:00", timezone="US/Eastern")
+        # 04:00 UTC = 23:00 America/New_York (EST, UTC-5)
+        c = TemporalWindowConstraint(schedule_start="08:00", schedule_end="21:00", timezone="America/New_York")
         result = c.evaluate(_ctx(hour=4))  # 23:00 Eastern
         assert result.allowed is False
 
@@ -135,14 +135,14 @@ class TestSerialization:
     def test_to_dict(self):
         c = TemporalWindowConstraint(
             schedule_start="08:00", schedule_end="21:00",
-            timezone="US/Eastern",
+            timezone="America/New_York",
             days_of_week=[0, 1, 2],
         )
         d = c.to_dict()
         assert d["type"] == "temporal_window"
         assert d["schedule_start"] == "08:00"
         assert d["schedule_end"] == "21:00"
-        assert d["timezone"] == "US/Eastern"
+        assert d["timezone"] == "America/New_York"
         assert d["days_of_week"] == [0, 1, 2]
 
     def test_to_dict_no_days(self):
