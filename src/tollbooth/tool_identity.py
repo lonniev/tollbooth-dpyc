@@ -229,6 +229,12 @@ GET_PATRON_CREDENTIAL_FIELDS_UUID    = "16dac337-6482-5c55-9710-ca7aceaa02b6"
 UPDATE_OPERATOR_CREDENTIAL_UUID      = "2e4d6f1b-5a89-527a-8324-4f7b7344e7e9"
 DELETE_OPERATOR_CREDENTIAL_UUID      = "a752e8c2-314c-59f6-85ab-7995f2b1df13"
 
+# Properties (tollbooth.properties)
+GET_OPERATOR_PROPERTIES_UUID         = "09b852df-667b-549e-824e-9daa3691b807"
+SET_OPERATOR_PROPERTY_UUID           = "95c90ae4-6b22-5b45-a9e5-43e9ba85e6b3"
+GET_MY_PROPERTIES_UUID               = "0ea86533-d32e-5834-9e19-73511b61dcc3"
+SET_MY_PROPERTY_UUID                 = "90b2cced-68a3-543b-8b86-173ce17d6508"
+
 # OTS notarization
 NOTARIZE_LEDGER_UUID                 = "fa72cde0-35a6-5fb3-8a49-85041cf3fb6c"
 GET_NOTARIZATION_PROOF_UUID          = "144b6fd8-6409-5642-a72a-d0b14434de73"
@@ -436,6 +442,20 @@ _STANDARD_LIST: list[ToolIdentity] = [
                  intent="Operator-only: remove one operator secret field, "
                         "including stored-but-untemplated leftovers, without "
                         "wiping the rest of the bundle."),
+
+    # -- Properties --
+    ToolIdentity(tool_id=GET_OPERATOR_PROPERTIES_UUID, capability="get_operator_properties",
+                 category="free", title="Operator properties", behavior=READS,
+                 intent="List what the operator may tune, and what each is set to."),
+    ToolIdentity(tool_id=SET_OPERATOR_PROPERTY_UUID, capability="set_operator_property",
+                 category="restricted", title="Set operator property", behavior=WRITES,
+                 intent="Operator-only: set one tunable property, or return it to its default."),
+    ToolIdentity(tool_id=GET_MY_PROPERTIES_UUID, capability="get_my_properties",
+                 category="free", title="My properties", behavior=READS,
+                 intent="List what a patron may tune here, and what they set."),
+    ToolIdentity(tool_id=SET_MY_PROPERTY_UUID, capability="set_my_property",
+                 category="free", title="Set my property", behavior=WRITES,
+                 intent="Set one of the patron's own properties, or return it to its default."),
 
     # -- OTS notarization --
     ToolIdentity(tool_id=NOTARIZE_LEDGER_UUID, capability="notarize_ledger", category="restricted",

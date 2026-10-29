@@ -201,6 +201,10 @@ from tollbooth.llm_route import (
     web_fetch_tool,
     web_search_tool,
 )
+from tollbooth.properties import (
+    PropertySpec,
+    llm_model_property,
+)
 from tollbooth.upstream_payment import (
     classify_upstream_payment,
     is_x402_payment_challenge,
@@ -349,6 +353,7 @@ __all__ = [
     "PricingModelStore",
     "PricingResolver",
     "ProofGrantRevocations",
+    "PropertySpec",
     "RegistryError",
     "RelayRegistry",
     "RelayRegistryError",
@@ -390,6 +395,7 @@ __all__ = [
     "get_relays",
     "is_x402_payment_challenge",
     "llm_failure_situation",
+    "llm_model_property",
     "make_slug_tool",
     "model_for",
     "passages",

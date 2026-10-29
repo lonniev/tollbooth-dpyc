@@ -8,6 +8,7 @@ from fastmcp import Client, FastMCP
 from tollbooth.authority.tools import AUTHORITY_TOOL_REGISTRY, register_authority_tools
 from tollbooth.credential_templates import CredentialTemplate, FieldSpec
 from tollbooth.params import PatronNpub
+from tollbooth.properties import llm_model_property
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
 from tollbooth.tool_identity import READS, READS_REMOTE, STANDARD_IDENTITIES, ToolIdentity
 
@@ -26,6 +27,7 @@ async def listed_tools(monkeypatch):
             fields={"api_key": FieldSpec(required=True, sensitive=True, description="Key.")},
         ),
         oauth_provider=object(),
+        operator_properties={"model": llm_model_property("Model")},
     )
     register_standard_tools(mcp, "x", rt)
     register_authority_tools(mcp, rt, slug="x")
@@ -45,7 +47,8 @@ async def listed_tools(monkeypatch):
 @pytest.mark.asyncio
 async def test_every_tool_has_a_title_and_behavior(listed_tools):
     names = {t.name for t in listed_tools}
-    assert {"x_receive_patron_credentials", "x_begin_oauth", "x_published_query"} <= names
+    assert {"x_receive_patron_credentials", "x_begin_oauth", "x_published_query",
+            "x_set_operator_property", "x_set_my_property"} <= names
     for t in listed_tools:
         assert t.title, t.name
         hints = t.annotations
