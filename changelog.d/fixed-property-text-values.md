@@ -1,1 +1,0 @@
-- A property whose value is text — a model slug, a choice, a time zone — reads back as it was set. Neon returns JSONB already parsed, and the reader parsed it again, so every such property read as its default.
