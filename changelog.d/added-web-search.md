@@ -1,0 +1,1 @@
+- `tollbooth.web_search`: search the web (`BraveSearch`, key passed in, redacted), read a page politely (`fetch_text`, capped, scripts and navigation dropped), and keep only the paragraphs that matter (`passages`). The steps an operator runs before an LLM edits, so the model reads a few thousand tokens of sources rather than whole pages.
