@@ -206,6 +206,12 @@ from tollbooth.upstream_payment import (
     is_x402_payment_challenge,
     upstream_payment_situation,
 )
+from tollbooth.web_search import (
+    BraveSearch,
+    WebSearchError,
+    fetch_text,
+    passages,
+)
 
 try:
     from tollbooth.constraints import (
@@ -283,6 +289,7 @@ __all__ = [
     # Bootstrap & Runtime
     "BootstrapClient",
     "BootstrapResult",
+    "BraveSearch",
     "BulkBonusConstraint",
     "CertificateError",
     "ConstraintContext",
@@ -365,6 +372,7 @@ __all__ = [
     "UserLedger",
     "VaultBackend",
     "VaultCipher",
+    "WebSearchError",
     "X402Client",
     "async_validate_operator_tools",
     "build_messages_request",
@@ -378,11 +386,13 @@ __all__ = [
     "decode_credential_card",
     "encode_credential_card",
     "ensure_bootstrapped",
+    "fetch_text",
     "get_relays",
     "is_x402_payment_challenge",
     "llm_failure_situation",
     "make_slug_tool",
     "model_for",
+    "passages",
     "probe_relay_liveness",
     "render_qr",
     "resolve_npub",
