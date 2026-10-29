@@ -206,8 +206,9 @@ def check_declarations(specs: dict[str, PropertySpec]) -> dict[str, PropertySpec
 STANDARD_PATRON_PROPERTIES: dict[str, PropertySpec] = {
     "theme": PropertySpec(kind="choice", default="system", label="Theme",
                           choices=("system", "light", "dark"), follows="device"),
-    "timezone": PropertySpec(kind="text", default="", label="Time zone",
-                             description="An IANA zone, e.g. America/New_York; empty follows the browser."),
+    "timezone": PropertySpec(kind="text", default="auto", label="Time zone",
+                             description="An IANA zone, e.g. America/New_York, or auto for the browser's."),
+    # Whether the guided tour runs. Which pages have had theirs stays per device.
     "tour": PropertySpec(kind="flag", default=True, label="Tour"),
 }
 
