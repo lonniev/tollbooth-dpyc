@@ -17,6 +17,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pynostr.key import PrivateKey
 
 import tollbooth.bootstrap as bs
 from tollbooth.bootstrap import BootstrapClient, BootstrapResult, ensure_bootstrapped
@@ -52,7 +53,7 @@ def _client():
 def _oracle():
     o = AsyncMock()
     o.get_relays = AsyncMock(return_value=["wss://a", "wss://b"])
-    o.resolve_authority_for = AsyncMock(return_value=None)
+    o.resolve_authority_for = AsyncMock(return_value={"npub": PrivateKey().public_key.bech32()})
     o.session = MagicMock()  # a session yields a client bound to one connection
     o.session.return_value.__aenter__.return_value = o
     return o

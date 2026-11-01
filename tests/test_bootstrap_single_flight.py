@@ -13,6 +13,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pynostr.key import PrivateKey
 
 import tollbooth.bootstrap as bs
 from tollbooth.bootstrap import (
@@ -104,7 +105,9 @@ class TestFrontLadder:
              patch("tollbooth.oracle_client.default_oracle_client") as oracle:
             oracle.return_value = AsyncMock()
             oracle.return_value.get_relays = AsyncMock(return_value=["wss://a"])
-            oracle.return_value.resolve_authority_for = AsyncMock(return_value=None)
+            oracle.return_value.resolve_authority_for = AsyncMock(
+                return_value={"npub": PrivateKey().public_key.bech32()},
+            )
             oracle.return_value.session = MagicMock()
             oracle.return_value.session.return_value.__aenter__.return_value = oracle.return_value
             c = BootstrapClient(nsec_hex=NSEC_HEX)

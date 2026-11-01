@@ -13,6 +13,7 @@ import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pynostr.key import PrivateKey
 
 from tollbooth.bootstrap import BootstrapClient
 from tollbooth.bootstrap_relay import ConfigRead, PublishResult
@@ -25,7 +26,7 @@ CONFIG = {"neon_database_url": "postgresql://x"}
 def _oracle():
     o = MagicMock()
     o.get_relays = AsyncMock(return_value=RELAYS)
-    o.resolve_authority_for = AsyncMock(return_value=None)
+    o.resolve_authority_for = AsyncMock(return_value={"npub": PrivateKey().public_key.bech32()})
     o.session.return_value.__aenter__.return_value = o
     return o
 
