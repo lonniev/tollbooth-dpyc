@@ -7,12 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from tollbooth import InvoiceRecord, NeonVault, Tranche, UserLedger
 
-DATABASE_URL = os.environ.get(
-    "NEON_DATABASE_URL",
-    "postgresql://neondb_owner:npg_jsoldJREFh15"
-    "@ep-twilight-thunder-ainublqx-pooler.c-4.us-east-1.aws.neon.tech"
-    "/neondb?sslmode=require&channel_binding=require",
-)
+DATABASE_URL = os.environ["NEON_DATABASE_URL"]
 
 DEMO_USER = "npub1_mock_realistic_feb23"
 
