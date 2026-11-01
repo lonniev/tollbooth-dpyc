@@ -1,11 +1,11 @@
 """DPYC relay registry — the Nostr relay set, sourced from the Oracle.
 
 Every Tollbooth server draws its relay set from the DPYC Oracle
-(``get_relays`` over MCP), cached in process with a 3-day TTL. Operators are
-nsec-only and must never read GitHub directly, so the relay list — like every
-other community fact — comes from the Oracle, the one component allowed to read
-``dpyc-community``. The authoritative data still lives in
-``dpyc-community/relays.json``; the Oracle serves it.
+(``get_relays`` over MCP), cached in process. The authoritative data lives in
+``dpyc-community/relays.json``; the Oracle serves it. When the Oracle is silent
+and nothing is cached, that same public file is read directly: the only time an
+operator touches GitHub, and only for addresses, which grant no trust. Every
+event read from a relay is still checked for its author and signature.
 
 Resolution semantics:
 
@@ -14,8 +14,8 @@ Resolution semantics:
 - Refresh fails but a previously-fetched (or seeded) copy exists → serve that
   last-known-good copy (stale-if-error), with a short backoff so an Oracle
   outage does not cause a fetch on every call.
-- Cold start with no cache and an unreachable Oracle → ``RelayRegistryError``
-  (fail closed).
+- Cold start with no cache and an unreachable Oracle → the published list.
+- That is unreachable too → ``RelayRegistryError`` (fail closed).
 
 The bootstrap path fetches the relay set from the Oracle once (async) and
 **seeds** it here via ``seed_relays`` so later synchronous consumers (Secure
@@ -33,6 +33,8 @@ import asyncio
 import logging
 import time
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 # 3 days — clients fetch only when their cache is stale.
@@ -49,8 +51,33 @@ DEFAULT_RELAY_TTL_SECONDS = 60 * 60  # 259200
 _FAIL_BACKOFF_SECONDS = 60.0
 
 
+_PUBLISHED_RELAYS_URL = (
+    "https://raw.githubusercontent.com/lonniev/dpyc-community/main/relays.json"
+)
+_PUBLISHED_RELAYS_TIMEOUT_SECONDS = 5.0
+
+
 class RelayRegistryError(Exception):
     """Raised when relays cannot be resolved and no cached set exists (fail closed)."""
+
+
+def fetch_published_relays() -> list[str]:
+    """Read ``relays.json`` directly, primary first, for when the Oracle is silent."""
+    response = httpx.get(_PUBLISHED_RELAYS_URL, timeout=_PUBLISHED_RELAYS_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    entries = response.json().get("relays")
+    if not isinstance(entries, list):
+        raise RelayRegistryError("Published relay list has no 'relays' array.")
+    primary: list[str] = []
+    rest: list[str] = []
+    for entry in entries:
+        url = entry.get("url") if isinstance(entry, dict) else entry
+        if isinstance(url, str) and url.startswith("wss://"):
+            (primary if isinstance(entry, dict) and entry.get("primary") else rest).append(url)
+    relays = list(dict.fromkeys(primary + rest))
+    if not relays:
+        raise RelayRegistryError("Published relay list contained no wss:// relays.")
+    return relays
 
 
 class RelayRegistry:
@@ -80,8 +107,8 @@ class RelayRegistry:
     def relays(self) -> list[str]:
         """Return the ordered relay URLs (primary first), refreshing if stale.
 
-        Raises ``RelayRegistryError`` only on a cold cache with an unreachable
-        Oracle; otherwise a stale set is served rather than failing.
+        Raises ``RelayRegistryError`` only on a cold cache with both the Oracle
+        and the published list unreachable; otherwise a stale set is served.
         """
         now = time.monotonic()
 
@@ -95,7 +122,7 @@ class RelayRegistry:
 
         try:
             relays = self._do_fetch()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — any failure means try the next source
             if self._cache is not None:
                 logger.warning(
                     "Relay registry refresh failed (%s); serving last-known-good "
@@ -105,9 +132,14 @@ class RelayRegistry:
                 )
                 self._retry_after = now + _FAIL_BACKOFF_SECONDS
                 return self._cache
-            raise RelayRegistryError(
-                f"Relay registry unreachable and no cached relays: {e}"
-            ) from e
+            try:
+                relays = fetch_published_relays()
+            except Exception as published_error:  # noqa: BLE001
+                raise RelayRegistryError(
+                    f"Relay registry unreachable and no cached relays: {e}; "
+                    f"published list: {published_error}"
+                ) from e
+            logger.warning("Oracle silent (%s); using the published relay list.", e)
 
         self._cache = relays
         self._cache_time = now
@@ -149,8 +181,8 @@ _registry = RelayRegistry()
 def get_relays() -> list[str]:
     """Return the DPYC supported relay URLs (primary first) from the Oracle.
 
-    Cached process-wide with a 3-day TTL. Raises ``RelayRegistryError`` only
-    on a cold cache with an unreachable Oracle.
+    Cached process-wide. Raises ``RelayRegistryError`` only on a cold cache with
+    both the Oracle and the published list unreachable.
     """
     return _registry.relays()
 
@@ -183,7 +215,11 @@ async def ensure_relays_seeded() -> None:
         relays = await default_oracle_client().get_relays()
         _registry.seed(relays)
     except Exception as e:  # noqa: BLE001 — best-effort warm; the sync path surfaces a cold miss
-        logger.warning("Relay pre-seed from Oracle failed (%s); cache left cold.", e)
+        logger.warning("Relay pre-seed from Oracle failed (%s); trying the published list.", e)
+        try:
+            _registry.seed(await asyncio.to_thread(fetch_published_relays))
+        except Exception as published_error:  # noqa: BLE001
+            logger.warning("Published relay list unavailable (%s); cache left cold.", published_error)
 
 
 def invalidate_relays_cache() -> None:

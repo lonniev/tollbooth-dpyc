@@ -64,7 +64,7 @@ async def test_no_named_authority_means_no_config_is_read():
     oracle = _oracle(relays=["wss://r.test"], authority=None)
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
-    ) as rbc:
+    ) as rbc, patch("tollbooth.operator_state.withdraw_operator_state"):
         result = await client.bootstrap()
 
     assert not result.success
@@ -82,7 +82,7 @@ async def test_an_oracle_error_on_the_authority_question_reads_no_config():
     oracle.resolve_authority_for = AsyncMock(side_effect=OracleClientError("timeout"))
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
-    ) as rbc:
+    ) as rbc, patch("tollbooth.operator_state.read_operator_state", return_value=None):
         result = await client.bootstrap()
 
     assert not result.success and result.transient
@@ -158,7 +158,9 @@ async def test_relays_fail_while_authority_answers_is_still_a_clear_failure():
     )
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
-    ) as rbc:
+    ) as rbc, patch(
+        "tollbooth.relay_registry.fetch_published_relays", side_effect=RuntimeError("429"),
+    ):
         result = await client.bootstrap()
 
     assert not result.success
@@ -175,7 +177,7 @@ async def test_injected_relays_do_not_replace_the_oracle_naming_the_authority():
     client = BootstrapClient(nsec_hex=OP.bech32(), relays=["wss://mine.test"])
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
-    ) as rbc:
+    ) as rbc, patch("tollbooth.operator_state.read_operator_state", return_value=None):
         result = await client.bootstrap()
 
     assert not result.success and result.transient

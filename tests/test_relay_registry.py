@@ -68,6 +68,8 @@ class TestRelayRegistry:
         with patch(
             "tollbooth.oracle_client.default_oracle_client",
             _oracle_factory(RuntimeError("oracle down")),
+        ), patch(
+            "tollbooth.relay_registry.fetch_published_relays", side_effect=RuntimeError("429"),
         ), pytest.raises(RelayRegistryError):
             reg.relays()
 
@@ -131,6 +133,8 @@ class TestEnsureRelaysSeeded:
     async def test_best_effort_on_oracle_failure_leaves_cache_cold(self):
         from tollbooth.relay_registry import _registry, ensure_relays_seeded
         factory = _oracle_factory(RuntimeError("oracle down"))
-        with patch("tollbooth.oracle_client.default_oracle_client", factory):
+        with patch("tollbooth.oracle_client.default_oracle_client", factory), patch(
+            "tollbooth.relay_registry.fetch_published_relays", side_effect=RuntimeError("429"),
+        ):
             await ensure_relays_seeded()  # must NOT raise
         assert _registry.is_warm() is False

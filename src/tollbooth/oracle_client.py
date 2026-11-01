@@ -178,12 +178,15 @@ class OracleClient:
     async def resolve_authority_for(self, npub: str) -> dict[str, Any] | None:
         """Resolve the certifying Authority ``{npub, url, name}`` for an operator.
 
-        Returns ``None`` when the Oracle can't resolve one (unknown npub, trust
-        root, or no service listed). Raises ``OracleClientError`` only on a
-        connection/parse failure — a resolvable "no authority" answer is data.
+        Returns ``None`` when the Oracle answers that there is none. Raises
+        ``OracleClientError`` when it could not answer: a connection or parse
+        failure, or a registry it could not read. A "no authority" answer is data.
         """
         result = await self.call_tool("resolve_authority_for", {"npub": npub})
         if not result.get("success"):
+            # The Oracle could not read its registry: silence, not "no Authority".
+            if "Could not read the registry" in str(result.get("error", "")):
+                raise OracleClientError(str(result["error"]))
             return None
         authority = result.get("authority")
         return authority if isinstance(authority, dict) else None
