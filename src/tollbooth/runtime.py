@@ -6405,7 +6405,13 @@ def register_standard_tools(
 
             Operator-only background task. Bitcoin confirmation takes 1-6 hours.
             Free — no credits required.
+
+            RESTRICTED to operator — requires proof (nsec-signed).
             """
+            err = await rt.require_caller_proof(rt.operator_npub())
+            if err:
+                return err
+
             vault = await rt.vault()
             return await notarize_ledger_tool(vault, ots_calendars=rt._ots_calendars)
 
