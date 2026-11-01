@@ -100,10 +100,10 @@ class PeriodicRefreshConstraint(ToolConstraint):
     def evaluate(self, context: ConstraintContext) -> ConstraintResult:
         now = context.env.utc_now
 
-        # Scope-aware count: per_patron uses the patron's own counter,
-        # global uses the shared counter.
+        # Scope-aware count: per_patron uses the patron's own calls inside
+        # this window, global uses the shared counter.
         base_count = (
-            context.env.invocation_count
+            context.env.calls_since(now - self._delta)
             if self.scope == "per_patron"
             else self.current_window_count
         )

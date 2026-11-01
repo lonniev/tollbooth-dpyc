@@ -213,6 +213,10 @@ class LedgerCache:
         per_user = self._usage.setdefault(user_id, {})
         per_user[tool_name] = per_user.get(tool_name, 0) + 1
 
+    def pending_usage_for(self, user_id: str, tool_name: str) -> int:
+        """Free calls of a tool noted here and not yet folded into the ledger."""
+        return self._usage.get(user_id, {}).get(tool_name, 0)
+
     async def fold_usage(self) -> int:
         """Write every patron's pending usage counters through ``mutate``.
 

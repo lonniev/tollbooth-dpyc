@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from tollbooth.tool_identity import ToolBehavior, ToolIdentity
 
-from datetime import UTC
+from datetime import UTC, date
 
 from tollbooth.credential_meta import CredentialFieldDetail
 from tollbooth.identity_proof import require_held_grant
@@ -1343,6 +1343,30 @@ class OperatorRuntime:
         """Every tool id the wheel exposes, with its MCP name — what a binding may name."""
         return {tid: self.mcp_name_for(tid) for tid in self._tool_registry}
 
+    async def _patron_usage(
+        self, chain: list[Any], name: str, npub: str,
+    ) -> tuple[int, dict[str, int]] | None:
+        """The patron's ``(all-time calls, calls per day)`` of a tool, for the walk.
+
+        Read fresh, plus the free calls this process has not folded yet, when
+        the chain decides by them. A chain that does not reads nothing. ``None``
+        means the ledger could not be read, so those steps cannot be decided.
+        """
+        from tollbooth.constraints.gate import reads_patron_usage
+
+        if not reads_patron_usage(chain):
+            return 0, {}
+        cache = await self.ledger_cache()
+        ledger = await cache.get_fresh(npub)
+        if getattr(ledger, "_vault_unavailable", False):
+            return None
+        total, daily = ledger.tool_usage(name)
+        pending = cache.pending_usage_for(npub, name)
+        if pending:
+            today = date.today().isoformat()
+            daily[today] = daily.get(today, 0) + pending
+        return total + pending, daily
+
     async def _evaluate_constraints(
         self,
         tool_id: str,
@@ -1366,6 +1390,17 @@ class OperatorRuntime:
         try:
             chain, coupon_map, gate = await self._effective_chain(tool_id, name, npub)
             if chain:
+                usage = await self._patron_usage(chain, name, npub)
+                if usage is None:
+                    return cost, [], {
+                        "success": False,
+                        "error_code": "vault_unavailable",
+                        "error": (
+                            "The service is warming up and couldn't confirm your usage. "
+                            "No fare was charged — please try again in a few seconds."
+                        ),
+                        "next_steps": ["Retry in 10–15 seconds."],
+                    }
                 cache = await self.ledger_cache()
                 ledger = await cache.get(npub)
                 demand = await self.get_global_demand(name)
@@ -1375,6 +1410,8 @@ class OperatorRuntime:
                     base_cost=cost,
                     ledger=ledger,
                     npub=npub,
+                    invocation_count=usage[0],
+                    daily_calls=usage[1],
                     global_demand=demand,
                     coupon_redemptions=coupon_map,
                 )
@@ -6116,6 +6153,13 @@ def register_standard_tools(
             try:
                 if not resolved:
                     raise ValueError("npub required")
+                usage = await rt._patron_usage(chain, name, resolved)
+                if usage is None:
+                    result["constraint_effects"].append({
+                        "type": "info",
+                        "message": "Usage could not be read; the price shown ignores the constraints.",
+                    })
+                    return result
                 cache = await rt.ledger_cache()
                 ledger = await cache.get(resolved)
                 demand = await rt.get_global_demand(name)
@@ -6125,6 +6169,8 @@ def register_standard_tools(
                     base_cost=int(base_cost),
                     ledger=ledger,
                     npub=resolved,
+                    invocation_count=usage[0],
+                    daily_calls=usage[1],
                     global_demand=demand,
                     coupon_redemptions=coupon_map,
                 )

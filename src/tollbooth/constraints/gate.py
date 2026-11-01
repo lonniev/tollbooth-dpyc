@@ -16,6 +16,7 @@ its ``ToolPrice``.  The gate fetches the chain from the
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -30,6 +31,19 @@ from tollbooth.constraints.config import ConfigError, load_constraint
 from tollbooth.pricing_model import PipelineStep
 
 logger = logging.getLogger(__name__)
+
+
+def reads_patron_usage(chain: list[PipelineStep]) -> bool:
+    """True when a step in *chain* decides by the patron's own call counts."""
+    for step in chain:
+        params = step.params or {}
+        if (
+            step.type == "free_trial"
+            or params.get("scope") == "per_patron"
+            or "invocation_count" in json.dumps(params, default=str)
+        ):
+            return True
+    return False
 
 
 class ConstraintGate:
@@ -64,6 +78,7 @@ class ConstraintGate:
         npub: str,
         membership_tier: str = "default",
         invocation_count: int = 0,
+        daily_calls: dict[str, int] | None = None,
         global_demand: dict[str, int] | None = None,
         coupon_redemptions: Any | None = None,
     ) -> ConstraintContext:
@@ -83,6 +98,7 @@ class ConstraintGate:
                 tool_name=tool_name,
                 invocation_count=invocation_count,
                 global_demand=tuple((global_demand or {}).items()),
+                daily_calls=tuple((daily_calls or {}).items()),
             ),
             coupon_redemptions=coupon_redemptions,
         )
@@ -177,6 +193,7 @@ class ConstraintGate:
         npub: str = "",
         membership_tier: str = "default",
         invocation_count: int = 0,
+        daily_calls: dict[str, int] | None = None,
         global_demand: dict[str, int] | None = None,
         coupon_redemptions: Any | None = None,
     ) -> tuple[dict[str, Any] | None, int, list[str]]:
@@ -204,6 +221,7 @@ class ConstraintGate:
             npub=npub,
             membership_tier=membership_tier,
             invocation_count=invocation_count,
+            daily_calls=daily_calls,
             global_demand=global_demand,
             coupon_redemptions=coupon_redemptions,
         )
@@ -219,6 +237,7 @@ class ConstraintGate:
         npub: str = "",
         membership_tier: str = "default",
         invocation_count: int = 0,
+        daily_calls: dict[str, int] | None = None,
         global_demand: dict[str, int] | None = None,
         coupon_redemptions: Any | None = None,
     ) -> tuple[dict[str, Any] | None, int, list[str]]:
@@ -233,6 +252,7 @@ class ConstraintGate:
             npub=npub,
             membership_tier=membership_tier,
             invocation_count=invocation_count,
+            daily_calls=daily_calls,
             global_demand=global_demand,
             coupon_redemptions=coupon_redemptions,
         )
