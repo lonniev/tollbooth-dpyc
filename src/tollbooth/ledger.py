@@ -335,6 +335,18 @@ class UserLedger:
         agg.calls += calls
         agg.api_sats += api_sats
 
+    def tool_usage(self, tool_name: str) -> tuple[int, dict[str, int]]:
+        """A tool's ``(all-time calls, calls per ISO day)``."""
+        total = self.history.get(tool_name)
+        return (
+            total.calls if total else 0,
+            {
+                day: tools[tool_name].calls
+                for day, tools in self.daily_log.items()
+                if tool_name in tools
+            },
+        )
+
     def credit_deposit(
         self, api_sats: int, invoice_id: str, ttl_seconds: int | None = None,
     ) -> None:

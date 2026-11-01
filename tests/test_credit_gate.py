@@ -19,6 +19,7 @@ import pytest
 from pynostr.key import PrivateKey
 
 from tollbooth.constants import ErrorCode
+from tollbooth.pricing_model import PipelineStep
 from tollbooth.runtime import OperatorRuntime
 from tollbooth.tool_identity import READS, ToolIdentity, capability_uuid
 
@@ -58,6 +59,9 @@ class FakeResolver:
 
     async def get_chain(self, tid):
         return self._chain
+
+
+_STEP = PipelineStep(id="step", type="coupon", params={"coupon_id": "c1"})
 
 
 class FakeGate:
@@ -277,7 +281,7 @@ async def test_insufficient_balance_denied():
 @pytest.mark.asyncio
 async def test_constraint_denial_returns_constraint_denied():
     registry, tid = _registry()
-    resolver = FakeResolver(cost=10, chain=["step"])
+    resolver = FakeResolver(cost=10, chain=[_STEP])
     gate = FakeGate(denial={"success": False, "constraint_reason": "rate limited"})
     rt = _runtime(registry, resolver=resolver, gate=gate)
     with _PASS_PROOF:
@@ -289,7 +293,7 @@ async def test_constraint_denial_returns_constraint_denied():
 @pytest.mark.asyncio
 async def test_constraint_discount_debits_effective_cost():
     registry, tid = _registry()
-    resolver = FakeResolver(cost=100, chain=["step"])
+    resolver = FakeResolver(cost=100, chain=[_STEP])
     gate = FakeGate(effective=30)  # chain discounted 100 → 30
     rt = _runtime(registry, balance=1000, resolver=resolver, gate=gate)
     with _PASS_PROOF:
@@ -310,7 +314,7 @@ async def test_invalid_npub_denied_for_paid_tool():
 @pytest.mark.asyncio
 async def test_consumed_coupons_are_burned():
     registry, tid = _registry()
-    resolver = FakeResolver(cost=10, chain=["step"])
+    resolver = FakeResolver(cost=10, chain=[_STEP])
     gate = FakeGate(effective=0, consumed=["coupon-1"])  # discounted to free
     rt = _runtime(registry, resolver=resolver, gate=gate)
     burn = AsyncMock()
@@ -368,7 +372,7 @@ async def test_resolve_expiry_unchosen_when_no_model_and_never_invents_a_lifetim
 @pytest.mark.asyncio
 async def test_constraint_credit_deposits_and_returns_signed():
     registry, tid = _registry()
-    resolver = FakeResolver(cost=10, chain=["step"])
+    resolver = FakeResolver(cost=10, chain=[_STEP])
     gate = FakeGate(effective=-50)  # chain drove price negative → credit
     rt = _runtime(registry, balance=1000, resolver=resolver, gate=gate)
     with _PASS_PROOF:

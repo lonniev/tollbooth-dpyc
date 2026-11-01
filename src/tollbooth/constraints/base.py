@@ -44,6 +44,16 @@ class EnvironmentSnapshot:
     tool_name: str = ""
     invocation_count: int = 0  # Per-patron total invocations for this tool
     global_demand: tuple[tuple[str, int], ...] = ()  # (tool_name, count) pairs
+    daily_calls: tuple[tuple[str, int], ...] = ()  # (ISO day, patron's calls of this tool)
+
+    def calls_since(self, since: datetime) -> int:
+        """The patron's calls of this tool on every day touching ``since`` or later.
+
+        Usage is kept per day, so a whole day counts when any of it falls inside
+        the window: a limit may hold a little long, and never lets extra calls through.
+        """
+        first_day = since.date().isoformat()
+        return sum(calls for day, calls in self.daily_calls if day >= first_day)
 
     def demand_for(self, tool_name: str) -> int:
         """Return the global demand count for *tool_name*, or 0 if unknown."""
