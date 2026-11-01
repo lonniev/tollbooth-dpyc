@@ -1,1 +1,0 @@
-- `notarize_ledger` requires the operator's proof, as its `restricted` category always said. The opportunistic background notarization is unchanged.
