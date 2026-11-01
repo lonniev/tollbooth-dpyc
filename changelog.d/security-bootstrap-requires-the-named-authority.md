@@ -1,0 +1,1 @@
+- An operator now takes its Neon URL only from the Authority the Oracle names. With no named Authority it reports a temporary failure and asks again on the next call, and it verifies the signature on the config event. Before, an Oracle failure at cold start let a config from any Nostr author win.

@@ -57,19 +57,36 @@ async def test_bootstrap_is_github_free_and_pins_expected_authority():
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_discovers_authority_from_event_when_oracle_cannot_resolve():
+async def test_no_named_authority_means_no_config_is_read():
+    """A stranger can plant a config under our d-tag, so without a named
+    Authority the relays are not even asked, and the next call tries again."""
     client = BootstrapClient(nsec_hex=OP.bech32())
-    oracle = _oracle(relays=["wss://r.test"], authority=None)  # Oracle can't resolve
+    oracle = _oracle(relays=["wss://r.test"], authority=None)
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
-        return_value=ConfigRead({"neon_database_url": "postgresql://y"}, AUTH.public_key.hex(), "diag"),
     ) as rbc:
         result = await client.bootstrap()
 
-    assert result.success
-    # Authority discovered from the event's author, not from a pre-resolve.
-    assert result.authority_npub == AUTH.public_key.bech32()
-    assert rbc.call_args.kwargs["expected_authority_hex"] is None
+    assert not result.success
+    assert result.transient
+    assert result.neon_database_url is None
+    rbc.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_oracle_error_on_the_authority_question_reads_no_config():
+    from tollbooth.oracle_client import OracleClientError
+
+    client = BootstrapClient(nsec_hex=OP.bech32())
+    oracle = _oracle(relays=["wss://r.test"])
+    oracle.resolve_authority_for = AsyncMock(side_effect=OracleClientError("timeout"))
+    with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
+        "tollbooth.bootstrap_relay.receive_bootstrap_config",
+    ) as rbc:
+        result = await client.bootstrap()
+
+    assert not result.success and result.transient
+    rbc.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -150,8 +167,7 @@ async def test_relays_fail_while_authority_answers_is_still_a_clear_failure():
 
 
 @pytest.mark.asyncio
-async def test_injected_relays_survive_an_unreachable_oracle():
-    """With relays in hand, the Oracle is only the spoof guard's source — best-effort."""
+async def test_injected_relays_do_not_replace_the_oracle_naming_the_authority():
     from tollbooth.oracle_client import OracleClientError
 
     oracle = _oracle()
@@ -159,11 +175,8 @@ async def test_injected_relays_survive_an_unreachable_oracle():
     client = BootstrapClient(nsec_hex=OP.bech32(), relays=["wss://mine.test"])
     with patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle), patch(
         "tollbooth.bootstrap_relay.receive_bootstrap_config",
-        return_value=ConfigRead({"neon_database_url": "postgresql://x"}, AUTH.public_key.hex(), "d"),
     ) as rbc:
         result = await client.bootstrap()
 
-    assert result.success
-    assert rbc.call_args.kwargs["relays"] == ["wss://mine.test"]
-    assert rbc.call_args.kwargs["expected_authority_hex"] is None
-    assert result.authority_npub == AUTH.public_key.bech32(), "discovered from the event"
+    assert not result.success and result.transient
+    rbc.assert_not_called()

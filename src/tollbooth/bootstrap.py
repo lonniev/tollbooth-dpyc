@@ -272,11 +272,11 @@ class BootstrapClient:
         # Step 1: relay set. Injected relays win (tests / callers); otherwise the
         # Oracle is the one fixed anchor an nsec-only operator may know a priori.
         #
-        # Step 2: who is our Authority? When the Oracle answers, we accept ONLY
-        # that author's config event (spoof guard). When it can't (operator
-        # unknown/new, or Oracle briefly unreachable), we proceed by our own
-        # d-tag and discover the author from the event — a working Neon URL is
-        # the backstop, and the author can be re-verified later.
+        # Step 2: who is our Authority? We accept a config event ONLY from the
+        # Authority the Oracle names. Anyone can publish an event under our d-tag
+        # and encrypt it to us, so an operator with no named Authority has no
+        # config to trust: it waits and asks again, and never learns its
+        # Authority from an event.
         try:
             async with default_oracle_client().session() as oracle:
                 relays, authority = await asyncio.gather(
@@ -285,25 +285,25 @@ class BootstrapClient:
                     return_exceptions=True,
                 )
         except OracleClientError as e:
-            # No connection: the injected relays still stand; only the guard is lost.
             relays = self._relays if self._relays is not None else e
             authority = e
 
         if isinstance(relays, BaseException):
             result.error = f"Cannot reach Oracle for relay set: {relays}"
             logger.warning("Bootstrap: %s", result.error)
+            result.transient = True
             return result
 
-        expected_authority_hex: str | None = None
-        if isinstance(authority, BaseException):
-            logger.info(
-                "Bootstrap: Oracle authority pre-resolve unavailable (%s); "
-                "accepting config by operator d-tag, discovering author from event.",
-                authority,
-            )
-        elif authority and authority.get("npub"):
-            result.authority_npub = authority["npub"]
-            expected_authority_hex = PublicKey.from_npub(authority["npub"]).hex()
+        if isinstance(authority, BaseException) or not (authority and authority.get("npub")):
+            detail = authority if isinstance(authority, BaseException) else "none named"
+            result.error = f"The Oracle named no Authority for this operator: {detail}"
+            logger.warning("Bootstrap: %s", result.error)
+            # Registry entries and Oracle reachability both change: ask again.
+            result.transient = True
+            return result
+
+        result.authority_npub = authority["npub"]
+        expected_authority_hex = PublicKey.from_npub(authority["npub"]).hex()
 
         # Step 3: read our own config from Nostr using only our nsec.
         #
@@ -323,7 +323,7 @@ class BootstrapClient:
         #
         # The poll is synchronous websocket I/O, so it runs on a worker thread:
         # every other session on this process keeps moving while we read.
-        config = author_hex = diag = None
+        config = diag = None
         for attempt, pause in enumerate(ladder, start=1):
             read = await asyncio.to_thread(
                 receive_bootstrap_config,
@@ -331,7 +331,7 @@ class BootstrapClient:
                 relays=relays,
                 expected_authority_hex=expected_authority_hex,
             )
-            config, author_hex, diag = read.config, read.author_hex, read.diag
+            config, diag = read.config, read.diag
             if config is not None:
                 if read.thin:
                     _spread_in_background(read, relays)
@@ -359,23 +359,12 @@ class BootstrapClient:
             await self._report_unreachable_relays(relays, diag)
             result.error = (
                 "No bootstrap config on relays for this operator"
-                + (
-                    f" from authority {result.authority_npub[:20]}..."
-                    if result.authority_npub
-                    else ""
-                )
+                f" from authority {result.authority_npub[:20]}..."
             )
             # Reachability is a moment-in-time fact, so this verdict is not
             # durable — see ensure_bootstrapped, which declines to cache it.
             result.transient = True
             return result
-
-        # Discover the Authority from the event when the Oracle didn't pre-resolve.
-        if author_hex and not result.authority_npub:
-            try:
-                result.authority_npub = PublicKey(bytes.fromhex(author_hex)).bech32()
-            except Exception as e:  # noqa: BLE001
-                logger.debug("Could not encode author %s as npub: %s", author_hex[:16], e)
 
         result.config = config
         result.neon_database_url = config.get("neon_database_url")
@@ -385,7 +374,7 @@ class BootstrapClient:
             logger.info(
                 "Bootstrap complete: npub=%s, authority=%s, neon=configured",
                 self.npub[:16],
-                result.authority_npub[:16] if result.authority_npub else "?",
+                result.authority_npub[:16],
             )
         else:
             result.error = "Neon URL not in bootstrap config from Authority"

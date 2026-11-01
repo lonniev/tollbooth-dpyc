@@ -71,6 +71,7 @@ def test_operator_reads_back_and_decrypts_with_only_its_nsec() -> None:
         read = receive_bootstrap_config(
             operator_nsec=OP_NSEC,
             relays=["wss://relay.test"],
+            expected_authority_hex=AUTH_HEX,
         )
     assert read.config == CONFIG, read.diag
     # The Authority npub is DISCOVERED from the event's author — the operator
@@ -78,10 +79,9 @@ def test_operator_reads_back_and_decrypts_with_only_its_nsec() -> None:
     assert read.author_hex == AUTH_HEX
 
 
-def test_receive_filter_targets_kind_30078_and_d_tag_without_authors() -> None:
-    """The REQ filter selects the replaceable kind + the operator's own scoped
-    `d` tag, with NO `authors` clause (the operator finds its own config without
-    knowing who signed it) and no `since` window."""
+def test_receive_filter_asks_only_for_the_authoritys_event_under_our_d_tag() -> None:
+    """The REQ filter selects the replaceable kind, the named Authority and the
+    operator's own scoped `d` tag, with no `since` window."""
     sent: list = []
     recv_ws = MagicMock()
     recv_ws.recv.side_effect = [json.dumps(["EOSE", "sub"])]
@@ -90,18 +90,19 @@ def test_receive_filter_targets_kind_30078_and_d_tag_without_authors() -> None:
         receive_bootstrap_config(
             operator_nsec=OP_NSEC,
             relays=["wss://relay.test"],
+            expected_authority_hex=AUTH_HEX,
         )
     req = next(m for m in sent if m[0] == "REQ")
     filt = req[2]
     assert filt["kinds"] == [30078]
-    assert "authors" not in filt  # no pre-known Authority required
+    assert filt["authors"] == [AUTH_HEX]
     assert filt["#d"] == [f"{BOOTSTRAP_CONFIG_TAG}:{OP_HEX}"]
     assert "since" not in filt
 
 
 def test_expected_authority_filter_rejects_a_spoofed_event() -> None:
-    """With a trusted Authority known, an event bearing our `d` tag from any
-    OTHER author is ignored — the spoof guard for the author-agnostic query."""
+    """A relay may ignore the `authors` clause, so an event bearing our `d` tag
+    from any OTHER author is still dropped."""
     ev = _publish_and_capture()  # legitimately authored by AUTH_PK
 
     recv_ws = MagicMock()
@@ -118,6 +119,22 @@ def test_expected_authority_filter_rejects_a_spoofed_event() -> None:
         )
     assert read.config is None, read.diag  # real event dropped: author != expected
     assert read.author_hex is None
+
+
+def test_an_event_claiming_the_authority_with_a_bad_signature_is_dropped() -> None:
+    forged = dict(_publish_and_capture(), sig="00" * 64)
+    recv_ws = MagicMock()
+    recv_ws.recv.side_effect = [
+        json.dumps(["EVENT", "sub", forged]),
+        json.dumps(["EOSE", "sub"]),
+    ]
+    with patch("websocket.create_connection", return_value=recv_ws):
+        read = receive_bootstrap_config(
+            operator_nsec=OP_NSEC,
+            relays=["wss://relay.test"],
+            expected_authority_hex=AUTH_HEX,
+        )
+    assert read.config is None, read.diag
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +199,7 @@ def test_slower_relay_holding_the_newer_revision_wins_within_the_settle_window()
     }
     with patch("websocket.create_connection", side_effect=_by_relay(table)):
         read = receive_bootstrap_config(
-            operator_nsec=OP_NSEC, relays=list(table),
+            operator_nsec=OP_NSEC, relays=list(table), expected_authority_hex=AUTH_HEX,
         )
     assert read.config == {"neon_database_url": "postgresql://current"}
     assert read.author_hex == AUTH_HEX
@@ -202,7 +219,7 @@ def test_refusing_relay_is_an_error_but_a_slow_one_is_only_slow(monkeypatch) -> 
     }
     with patch("websocket.create_connection", side_effect=_by_relay(table)):
         read = receive_bootstrap_config(
-            operator_nsec=OP_NSEC, relays=list(table),
+            operator_nsec=OP_NSEC, relays=list(table), expected_authority_hex=AUTH_HEX,
         )
     assert read.config == CONFIG
     assert read.diag == "relays=3, events=1, slow=1, errors=[wss://refuses: refused]"
@@ -223,7 +240,9 @@ def test_holders_are_the_relays_that_served_the_winning_event() -> None:
         "wss://empty": _serving(None),
     }
     with patch("websocket.create_connection", side_effect=_by_relay(table)):
-        read = receive_bootstrap_config(operator_nsec=OP_NSEC, relays=list(table))
+        read = receive_bootstrap_config(
+            operator_nsec=OP_NSEC, relays=list(table), expected_authority_hex=AUTH_HEX,
+        )
     assert read.event["id"] == fresh["id"]
     assert sorted(read.holders) == ["wss://fresh-a", "wss://fresh-b"]
     assert read.thin, "two copies is one outage from one"
@@ -233,13 +252,17 @@ def test_a_config_on_three_relays_is_not_thin() -> None:
     fresh = _event_for(CONFIG, at=1_700_000_000)
     table = {f"wss://r{i}": _serving(fresh) for i in range(3)}
     with patch("websocket.create_connection", side_effect=_by_relay(table)):
-        read = receive_bootstrap_config(operator_nsec=OP_NSEC, relays=list(table))
+        read = receive_bootstrap_config(
+            operator_nsec=OP_NSEC, relays=list(table), expected_authority_hex=AUTH_HEX,
+        )
     assert not read.thin
 
 
 def test_no_config_is_never_thin() -> None:
     with patch("websocket.create_connection", side_effect=_serving(None)):
-        read = receive_bootstrap_config(operator_nsec=OP_NSEC, relays=["wss://r"])
+        read = receive_bootstrap_config(
+            operator_nsec=OP_NSEC, relays=["wss://r"], expected_authority_hex=AUTH_HEX,
+        )
     assert read.config is None and not read.thin
 
 

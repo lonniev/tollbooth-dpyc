@@ -244,23 +244,15 @@ def receive_bootstrap_config(
     *,
     operator_nsec: str,
     relays: list[str] | None = None,
-    expected_authority_hex: str | None = None,
+    expected_authority_hex: str,
 ) -> ConfigRead:
-    """Read bootstrap config from Nostr relays using ONLY the operator nsec.
+    """Read bootstrap config from Nostr relays with the operator nsec.
 
     Called by the operator on cold start. Polls relays for the config event
-    (kind 30078) scoped to this operator's own ``d`` tag — the operator does
-    NOT need to know its Authority in advance. Each candidate is decrypted with
-    the **event's own author** as the NIP-04 counterparty, so the Authority npub
-    is *discovered* from the event rather than supplied. No age window: a
+    (kind 30078) that ``expected_authority_hex`` published under this operator's
+    own ``d`` tag. Anyone can publish under that tag, so an event from any other
+    author, or one whose signature does not verify, is ignored. No age window: a
     replaceable event is the current config however old it is.
-
-    ``expected_authority_hex`` (optional): when the caller already knows the
-    trusted Authority (e.g. verified via the Oracle), only events from that
-    author are accepted — a spoofed event carrying this operator's ``d`` tag
-    from any other author is ignored. When ``None``, newest-``ts`` wins across
-    all authors and the caller is expected to verify the returned author
-    out-of-band (Oracle cross-check) before trusting the config.
 
     Returns a :class:`ConfigRead`: the winning config, its author's hex pubkey
     (``None`` when no config was found), the diagnostics, and the signed event
@@ -283,19 +275,18 @@ def receive_bootstrap_config(
     # Sanity check — ensure hex strings are valid
     try:
         bytes.fromhex(op_privkey_hex)
-        if expected_authority_hex is not None:
-            bytes.fromhex(expected_authority_hex)
+        bytes.fromhex(expected_authority_hex)
     except ValueError as e:
         logger.error("Bootstrap key hex invalid: priv=%s... err=%s",
                      op_privkey_hex[:8], e)
         return ConfigRead(None, None, f"key hex error: {e}")
 
-    # Build subscription filter: the config event (kind 30078) scoped to THIS
-    # operator's `d` tag. No `authors` clause — the `d` tag is already namespaced
-    # by operator pubkey, so the operator finds its own config without knowing
-    # who signed it. No `since` — a replaceable is the current config however old.
+    # Build subscription filter: the Authority's config event (kind 30078) scoped
+    # to THIS operator's `d` tag. No `since` — a replaceable is the current config
+    # however old.
     sub_filter = {
         "kinds": [30078],
+        "authors": [expected_authority_hex],
         "#d": [_config_d_tag(op_pubkey_hex)],
     }
 
@@ -422,11 +413,22 @@ class _RelayRead:
     event: dict[str, Any] | None = None
 
 
+def _signature_verifies(event_data: dict[str, Any]) -> bool:
+    """True when a relay-served event's id and signature are its author's."""
+    from pynostr.event import Event  # type: ignore[import-untyped]
+
+    try:
+        return bool(Event.from_dict(event_data).verify())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Bootstrap event could not be verified: %s", exc)
+        return False
+
+
 def _read_one(
     relay_url: str,
     sub_filter: dict[str, Any],
     op_privkey_hex: str,
-    expected_authority_hex: str | None,
+    expected_authority_hex: str,
 ) -> _RelayRead:
     """Subscribe to one relay and read until EOSE, inside one time budget.
 
@@ -459,9 +461,9 @@ def _read_one(
             events += 1
             event_data = msg[2]
             author_hex = event_data.get("pubkey", "")
-            # When a trusted author is known, ignore anyone else's event bearing
-            # our `d` tag (spoof guard).
-            if expected_authority_hex and author_hex != expected_authority_hex:
+            # A relay need not honor the `authors` clause, so check both the
+            # author and the signature that makes it that author's event.
+            if author_hex != expected_authority_hex or not _signature_verifies(event_data):
                 continue
             try:
                 payload = json.loads(nip04_decrypt(

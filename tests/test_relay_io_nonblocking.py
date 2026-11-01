@@ -166,7 +166,7 @@ async def test_bootstrap_relay_read_does_not_block_event_loop() -> None:
     event = captured["event"]
 
     oracle = AsyncMock()
-    oracle.resolve_authority_for = AsyncMock(return_value=None)
+    oracle.resolve_authority_for = AsyncMock(return_value={"npub": authority.public_key.bech32()})
     oracle.session = MagicMock()  # a session yields a client bound to one connection
     oracle.session.return_value.__aenter__.return_value = oracle
     client = BootstrapClient(nsec_hex=operator.bech32(), relays=["wss://relay.test"])
