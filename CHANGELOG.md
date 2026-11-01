@@ -13,7 +13,7 @@ Changes not yet released live in `changelog.d/`, one file per change — see the
 
 ### Security
 
-- An operator now takes its Neon URL only from the Authority the Oracle names. With no named Authority it reports a temporary failure and asks again on the next call, and it verifies the signature on the config event. Before, an Oracle failure at cold start let a config from any Nostr author win.
+- An operator now takes its Neon URL only from the Authority the Oracle names or last confirmed, and it verifies the signature on the config event. With neither, it reports a temporary failure and asks again on the next call. Before, an Oracle failure at cold start let a config from any Nostr author win.
 
 - The demos read `NEON_DATABASE_URL` from the environment and no longer carry a database credential. `demos/` is left out of the sdist.
 
