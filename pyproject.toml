@@ -89,6 +89,9 @@ Homepage = "https://github.com/lonniev/tollbooth-dpyc"
 Repository = "https://github.com/lonniev/tollbooth-dpyc"
 Issues = "https://github.com/lonniev/tollbooth-dpyc/issues"
 
+[tool.hatch.build.targets.sdist]
+exclude = ["demos/"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/tollbooth"]
 
