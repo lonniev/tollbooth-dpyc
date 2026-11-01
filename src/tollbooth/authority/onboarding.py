@@ -50,6 +50,9 @@ class OnboardingChallenge:
     phase: str  # "claim" | "approval"
     parent_npub: str | None = None  # registered approver (Prime, NA, etc.)
     nonce: str = ""  # names the reply to this phase's DM challenge
+    approved: bool = False  # the parent's yes was read (a reply is consumed when read)
+    registered: bool = False  # the registry accepted the candidate
+    commit_url: str = ""
     created_at: float = field(default_factory=time.time)
     ttl_seconds: int = _DEFAULT_TTL_SECONDS
 

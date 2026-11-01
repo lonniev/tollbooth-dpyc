@@ -406,6 +406,25 @@ async def _nostr_exchange() -> Any:
     return _exchange
 
 
+def _reply_refusal(reply: dict[str, Any], field: str, who: str) -> dict[str, Any] | None:
+    """Why this courier reply does not count as a yes, or ``None`` when it does.
+
+    With no reply yet the onboarding stays open, so the caller can ask again. An
+    answer other than yes ends it.
+    """
+    if reply.get("success") is not True:
+        return {
+            "success": False,
+            "error_code": reply.get("error_code"),
+            "error": f"No valid reply from {who} yet: {reply.get('error', 'not found')}",
+        }
+    answer = str((reply.get("credentials") or {}).get(field, "")).strip().lower()
+    if answer != "yes":
+        _onboarding.complete()
+        return {"success": False, "error": f"Onboarding ended: {who} did not answer yes."}
+    return None
+
+
 async def _dm_owner(runtime: OperatorRuntime, text: str) -> None:
     """Best-effort DM to the Authority's owner. Never raises."""
     try:
@@ -429,19 +448,16 @@ def _resolve_npub_or_operator(npub: str) -> str:
 
 
 async def _get_authority_npub() -> str | None:
+    """The saved curator, or ``None`` when there is none. A failed read raises:
+    it says nothing about whether the slot is free."""
     global _cached_authority_npub
     if _cached_authority_npub is not None:
         return _cached_authority_npub
-    try:
-        vault = await _get_runtime().vault()
-        npub = await vault.get_config("authority_npub")
-        if npub:
-            _cached_authority_npub = npub
-            return npub
-    except Exception:
-        logger.warning(
-            "authority_npub vault read failed; treating as unset", exc_info=True,
-        )
+    vault = await _get_runtime().vault()
+    npub = await vault.get_config("authority_npub")
+    if npub:
+        _cached_authority_npub = npub
+        return npub
     return None
 
 
@@ -1642,7 +1658,10 @@ def register_authority_tools(
         if not candidate_npub.startswith("npub1") or len(candidate_npub) < 60:
             return {"success": False, "error": "Invalid npub format."}
 
-        existing = await _get_authority_npub()
+        try:
+            existing = await _get_authority_npub()
+        except Exception as exc:  # noqa: BLE001
+            return {"success": False, "error": f"Could not read this Authority's curator: {exc}"}
         if existing:
             return {
                 "success": False,
@@ -1705,11 +1724,13 @@ def register_authority_tools(
 
         try:
             exchange = await _nostr_exchange()
-            await exchange.receive(
+            reply = await exchange.receive(
                 sender_npub=candidate_npub, service="authority_claim", nonce=challenge.nonce,
             )
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"No valid claim DM received: {exc}"}
+        if refusal := _reply_refusal(reply, "claim", "the candidate"):
+            return refusal
 
         try:
             signer = _get_nostr_signer()
@@ -1768,13 +1789,39 @@ def register_authority_tools(
         if not parent_npub:
             return {"success": False, "error": "Parent Authority npub not set."}
 
-        try:
-            exchange = await _nostr_exchange()
-            await exchange.receive(
-                sender_npub=parent_npub, service="authority_approval", nonce=challenge.nonce,
-            )
-        except Exception as exc:  # noqa: BLE001
-            return {"success": False, "error": f"No approval received from parent Authority: {exc}"}
+        # A reply is consumed when it is read, so each finished step is remembered
+        # and a retry resumes after it.
+        if not challenge.approved:
+            try:
+                exchange = await _nostr_exchange()
+                reply = await exchange.receive(
+                    sender_npub=parent_npub, service="authority_approval", nonce=challenge.nonce,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {"success": False, "error": f"No approval received from parent Authority: {exc}"}
+            if refusal := _reply_refusal(reply, "approval", "the parent Authority"):
+                return refusal
+            challenge.approved = True
+
+        # The registry first: a candidate is activated only once it is listed.
+        if not challenge.registered:
+            try:
+                service_url = await _resolve_own_service_url()
+                challenge.commit_url = await _register_via_oracle(
+                    authority_npub=candidate_npub,
+                    display_name=f"Authority ({candidate_npub[:16]}...)",
+                    service_url=service_url,
+                    upstream_authority_npub=parent_npub,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "success": False,
+                    "error": (
+                        f"The parent approved, but the registry refused the candidate: {exc}. "
+                        "Nothing was activated. Call check_authority_approval again to retry."
+                    ),
+                }
+            challenge.registered = True
 
         try:
             await _set_authority_npub(candidate_npub)
@@ -1787,18 +1834,7 @@ def register_authority_tools(
                 ),
             }
 
-        commit_url = ""
-        try:
-            service_url = await _resolve_own_service_url()
-            commit_url = await _register_via_oracle(
-                authority_npub=candidate_npub,
-                display_name=f"Authority ({candidate_npub[:16]}...)",
-                service_url=service_url,
-                upstream_authority_npub=parent_npub,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Oracle registration failed (Authority still activated): %s", exc)
-
+        commit_url = challenge.commit_url
         _onboarding.complete()
 
         result: dict[str, Any] = {

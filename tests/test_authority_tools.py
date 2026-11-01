@@ -466,8 +466,9 @@ class FakeExchange:
     """The courier exchange as onboarding uses it. ``receive`` has the real
     signature, so a call that leaves out the nonce fails as it would live."""
 
-    def __init__(self, nonce: str = "bold-hawk-42"):
+    def __init__(self, nonce: str = "bold-hawk-42", reply: dict | None = None):
         self.nonce = nonce
+        self.reply = reply or {"success": True, "credentials": {"claim": "yes", "approval": "yes"}}
         self.opened: list[str] = []
         self.received: list[tuple[str, str, str]] = []
 
@@ -477,7 +478,7 @@ class FakeExchange:
 
     async def receive(self, sender_npub, *, service, nonce):
         self.received.append((sender_npub, service, nonce))
-        return {"success": True}
+        return self.reply
 
 
 def _exchange(fake):
@@ -583,6 +584,8 @@ async def test_check_approval_aborts_when_authority_npub_persist_fails():
     exchange = FakeExchange()
     with _tools() as tools, patch.object(at, "_onboarding", state), \
              _exchange(exchange), \
+             patch.object(at, "_resolve_own_service_url", AsyncMock(return_value="https://a/mcp")), \
+             patch.object(at, "_register_via_oracle", AsyncMock(return_value="https://commit")), \
              patch.object(at, "_set_authority_npub",
                       AsyncMock(side_effect=RuntimeError("neon unreachable"))):
         r = await tools["check_authority_approval"](candidate_npub="npub1cand")
@@ -613,3 +616,87 @@ async def test_set_authority_npub_propagates_write_failure_without_caching():
         with pytest.raises(RuntimeError, match="neon down"):
             await at._set_authority_npub("npub1xyz")
         assert at._cached_authority_npub is None  # never cached on failed write
+
+
+# ── A reply is the proof: nothing proceeds without a real yes (F18)
+
+NOT_FOUND = {"success": False, "error_code": "courier_not_found", "error": "no DM"}
+SAID_NO = {"success": True, "credentials": {"approval": "no", "claim": "no"}}
+
+
+def _at_approval():
+    state = OnboardingState()
+    state.start_claim("npub1cand")
+    state.promote_to_approval("npub1parent").nonce = "approval-nonce-2"
+    return state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", [NOT_FOUND, SAID_NO])
+async def test_a_claim_without_a_yes_never_reaches_the_parent(reply):
+    state = OnboardingState()
+    state.start_claim("npub1cand").nonce = "claim-nonce-1"
+    exchange = FakeExchange(reply=reply)
+    with _tools(signer=SimpleNamespace(npub="npub1auth")) as tools, patch.object(at, "_onboarding", state), \
+             _exchange(exchange):
+        r = await tools["confirm_authority_claim"](candidate_npub="npub1cand")
+    assert r["success"] is False
+    assert exchange.opened == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", [NOT_FOUND, SAID_NO])
+async def test_an_approval_without_a_yes_activates_and_registers_nothing(reply):
+    register = AsyncMock(return_value="https://commit")
+    save = AsyncMock()
+    with _tools() as tools, patch.object(at, "_onboarding", _at_approval()), \
+             _exchange(FakeExchange(reply=reply)), \
+             patch.object(at, "_register_via_oracle", register), \
+             patch.object(at, "_set_authority_npub", save):
+        r = await tools["check_authority_approval"](candidate_npub="npub1cand")
+    assert r["success"] is False
+    register.assert_not_awaited()
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_reply_yet_keeps_the_onboarding_open_and_a_no_ends_it():
+    state = _at_approval()
+    with _tools() as tools, patch.object(at, "_onboarding", state), _exchange(FakeExchange(reply=NOT_FOUND)):
+        await tools["check_authority_approval"](candidate_npub="npub1cand")
+    assert state.get() is not None
+
+    with _tools() as tools, patch.object(at, "_onboarding", state), _exchange(FakeExchange(reply=SAID_NO)):
+        await tools["check_authority_approval"](candidate_npub="npub1cand")
+    assert state.get() is None
+
+
+@pytest.mark.asyncio
+async def test_a_registry_refusal_activates_nothing_and_a_retry_needs_no_second_reply():
+    state = _at_approval()
+    exchange = FakeExchange()
+    save = AsyncMock()
+    with _tools() as tools, patch.object(at, "_onboarding", state), _exchange(exchange), \
+             patch.object(at, "_resolve_own_service_url", AsyncMock(return_value="https://a/mcp")), \
+             patch.object(at, "_set_authority_npub", save), \
+             patch.object(at, "_register_via_oracle", AsyncMock(side_effect=RuntimeError("refused"))):
+        r = await tools["check_authority_approval"](candidate_npub="npub1cand")
+        assert r["success"] is False and "refused" in r["error"]
+        save.assert_not_awaited()
+        assert state.get() is not None
+
+    with _tools() as tools, patch.object(at, "_onboarding", state), _exchange(exchange), \
+             patch.object(at, "_resolve_own_service_url", AsyncMock(return_value="https://a/mcp")), \
+             patch.object(at, "_set_authority_npub", save), \
+             patch.object(at, "_register_via_oracle", AsyncMock(return_value="https://commit")):
+        r = await tools["check_authority_approval"](candidate_npub="npub1cand")
+    assert r["success"] is True and r["commit_url"] == "https://commit"
+    assert len(exchange.received) == 1  # the parent's reply was consumed once
+    save.assert_awaited_once_with("npub1cand")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_curator_read_does_not_open_the_slot():
+    with _tools() as tools, patch.object(at, "_get_authority_npub", AsyncMock(side_effect=RuntimeError("vault"))):
+        r = await tools["register_authority_npub"](candidate_npub="npub1" + "q" * 59)
+    assert r["success"] is False and "Could not read" in r["error"]
