@@ -1,21 +1,24 @@
 """Operator bootstrap — discover config from Nostr using only nsec.
 
-The bootstrap sequence (no direct GitHub access — operators are nsec-only):
+The bootstrap sequence:
 1. Derive npub from nsec
-2. Seed the Nostr relay set from the Oracle (one MCP call to the one fixed
-   anchor, ``DPYC_ORACLE_MCP_URL``)
-3. Poll those relays for THIS operator's config event by its own ``d`` tag —
-   the operator does not need to know its Authority to find it; the Authority
-   npub is discovered from the event's author
+2. Ask the Oracle (``DPYC_ORACLE_MCP_URL``) for the relay set and this
+   operator's Authority
+3. Poll those relays for the config event that Authority published under THIS
+   operator's own ``d`` tag
 4. Extract Neon URL from the encrypted config
 5. Connect to Neon with encryption
 
 The Authority publishes the bootstrap config as a NIP-33 parameterized-
 replaceable event (kind 30078) at registration time; relays keep the latest,
 so it does not age off. The operator reads it on cold start — no OAuth, no
-GitHub reads, no additional env vars beyond the nsec. The Oracle is asked who
-the Authority is (to accept only its event, and/or to verify the discovered
-author), but a working Neon URL is the final backstop either way.
+additional env vars beyond the nsec.
+
+The Oracle may be down when an operator comes up, so neither of its answers is
+fatal to lose. Silence about relays falls back to the published ``relays.json``,
+the one GitHub read an operator makes. Silence about the Authority falls back to
+the operator's own record on Nostr (:mod:`tollbooth.operator_state`). An explicit
+"no Authority" is an answer: the operator waits, and withdraws its record.
 """
 
 from __future__ import annotations
@@ -183,6 +186,26 @@ def _spread_in_background(read: ConfigRead, relays: list[str]) -> None:
     task.add_done_callback(_spreads.discard)
 
 
+def _record_state_in_background(nsec: str, authority_npub: str, relays: list[str]) -> None:
+    """Write down what the Oracle just confirmed, for a later start without it.
+
+    Bootstrap already has its answer, so nothing waits on this. Horizon may
+    freeze it between requests, and a process recycled first tries again on its
+    next cold start.
+    """
+    from tollbooth.operator_state import record_operator_state
+
+    async def record() -> None:
+        try:
+            await asyncio.to_thread(record_operator_state, nsec, authority_npub, relays)
+        except Exception as exc:  # noqa: BLE001 — the record is never load-bearing here
+            logger.info("Operator state not recorded: %s", type(exc).__name__)
+
+    task = asyncio.create_task(record())
+    _spreads.add(task)
+    task.add_done_callback(_spreads.discard)
+
+
 class BootstrapClient:
     """Discovers operator config from Nostr relays using only the nsec.
 
@@ -238,13 +261,14 @@ class BootstrapClient:
         *,
         retry_backoff: tuple[int, ...] | None = None,
     ) -> BootstrapResult:
-        """Run the full bootstrap sequence — nsec + Oracle + Nostr, no GitHub.
+        """Run the full bootstrap sequence — nsec + Oracle + Nostr.
 
-        1. Seed relays from the Oracle (or use injected ``relays``)
-        2. Ask the Oracle who our Authority is (best-effort — used to accept
-           only its config event; falls back to discover-from-event)
-        3. Poll relays for our config event by our own ``d`` tag
-        4. Extract Neon URL; the Authority npub is the event's author
+        1. Seed relays from the Oracle (or use injected ``relays``); if it is
+           silent, read the published relay list
+        2. Ask the Oracle who our Authority is; if it is silent, read our own
+           record on Nostr; if it says none, wait
+        3. Poll relays for that Authority's config event under our own ``d`` tag
+        4. Extract Neon URL
 
         ``retry_backoff`` defaults to the long detached-runner ladder
         (:data:`_BOOTSTRAP_RETRY_BACKOFF`). Callers that serve live agents
@@ -256,6 +280,7 @@ class BootstrapClient:
 
         from tollbooth.bootstrap_relay import receive_bootstrap_config
         from tollbooth.oracle_client import OracleClientError, default_oracle_client
+        from tollbooth.relay_registry import fetch_published_relays, seed_relays
 
         ladder = retry_backoff if retry_backoff is not None else _BOOTSTRAP_RETRY_BACKOFF
 
@@ -270,13 +295,12 @@ class BootstrapClient:
         # both, since the Authority's hex is its spoof guard.
         #
         # Step 1: relay set. Injected relays win (tests / callers); otherwise the
-        # Oracle is the one fixed anchor an nsec-only operator may know a priori.
+        # Oracle, and the published list only when the Oracle is silent.
         #
         # Step 2: who is our Authority? We accept a config event ONLY from the
-        # Authority the Oracle names. Anyone can publish an event under our d-tag
-        # and encrypt it to us, so an operator with no named Authority has no
-        # config to trust: it waits and asks again, and never learns its
-        # Authority from an event.
+        # Authority the Oracle names, or the one it last confirmed in our own
+        # signed record. Anyone can publish an event under our d-tag and encrypt
+        # it to us, so an operator never learns its Authority from a config event.
         try:
             async with default_oracle_client().session() as oracle:
                 relays, authority = await asyncio.gather(
@@ -289,21 +313,54 @@ class BootstrapClient:
             authority = e
 
         if isinstance(relays, BaseException):
-            result.error = f"Cannot reach Oracle for relay set: {relays}"
+            oracle_relays_error = relays
+            try:
+                relays = await asyncio.to_thread(fetch_published_relays)
+            except Exception as e:  # noqa: BLE001
+                result.error = (
+                    f"Cannot reach Oracle for relay set: {oracle_relays_error}; "
+                    f"published relay list unavailable: {e}"
+                )
+                logger.warning("Bootstrap: %s", result.error)
+                result.transient = True
+                return result
+            seed_relays(relays)
+            logger.warning("Bootstrap: Oracle silent; using the published relay list.")
+
+        # Everything below is a fact that changes, so each failure is transient:
+        # the next call asks again.
+        oracle_confirmed = False
+        if isinstance(authority, BaseException):
+            from tollbooth.operator_state import read_operator_state
+
+            state = await asyncio.to_thread(read_operator_state, self._nsec_hex, relays)
+            if state is None:
+                result.error = (
+                    f"The Oracle is silent about this operator's Authority ({authority}) "
+                    "and no record of it was found on the relays."
+                )
+                logger.warning("Bootstrap: %s", result.error)
+                result.transient = True
+                return result
+            logger.warning(
+                "Bootstrap: Oracle silent (%s); gliding on our record, confirmed at %d.",
+                authority, state.confirmed_at,
+            )
+            relays = list(dict.fromkeys([*state.relays, *relays]))
+            seed_relays(relays)
+            authority_npub = state.authority_npub
+        elif authority and authority.get("npub"):
+            authority_npub = authority["npub"]
+            oracle_confirmed = True
+        else:
+            await self._withdraw_state(relays)
+            result.error = "The Oracle names no legitimate Authority for this operator."
             logger.warning("Bootstrap: %s", result.error)
             result.transient = True
             return result
 
-        if isinstance(authority, BaseException) or not (authority and authority.get("npub")):
-            detail = authority if isinstance(authority, BaseException) else "none named"
-            result.error = f"The Oracle named no Authority for this operator: {detail}"
-            logger.warning("Bootstrap: %s", result.error)
-            # Registry entries and Oracle reachability both change: ask again.
-            result.transient = True
-            return result
-
-        result.authority_npub = authority["npub"]
-        expected_authority_hex = PublicKey.from_npub(authority["npub"]).hex()
+        result.authority_npub = authority_npub
+        expected_authority_hex = PublicKey.from_npub(authority_npub).hex()
 
         # Step 3: read our own config from Nostr using only our nsec.
         #
@@ -371,6 +428,8 @@ class BootstrapClient:
         result.success = result.neon_database_url is not None
 
         if result.success:
+            if oracle_confirmed:
+                _record_state_in_background(self._nsec_hex, authority_npub, relays)
             logger.info(
                 "Bootstrap complete: npub=%s, authority=%s, neon=configured",
                 self.npub[:16],
@@ -380,6 +439,15 @@ class BootstrapClient:
             result.error = "Neon URL not in bootstrap config from Authority"
 
         return result
+
+    async def _withdraw_state(self, relays: list[str]) -> None:
+        """Best-effort: the Oracle said no, so no later start may glide on a record."""
+        from tollbooth.operator_state import withdraw_operator_state
+
+        try:
+            await asyncio.to_thread(withdraw_operator_state, self._nsec_hex, relays)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Operator state not withdrawn: %s", type(exc).__name__)
 
     async def _relays_from(self, oracle: OracleClient) -> list[str]:
         """The injected relays, else the Oracle's set — which then warms the

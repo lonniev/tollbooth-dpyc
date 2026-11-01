@@ -17,8 +17,8 @@ Send side (Authority):
         config={"neon_database_url": "postgres://..."},
     )
 
-Receive side (Operator) — nsec only, Authority discovered from the event:
-    read = receive_bootstrap_config(operator_nsec="nsec1...")
+Receive side (Operator) — the nsec and the Authority it was told to trust:
+    read = receive_bootstrap_config(operator_nsec="nsec1...", expected_authority_hex=...)
     neon_url = read.config.get("neon_database_url")
 
 When ``relays`` is omitted, both sides draw the relay set from the DPYC
