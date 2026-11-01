@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.109.1] — 2026-11-01
+
+### Security
+
+- Authority onboarding now acts on the replies it asks for. The candidate's claim and the parent's approval must each be a real `yes`, a candidate is activated only after the registry accepts it, and a failed read of the curator slot no longer counts as an empty slot.
+
 ## [0.109.0] — 2026-11-01
 
 ### Added
