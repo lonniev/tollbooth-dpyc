@@ -1,1 +1,0 @@
-- The demos read `NEON_DATABASE_URL` from the environment and no longer carry a database credential. `demos/` is left out of the sdist.

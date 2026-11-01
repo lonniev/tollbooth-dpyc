@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.109.0] — 2026-11-01
+
+### Added
+
+- Operators glide through Oracle outages. Each good bootstrap records its Authority and relays in an event the operator signs and encrypts to itself. A cold start with a silent Oracle reads the relays from the published `relays.json` and the Authority from that record, for up to 30 days after the Oracle last confirmed it. An explicit "no Authority" from the Oracle withdraws the record.
+
+### Security
+
+- An operator now takes its Neon URL only from the Authority the Oracle names or last confirmed, and it verifies the signature on the config event. With neither, it reports a temporary failure and asks again on the next call. Before, an Oracle failure at cold start let a config from any Nostr author win.
+
+- The demos read `NEON_DATABASE_URL` from the environment and no longer carry a database credential. `demos/` is left out of the sdist.
+
+- `notarize_ledger` requires the operator's proof, as its `restricted` category always said. The opportunistic background notarization is unchanged.
+
+- Per-patron constraints now see the patron's real call counts. Free trials end, `finite_supply` and `periodic_refresh` with `scope: per_patron` deny, and expressions on `env.invocation_count` read a true figure, at the charge and in `check_price`. Per-patron windows count whole days. When the ledger cannot be read, a chain that needs these counts refuses the call without charging.
+
 ## [0.108.1] — 2026-10-29
 
 ### Fixed
