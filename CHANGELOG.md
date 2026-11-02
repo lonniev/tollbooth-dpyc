@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.109.2] — 2026-11-01
+
+### Security
+
+- A failed read of `NeonVault.get_config` now raises instead of reading as "not set". A revoked proof grant is refused while the database cannot answer, and an Authority no longer mistakes a failed read for an empty curator slot.
+
 ## [0.109.1] — 2026-11-01
 
 ### Security
