@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from tollbooth.vault_backend import LedgerVersionConflict
 from tollbooth.proven_npub import ProofGrantRevocations, RevocationStoreUnavailable
+from tollbooth.vault_backend import LedgerVersionConflict
 from tollbooth.vaults.neon import NeonQueryError, NeonVault
 
 # ---------------------------------------------------------------------------
