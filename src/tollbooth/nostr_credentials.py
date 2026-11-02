@@ -1615,15 +1615,15 @@ class NostrCredentialExchange:
             "error_code": None if persisted else "credential_vault_unavailable",
             "error": None if persisted else (
                 "Credentials received and validated but the vault write "
-                "failed. Retry receive_credentials in 10–15 seconds — the "
-                "DM is gone from the relay; the agent must resend."
+                "failed, and the DM is gone from the relay. The sender must "
+                "deliver them again on a fresh channel."
             ),
             "message": (
                 f"Received {len(delivered)} field(s) for {template.service}."
                 + (
                     (" Merged and stored." if persisted else
-                     " Merge stored locally but the vault write failed — resend; "
-                     "retry receive_credentials in a moment.")
+                     " The vault write failed, so nothing was kept. "
+                     "The sender must deliver them again.")
                     if self._credential_vault is not None else ""
                 )
                 + " Relay copy deletion requested."
