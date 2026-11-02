@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.109.3] — 2026-11-02
+
+### Security
+
+- `receive_credentials` and `receive_patron_credentials` no longer return decrypted credential values when the vault write fails. The error now says the sender must deliver them again.
+
 ## [0.109.2] — 2026-11-01
 
 ### Security
