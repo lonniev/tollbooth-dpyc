@@ -503,17 +503,15 @@ class NeonVault:
     async def get_config(self, key: str) -> str | None:
         """Read a value from the ``authority_config`` table.
 
-        Returns ``None`` if the key does not exist.
+        Returns ``None`` if the key does not exist. A failed read raises: it
+        says nothing about whether the key exists.
         """
-        try:
-            result = await self._execute(
-                f"SELECT value FROM {self._t('authority_config')} WHERE key = $1",
-                [key],
-            )
-            rows = result.get("rows", [])
-            return rows[0]["value"] if rows else None
-        except Exception:  # noqa: BLE001
-            return None
+        result = await self._execute(
+            f"SELECT value FROM {self._t('authority_config')} WHERE key = $1",
+            [key],
+        )
+        rows = result.get("rows", [])
+        return rows[0]["value"] if rows else None
 
     async def set_config(self, key: str, value: str) -> None:
         """Upsert a value into the ``authority_config`` table."""

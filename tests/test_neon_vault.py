@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from tollbooth.vault_backend import LedgerVersionConflict
+from tollbooth.proven_npub import ProofGrantRevocations, RevocationStoreUnavailable
 from tollbooth.vaults.neon import NeonQueryError, NeonVault
 
 # ---------------------------------------------------------------------------
@@ -309,3 +310,44 @@ class TestProtocolConformance:
 
         vault = _vault()
         assert isinstance(vault, VaultBackend)
+
+
+class TestGetConfig:
+    @pytest.mark.asyncio
+    async def test_a_saved_key_reads_its_value(self) -> None:
+        vault = _vault()
+        vault._client.post = AsyncMock(
+            return_value=_response(json_data={"rows": [{"value": "v"}]}),
+        )
+        assert await vault.get_config("k") == "v"
+
+    @pytest.mark.asyncio
+    async def test_a_missing_key_reads_none(self) -> None:
+        vault = _vault()
+        vault._client.post = AsyncMock(return_value=_response(json_data={"rows": []}))
+        assert await vault.get_config("k") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(httpx.ConnectError("down"), id="unreachable"),
+            pytest.param(_response(500), id="server-error"),
+            pytest.param(
+                _response(400, {"message": "permission denied", "code": "42501"}),
+                id="sql-error",
+            ),
+        ],
+    )
+    async def test_a_failed_read_raises(self, failure: object) -> None:
+        vault = _vault()
+        vault._client.post = AsyncMock(side_effect=[failure])
+        with pytest.raises((httpx.HTTPError, NeonQueryError)):
+            await vault.get_config("k")
+
+    @pytest.mark.asyncio
+    async def test_a_failed_read_refuses_a_grant_instead_of_passing_it(self) -> None:
+        vault = _vault()
+        vault._client.post = AsyncMock(side_effect=httpx.ConnectError("down"))
+        with pytest.raises(RevocationStoreUnavailable):
+            await ProofGrantRevocations(vault=vault).is_revoked("npub1x", 1)

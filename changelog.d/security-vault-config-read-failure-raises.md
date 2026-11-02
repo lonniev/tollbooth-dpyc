@@ -1,0 +1,1 @@
+- A failed read of `NeonVault.get_config` now raises instead of reading as "not set". A revoked proof grant is refused while the database cannot answer, and an Authority no longer mistakes a failed read for an empty curator slot.
