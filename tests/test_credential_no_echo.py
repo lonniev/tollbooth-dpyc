@@ -168,3 +168,83 @@ async def test_receive_patron_credentials_card_branch_strips_credentials() -> No
     )
     _assert_no_creds(result)
     assert result.get("success") is True
+
+
+# ---------------------------------------------------------------------------
+# A failed vault write: the exchange reports success=False and still carries
+# the decrypted values (audit F13).
+# ---------------------------------------------------------------------------
+
+FAILED_WRITE = {
+    "success": False,
+    "service": "test-operator",
+    "credentials": dict(SECRET_CREDS),
+    "persisted": False,
+    "error_code": "credential_vault_unavailable",
+    "error": "the vault write failed",
+}
+SENDER = "npub1patrontestxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+
+def _courier_whose_vault_write_fails() -> SecureCourierService:
+    svc = _leaky_courier()
+    svc._exchange.redeem_credential_card = AsyncMock(return_value=dict(FAILED_WRITE))
+    svc._exchange.receive = AsyncMock(return_value=dict(FAILED_WRITE))
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_service_strips_credentials_when_a_card_write_fails() -> None:
+    result = await _courier_whose_vault_write_fails().redeem_card("ncred1fake")
+    _assert_no_creds(result)
+    assert result["success"] is False
+    assert result["error_code"] == "credential_vault_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_service_strips_credentials_when_a_receive_write_fails() -> None:
+    result = await _courier_whose_vault_write_fails().receive(
+        SENDER, service="test-operator", nonce="a-nonce",
+    )
+    _assert_no_creds(result)
+    assert result["success"] is False
+    assert result["error_code"] == "credential_vault_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("receive_credentials", {"service": "test-operator", "credential_card": "ncred1fake"}),
+        ("receive_credentials", {"service": "test-operator", "nonce": "a-nonce"}),
+        ("receive_patron_credentials", {"credential_card": "ncred1fake"}),
+        ("receive_patron_credentials", {"nonce": "a-nonce"}),
+    ],
+)
+async def test_tools_strip_credentials_when_the_write_fails(tool: str, args: dict) -> None:
+    rt = _runtime()
+    rt._courier = _courier_whose_vault_write_fails()
+    result = await _register(rt)[tool](sender_npub=SENDER, **args)
+    _assert_no_creds(result)
+    assert result["success"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args",
+    [{"credential_card": "ncred1fake"}, {"nonce": "a-nonce"}],
+)
+async def test_tools_strip_credentials_a_courier_failed_to(args: dict) -> None:
+    """The tools hold the line even if the service ever stops stripping."""
+    rt = _runtime()
+    courier = MagicMock()
+    courier.redeem_card = AsyncMock(return_value=dict(FAILED_WRITE))
+    courier.receive = AsyncMock(return_value=dict(FAILED_WRITE))
+    rt.courier = AsyncMock(return_value=courier)
+    tools = _register(rt)
+    _assert_no_creds(
+        await tools["receive_patron_credentials"](sender_npub=SENDER, **args)
+    )
+    _assert_no_creds(
+        await tools["receive_credentials"](sender_npub=SENDER, service="test-operator", **args)
+    )

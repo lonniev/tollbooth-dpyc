@@ -321,9 +321,8 @@ class SecureCourierService:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Credential card generation failed: %s", exc)
 
-            # NEVER echo credential values
-            result.pop("credentials", None)
-
+        # NEVER echo credential values, least of all on a failed vault write.
+        result.pop("credentials", None)
         return result
 
     async def forget(
@@ -604,7 +603,6 @@ class SecureCourierService:
                     )
                     result["callback_error"] = str(exc)
 
-            # NEVER echo credential values
-            result.pop("credentials", None)
-
+        # NEVER echo credential values, least of all on a failed vault write.
+        result.pop("credentials", None)
         return result

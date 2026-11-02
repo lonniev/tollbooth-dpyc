@@ -116,6 +116,7 @@ async def receive_credentials_tool(
             result = await courier.receive(
                 sender_npub, service=service, nonce=nonce,
             )
+        result.pop("credentials", None)
 
         # Validate credentials via operator callback before accepting.
         # The courier strips credentials from the result for security,
@@ -300,12 +301,15 @@ async def receive_patron_credentials_tool(
         if credential_card:
             # Route through the wrapper, not courier._exchange directly,
             # so credential values are stripped before returning (audit S1).
-            return await courier.redeem_card(
+            result = await courier.redeem_card(
                 credential_card, service=service,
             )
-        return await courier.receive(
-            sender_npub, service, nonce=nonce,
-            request_tool="request_patron_credentials",
-        )
+        else:
+            result = await courier.receive(
+                sender_npub, service, nonce=nonce,
+                request_tool="request_patron_credentials",
+            )
+        result.pop("credentials", None)
+        return result
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": str(e)}

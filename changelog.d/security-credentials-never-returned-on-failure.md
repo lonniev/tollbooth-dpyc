@@ -1,0 +1,1 @@
+- `receive_credentials` and `receive_patron_credentials` no longer return decrypted credential values when the vault write fails. The error now says the sender must deliver them again.
