@@ -210,7 +210,8 @@ async def test_check_price_previews_the_bound_coupon_exactly_as_the_debit_will_c
     with patch("tollbooth.slug_tools.make_slug_tool", side_effect=fake_slug_tool):
         register_standard_tools(MagicMock(), "test", rt, service_name="test")
 
-    r = await tools["check_price"](tool_id=tid, npub=PATRON)
+    with _PASS_PROOF:
+        r = await tools["check_price"](tool_id=tid, npub=PATRON)
     assert r["success"] and r["constraints_enabled"] is True
     assert r["effective_cost_api_sats"] == 0 and r["base_cost_api_sats"] == 20
     assert coupons.burned == [], "a preview burns nothing"
@@ -218,6 +219,55 @@ async def test_check_price_previews_the_bound_coupon_exactly_as_the_debit_will_c
     r = await tools["check_price"](tool_id=tid)
     assert r["constraints_enabled"] is True and r["effective_cost_api_sats"] == 20
     assert any("npub required" in e["message"] for e in r["constraint_effects"])
+
+
+def _check_price_tool(rt):
+    from tollbooth.runtime import register_standard_tools
+
+    tools: dict = {}
+
+    def fake_slug_tool(_mcp, _slug, _identify):
+        def deco(fn):
+            tools[fn.__name__] = fn
+            return fn
+        return deco
+
+    with patch("tollbooth.slug_tools.make_slug_tool", side_effect=fake_slug_tool):
+        register_standard_tools(MagicMock(), "test", rt, service_name="test")
+    return tools["check_price"]
+
+
+@pytest.mark.asyncio
+async def test_check_price_shows_a_stranger_only_the_public_price():
+    """Naming someone else's npub reads nothing of theirs: no coupons, no ledger."""
+    registry = _registry("read_tool")
+    tid = next(iter(registry))
+    coupons = FakeCoupons([_coupon([tid])])
+    coupons.fetch_redemptions_for_chain = AsyncMock(side_effect=AssertionError("read a patron's coupons"))
+    rt = _runtime(registry, resolver=FakeResolver(cost=20, chain=[]), coupons=coupons)
+    ledgers = MagicMock()
+    ledgers.get = AsyncMock(side_effect=AssertionError("read a patron's ledger"))
+    rt._ledger_cache = ledgers
+    check_price = _check_price_tool(rt)
+
+    denied = AsyncMock(return_value={"success": False, "error_code": "proof_required"})
+    with patch("tollbooth.runtime.require_held_grant", denied):
+        r = await check_price(tool_id=tid, npub=PATRON)
+    assert r["success"] and r["effective_cost_api_sats"] == 20 and r["base_cost_api_sats"] == 20
+    assert any("public price" in e["message"] for e in r["constraint_effects"])
+    denied.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_check_price_with_a_bad_npub_is_the_public_price():
+    registry = _registry("read_tool")
+    tid = next(iter(registry))
+    coupons = FakeCoupons([_coupon([tid])])
+    rt = _runtime(registry, resolver=FakeResolver(cost=20, chain=[]), coupons=coupons)
+    check_price = _check_price_tool(rt)
+    with _PASS_PROOF:
+        r = await check_price(tool_id=tid, npub="not-an-npub")
+    assert r["success"] and r["effective_cost_api_sats"] == 20
 
 
 def test_resolve_tool_ids_accepts_ids_or_names_and_refuses_strangers():
