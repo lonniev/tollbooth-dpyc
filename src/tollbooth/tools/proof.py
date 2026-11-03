@@ -329,9 +329,11 @@ async def receive_npub_proof_tool(
     from tollbooth.nostr_credentials import (
         _MAX_NACKS_PER_DRAIN,
         _NACK_TOKEN,
+        DuplicateFieldError,
         _courier_resolve_error,
         _npub_to_hex,
         _parse_delimited_credentials,
+        _repeated_field_nack,
     )
 
     patron_hex = _npub_to_hex(resolved)
@@ -434,13 +436,18 @@ async def receive_npub_proof_tool(
             last_failure = "undecryptable DM"
 
         if plaintext:
-            payload = _parse_delimited_credentials(plaintext)
-            if payload is None:
-                nack_reason = _NACK_TOKEN
-                last_failure = "no @@@ fields"
-            elif payload.get("nonce", "") != expected_phrase:
-                nack_reason = _NACK_TOKEN
-                last_failure = "wrong token"
+            try:
+                payload = _parse_delimited_credentials(plaintext)
+            except DuplicateFieldError as dup:
+                nack_reason = _repeated_field_nack(dup.keys)
+                last_failure = "a field given twice"
+            else:
+                if payload is None:
+                    nack_reason = _NACK_TOKEN
+                    last_failure = "no @@@ fields"
+                elif payload.get("nonce", "") != expected_phrase:
+                    nack_reason = _NACK_TOKEN
+                    last_failure = "wrong token"
         elif nack_reason is None:
             nack_reason = _NACK_TOKEN
             last_failure = "empty DM"

@@ -219,6 +219,22 @@ async def test_wrong_nonce_nacks_and_reports_not_found(patron):
 
 
 @pytest.mark.asyncio
+async def test_a_reply_giving_a_field_twice_nacks_and_proves_nothing(patron):
+    nonce = "bold-hawk-42"
+    reply = _delimited(nonce=nonce, cache_duration="2h") + "\ncache_duration = @@@30d@@@"
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": reply}])
+    rt, _ = _runtime_with_exchange(ex)
+    tools = _register(rt)
+
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
+
+    assert r["success"] is False
+    assert r["error_code"] == ErrorCode.COURIER_NOT_FOUND
+    assert "a field given twice" in r["error"]
+    assert ex.popped == [("e1", True)]      # NACK'd
+
+
+@pytest.mark.asyncio
 async def test_undecryptable_dm_nacks(patron):
     ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, "_undecryptable": True}])
     rt, _ = _runtime_with_exchange(ex)
