@@ -354,6 +354,37 @@ async def receive_npub_proof_tool(
         }
     expected_phrase = nonce
 
+    # A challenge raised before the patron last revoked can never mint a
+    # grant, however late its reply is collected. Both times are this
+    # operator's clock, so the patron's clock cannot skew the answer.
+    pending = exchange._pending_nonces.get(nonce_key)
+    opened_at = pending[1] - exchange._freshness_window if pending else 0.0
+    try:
+        revoked_before = await (await rt.proof_grant_revocations()).revoked_before(resolved)
+    except Exception as exc:  # noqa: BLE001 — unknown is not "not revoked"
+        logger.warning("revocation check before a proof collect unavailable: %s", exc)
+        return {
+            "success": False,
+            "error_code": _EC.PROOF_REVOCATIONS_UNAVAILABLE,
+            "popped_dms": 0,
+            "error": (
+                "Could not confirm the patron has not revoked their proofs, so "
+                "nothing was collected. Try again shortly; the reply stays waiting."
+            ),
+        }
+    if revoked_before is not None and opened_at <= revoked_before:
+        await exchange.close_channel(resolved, PROOF_SERVICE)
+        return {
+            "success": False,
+            "error_code": _EC.PROOF_CHALLENGE_REVOKED,
+            "popped_dms": 0,
+            "error": (
+                "The patron revoked their proofs after this challenge was sent, "
+                "so it can no longer prove them. Call request_npub_proof for a "
+                "fresh challenge."
+            ),
+        }
+
     # Single drain of ONLY the pinned relay — human-gated, no retry loop.
     # Off the event loop — blocking websocket I/O (0.44.3 / M1.2 reasoning).
     await asyncio.to_thread(exchange._fetch_dms_from_relays, [pinned])
@@ -428,10 +459,9 @@ async def receive_npub_proof_tool(
             exchange._pop_event(event_id)
         popped += 1
 
-    # Clean up nonce state and rendezvous pin (one-time use)
-    exchange._pending_nonces.pop(nonce_key, None)
-    exchange._pinned_relays.pop(nonce_key, None)
-    exchange._ephemeral_agents.pop(nonce_key, None)
+    # One-time use: the channel leaves memory AND the vault, or another
+    # process would rehydrate it and collect the same reply again.
+    await exchange.close_channel(resolved, PROOF_SERVICE)
 
     # One summary DM to patron
     if matched_payload is not None:

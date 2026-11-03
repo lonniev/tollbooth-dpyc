@@ -58,6 +58,14 @@ class FakeExchange:
         self.sent_dms: list[str] = []
         self.reopen_wait = 0
         self.fetched = 0
+        self._freshness_window = 3600
+        self.closed: list[tuple] = []
+
+    async def close_channel(self, npub, service):
+        self.closed.append((npub, service))
+        self._pending_nonces.pop((npub, service), None)
+        self._pinned_relays.pop((npub, service), None)
+        self._ephemeral_agents.pop((npub, service), None)
 
     async def seconds_until_reopen(self, npub, service):
         return self.reopen_wait
@@ -67,7 +75,7 @@ class FakeExchange:
         if self._resolve_error is not None:
             return None, self._resolve_error
         # seed channel state so the cleanup .pop()s have something to remove
-        self._pending_nonces[(npub, service)] = (nonce, 0)
+        self._pending_nonces[(npub, service)] = (nonce, time.time() + self._freshness_window)
         self._pinned_relays[(npub, service)] = self._pinned
         return self._pinned, None
 
@@ -118,7 +126,10 @@ def _runtime_with_exchange(exchange, *, on_proven=None):
     rt._nsec = PrivateKey().bech32()
     # Stub persistence the drain doesn't exercise.
     rt.load_patron_session = AsyncMock(return_value=({}, ""))  # no challenge_ts
-    revocations = SimpleNamespace(is_revoked=AsyncMock(return_value=False))
+    revocations = SimpleNamespace(
+        is_revoked=AsyncMock(return_value=False),
+        revoked_before=AsyncMock(return_value=None),
+    )
     rt.proof_grant_revocations = AsyncMock(return_value=revocations)
     return rt, revocations
 
@@ -330,6 +341,53 @@ async def test_match_clears_channel_state(patron):
     # one-time-use cleanup removed the nonce/pin state
     assert key not in ex._pending_nonces
     assert key not in ex._pinned_relays
+    # F23: closed through close_channel, which also deletes the vault copy
+    assert ex.closed == [key]
+
+
+@pytest.mark.asyncio
+async def test_a_challenge_sent_before_a_revocation_cannot_prove(patron):
+    """F23: the reply to a challenge raised before forget_credentials mints
+    nothing, however late it is collected, and the channel is closed."""
+    nonce = "bold-hawk-42"
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=nonce)}])
+    rt, revocations = _runtime_with_exchange(ex)
+    revocations.revoked_before = AsyncMock(return_value=int(time.time()) + 5)  # revoked after it opened
+    tools = _register(rt)
+
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
+
+    assert r["success"] is False
+    assert r["error_code"] == ErrorCode.PROOF_CHALLENGE_REVOKED
+    assert ex.fetched == 0 and ex.popped == []
+    assert ex.closed == [(patron, "npub_ownership")]
+    assert await rt.wallet.envelope(HOLDER, patron) is None
+
+
+@pytest.mark.asyncio
+async def test_a_challenge_sent_after_a_revocation_proves(patron):
+    nonce = "bold-hawk-42"
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=nonce)}])
+    rt, revocations = _runtime_with_exchange(ex)
+    revocations.revoked_before = AsyncMock(return_value=int(time.time()) - 60)
+    tools = _register(rt)
+
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
+    assert r["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_unanswered_revocation_check_collects_nothing(patron):
+    nonce = "bold-hawk-42"
+    ex = FakeExchange(candidates=[{"id": "e1", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=nonce)}])
+    rt, revocations = _runtime_with_exchange(ex)
+    revocations.revoked_before = AsyncMock(side_effect=RuntimeError("neon asleep"))
+    tools = _register(rt)
+
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
+    assert r["error_code"] == ErrorCode.PROOF_REVOCATIONS_UNAVAILABLE
+    assert ex.fetched == 0 and ex.closed == []
+    assert "neon" not in r["error"]
 
 
 # ── request_npub_proof ────────────────────────────────────────────────

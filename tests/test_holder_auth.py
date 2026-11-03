@@ -345,7 +345,10 @@ async def test_forgetting_an_npub_drops_it_from_every_wallet():
         operator_credential_service="op",
         patron_credential_service="patron",
         require_caller_proof=AsyncMock(return_value=None),
-        courier=AsyncMock(return_value=SimpleNamespace(forget=AsyncMock(return_value={"success": True}))),
+        courier=AsyncMock(return_value=SimpleNamespace(
+            forget=AsyncMock(return_value={"success": True}),
+            _exchange=SimpleNamespace(close_channel=AsyncMock()),
+        )),
         proof_grant_revocations=AsyncMock(return_value=SimpleNamespace(revoke_all=AsyncMock())),
         holder_auth_enabled=True,
         holder_store=AsyncMock(return_value=store),
@@ -356,6 +359,8 @@ async def test_forgetting_an_npub_drops_it_from_every_wallet():
 
     assert result["proof_grants_revoked"] is True
     assert set(store.wallet) == {("h2", "npub1b")}
+    # F23: an open proof challenge is closed too, so its reply cannot mint
+    (await rt.courier())._exchange.close_channel.assert_awaited_once_with("npub1a", "npub_ownership")
 
 
 # ---------------------------------------------------------------------------

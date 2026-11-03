@@ -978,6 +978,25 @@ class NostrCredentialExchange:
                 pass
             ws.close()
 
+    async def close_channel(self, npub: str, service: str) -> None:
+        """Forget a channel everywhere: this process's memory and the vault.
+
+        A channel left in the vault is rehydrated by the next process that
+        sees its nonce, so a channel that has done its one job must leave
+        both, or its reply can be collected again.
+        """
+        key = (npub, service)
+        with self._lock:
+            self._pending_nonces.pop(key, None)
+            self._pinned_relays.pop(key, None)
+            self._bound_to.pop(key, None)
+            self._ephemeral_agents.pop(key, None)
+        if self._credential_vault is not None:
+            try:
+                await self._credential_vault.delete_credentials(f"__pending__{service}", npub)
+            except Exception:
+                logger.warning("pending channel %s not removed from the vault", service, exc_info=True)
+
     async def seconds_until_reopen(self, npub: str, service: str) -> int:
         """Seconds until a channel for (npub, service) may be replaced; 0 if now.
 
@@ -1573,20 +1592,7 @@ class NostrCredentialExchange:
         assert plaintext is not None
 
         # ── Match: consume one-time channel state (keyed by raw service) ──
-        self._pending_nonces.pop(nonce_key, None)
-        self._pinned_relays.pop(nonce_key, None)
-        self._bound_to.pop(nonce_key, None)
-        self._ephemeral_agents.pop(nonce_key, None)
-        if self._credential_vault is not None:
-            try:
-                await self._credential_vault.delete_credentials(
-                    f"__pending__{service}", sender_npub,
-                )
-            except Exception:
-                logger.debug(
-                    "best-effort __pending__ cleanup (post-match) failed",
-                    exc_info=True,
-                )
+        await self.close_channel(sender_npub, service)
 
         payload = _parse_delimited_credentials(plaintext)
         if payload is None:
