@@ -915,6 +915,18 @@ def register_authority_tools(
     global _runtime
     _runtime = runtime
 
+    # Operators sign certify_credits straight to their Authority, through no
+    # proxy, so a signed request here must have been signed for this host. A
+    # request signed for a sibling Authority is refused rather than replayed.
+    from tollbooth.holder_auth import HolderAuthProvider
+
+    if isinstance(getattr(mcp, "auth", None), HolderAuthProvider):
+        from urllib.parse import urlparse
+
+        own_host = urlparse(runtime._holder_auth_url).hostname
+        if own_host:
+            mcp.auth.bind_signed_requests_to(own_host)
+
     # Inject search_path=authority into NEON_DATABASE_URL so the
     # Authority's own tables land in the "authority" schema, not "public".
     # OperatorRuntime reads NEON_DATABASE_URL lazily — must happen before

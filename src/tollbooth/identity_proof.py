@@ -509,6 +509,7 @@ def verify_request_signature(
     path: str,
     body_sha256: str,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
+    host: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Verify a NIP-98 signed request: who signed THIS request, if anyone.
 
@@ -518,6 +519,10 @@ def verify_request_signature(
     URL's path must match; its host may differ, because a site's same-origin
     proxy forwards a request signed for the site to the operator, and the body
     already names the operator's slug-prefixed tool.
+
+    ``host``, when given, must also be the URL's host. An Authority passes its
+    own: operators sign ``certify_credits`` straight to it, with no proxy, so
+    a request signed for another Authority must not be accepted here.
 
     Returns ``(npub, None)`` for a good signature, else ``(None, reason)``.
     """
@@ -536,6 +541,7 @@ def verify_request_signature(
             and _tag_values(event, "payload") == [body_sha256]
             and len(urls) == 1
             and urlparse(urls[0]).path.rstrip("/") == path.rstrip("/")
+            and (host is None or (urlparse(urls[0]).hostname or "") == host.lower())
         )
 
     reason, signer_hex = _check_proof_event(

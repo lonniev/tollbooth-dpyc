@@ -1,0 +1,1 @@
+- An Authority accepts a signed (NIP-98) request only when it was signed for the Authority's own host, so a request an operator signed for one Authority can no longer be replayed at another. Operators still accept any host, since a site's proxy forwards requests signed for the site.
