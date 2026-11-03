@@ -536,8 +536,6 @@ All secrets — BTCPay keys, API tokens, OAuth credentials — are delivered via
 
 Vault-first lookup means returning patrons activate instantly — no relay I/O needed.
 
-On first relay receipt, the service sends an `ncred1...` credential card back via DM. Patrons can scan or paste this card to reactivate later.
-
 ---
 
 ## x402 Upstream Encapsulation
@@ -643,12 +641,9 @@ Dependency flows one way: `your-mcp-server --> tollbooth-dpyc`. Authority is a n
 ```bash
 # Standard install — includes Nostr relay support (Secure Courier, audit trail)
 pip install tollbooth-dpyc[nostr]
-
-# With QR code rendering for credential cards
-pip install tollbooth-dpyc[nostr,qr]
 ```
 
-Core dependencies (`httpx`, `pynostr`) handle identity, proofs, and HTTP. The `[nostr]` extra adds `websocket-client` for Nostr relay I/O — required by every real operator since Secure Courier credential delivery, audit publishing, and bootstrap all use relay DMs. The `[qr]` extra adds `segno` for credential card QR rendering. The `[x402]` extra adds `x402` + `eth-account` for transparent Coinbase x402 upstream encapsulation.
+Core dependencies (`httpx`, `pynostr`) handle identity, proofs, and HTTP. The `[nostr]` extra adds `websocket-client` for Nostr relay I/O — required by every real operator since Secure Courier credential delivery, audit publishing, and bootstrap all use relay DMs. The `[x402]` extra adds `x402` + `eth-account` for transparent Coinbase x402 upstream encapsulation.
 
 ```bash
 # With x402 upstream encapsulation (for operators consuming x402-protected APIs)
@@ -695,10 +690,6 @@ The Authority uses the `authority` schema. Each certified operator receives an i
 ### Low-Balance Notifications
 
 `NotificationManager` sends proactive NIP-44 DMs when a patron's balance crosses thresholds or tranches approach expiration. Fire-and-forget — never blocks the tool path.
-
-### Credential Cards
-
-`ncred1...` bech32-encoded credential cards package encrypted credentials into scannable QR codes. Built on kind-21420 Nostr events with NIP-44v2 encryption.
 
 ---
 

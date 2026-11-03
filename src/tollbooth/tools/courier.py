@@ -76,22 +76,19 @@ async def receive_credentials_tool(
     sender_npub: str,
     service: str,
     nonce: str,
-    credential_card: str,
     *,
     service_name: str,
     slug: str,
 ) -> dict[str, Any]:
-    """Pick up operator credentials (nonce drain or ncred card) + validate."""
+    """Pick up operator credentials (nonce drain) + validate."""
     if not sender_npub:
         return {
             "success": False,
             "error": "sender_npub is required.",
         }
     # Bound untrusted string args before any parsing. A nonce is a short
-    # phrase and an ncred card is a small JSON blob; anything larger is an
-    # adversarial oversized payload from AI tool input.
-    _MAX_ARG_BYTES = 256 * 1024
-    if len(nonce or "") > 1024 or len(credential_card or "") > _MAX_ARG_BYTES:
+    # phrase; anything larger is an adversarial payload from AI tool input.
+    if len(nonce or "") > 1024:
         return {
             "success": False,
             "error": "Argument too large.",
@@ -110,30 +107,23 @@ async def receive_credentials_tool(
                 )
             ),
         }
-    if not nonce and not credential_card:
+    if not nonce:
         from tollbooth.constants import ErrorCode as _EC
         return {
             "success": False,
             "error_code": _EC.NONCE_MISSING,
             "error": (
                 "nonce is required — pass the session phrase returned by "
-                "request_credential_channel (or provide a credential_card)."
+                "request_credential_channel."
             ),
         }
     courier = await rt.courier()
     if courier is None:
         return {"success": False, "error": "Secure Courier not configured."}
     try:
-        if credential_card:
-            # Route through the wrapper, not courier._exchange directly,
-            # so credential values are stripped before returning (audit S1).
-            result = await courier.redeem_card(
-                credential_card, service=service,
-            )
-        else:
-            result = await courier.receive(
-                sender_npub, service=service, nonce=nonce,
-            )
+        result = await courier.receive(
+            sender_npub, service=service, nonce=nonce,
+        )
         result.pop("credentials", None)
 
         # Validate credentials via operator callback before accepting.
@@ -306,19 +296,19 @@ async def request_patron_credentials_tool(
 
 
 async def receive_patron_credentials_tool(
-    rt: Any, sender_npub: str, nonce: str, credential_card: str,
+    rt: Any, sender_npub: str, nonce: str,
 ) -> dict[str, Any]:
-    """Pick up patron credentials (nonce drain or ncred card)."""
+    """Pick up patron credentials (nonce drain)."""
     if not sender_npub:
         return {"success": False, "error": "sender_npub is required."}
-    if not nonce and not credential_card:
+    if not nonce:
         from tollbooth.constants import ErrorCode as _EC
         return {
             "success": False,
             "error_code": _EC.NONCE_MISSING,
             "error": (
                 "nonce is required — pass the session phrase returned "
-                "by request_patron_credentials (or a credential_card)."
+                "by request_patron_credentials."
             ),
         }
     courier = await rt.courier()
@@ -326,17 +316,10 @@ async def receive_patron_credentials_tool(
         return {"success": False, "error": "Secure Courier not configured."}
     try:
         service = rt.patron_credential_service
-        if credential_card:
-            # Route through the wrapper, not courier._exchange directly,
-            # so credential values are stripped before returning (audit S1).
-            result = await courier.redeem_card(
-                credential_card, service=service,
-            )
-        else:
-            result = await courier.receive(
-                sender_npub, service, nonce=nonce,
-                request_tool="request_patron_credentials",
-            )
+        result = await courier.receive(
+            sender_npub, service, nonce=nonce,
+            request_tool="request_patron_credentials",
+        )
         result.pop("credentials", None)
         return result
     except Exception as e:  # noqa: BLE001

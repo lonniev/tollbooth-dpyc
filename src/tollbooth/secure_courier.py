@@ -52,17 +52,6 @@ except ImportError:
     _HAS_COURIER = False
 
 try:
-    from tollbooth.credential_card import (
-        CredentialCardError,  # noqa: F401
-        encode_credential_card,
-        render_qr,
-    )
-
-    _HAS_CREDENTIAL_CARD = True
-except ImportError:
-    _HAS_CREDENTIAL_CARD = False
-
-try:
     from tollbooth.identity_credential import sign_identity_credential
 
     _HAS_IDENTITY_CREDENTIAL = True
@@ -96,7 +85,6 @@ class SecureCourierService:
             Callable[[str, dict[str, str], str], Awaitable[dict[str, Any] | None]]
             | None
         ) = None,
-        send_card_dm: bool = True,
         credential_ttl_seconds: int = 30 * 24 * 3600,
     ) -> None:
         """Initialise the Secure Courier Service.
@@ -113,11 +101,6 @@ class SecureCourierService:
                 result.  ``credentials`` contains the validated fields.
                 The callback handles operator-specific actions like session
                 activation and identity mapping.
-            send_card_dm: If True (default), send the credential card as a
-                Nostr DM to the patron after first-time credential receipt.
-                The DM contains the ``ncred1...`` string so the patron can
-                save it for scan-and-paste reuse.  Only sent on fresh relay
-                delivery, not on vault restores.
             credential_ttl_seconds: TTL for issued identity credentials
                 (default 30 days).
         """
@@ -128,7 +111,6 @@ class SecureCourierService:
             )
 
         self._operator_nsec = operator_nsec
-        self._send_card_dm = send_card_dm
         self._credential_ttl = credential_ttl_seconds
         self._sessions: dict[str, str] = {}  # caller_id → npub (in-memory)
         self._credentials: dict[str, str] = {}  # npub → signed credential JSON
@@ -219,7 +201,7 @@ class SecureCourierService:
 
         1. Delegates to the exchange's nonce-scoped, pinned-relay drain.
         2. On success, runs the shared post-receive finalization (callback,
-           identity credential, session binding, credential card).
+           identity credential, session binding).
         3. **Always** strips credential values before returning.
 
         Args:
@@ -254,9 +236,8 @@ class SecureCourierService:
         """Shared post-receive work for relay drains and vault restores.
 
         Runs the operator callback, issues the identity credential, persists
-        the session binding, and generates the credential card, then strips
-        credential values. Card DMs are suppressed on vault restores (no fresh
-        relay receipt to acknowledge). Returns the (mutated) result dict.
+        the session binding, then strips credential values. Returns the
+        (mutated) result dict.
         """
         if result.get("success") and result.get("credentials"):
             credentials: dict[str, str] = result["credentials"]
@@ -295,31 +276,6 @@ class SecureCourierService:
             if caller_id is not None:
                 self._sessions[caller_id] = sender_npub
                 await self._store_binding(caller_id, matched_service, sender_npub)
-
-            # Generate credential card for scan-and-paste reuse
-            if _HAS_CREDENTIAL_CARD:
-                try:
-                    ncred, qr_png = self.generate_credential_card(
-                        sender_npub, matched_service, credentials,
-                    )
-                    result["credential_card"] = ncred
-                    if qr_png is not None:
-                        import base64
-
-                        result["credential_card_qr_base64"] = base64.b64encode(
-                            qr_png
-                        ).decode()
-
-                    # Send credential card via Nostr DM on fresh relay receipt
-                    is_vault_restore = result.get("encryption") == "vault"
-                    if self._send_card_dm and not is_vault_restore:
-                        await self._deliver_card_dm(
-                            sender_npub, matched_service, ncred, qr_png=qr_png,
-                        )
-                        result["credential_card_dm_sent"] = True
-
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Credential card generation failed: %s", exc)
 
         # NEVER echo credential values, least of all on a failed vault write.
         result.pop("credentials", None)
@@ -457,152 +413,3 @@ class SecureCourierService:
                 await vault.delete_session_binding(caller_id, service)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to delete session binding: %s", exc)
-
-    # -- Credential card -----------------------------------------------------
-
-    def generate_credential_card(
-        self,
-        sender_npub: str,
-        service: str,
-        credentials: dict[str, str],
-        *,
-        expiry_days: int = 90,
-    ) -> tuple[str, bytes | None]:
-        """Generate an ``ncred1...`` credential card with optional QR PNG.
-
-        Args:
-            sender_npub: Patron's npub (bech32).
-            service: Service name for the card.
-            credentials: Validated credential dict.
-            expiry_days: Card validity in days.
-
-        Returns:
-            Tuple of (ncred_string, qr_png_bytes_or_None).
-        """
-        if not _HAS_CREDENTIAL_CARD:
-            raise RuntimeError("credential_card module not available")
-
-        ncred = encode_credential_card(
-            credentials, service, self._operator_nsec, sender_npub,
-            expiry_days=expiry_days,
-        )
-
-        qr_png: bytes | None = None
-        try:
-            qr_png = render_qr(ncred)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("QR rendering skipped: %s", exc)
-
-        return ncred, qr_png
-
-    async def _deliver_card_dm(
-        self,
-        recipient_npub: str,
-        service: str,
-        ncred: str,
-        *,
-        qr_png: bytes | None = None,
-    ) -> None:
-        """Send the credential card string to the patron via Nostr DM.
-
-        Runs in a fire-and-forget manner — DM delivery failures are
-        logged but never propagated to the caller.
-
-        When *qr_png* is provided, the QR image is uploaded to
-        nostr.build (NIP-96) and the resulting URL is included in the
-        DM so Nostr clients auto-render the image inline.
-
-        Args:
-            recipient_npub: Patron's npub (bech32).
-            service: Service name (for the human-readable header).
-            ncred: The ``ncred1...`` credential card string.
-            qr_png: Optional PNG bytes of the credential card QR code.
-        """
-        image_url: str | None = None
-        if qr_png is not None:
-            try:
-                from tollbooth.media_upload import upload_to_nostr_build
-
-                image_url = await upload_to_nostr_build(qr_png)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "QR upload to nostr.build failed (non-fatal): %s", exc,
-                )
-
-        if image_url:
-            dm_text = (
-                f"Your credential card for {service}:\n\n"
-                f"{image_url}\n\n"
-                f"{ncred}\n\n"
-                "Save this string. To reactivate your session later, "
-                "paste it into the credential_card parameter — "
-                "no Courier exchange needed."
-            )
-        else:
-            dm_text = (
-                f"Your credential card for {service}:\n\n"
-                f"{ncred}\n\n"
-                "Save this string. To reactivate your session later, "
-                "paste it into the credential_card parameter — "
-                "no Courier exchange needed."
-            )
-
-        try:
-            self._exchange.send_dm(recipient_npub, dm_text)
-            logger.info(
-                "Credential card DM sent to %s for service %s",
-                recipient_npub[:16] + "...",
-                service,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Credential card DM delivery failed (non-fatal): %s", exc,
-            )
-
-    async def redeem_card(
-        self,
-        ncred: str,
-        service: str | None = None,
-    ) -> dict[str, Any]:
-        """Redeem an ``ncred1...`` credential card — bypasses relay DM flow.
-
-        1. Delegates to the exchange for decode/verify/decrypt.
-        2. On success, calls ``on_credentials_received`` if set.
-        3. Merges callback result into the response.
-        4. **Always** strips credential values before returning.
-
-        Args:
-            ncred: The ``ncred1...`` bech32 credential card string.
-            service: Optional service hint for template matching.
-
-        Returns:
-            Dict with success, service, field count, and any callback-added
-            metadata.  **NEVER** returns credential values.
-        """
-        result = await self._exchange.redeem_credential_card(
-            ncred, service=service,
-        )
-
-        if result.get("success") and result.get("credentials"):
-            credentials: dict[str, str] = result["credentials"]
-            matched_service: str = result.get("service", service or "")
-
-            # Invoke operator callback (same pattern as receive())
-            if self._on_received is not None:
-                try:
-                    extra = await self._on_received(
-                        result.get("user_npub", ""),
-                        credentials,
-                        matched_service,
-                    )
-                    if extra and isinstance(extra, dict):
-                        result.update(extra)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "on_credentials_received callback failed: %s", exc,
-                    )
-                    result["callback_error"] = str(exc)
-
-        # NEVER echo credential values, least of all on a failed vault write.
-        result.pop("credentials", None)
-        return result

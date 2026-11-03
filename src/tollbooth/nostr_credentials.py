@@ -1803,120 +1803,6 @@ class NostrCredentialExchange:
             ),
         }
 
-    async def redeem_credential_card(
-        self, ncred: str, *, service: str | None = None,
-    ) -> dict[str, Any]:
-        """Redeem an ``ncred1...`` credential card — bypass relay DM flow.
-
-        Decodes the card, verifies signature and expiration, validates
-        against the matching template, and stores in vault if configured.
-
-        Args:
-            ncred: The ``ncred1...`` bech32 credential card string.
-            service: Optional service hint for template matching.
-                If omitted, uses the service from the card.
-
-        Returns:
-            Dict with same shape as ``receive()`` — success, service,
-            field counts, and credentials.
-
-        Raises:
-            CourierNotReady: If dependencies are missing.
-            CourierValidationError: If card fails validation.
-        """
-        if not self._enabled:
-            raise CourierNotReady(
-                "Secure Courier not available. Check logs for missing dependencies."
-            )
-
-        try:
-            from tollbooth.credential_card import (
-                CredentialCardError,
-                CredentialCardExpired,
-                CredentialCardInvalid,
-                decode_credential_card,
-            )
-        except ImportError:
-            raise CourierNotReady(
-                "credential_card module not available"
-            )
-
-        try:
-            decoded = decode_credential_card(ncred, self._nsec)
-        except CredentialCardExpired as exc:
-            raise CourierValidationError(f"Credential card expired: {exc}") from exc
-        except (CredentialCardInvalid, CredentialCardError) as exc:
-            raise CourierValidationError(f"Invalid credential card: {exc}") from exc
-
-        card_service = decoded["service"]
-        credentials = decoded["credentials"]
-        user_npub = decoded["user_npub"]
-
-        # Resolve service: prefer explicit param, fall back to card's service
-        resolved = self._resolve_service(service) or card_service
-
-        # Validate against template
-        if resolved in self._templates:
-            template = self._templates[resolved]
-            try:
-                credentials = validate_payload(credentials, template)
-            except TemplateValidationError as exc:
-                raise CourierValidationError(str(exc)) from exc
-        elif service is not None:
-            # Explicit service requested but no template found
-            raise CourierValidationError(
-                f"No template found for service '{service}'"
-            )
-
-        # Store in vault, honestly report persistence outcome. Pre-0.33.0
-        # this was a fire-and-forget that always claimed success — root
-        # cause of the ncred state-lag bug class. Every field on the card
-        # is a fresh delivery for timestamp purposes.
-        persisted = True
-        if self._credential_vault is not None and resolved:
-            persisted = await self._vault_store(
-                resolved,
-                user_npub,
-                credentials,
-                just_delivered=list(credentials.keys()),
-            )
-
-        # Count sensitive fields
-        sensitive_count = 0
-        if resolved and resolved in self._templates:
-            template = self._templates[resolved]
-            sensitive_count = sum(
-                1 for name in credentials
-                if template.fields.get(name, FieldSpec()).sensitive
-            )
-
-        return {
-            "success": persisted or self._credential_vault is None,
-            "service": resolved or card_service,
-            "fields_received": len(credentials),
-            "sensitive_fields": sensitive_count,
-            "encryption": "credential_card",
-            "credentials": credentials,
-            "user_npub": user_npub,
-            "persisted": persisted,
-            "error_code": None if persisted else "credential_vault_unavailable",
-            "error": None if persisted else (
-                "Credential card was valid but the vault write failed. "
-                "Retry receive_credentials in 10–15 seconds once the MCP has "
-                "warmed up; the ncred is still good."
-            ),
-            "message": (
-                f"Credentials for {resolved or card_service} redeemed from "
-                f"credential card ({len(credentials)} fields)."
-                + (
-                    " Credentials stored in vault for future sessions."
-                    if persisted and self._credential_vault is not None else
-                    " Vault write failed — retry receive_credentials in a moment."
-                    if self._credential_vault is not None else ""
-                )
-            ),
-        }
-
     # ── Conversational DM helpers ─────────────────────────────────────
 
     def _send_success_dm(
@@ -2179,7 +2065,7 @@ class NostrCredentialExchange:
         Callers MUST propagate this honestly in their response — same lesson
         as the 0.30.0 `_vault_unavailable` guards for the ledger path:
         telling a caller "stored" when the row isn't there leads to the
-        ncred-state-lag class of bugs where `get_patron_onboarding_status`
+        state-lag class of bugs where `get_patron_onboarding_status`
         keeps reporting "missing" while the user sees "accepted" messaging.
         """
         assert self._credential_vault is not None

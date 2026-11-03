@@ -45,7 +45,6 @@ nostr = [
 authority = [
     "pydantic-settings>=2.0",
 ]
-qr = ["segno>=1.6.0"]
 # tollbooth.agent_keyring — the reusable agent keyring (a FastMCP proxy that signs a
 # fresh proof per call). Only an agent runtime that runs the keyring installs this;
 # FastMCP is imported lazily, never at module load.

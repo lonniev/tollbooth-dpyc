@@ -133,25 +133,6 @@ except ImportError:
     SecureCourierService = None  # type: ignore[assignment,misc]
 
 try:
-    from tollbooth.credential_card import (
-        CREDENTIAL_CARD_KIND,
-        CredentialCardError,
-        CredentialCardExpired,
-        CredentialCardInvalid,
-        decode_credential_card,
-        encode_credential_card,
-        render_qr,
-    )
-except ImportError:
-    CREDENTIAL_CARD_KIND = None  # type: ignore[assignment,misc]
-    CredentialCardError = None  # type: ignore[assignment,misc]
-    CredentialCardExpired = None  # type: ignore[assignment,misc]
-    CredentialCardInvalid = None  # type: ignore[assignment,misc]
-    decode_credential_card = None  # type: ignore[assignment,misc]
-    encode_credential_card = None  # type: ignore[assignment,misc]
-    render_qr = None  # type: ignore[assignment,misc]
-
-try:
     from tollbooth.nostr_diagnostics import (
         courier_health,
         courier_ping,
@@ -263,7 +244,6 @@ except ImportError:
 __all__ = [
     "AUTHORITY_BASE_CATALOG",
     # Credential Card
-    "CREDENTIAL_CARD_KIND",
     "DEFAULT_REGISTRY_URL",
     "ECOSYSTEM_LINKS",
     "IDENTITY_CREDENTIAL_KIND",
@@ -305,9 +285,6 @@ __all__ = [
     "CourierNotReady",
     "CourierTimeout",
     "CourierValidationError",
-    "CredentialCardError",
-    "CredentialCardExpired",
-    "CredentialCardInvalid",
     "CredentialTemplate",
     "CredentialVaultBackend",
     # Registry
@@ -388,8 +365,6 @@ __all__ = [
     "courier_ping",
     # Shortlinks
     "create_shortlink",
-    "decode_credential_card",
-    "encode_credential_card",
     "ensure_bootstrapped",
     "fetch_text",
     "get_relays",
@@ -400,7 +375,6 @@ __all__ = [
     "model_for",
     "passages",
     "probe_relay_liveness",
-    "render_qr",
     "resolve_npub",
     "resolve_oracle_service",
     "resolve_relays",

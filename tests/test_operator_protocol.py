@@ -92,7 +92,7 @@ class StubOperator:
         return {"success": True}
 
     async def receive_credentials(
-        self, sender_npub: str, service: str, credential_card: str,
+        self, sender_npub: str, service: str, nonce: str,
     ) -> dict[str, Any]:
         return {"success": True}
 
