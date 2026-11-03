@@ -66,10 +66,11 @@ class TestSchemaStatements:
     def test_coupons_then_redemptions_each_indexed(self) -> None:
         from tollbooth.coupons.vault import schema_statements
         sql = schema_statements(lambda n: f"op_test.{n}", "op_test_")
-        assert len(sql) == 5
+        assert len(sql) == 6
         assert "op_test.coupons" in sql[0] and "op_test_idx_coupons_operator" in sql[1]
         assert "ADD COLUMN IF NOT EXISTS tool_ids TEXT[]" in sql[2], "the binding arrives as an ALTER on old tables"
         assert "REFERENCES op_test.coupons(id)" in sql[3], "redemptions follow their coupon"
+        assert "ADD COLUMN IF NOT EXISTS forgotten_at" in sql[5], "forgetting arrives as an ALTER on old tables"
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +287,7 @@ class TestPatronFlow:
         v = _vault()
         v._client.post = AsyncMock(
             return_value=_response(
-                200, {"command": "DELETE", "rowCount": 1, "rows": []},
+                200, {"command": "UPDATE", "rowCount": 1, "rows": []},
             )
         )
         out = await _cvault(v).forget("c-uuid", "npub1pat")
@@ -297,10 +298,44 @@ class TestPatronFlow:
         v = _vault()
         v._client.post = AsyncMock(
             return_value=_response(
-                200, {"command": "DELETE", "rowCount": 0, "rows": []},
+                200, {"command": "UPDATE", "rowCount": 0, "rows": []},
             )
         )
         assert await _cvault(v).forget("c-uuid", "npub1pat") is False
+
+    @pytest.mark.asyncio
+    async def test_forget_keeps_the_row_that_holds_the_use_count(self) -> None:
+        """F12: deleting the row handed back every use of a capped coupon."""
+        v = _vault()
+        v._client.post = AsyncMock(
+            return_value=_response(200, {"command": "UPDATE", "rowCount": 1, "rows": []})
+        )
+        await _cvault(v).forget("c-uuid", "npub1pat")
+        sql, params = _sent_sql(v)
+        assert not sql.startswith("DELETE")
+        assert "SET forgotten_at = now()" in sql
+        assert params == ["c-uuid", "npub1pat"]
+
+    @pytest.mark.asyncio
+    async def test_redeeming_again_restores_the_row_and_leaves_its_count(self) -> None:
+        v = _vault()
+        row = {"id": "p", "coupon_id": "c-uuid", "npub": "npub1pat", "use_count": 1,
+               "redeemed_at": "2026-06-01T12:00:00+00:00"}
+        v._client.post = AsyncMock(return_value=_response(200, {"command": "INSERT", "rows": [row]}))
+        pc = await _cvault(v).redeem("c-uuid", "npub1pat")
+        sql, _ = _sent_sql(v)
+        assert "SET forgotten_at = NULL" in sql
+        assert "use_count = 0" not in sql
+        assert pc.use_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_forgotten_coupon_is_not_listed_and_gives_no_discount(self) -> None:
+        v = _vault()
+        v._client.post = AsyncMock(return_value=_response(200, {"command": "SELECT", "rows": []}))
+        await _cvault(v).list_redemptions_for_patron("npub1pat")
+        assert "pc.forgotten_at IS NULL" in _sent_sql(v)[0]
+        await _cvault(v).fetch_redemptions_for_chain("npub1pat", ["c-uuid"])
+        assert "pc.forgotten_at IS NULL" in _sent_sql(v)[0]
 
     @pytest.mark.asyncio
     async def test_burn_use_atomic_cte(self) -> None:

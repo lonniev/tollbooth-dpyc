@@ -231,24 +231,33 @@ class AsyncJobStore:
         return _row_to_job(rows[0]) if rows else None
 
     async def complete(self, claim: str, result_blob: dict[str, Any]) -> None:
-        """Mark done; result kept until its coded TTL elapses."""
+        """Mark done; result kept until its coded TTL elapses.
+
+        A job already closed stays closed: one that failed has refunded, and
+        a late result must not turn a refunded job into a delivered one.
+        """
         await self._vault._execute(
             f"UPDATE {self._t('async_jobs')} "
             "SET status = 'done', result = $2::jsonb, completed_at = now(), "
             "expires_at = now() + make_interval(secs => result_ttl_seconds) "
-            "WHERE claim = $1",
+            "WHERE claim = $1 AND status IN ('pending', 'running')",
             [claim, json.dumps(result_blob)],
         )
 
-    async def fail(self, claim: str, error: str) -> None:
-        """Mark terminally failed; the error state also expires on the TTL."""
-        await self._vault._execute(
+    async def fail(self, claim: str, error: str) -> bool:
+        """Mark terminally failed; the error state also expires on the TTL.
+
+        True only for the call that closed the job, which is the one that
+        may refund it.
+        """
+        result = await self._vault._execute(
             f"UPDATE {self._t('async_jobs')} "
             "SET status = 'error', error = $2, completed_at = now(), "
             "expires_at = now() + make_interval(secs => result_ttl_seconds) "
-            "WHERE claim = $1",
+            "WHERE claim = $1 AND status IN ('pending', 'running')",
             [claim, error],
         )
+        return int(result.get("rowCount") or 0) > 0
 
     async def release(self, claim: str) -> None:
         """Return a running job to 'pending' for another attempt."""

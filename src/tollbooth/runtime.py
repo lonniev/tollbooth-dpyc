@@ -3603,8 +3603,8 @@ class OperatorRuntime:
             # persist it structured, refund, and return it. Never a
             # dispatch-failure retry.
             logger.info("async job %s dispatch situation: %s", claim, sit.error_code)
-            await store.fail(claim, sit.to_row())
-            await self.rollback_debit(tool_id, npub, tool_kwargs=params)
+            if await store.fail(claim, sit.to_row()):
+                await self.rollback_debit(tool_id, npub, tool_kwargs=params)
             return sit.to_response()
         except Exception as exc:
             # Dispatch failed after the row was persisted. Never strand a
@@ -3619,8 +3619,8 @@ class OperatorRuntime:
             # so is worth more than a success that is not one.
             logger.warning("async job %s dispatch failed: %s", claim, exc, exc_info=True)
             self._async_dispatch_error = f"{type(exc).__name__}: {exc}"
-            await store.fail(claim, "Job dispatch failed. Check operator logs.")
-            await self.rollback_debit(tool_id, npub, tool_kwargs=params)
+            if await store.fail(claim, "Job dispatch failed. Check operator logs."):
+                await self.rollback_debit(tool_id, npub, tool_kwargs=params)
             return {
                 "success": True,
                 "status": "error",
@@ -3659,14 +3659,12 @@ class OperatorRuntime:
                 attempt = job["attempts"]
                 runner = self._job_runners.get(kind)
                 if runner is None:
-                    await store.fail(
+                    await self._fail_and_refund(
+                        store,
                         claim,
                         f"No runner registered for job kind {kind!r}. "
                         "The operator must register it at startup.",
-                    )
-                    await self.rollback_debit(
-                        job["tool_id"], job["npub"], tool_kwargs=job["params"],
-                        charged=job.get("charged_sats") or None,
+                        job,
                     )
                     return
                 # Hard-cap the attempt at the job's declared max_runtime_seconds.
@@ -3693,11 +3691,7 @@ class OperatorRuntime:
                     # runner decided this is a settled outcome, not a transient
                     # infra blip), no raw text to the patron.
                     logger.info("async job %s situation: %s", claim, sit.error_code)
-                    await store.fail(claim, sit.to_row())
-                    await self.rollback_debit(
-                        job["tool_id"], job["npub"], tool_kwargs=job["params"],
-                        charged=job.get("charged_sats") or None,
-                    )
+                    await self._fail_and_refund(store, claim, sit.to_row(), job)
                     return
                 except TimeoutError:
                     # The attempt outran its budget and was cancelled. Treat as a
@@ -3717,11 +3711,7 @@ class OperatorRuntime:
                         next_steps="Please try again.",
                         transient=True,
                     )
-                    await store.fail(claim, situation.to_row())
-                    await self.rollback_debit(
-                        job["tool_id"], job["npub"], tool_kwargs=job["params"],
-                        charged=job.get("charged_sats") or None,
-                    )
+                    await self._fail_and_refund(store, claim, situation.to_row(), job)
                     return
                 except Exception:
                     # Generic message to the patron (an exception string can
@@ -3734,12 +3724,8 @@ class OperatorRuntime:
                         claim, kind, attempt, self._ASYNC_JOB_MAX_ATTEMPTS,
                     )
                     if attempt >= self._ASYNC_JOB_MAX_ATTEMPTS:
-                        await store.fail(
-                            claim, "Job execution failed. Check operator logs.",
-                        )
-                        await self.rollback_debit(
-                            job["tool_id"], job["npub"], tool_kwargs=job["params"],
-                            charged=job.get("charged_sats") or None,
+                        await self._fail_and_refund(
+                            store, claim, "Job execution failed. Check operator logs.", job,
                         )
                         return
                     await store.release(claim)
@@ -3753,6 +3739,20 @@ class OperatorRuntime:
             # Store-level failure (Neon unreachable mid-job). Leave the row
             # as-is — the watchdog reclaims it once max_runtime elapses.
             logger.warning("Async job %s aborted: %s", claim, exc)
+
+    async def _fail_and_refund(
+        self, store: Any, claim: str, error: Any, job: dict[str, Any],
+    ) -> None:
+        """Close a failed job and give its fare back, once.
+
+        Concurrent polls and a runner can all see the same job fail. Only the
+        one whose ``fail`` closed the row refunds.
+        """
+        if await store.fail(claim, error):
+            await self.rollback_debit(
+                job["tool_id"], job["npub"], tool_kwargs=job["params"],
+                charged=job.get("charged_sats") or None,
+            )
 
     async def fetch_async_job(self, claim: str, npub: str) -> dict[str, Any]:
         """Redeem a claim check — the body of an operator's companion tool.
@@ -3807,11 +3807,7 @@ class OperatorRuntime:
                 logger.info(
                     "async job %s detached run failed: %s", claim, outcome.get("error")
                 )
-                await store.fail(claim, "Job execution failed.")
-                await self.rollback_debit(
-                    job["tool_id"], job["npub"], tool_kwargs=job["params"],
-                    charged=job.get("charged_sats") or None,
-                )
+                await self._fail_and_refund(store, claim, "Job execution failed.", job)
                 return {
                     "success": True,
                     "status": "error",
@@ -6414,9 +6410,10 @@ def register_standard_tools(
     ) -> dict[str, Any]:
         """Remove a coupon from this patron's redemption list.
 
-        Cosmetic only — the coupon itself still exists at the operator,
-        and the patron can re-redeem the same code later while the
-        window allows.  Free — requires proof of ``npub``.
+        The discount stops applying and the coupon leaves the list. The
+        coupon itself still exists at the operator, and the patron can
+        re-redeem the same code while the window allows, with the uses
+        already spent still counted.  Free — requires proof of ``npub``.
 
         Args:
             npub: The patron's Nostr public key (npub1...).

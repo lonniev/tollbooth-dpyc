@@ -349,7 +349,7 @@ async def list_my_coupons_tool(
 async def forget_coupon_tool(
     cv: Any, patron_npub: str, coupon_id: str,
 ) -> dict[str, Any]:
-    """Remove a coupon from this patron's redemption list (cosmetic only)."""
+    """Hide a coupon from this patron's redemption list; its uses stay counted."""
     if not coupon_id:
         return {"success": False, "error": "coupon_id is required."}
 

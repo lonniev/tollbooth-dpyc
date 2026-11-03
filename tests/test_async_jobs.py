@@ -34,6 +34,11 @@ class FakeVault:
     def _t(self, table: str) -> str:
         return table
 
+    @staticmethod
+    def _closed(query: str, r: dict) -> bool:
+        """The WHERE of a closing UPDATE, honored only if the query states it."""
+        return "status IN ('pending', 'running')" in query and r["status"] not in ("pending", "running")
+
     def _computed(self, r: dict) -> dict:
         out = dict(r)
         out["elapsed_seconds"] = self.now - r["created_at"]
@@ -87,12 +92,16 @@ class FakeVault:
             return {"rows": [self._computed(r)], "rowCount": 1}
         if "SET status = 'done'" in query:
             r = self.rows[params[0]]
+            if self._closed(query, r):
+                return {"rows": [], "rowCount": 0}
             r["status"] = "done"
             r["result"] = params[1]  # JSON string, as Neon may return it
             r["expires_at"] = self.now + r["result_ttl_seconds"]
             return {"rows": [], "rowCount": 1}
         if "SET status = 'error'" in query:
             r = self.rows[params[0]]
+            if self._closed(query, r):
+                return {"rows": [], "rowCount": 0}
             r["status"] = "error"
             r["error"] = params[1]
             r["expires_at"] = self.now + r["result_ttl_seconds"]
@@ -323,6 +332,49 @@ class TestRuntimeAsyncJobs:
         # the raw exception text must NOT reach the patron
         assert "hunter2" not in json.dumps(fetched)
         assert refunds == [(TOOL_ID, NPUB, {"x": "1"}, None)]
+
+    async def test_concurrent_polls_of_a_failed_run_refund_once(self, vault):
+        """F38: every poll in flight sees 'failed'; only one gives the fare back."""
+        rt = _make_runtime(vault)
+        store = AsyncJobStore(vault)
+        claim = await _create(store)
+        await store.claim_for_run(claim)
+        vault.rows[claim]["run_handle"] = "run-1"
+        refunds: list[int] = []
+
+        async def fake_rollback(tool_id, npub, *, tool_kwargs=None, charged=None):
+            refunds.append(charged)
+
+        rt.rollback_debit = fake_rollback
+        vault.rows[claim]["charged_sats"] = 7
+        polling = asyncio.Barrier(3)
+
+        class FailedRun:
+            async def poll(self, _handle):
+                await polling.wait()  # All three have read the row as open.
+                return {"status": "failed", "error": "crashed"}
+
+        rt._async_executor = FailedRun()
+        answers = await asyncio.gather(*(rt.fetch_async_job(claim, NPUB) for _ in range(3)))
+
+        assert refunds == [7]
+        assert [a["status"] for a in answers] == ["error"] * 3
+
+    async def test_a_late_result_does_not_reopen_a_refunded_job(self, store, vault):
+        claim = await _create(store)
+        await store.claim_for_run(claim)
+        assert await store.fail(claim, "Job execution failed.") is True
+        await store.complete(claim, {"answer": 42})
+        job = await store.get(claim, NPUB)
+        assert job["status"] == "error"
+        assert job["result"] == {}
+
+    async def test_a_finished_job_cannot_be_failed_into_a_refund(self, store):
+        claim = await _create(store)
+        await store.claim_for_run(claim)
+        await store.complete(claim, {"answer": 42})
+        assert await store.fail(claim, "Job execution failed.") is False
+        assert (await store.get(claim, NPUB))["status"] == "done"
 
     async def test_runner_exceeding_budget_is_cancelled_and_refunds(self, vault):
         rt = _make_runtime(vault)
