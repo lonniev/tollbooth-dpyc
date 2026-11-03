@@ -1,0 +1,1 @@
+- `get_nostr_profile` shows only a profile its own npub signed. A relay could serve a forged kind-0 (for example another Lightning address) dated far in the future, and it was shown as the newest. Each event must now be kind 0, authored by the npub asked for, carry a valid signature, and be dated no more than 10 minutes ahead.
