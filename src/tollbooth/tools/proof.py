@@ -19,7 +19,7 @@ from datetime import UTC
 from typing import Any
 
 from tollbooth.constants import ErrorCode as _EC_MODULE
-from tollbooth.nostr_credentials import CourierUnreachableError
+from tollbooth.nostr_credentials import CourierChannelBusy, CourierUnreachableError
 
 _EC_UNREACHABLE = _EC_MODULE.COURIER_RELAY_UNREACHABLE
 
@@ -190,6 +190,16 @@ async def request_npub_proof_tool(
             "error": "Secure Courier not configured.",
         }
 
+    # Refuse a replacement before the purge: the purge pops this patron's DMs,
+    # which would take a reply to the channel that is still open.
+    try:
+        wait = await courier._exchange.seconds_until_reopen(patron_npub, PROOF_SERVICE)
+    except Exception:
+        logger.debug("reopen check failed", exc_info=True)
+        wait = 0
+    if wait:
+        return CourierChannelBusy(wait).to_response()
+
     # Purge stale DMs for this patron before sending a fresh challenge. The
     # fetch and NIP-09 deletes are blocking websocket I/O, so run them off the
     # event loop (same reasoning as the courier drains in 0.44.3 / M1.2).
@@ -241,6 +251,8 @@ async def request_npub_proof_tool(
         )
         if not result.get("success"):
             return result
+    except CourierChannelBusy as busy:
+        return busy.to_response()
     except CourierUnreachableError as e:
         # Every candidate relay refused the challenge. That is a relay
         # situation, not a caller mistake, and it carries a code so an agent

@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from tollbooth.nostr_credentials import CourierChannelBusy
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +42,20 @@ async def request_credential_channel_tool(
                 )
             ),
         }
+    credential_services = [
+        s for s in (rt.operator_credential_service, rt.patron_credential_service) if s
+    ]
+    if service not in credential_services:
+        # The npub_ownership proof channel is opened only by request_npub_proof,
+        # which binds it to the holder that asked. Opening it here let anyone
+        # replace a patron's pending proof.
+        return {
+            "success": False,
+            "error": (
+                f"Unknown service {service!r}. Available: "
+                + ", ".join(credential_services)
+            ),
+        }
     courier = await rt.courier()
     if courier is None:
         return {"success": False, "error": "Secure Courier not configured."}
@@ -49,6 +65,8 @@ async def request_credential_channel_tool(
             greeting=rt._operator_credential_greeting,
             recipient_npub=sender_npub,
         )
+    except CourierChannelBusy as busy:
+        return busy.to_response()
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": str(e)}
 
@@ -273,6 +291,8 @@ async def request_patron_credentials_tool(
             greeting=rt._patron_credential_greeting,
             recipient_npub=sender_npub,
         )
+    except CourierChannelBusy as busy:
+        return busy.to_response()
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": str(e)}
 

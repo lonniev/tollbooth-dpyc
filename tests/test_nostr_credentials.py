@@ -17,7 +17,9 @@ from tollbooth.nostr_credentials import (
     _KIND_METADATA,
     _KIND_PRIVATE_DM,
     _KIND_SEAL,
+    _REOPEN_AFTER_SECONDS,
     _TIMESTAMP_FUZZ_SECONDS,
+    CourierChannelBusy,
     CourierError,
     CourierNotReady,
     CourierValidationError,
@@ -1959,7 +1961,8 @@ class TestConcurrentExchanges:
 
     @pytest.mark.asyncio
     async def test_second_open_channel_same_service_replaces_nonce(self):
-        """Re-opening a channel for the same service overwrites the old nonce."""
+        """Re-opening a channel for the same service overwrites the old nonce,
+        once the old one has stood for the reopen spacing (F22)."""
         ex = _make_exchange(templates=self._two_service_templates())
         npub = "npub1test123"
 
@@ -1968,6 +1971,13 @@ class TestConcurrentExchanges:
             r1 = await ex.open_channel(
                 "x", greeting="First attempt", recipient_npub=npub,
             )
+            with pytest.raises(CourierChannelBusy) as busy:
+                await ex.open_channel("x", greeting="Too soon", recipient_npub=npub)
+            assert 0 < busy.value.retry_after <= _REOPEN_AFTER_SECONDS
+            assert ex._pending_nonces[(npub, "x")][0] == r1["nonce"]
+
+            nonce, expiry = ex._pending_nonces[(npub, "x")]
+            ex._pending_nonces[(npub, "x")] = (nonce, expiry - _REOPEN_AFTER_SECONDS)
             r2 = await ex.open_channel(
                 "x", greeting="Second attempt", recipient_npub=npub,
             )
@@ -1975,6 +1985,20 @@ class TestConcurrentExchanges:
         # Only the second nonce should be stored
         assert ex._pending_nonces[(npub, "x")][0] == r2["nonce"]
         assert ex._pending_nonces[(npub, "x")][0] != r1["nonce"]
+
+    @pytest.mark.asyncio
+    async def test_a_channel_another_process_opened_is_also_spaced(self):
+        """F22: the pending record in the vault counts, not only this process's."""
+        ex = _make_exchange(templates=self._two_service_templates())
+        ex._credential_vault = object()
+        opened_now = {"nonce": "n", "expiry": time.time() + ex._freshness_window}
+        with patch.object(ex, "_vault_fetch", AsyncMock(return_value=opened_now)):
+            assert await ex.seconds_until_reopen("npub1x", "x") > 0
+        lapsed = {"nonce": "n", "expiry": time.time() - 1}
+        with patch.object(ex, "_vault_fetch", AsyncMock(return_value=lapsed)):
+            assert await ex.seconds_until_reopen("npub1x", "x") == 0
+        with patch.object(ex, "_vault_fetch", AsyncMock(return_value=None)):
+            assert await ex.seconds_until_reopen("npub1x", "x") == 0
 
 
 # ── Conversational DM Flow Tests ──────────────────────────────────────────

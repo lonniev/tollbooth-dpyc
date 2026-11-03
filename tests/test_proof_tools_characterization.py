@@ -56,6 +56,11 @@ class FakeExchange:
         self._credential_vault = None
         self.popped: list[tuple] = []      # (event_id, nacked: bool)
         self.sent_dms: list[str] = []
+        self.reopen_wait = 0
+        self.fetched = 0
+
+    async def seconds_until_reopen(self, npub, service):
+        return self.reopen_wait
 
     async def _resolve_pinned_record(self, npub, service, nonce, *, bound_to=""):
         self.resolved_for = bound_to
@@ -67,6 +72,7 @@ class FakeExchange:
         return self._pinned, None
 
     def _fetch_dms_from_relays(self, relays=None):
+        self.fetched += 1
         # Simulate a slow/timing-out relay (blocking, like websocket-client).
         if self._fetch_delay:
             time.sleep(self._fetch_delay)
@@ -393,6 +399,24 @@ async def test_request_propagates_open_channel_failure(patron):
 
     r = await tools["request_npub_proof"](patron_npub=patron)
     assert r["success"] is False and r["error"] == "relay down"
+
+
+@pytest.mark.asyncio
+async def test_a_proof_channel_opened_moments_ago_is_not_replaced(patron):
+    """F22: refused before the purge, which would take the open channel's reply."""
+    ex = FakeExchange(candidates=[])
+    ex.reopen_wait = 75
+    rt = OperatorRuntime(tool_registry={}, service_name="Test",
+                         holder_auth_url="https://op.example")
+    rt._courier = SimpleNamespace(_exchange=ex, open_channel=AsyncMock())
+    rt.store_patron_session = AsyncMock()
+    tools = _register(rt)
+
+    r = await tools["request_npub_proof"](patron_npub=patron)
+    assert r["error_code"] == "courier_channel_busy"
+    assert r["retry_after_seconds"] == 75
+    assert ex.fetched == 0
+    rt._courier.open_channel.assert_not_awaited()
 
 
 # ── check_proof_status ────────────────────────────────────────────────

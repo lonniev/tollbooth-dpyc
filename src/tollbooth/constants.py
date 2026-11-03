@@ -71,6 +71,7 @@ class ErrorCode:
     COURIER_NO_PINNED_RELAY = "courier_no_pinned_relay"    # record has no rendezvous relay to drain
     COURIER_NOT_FOUND = "courier_not_found"                # relay drained; no DM matched the nonce
     COURIER_RELAY_UNREACHABLE = "courier_relay_unreachable"  # pinned relay never answered; nothing was drained
+    COURIER_CHANNEL_BUSY = "courier_channel_busy"          # a channel for (npub, service) opened moments ago
 
     # Billing / pricing
     INSUFFICIENT_BALANCE = "insufficient_balance"
