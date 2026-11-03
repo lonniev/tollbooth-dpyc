@@ -1,1 +1,0 @@
-- `check_price(npub=…)` shows a patron's own price (their coupons and spend tier) only when the connection proves that npub. Anyone else gets the public price.

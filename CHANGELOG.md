@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.112.0] — 2026-11-03
+
+### Fixed
+
+- OTS snapshots run again on a container booted less than an hour ago. The hourly check started its clock at zero, and the monotonic clock counts from boot, so short-lived containers never notarized.
+- Snapshots now reach `confirmed`: each hour the runtime asks the calendars for the Bitcoin attestation of its older `submitted` snapshots, oldest first, and keeps the upgraded path and block height beside each receipt.
+- The snapshot tree hashes each patron's ledger, not its at-rest ciphertext, so a patron can recompute their own leaf.
+- `service_status` shows what the notarizer last did (`notarization`: last attempt, last snapshot, last confirmations, and the stage and error type of a failure).
+
+### Security
+
+- `check_price(npub=…)` shows a patron's own price (their coupons and spend tier) only when the connection proves that npub. Anyone else gets the public price.
+
+- `get_notarization_proof` answers only a connection that proves the npub, so a stranger can no longer test whether an npub is a patron of an operator.
+
+- `get_nostr_profile` shows only a profile its own npub signed. A relay could serve a forged kind-0 (for example another Lightning address) dated far in the future, and it was shown as the newest. Each event must now be kind 0, authored by the npub asked for, carry a valid signature, and be dated no more than 10 minutes ahead.
+
 ## [0.111.0] — 2026-11-03
 
 ### Security
