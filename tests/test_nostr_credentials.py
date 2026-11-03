@@ -2,6 +2,7 @@
 
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -3163,3 +3164,21 @@ class TestDrainTakesOnlyItsOwn:
         with patch.object(ex, "_request_deletion"):
             ex._find_dm_candidates(bob.public_key.hex())
         assert alices["id"] not in ex._consumed_ids
+
+
+# ── F23: a closed channel leaves the vault too ──────────────────────
+
+
+class TestCloseChannel:
+    @pytest.mark.asyncio
+    async def test_close_channel_forgets_memory_and_vault(self):
+        ex = _make_exchange()
+        vault = SimpleNamespace(delete_credentials=AsyncMock())
+        ex._credential_vault = vault
+        key = ("npub1x", "npub_ownership")
+        ex._pending_nonces[key] = ("n", time.time() + 60)
+        ex._pinned_relays[key] = "wss://r"
+        ex._bound_to[key] = "h1"
+        await ex.close_channel(*key)
+        assert key not in ex._pending_nonces and key not in ex._pinned_relays and key not in ex._bound_to
+        vault.delete_credentials.assert_awaited_once_with("__pending__npub_ownership", "npub1x")

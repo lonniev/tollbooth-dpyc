@@ -26,6 +26,8 @@ class ErrorCode:
     # receive_npub_proof).
     PROOF_REQUIRED = "proof_required"        # the connection does not prove the npub
     PROOF_INVALID = "proof_invalid"          # a held grant does not verify
+    PROOF_CHALLENGE_REVOKED = "proof_challenge_revoked"  # challenge predates the patron's revocation
+    PROOF_REVOCATIONS_UNAVAILABLE = "proof_revocations_unavailable"  # revocation store did not answer; retry
 
     # An Authority owner's act (its request queue, Neon health): the request
     # must prove the Authority's own npub.

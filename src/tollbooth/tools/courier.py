@@ -248,6 +248,14 @@ async def forget_credentials_tool(
                     "grants could not be persisted; call forget_credentials "
                     "again once the persistence layer answers."
                 )
+        # A proof challenge still open would let a reply already sent mint a
+        # new grant; close it too. The watermark refuses that grant as well.
+        if result.get("success"):
+            from tollbooth.tools.proof import PROOF_SERVICE
+            try:
+                await courier._exchange.close_channel(target_npub, PROOF_SERVICE)
+            except Exception:
+                logger.warning("open proof challenge not closed on forget", exc_info=True)
         # A patron who forgets their credentials here forgets their settings
         # too: properties are theirs, kept by npub. The operator's own are not
         # a patron's, and stay.
