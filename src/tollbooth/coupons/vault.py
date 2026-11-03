@@ -242,12 +242,13 @@ class CouponsVault:
 
         The window / cap checks happen at the caller — this method's job
         is just to record the redemption.  Repeated calls return the
-        existing row (no error)."""
+        existing row (no error), and a forgotten row returns to the list
+        with its ``use_count``."""
         result = await self._neon._execute(
             f"INSERT INTO {self._t('patron_coupons')} (coupon_id, npub) "
             "VALUES ($1::uuid, $2) "
             "ON CONFLICT (coupon_id, npub) DO UPDATE "
-            "SET use_count = patron_coupons.use_count "  # no-op refresh
+            "SET forgotten_at = NULL "  # the count it kept comes back with it
             "RETURNING id, coupon_id, npub, use_count, redeemed_at",
             [coupon_id, npub],
         )
@@ -257,11 +258,13 @@ class CouponsVault:
         return PatronCoupon.from_row(rows[0])
 
     async def forget(self, coupon_id: str, npub: str) -> bool:
-        """Patron-initiated removal of a redemption.  Pure cosmetic — the
-        coupon itself still exists, the patron may re-redeem later."""
+        """Patron-initiated removal of a redemption from their list.
+
+        The row stays, hidden, because it holds the patron's ``use_count``:
+        deleting it would hand back every use of a capped coupon."""
         result = await self._neon._execute(
-            f"DELETE FROM {self._t('patron_coupons')} "
-            "WHERE coupon_id = $1::uuid AND npub = $2",
+            f"UPDATE {self._t('patron_coupons')} SET forgotten_at = now() "
+            "WHERE coupon_id = $1::uuid AND npub = $2 AND forgotten_at IS NULL",
             [coupon_id, npub],
         )
         return int(result.get("rowCount") or 0) > 0
@@ -280,7 +283,7 @@ class CouponsVault:
             f"c.times_redeemed, pc.use_count, c.tool_ids "
             f"FROM {self._t('patron_coupons')} pc "
             f"JOIN {self._t('coupons')} c ON c.id = pc.coupon_id "
-            "WHERE pc.npub = $1"
+            "WHERE pc.npub = $1 AND pc.forgotten_at IS NULL"
         )
         params: list[Any] = [npub]
         if operator:
@@ -319,7 +322,7 @@ class CouponsVault:
             f"c.times_redeemed, pc.use_count, c.tool_ids "
             f"FROM {self._t('patron_coupons')} pc "
             f"JOIN {self._t('coupons')} c ON c.id = pc.coupon_id "
-            f"WHERE pc.npub = $1 AND c.id IN ({placeholders})"
+            f"WHERE pc.npub = $1 AND pc.forgotten_at IS NULL AND c.id IN ({placeholders})"
         )
         params: list[Any] = [npub, *clean]
         try:
@@ -424,4 +427,6 @@ def schema_statements(t: Any, idx: str) -> list[str]:
             ")"
         ),
         f"CREATE INDEX IF NOT EXISTS {idx}idx_patron_coupons_npub ON {t('patron_coupons')}(npub)",
+        # Forgetting hides a redemption and keeps its use_count.
+        f"ALTER TABLE {t('patron_coupons')} ADD COLUMN IF NOT EXISTS forgotten_at TIMESTAMPTZ",
     ]
