@@ -6,6 +6,7 @@ relay I/O itself (fetch_profile, the publish fan-out) is integration-only.
 """
 
 import json
+import time
 from unittest.mock import patch
 
 import pytest
@@ -232,3 +233,58 @@ def test_publish_event_with_no_relays_is_an_honest_zero_not_a_crash():
 def test_fetch_with_no_relays_is_none_not_a_crash():
     with patch("tollbooth.relay_registry.get_relays", return_value=[]):
         assert nostr_profile.fetch_profile(PrivateKey().public_key.bech32()) is None
+
+
+# ── F27: only a profile the npub itself signed counts ───────────────
+
+
+def _signed_profile(key, content: dict, *, created_at: int | None = None) -> dict:
+    ev = Event(kind=0, content=json.dumps(content), pubkey=key.public_key.hex(),
+               created_at=created_at or int(time.time()))
+    ev.sign(key.hex())
+    return ev.to_dict()
+
+
+def test_a_profile_its_npub_signed_is_accepted():
+    me = PrivateKey()
+    got = nostr_profile._authentic_profile(_signed_profile(me, {"lud16": "me@x"}), me.public_key.hex(), time.time())
+    assert got is not None and got[1] == {"lud16": "me@x"}
+
+
+def test_a_forged_lightning_address_is_refused():
+    me, attacker = PrivateKey(), PrivateKey()
+    now = time.time()
+    real = _signed_profile(me, {"lud16": "me@x"})
+    tampered = {**real, "content": json.dumps({"lud16": "attacker@x"})}  # same id and sig
+    other_author = _signed_profile(attacker, {"lud16": "attacker@x"})
+    claimed = {**other_author, "pubkey": me.public_key.hex()}  # claims my npub, signed by another
+    unsigned = {**real, "sig": "00" * 64}
+    for ev in (tampered, other_author, claimed, unsigned, {**real, "kind": 1}, "junk", {}):
+        assert nostr_profile._authentic_profile(ev, me.public_key.hex(), now) is None
+
+
+def test_a_profile_dated_in_the_future_cannot_pin_itself():
+    me = PrivateKey()
+    now = time.time()
+    far = _signed_profile(me, {"name": "pinned"}, created_at=int(now) + 365 * 86400)
+    skewed = _signed_profile(me, {"name": "skewed"}, created_at=int(now) + 60)
+    assert nostr_profile._authentic_profile(far, me.public_key.hex(), now) is None
+    assert nostr_profile._authentic_profile(skewed, me.public_key.hex(), now) is not None
+
+
+def test_a_relay_serving_a_forgery_loses_to_the_signed_profile():
+    """End to end through _fetch_one: the forged newer event is skipped."""
+    me, attacker = PrivateKey(), PrivateKey()
+    real = _signed_profile(me, {"lud16": "me@x"}, created_at=int(time.time()) - 60)
+    forged = {**_signed_profile(attacker, {"lud16": "attacker@x"}), "pubkey": me.public_key.hex()}
+    frames = [json.dumps(["EVENT", "s", forged]), json.dumps(["EVENT", "s", real]), json.dumps(["EOSE", "s"])]
+
+    class FakeSocket:
+        def settimeout(self, _t): pass
+        def send(self, _m): pass
+        def recv(self): return frames.pop(0)
+        def close(self): pass
+
+    with patch("websocket.create_connection", return_value=FakeSocket()):
+        got = nostr_profile._fetch_one("wss://r", {"kinds": [0], "authors": [me.public_key.hex()]})
+    assert got is not None and got[1] == {"lud16": "me@x"}

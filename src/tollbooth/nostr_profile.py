@@ -33,11 +33,38 @@ _TIMEOUT = 5
 _PROFILE_FIELDS = {
     "name", "display_name", "about", "picture", "banner", "nip05", "website", "lud16",
 }
+# A relay's clock may run a little ahead; a profile dated further ahead than
+# this is refused, or one relay could pin a forgery above every real update.
+_MAX_FUTURE_SECONDS = 600
 
 
 def _npub_to_hex(npub: str) -> str:
     from pynostr.key import PublicKey  # type: ignore[import-untyped]
     return PublicKey.from_npub(npub).hex()
+
+
+def _authentic_profile(ev: object, hex_pk: str, now: float) -> tuple[int, dict] | None:
+    """(created_at, content) of a kind-0 the npub itself signed, else None.
+
+    A relay can return anything, so a profile counts only when it is kind 0,
+    its author is the npub asked for, its Schnorr signature verifies over the
+    recomputed id, and it is not dated in the future beyond clock skew.
+    Otherwise one relay could serve a forged Lightning address as the newest.
+    """
+    if not isinstance(ev, dict) or ev.get("kind") != _KIND_METADATA or ev.get("pubkey") != hex_pk:
+        return None
+    try:
+        ts = int(ev.get("created_at", 0) or 0)
+        if ts > now + _MAX_FUTURE_SECONDS:
+            return None
+        from pynostr.event import Event  # type: ignore[import-untyped]
+
+        if not Event.from_dict(ev).verify():
+            return None
+        content = json.loads(ev.get("content", "{}"))
+    except Exception:  # noqa: BLE001 — malformed is not authentic
+        return None
+    return (ts, content) if isinstance(content, dict) else None
 
 
 def _fetch_one(relay_url: str, sub_filter: dict) -> tuple[int, dict] | None:
@@ -50,6 +77,7 @@ def _fetch_one(relay_url: str, sub_filter: dict) -> tuple[int, dict] | None:
 
     best: dict | None = None
     best_ts = -1
+    hex_pk = (sub_filter.get("authors") or [""])[0]
     try:
         ws = websocket.create_connection(relay_url, timeout=_TIMEOUT)
         sub = f"prof-{int(time.time() * 1000)}"
@@ -62,15 +90,9 @@ def _fetch_one(relay_url: str, sub_filter: dict) -> tuple[int, dict] | None:
                 if msg[0] == "EOSE":
                     break
                 if msg[0] == "EVENT" and len(msg) >= 3:
-                    ev = msg[2]
-                    ts = int(ev.get("created_at", 0) or 0)
-                    if ev.get("kind") == _KIND_METADATA and ts > best_ts:
-                        try:
-                            content = json.loads(ev.get("content", "{}"))
-                        except (json.JSONDecodeError, TypeError):
-                            continue
-                        if isinstance(content, dict):
-                            best, best_ts = content, ts
+                    found = _authentic_profile(msg[2], hex_pk, time.time())
+                    if found is not None and found[0] > best_ts:
+                        best_ts, best = found
             ws.send(json.dumps(["CLOSE", sub]))
         finally:
             ws.close()
