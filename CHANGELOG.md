@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.111.0] — 2026-11-03
+
+### Security
+
+- A revoked proof stays revoked. A collected proof challenge is now deleted from the vault as well as memory, so another process can no longer reload it and collect the same reply again. `forget_credentials` closes any proof challenge still open, and a challenge raised before the patron's last revocation is refused with `proof_challenge_revoked`. If the revocation store cannot answer, the collect is refused with `proof_revocations_unavailable` and the reply stays waiting.
+
+- An OAuth `state` now carries a one-time secret kept only in the flow's pending record, and the collector files the code under patron npub + secret. A link someone else built with a patron's npub can no longer deliver their account into that patron's session. `pack_oauth_state` takes the secret; `new_oauth_state_secret` and `oauth_code_key` are new. Deploy the collector on this SDK before the operators that use OAuth.
+
 ## [0.110.0] — 2026-11-03
 
 ### Fixed
