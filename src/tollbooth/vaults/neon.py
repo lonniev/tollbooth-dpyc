@@ -407,7 +407,9 @@ class NeonVault:
             f"SELECT npub, ledger_json FROM {self._t('balances')} ORDER BY npub"
         )
         rows = result.get("rows", [])
-        return [(row["npub"], row["ledger_json"]) for row in rows]
+        # The tree is over the ledger a patron can see, so a leaf can be
+        # recomputed from it: decrypt the at-rest ciphertext first.
+        return [(row["npub"], self._decrypt(row["ledger_json"])) for row in rows]
 
     async def store_anchor(
         self,
@@ -466,6 +468,22 @@ class NeonVault:
                 f"FROM {self._t('anchors')} ORDER BY created_at DESC LIMIT $1",
                 [limit],
             )
+        return result.get("rows", [])
+
+    async def unconfirmed_anchors(
+        self, older_than: str, limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """The oldest ``submitted`` anchors created before ``older_than``.
+
+        Oldest first, so a backlog drains instead of starving behind new ones.
+        """
+        result = await self._execute(
+            f"SELECT id, root_hash, ots_receipts_json, created_at "
+            f"FROM {self._t('anchors')} "
+            "WHERE status = 'submitted' AND created_at < $1::timestamptz "
+            "ORDER BY created_at ASC LIMIT $2",
+            [older_than, limit],
+        )
         return result.get("rows", [])
 
     async def update_anchor_status(

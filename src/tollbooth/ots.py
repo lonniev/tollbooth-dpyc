@@ -225,6 +225,114 @@ class MerkleTree:
         )
 
 
+# -- OTS timestamp walking -------------------------------------------------
+#
+# A calendar answers a submitted digest with a *pending* timestamp: a few
+# operations (append, prepend, sha256) that turn the digest into the
+# calendar's own commitment, then a pending attestation naming the calendar.
+# Hours later, ``GET /timestamp/<commitment>`` answers with the rest of the
+# path, ending in a Bitcoin attestation (the block height). Only what is
+# needed to follow that path is read here; anything else is refused.
+
+_PENDING_TAG = bytes.fromhex("83dfe30d2ef90c8e")
+_BITCOIN_TAG = bytes.fromhex("0588960d73d71901")
+_UNARY_OPS = {0x02: "sha1", 0x03: "ripemd160", 0x08: "sha256"}
+_APPEND, _PREPEND = 0xF0, 0xF1
+_MAX_DEPTH = 256
+
+
+class OTSParseError(ValueError):
+    """A timestamp this reader cannot follow."""
+
+
+class _Reader:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._pos = 0
+
+    def byte(self) -> int:
+        if self._pos >= len(self._data):
+            raise OTSParseError("timestamp ends early")
+        b = self._data[self._pos]
+        self._pos += 1
+        return b
+
+    def take(self, n: int) -> bytes:
+        if n < 0 or self._pos + n > len(self._data):
+            raise OTSParseError("timestamp ends early")
+        out = self._data[self._pos:self._pos + n]
+        self._pos += n
+        return out
+
+    def varuint(self) -> int:
+        value, shift = 0, 0
+        while True:
+            b = self.byte()
+            value |= (b & 0x7F) << shift
+            if not b & 0x80:
+                return value
+            shift += 7
+            if shift > 63:
+                raise OTSParseError("varuint too long")
+
+    def varbytes(self, limit: int = 8192) -> bytes:
+        n = self.varuint()
+        if n > limit:
+            raise OTSParseError("field too long")
+        return self.take(n)
+
+
+def _apply(op: int, arg: bytes, msg: bytes) -> bytes:
+    if op == _APPEND:
+        return msg + arg
+    if op == _PREPEND:
+        return arg + msg
+    return hashlib.new(_UNARY_OPS[op], msg).digest()
+
+
+def walk_timestamp(data: bytes, msg: bytes) -> list[tuple[str, bytes, Any]]:
+    """Every attestation in a serialized OTS timestamp, with the message it attests.
+
+    Returns ``(kind, message, value)`` triples: ``("pending", commitment,
+    calendar_uri)`` or ``("bitcoin", merkle_root_msg, block_height)``. Other
+    attestation kinds are returned as ``("unknown", message, tag_hex)``.
+    """
+    reader = _Reader(data)
+    found: list[tuple[str, bytes, Any]] = []
+
+    def node(current: bytes, depth: int) -> None:
+        if depth > _MAX_DEPTH:
+            raise OTSParseError("timestamp nested too deep")
+        tag = reader.byte()
+        while tag == 0xFF:
+            branch(reader.byte(), current, depth)
+            tag = reader.byte()
+        branch(tag, current, depth)
+
+    def branch(tag: int, current: bytes, depth: int) -> None:
+        if tag == 0x00:
+            kind = reader.take(8)
+            payload = _Reader(reader.varbytes())
+            if kind == _PENDING_TAG:
+                uri = payload.varbytes(1000).decode("utf-8", "replace")
+                found.append(("pending", current, uri))
+            elif kind == _BITCOIN_TAG:
+                found.append(("bitcoin", current, payload.varuint()))
+            else:
+                found.append(("unknown", current, kind.hex()))
+            return
+        if tag in (_APPEND, _PREPEND):
+            arg = reader.varbytes(4096)
+        elif tag in _UNARY_OPS:
+            arg = b""
+        else:
+            raise OTSParseError(f"unsupported operation 0x{tag:02x}")
+        node(_apply(tag, arg, current), depth + 1)
+
+    node(msg, 0)
+    return found
+
+
 class OTSCalendarClient:
     """Async HTTP client for OpenTimestamps calendar servers.
 

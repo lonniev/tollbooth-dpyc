@@ -3318,15 +3318,26 @@ class OperatorRuntime:
     # ------------------------------------------------------------------
 
     _OTS_INTERVAL_SECONDS = 3600  # 60 minutes between notarizations
-    _ots_last_check: float = 0.0  # monotonic timestamp of last check
+    # Monotonic time of the last check, or None before the first. Not 0.0:
+    # monotonic counts from boot, so a container younger than an hour would
+    # read "checked recently" forever and never notarize.
+    _ots_last_check: float | None = None
     _ots_running: bool = False     # prevent concurrent notarizations
+    _ots_task: Any = None          # the running task, held so it is not collected
+    _ots_status: dict[str, Any] | None = None
+
+    def notarization_status(self) -> dict[str, Any]:
+        """What the background notarizer last did in this process. No secrets:
+        stage names and exception type names only."""
+        return dict(self._ots_status or {"last_attempt_at": None})
 
     def fire_and_forget_notarize_if_stale(self) -> None:
-        """Trigger an OTS notarization if the last one is stale.
+        """Notarize if the last snapshot is stale, and confirm older ones.
 
         Piggybacks on tool calls — checked on every paid_tool invocation.
         Uses monotonic time to rate-limit vault queries to once per interval.
-        Non-blocking: notarization runs as a background task.
+        Non-blocking: the work runs as a background task. What it last did is
+        kept in ``notarization_status()`` and shown by ``service_status``.
         """
         if not self._ots_enabled or self._ots_running:
             return
@@ -3335,17 +3346,39 @@ class OperatorRuntime:
         import time as _time
 
         now = _time.monotonic()
-        if (now - self._ots_last_check) < self._OTS_INTERVAL_SECONDS:
+        if (
+            self._ots_last_check is not None
+            and (now - self._ots_last_check) < self._OTS_INTERVAL_SECONDS
+        ):
             return  # checked recently, skip
         self._ots_last_check = now
 
         async def _maybe_notarize() -> None:
+            from datetime import datetime
+
+            from tollbooth.tools.notarization import (
+                notarize_ledger_tool,
+                upgrade_pending_anchors,
+            )
+
             self._ots_running = True
+            status: dict[str, Any] = dict(self._ots_status or {})
+            status["last_attempt_at"] = datetime.now(UTC).isoformat()
+            status.pop("last_error", None)
+            stage = "vault"
             try:
                 vault = await self.vault()
+                stage = "confirm"
+                try:
+                    status["last_confirm"] = await upgrade_pending_anchors(
+                        vault, self._ots_calendars,
+                    )
+                except Exception as exc:  # noqa: BLE001 — confirming must not stop notarizing
+                    logger.warning("OTS confirmation failed: %s", type(exc).__name__)
+                    status["last_error"] = {"stage": stage, "error_type": type(exc).__name__}
+                stage = "list_anchors"
                 anchors = await vault.list_anchors(limit=1)
                 if anchors:
-                    from datetime import datetime
                     created = anchors[0].get("created_at", "")
                     if isinstance(created, str) and created:
                         last_ts = datetime.fromisoformat(created).timestamp()
@@ -3357,9 +3390,10 @@ class OperatorRuntime:
                     if age < self._OTS_INTERVAL_SECONDS:
                         return  # recent enough
 
-                from tollbooth.tools.notarization import notarize_ledger_tool
+                stage = "notarize"
                 result = await notarize_ledger_tool(vault, self._ots_calendars)
                 if result.get("success"):
+                    status["last_notarized_at"] = result.get("created_at")
                     logger.info(
                         "Opportunistic OTS notarization: %s (%d leaves, %d calendars)",
                         result.get("root_hash", "")[:16],
@@ -3367,13 +3401,19 @@ class OperatorRuntime:
                         result.get("calendars_submitted", 0),
                     )
                 else:
+                    status["last_error"] = {"stage": stage, "error_type": "refused"}
                     logger.warning("Opportunistic OTS notarization failed: %s", result.get("error"))
             except Exception as exc:  # noqa: BLE001
-                logger.debug("Opportunistic OTS notarization skipped: %s", exc)
+                status["last_error"] = {"stage": stage, "error_type": type(exc).__name__}
+                logger.warning(
+                    "Opportunistic OTS notarization failed at %s: %s",
+                    stage, type(exc).__name__,
+                )
             finally:
+                self._ots_status = status
                 self._ots_running = False
 
-        asyncio.create_task(_maybe_notarize())
+        self._ots_task = asyncio.create_task(_maybe_notarize())
 
     # ------------------------------------------------------------------
     # Claim-check async jobs
@@ -4743,6 +4783,8 @@ def register_standard_tools(
         # none). Free and unauthenticated so an agent can answer "do I need
         # credentials here?" before proving anything.
         status["patron_auth"] = rt.patron_auth_block()
+        if rt._ots_enabled:
+            status["notarization"] = rt.notarization_status()
         # How many calls since this process started still carried their proof
         # in a tool argument rather than on the connection.
         # Durable long-runner diagnostics: the non-secret key_id names the
