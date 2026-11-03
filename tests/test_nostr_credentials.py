@@ -2341,6 +2341,18 @@ class TestReceiveFormatEnforcement:
 class TestParseDelimitedCredentials:
     """Tests for _parse_delimited_credentials()."""
 
+    def test_a_long_reply_with_no_fields_parses_in_linear_time(self):
+        """F20: 40 KB of letters took 8 s of the event loop; now about 1 ms."""
+        import time
+
+        for junk in ("a" * 40_000, "a " * 20_000, "a=" * 20_000, "a=@@@" + "x" * 40_000):
+            started = time.perf_counter()
+            assert _parse_delimited_credentials(junk) is None
+            assert time.perf_counter() - started < 1.0
+
+    def test_a_key_is_the_whole_word_before_the_equals(self):
+        assert _parse_delimited_credentials("xapi_key = @@@v@@@") == {"xapi_key": "v"}
+
     def test_basic_single_field(self):
         """Extract a single field."""
         result = _parse_delimited_credentials("api_key = @@@sk-123@@@")

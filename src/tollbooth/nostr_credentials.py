@@ -130,7 +130,10 @@ def _generate_nonce() -> str:
 # [^@] matches newlines naturally (no DOTALL needed), so this handles
 # line-wrapped values from mobile Nostr clients without bleeding across
 # adjacent @@@ delimiters.
-_DELIMITED_FIELD = re.compile(r"(\w+)\s*=\s*@@@((?:[^@]|@(?!@@))*)@@@")
+# A key starts only where a word starts. Without (?<!\w) a stranger's long
+# run of letters with no "=" is retried from every position: 40 KB of reply
+# took 8 s of the event loop. With it the parse is linear (under 1 ms).
+_DELIMITED_FIELD = re.compile(r"(?<!\w)(\w+)\s*=\s*@@@((?:[^@]|@(?!@@))*)@@@")
 
 
 def _parse_delimited_credentials(text: str) -> dict[str, str] | None:
