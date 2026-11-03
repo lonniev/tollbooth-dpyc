@@ -6062,7 +6062,8 @@ def register_standard_tools(
                 (e.g. '{"amount_sats": 5000}' or
                 '{"difficulty": "sovereign", "mode": "live"}').
             npub: Optional patron npub; with it, the preview includes that
-                patron's coupons and constraint effects.
+                patron's coupons and constraint effects. The connection must
+                prove the npub; otherwise the public price is shown.
         """
         identity = rt._tool_registry.get(tool_id)
         # Fallback: caller passed a capability name instead of a UUID.
@@ -6136,11 +6137,19 @@ def register_standard_tools(
         # Preview with the chain the debit will walk — authored steps plus
         # the coupons bound to this tool — so the preview cannot say one
         # thing and the charge another. Nothing is burned here.
+        # A patron's own price (their coupons, their spend tier) is theirs
+        # alone: it is read only when this connection proves the npub.
+        # Anyone else gets the public price.
+        resolved = ""
+        unproven = False
         if base_cost != 0:
             try:
                 resolved = resolve_npub(npub) if npub else ""
             except ValueError:
                 resolved = ""
+            if resolved and await rt.prove_caller(resolved) is not None:
+                resolved = ""
+                unproven = True
             chain, coupon_map, gate = await rt._effective_chain(tool_id, name, resolved)
         else:
             chain, coupon_map, gate = [], None, None
@@ -6176,7 +6185,12 @@ def register_standard_tools(
             except ValueError:
                 result["constraint_effects"].append({
                     "type": "info",
-                    "message": "npub required for constraint evaluation.",
+                    "message": (
+                        "This is the public price. Your own price needs this "
+                        "connection to prove your npub."
+                        if unproven
+                        else "npub required for constraint evaluation."
+                    ),
                 })
 
         return result
