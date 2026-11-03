@@ -1,4 +1,0 @@
-- OTS snapshots run again on a container booted less than an hour ago. The hourly check started its clock at zero, and the monotonic clock counts from boot, so short-lived containers never notarized.
-- Snapshots now reach `confirmed`: each hour the runtime asks the calendars for the Bitcoin attestation of its older `submitted` snapshots, oldest first, and keeps the upgraded path and block height beside each receipt.
-- The snapshot tree hashes each patron's ledger, not its at-rest ciphertext, so a patron can recompute their own leaf.
-- `service_status` shows what the notarizer last did (`notarization`: last attempt, last snapshot, last confirmations, and the stage and error type of a failure).
