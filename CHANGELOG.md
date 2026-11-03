@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.110.0] — 2026-11-03
+
+### Fixed
+
+- Forgetting a coupon keeps its use count, so a patron can no longer forget and re-redeem to reset `uses_per_patron`. Schema version 5 adds `patron_coupons.forgotten_at`.
+- A failed async job refunds its fare once, however many polls see the failure at the same moment, and a late result cannot reopen a job that was refunded.
+
+- `request_credential_channel` opens only the operator and patron credential services. It could open the `npub_ownership` proof channel, so anyone could replace a patron's pending proof and keep them from ever proving.
+- A channel for one npub and service can be replaced at most every 2 minutes. A stranger can no longer replace a patron's channel faster than the patron can answer it, and the challenge DMs a patron receives are capped. A refused request returns `courier_channel_busy` with `retry_after_seconds`.
+
+- One patron's proof or credential drain no longer takes other patrons' gift-wrapped replies. Each wrap is routed by the sender named in its seal: the requester's are drained as before, another npub's recent ones are left for that npub, and unreadable or out-of-date wraps are popped as junk so the queue still empties. Another sender's wrap no longer draws a rejection DM to the requester.
+
+- A courier or proof reply is parsed in linear time. A stranger could send a long reply with no `=` and hold an operator's event loop for seconds per message (40 KB took 8 s).
+
 ## [0.109.3] — 2026-11-02
 
 ### Security

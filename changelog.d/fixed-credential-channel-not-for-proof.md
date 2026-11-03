@@ -1,2 +1,0 @@
-- `request_credential_channel` opens only the operator and patron credential services. It could open the `npub_ownership` proof channel, so anyone could replace a patron's pending proof and keep them from ever proving.
-- A channel for one npub and service can be replaced at most every 2 minutes. A stranger can no longer replace a patron's channel faster than the patron can answer it, and the challenge DMs a patron receives are capped. A refused request returns `courier_channel_busy` with `retry_after_seconds`.
