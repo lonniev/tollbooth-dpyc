@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.113.0] — 2026-11-03
+
+### Security
+
+- An Authority accepts a signed (NIP-98) request only when it was signed for the Authority's own host, so a request an operator signed for one Authority can no longer be replayed at another. Operators still accept any host, since a site's proxy forwards requests signed for the site.
+
+- A courier DM quotes the caller's `verify_at`, `reason` and `origin` as one line with no `@@@`, cut at 1,000 characters, so that text cannot add a field to the patron's reply. A reply that gives a field more than once is refused with a NACK naming the field.
+
 ## [0.112.0] — 2026-11-03
 
 ### Fixed
