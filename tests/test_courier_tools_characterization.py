@@ -122,6 +122,33 @@ async def test_request_channel_requires_sender_and_service():
     assert "service is required" in r["error"]
 
 
+
+@pytest.mark.asyncio
+async def test_request_credential_channel_cannot_open_the_proof_channel():
+    """F22: npub_ownership is opened only by request_npub_proof, bound to a holder."""
+    courier = FakeCourier()
+    tools = _register(_runtime(courier))
+    r = await tools["request_credential_channel"](sender_npub=SENDER, service="npub_ownership")
+    assert r["success"] is False
+    assert "test-operator" in r["error"] and "test-patron" in r["error"]
+    courier.open_channel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_channel_opened_moments_ago_is_not_replaced():
+    from tollbooth.nostr_credentials import CourierChannelBusy
+
+    courier = FakeCourier()
+    courier.open_channel = AsyncMock(side_effect=CourierChannelBusy(90))
+    tools = _register(_runtime(courier))
+    for call in (
+        tools["request_credential_channel"](sender_npub=SENDER, service="test-operator"),
+        tools["request_patron_credentials"](sender_npub=SENDER),
+    ):
+        r = await call
+        assert r["error_code"] == "courier_channel_busy"
+        assert r["retry_after_seconds"] == 90
+
 # ── receive_credentials validation-callback flow ──────────────────────
 
 @pytest.mark.asyncio

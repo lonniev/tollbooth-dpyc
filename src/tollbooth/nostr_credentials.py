@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import random
 import re
 import threading
@@ -91,6 +92,9 @@ _KIND_DELETION = 5  # NIP-09 event deletion
 
 # How far ahead of our clock a DM's own timestamp may run and still count.
 _CLOCK_SKEW_SECONDS = 300
+
+# A channel for one (npub, service) may be replaced at most this often.
+_REOPEN_AFTER_SECONDS = 120
 
 # NIP-17 timestamp randomization window (0–48 hours into the past)
 _TIMESTAMP_FUZZ_SECONDS = 2 * 24 * 60 * 60
@@ -336,6 +340,32 @@ class CourierTimeout(CourierError):
 
 class CourierValidationError(CourierError):
     """Raised when credential payload fails template validation."""
+
+
+class CourierChannelBusy(CourierError):
+    """A channel for this (npub, service) opened moments ago.
+
+    Opening a channel replaces any one pending for the same npub and
+    service, and anyone may ask. Spacing the asks keeps a stranger from
+    replacing a patron's channel faster than the patron can answer it, and
+    caps the challenge DMs the patron receives.
+    """
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(
+            f"A channel for this npub opened moments ago. Use the session "
+            f"phrase that request returned, or ask again in {retry_after}s."
+        )
+        self.retry_after = retry_after
+
+    def to_response(self) -> dict[str, Any]:
+        from tollbooth.constants import ErrorCode
+        return {
+            "success": False,
+            "error_code": ErrorCode.COURIER_CHANNEL_BUSY,
+            "error": str(self),
+            "retry_after_seconds": self.retry_after,
+        }
 
 
 class CourierUnreachableError(CourierError):
@@ -948,6 +978,24 @@ class NostrCredentialExchange:
                 pass
             ws.close()
 
+    async def seconds_until_reopen(self, npub: str, service: str) -> int:
+        """Seconds until a channel for (npub, service) may be replaced; 0 if now.
+
+        Reads the pending record in memory, else the vault, so every process
+        of the operator sees the same channel.
+        """
+        pending = self._pending_nonces.get((npub, service))
+        expiry = pending[1] if pending else None
+        if expiry is None and self._credential_vault is not None:
+            blob = await self._vault_fetch(f"__pending__{service}", npub)
+            if blob:
+                expiry = float(blob.get("expiry", 0) or 0)
+        now = time.time()
+        if not expiry or expiry <= now:
+            return 0
+        age = now - (expiry - self._freshness_window)
+        return max(0, math.ceil(_REOPEN_AFTER_SECONDS - age))
+
     async def open_channel(
         self,
         service: str,
@@ -987,6 +1035,11 @@ class NostrCredentialExchange:
             raise CourierValidationError(
                 f"Unknown service '{service}'. Available: {available}"
             )
+
+        if recipient_npub:
+            wait = await self.seconds_until_reopen(recipient_npub, service)
+            if wait:
+                raise CourierChannelBusy(wait)
 
         template = self._templates[service]
         instructions = render_delimited_instructions(template)
