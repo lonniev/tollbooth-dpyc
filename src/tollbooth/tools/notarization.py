@@ -9,12 +9,14 @@ Zero hot-path impact — fully decoupled from credit tool calls.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from tollbooth.ots import MerkleTree, OTSCalendarClient
+from tollbooth.ots import MerkleTree, OTSCalendarClient, OTSParseError, walk_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,84 @@ async def notarize_ledger_tool(
             f"Bitcoin confirmation expected in 1-6 hours."
         ),
     }
+
+
+# A calendar commits its pending digests to Bitcoin within a few hours; asking
+# sooner only collects 404s.
+UPGRADE_AFTER = timedelta(hours=2)
+
+
+async def upgrade_pending_anchors(
+    vault: Any,
+    ots_calendars: list[str] | None = None,
+    *,
+    limit: int = 5,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """Collect Bitcoin attestations for ``submitted`` anchors; mark them ``confirmed``.
+
+    Each stored receipt is a pending timestamp. Following it gives the
+    calendar's commitment; the calendar that named itself in the receipt then
+    answers ``/timestamp/<commitment>`` with the path to a Bitcoin block once
+    it has one. One calendar's Bitcoin attestation confirms the anchor. The
+    upgraded path and the block height are kept beside each receipt, so a
+    patron can rebuild the full proof.
+
+    Returns counts: anchors ``checked`` and ``confirmed``.
+    """
+    now = now or datetime.now(UTC)
+    anchors = await vault.unconfirmed_anchors(
+        older_than=(now - UPGRADE_AFTER).isoformat(), limit=limit,
+    )
+    checked = confirmed = 0
+    if not anchors:
+        return {"checked": 0, "confirmed": 0}
+    ots = OTSCalendarClient(calendars=ots_calendars)
+    try:
+        for anchor in anchors:
+            checked += 1
+            try:
+                receipts = json.loads(anchor.get("ots_receipts_json") or "[]")
+                digest = bytes.fromhex(anchor["root_hash"])
+            except (ValueError, TypeError, KeyError):
+                logger.warning("anchor %s has an unreadable receipt record", anchor.get("id"))
+                continue
+            heights: list[int] = []
+            for receipt in receipts:
+                if receipt.get("bitcoin_height"):
+                    heights.append(int(receipt["bitcoin_height"]))
+                    continue
+                try:
+                    pending = walk_timestamp(base64.b64decode(receipt["receipt_b64"]), digest)
+                except (OTSParseError, KeyError, binascii.Error) as exc:
+                    logger.warning("anchor %s: unreadable receipt (%s)", anchor.get("id"), type(exc).__name__)
+                    continue
+                for kind, commitment, uri in pending:
+                    if kind != "pending" or not str(uri).startswith("https://"):
+                        continue
+                    upgraded = await ots.upgrade_receipt(commitment.hex(), uri)
+                    if not upgraded:
+                        continue
+                    try:
+                        attested = walk_timestamp(upgraded, commitment)
+                    except OTSParseError:
+                        logger.warning("anchor %s: %s sent an unreadable upgrade", anchor.get("id"), uri)
+                        continue
+                    found = [v for k, _m, v in attested if k == "bitcoin"]
+                    if found:
+                        receipt["upgraded_b64"] = base64.b64encode(upgraded).decode("ascii")
+                        receipt["bitcoin_height"] = min(found)
+                        heights.append(min(found))
+                        break
+            if heights:
+                await vault.update_anchor_receipts(str(anchor["id"]), json.dumps(receipts))
+                await vault.update_anchor_status(
+                    str(anchor["id"]), "confirmed", confirmed_at=now.isoformat(),
+                )
+                confirmed += 1
+    finally:
+        await ots.close()
+    return {"checked": checked, "confirmed": confirmed}
 
 
 async def get_notarization_proof_tool(
