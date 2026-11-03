@@ -589,22 +589,29 @@ class TestRetrieveCodeFromCollector:
 
 
 # --- OAuth state packing: operator npub round-trips via the state -------------
-def test_pack_oauth_state_joins_patron_and_operator():
+def test_pack_oauth_state_joins_patron_operator_and_secret():
     from tollbooth.oauth2_collector import pack_oauth_state
 
-    assert pack_oauth_state("npub1patron", "npub1operator") == "npub1patron.npub1operator"
+    assert pack_oauth_state("npub1patron", "npub1operator", "s3cr-t_") == "npub1patron.npub1operator.s3cr-t_"
 
 
 def test_unpack_oauth_state_roundtrips():
-    from tollbooth.oauth2_collector import pack_oauth_state, unpack_oauth_state
+    from tollbooth.oauth2_collector import new_oauth_state_secret, pack_oauth_state, unpack_oauth_state
 
     patron, operator = "npub1patron", "npub1operator"
-    assert unpack_oauth_state(pack_oauth_state(patron, operator)) == (patron, operator)
-
-
-def test_unpack_legacy_patron_only_state_yields_empty_operator():
-    # A pre-cutover state (patron npub only) has no operator half — the collector
-    # keys on that to refuse it rather than seal to the wrong (public) key.
-    from tollbooth.oauth2_collector import unpack_oauth_state
-
+    assert unpack_oauth_state(pack_oauth_state(patron, operator, new_oauth_state_secret())) == (patron, operator)
     assert unpack_oauth_state("npub1patrononly") == ("npub1patrononly", "")
+
+
+def test_a_code_is_filed_under_patron_and_secret():
+    """F16: a link built with a patron's npub but not their flow's secret files
+    its code where that patron's flow never looks."""
+    from tollbooth.oauth2_collector import new_oauth_state_secret, oauth_code_key, pack_oauth_state
+
+    secret = new_oauth_state_secret()
+    assert "." not in secret and len(secret) >= 32
+    assert oauth_code_key(pack_oauth_state("npub1p", "npub1o", secret)) == f"npub1p.{secret}"
+    assert oauth_code_key(pack_oauth_state("npub1p", "npub1o", "other")) != f"npub1p.{secret}"
+    assert oauth_code_key("npub1p.npub1o") == ""
+    assert oauth_code_key("npub1p") == ""
+    assert oauth_code_key("npub1p.npub1o.") == ""
