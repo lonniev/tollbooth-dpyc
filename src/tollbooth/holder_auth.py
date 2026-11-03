@@ -120,6 +120,11 @@ class HolderAuthProvider(OAuthProvider):
         )
         self._store = store
         self._verified: dict[str, tuple[AccessToken, float]] = {}
+        self.signed_host: str | None = None
+
+    def bind_signed_requests_to(self, host: str) -> None:
+        """Accept a signed request only when it was signed for ``host``."""
+        self.signed_host = host.lower()
 
     def get_middleware(self) -> list:
         return [
@@ -414,7 +419,9 @@ class _ConnectionIdentity(AuthenticationBackend):
         if scheme.lower() != "bearer":
             return None
         if value.startswith(_SIGNED_BEARER):
-            token = _signed_request_token(conn, value.removeprefix(_SIGNED_BEARER))
+            token = _signed_request_token(
+                conn, value.removeprefix(_SIGNED_BEARER), host=self._provider.signed_host,
+            )
         else:
             token = await self._provider.verify_token(value)
         if token is None or (token.expires_at and token.expires_at < int(time.time())):
@@ -467,7 +474,9 @@ class _SignedOrAnonymous(AuthenticationBackend):
         return AuthCredentials(token.scopes), AuthenticatedUser(token)
 
 
-def _signed_request_token(conn: HTTPConnection, value: str) -> AccessToken | None:
+def _signed_request_token(
+    conn: HTTPConnection, value: str, *, host: str | None = None,
+) -> AccessToken | None:
     import hashlib
 
     from tollbooth.identity_proof import verify_request_signature
@@ -477,6 +486,7 @@ def _signed_request_token(conn: HTTPConnection, value: str) -> AccessToken | Non
         method=conn.scope["method"],
         path=conn.url.path,
         body_sha256=conn.scope.get(_BODY_SHA256) or hashlib.sha256(b"").hexdigest(),
+        host=host,
     )
     if npub is None:
         return None
