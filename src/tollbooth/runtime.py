@@ -6482,8 +6482,12 @@ def register_standard_tools(
 
             Args:
                 notarization_id: The notarization record ID.
-                npub: The patron's Nostr public key (npub1...).
+                npub: The patron's Nostr public key (npub1...). The
+                    connection must prove it: whether an npub is in a
+                    snapshot says whether it is a patron here.
             """
+            if err := await rt.require_caller_proof(npub):
+                return err
             vault = await rt.vault()
             return await get_notarization_proof_tool(vault, notarization_id, npub)
 
