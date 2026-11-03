@@ -1,2 +1,0 @@
-- Forgetting a coupon keeps its use count, so a patron can no longer forget and re-redeem to reset `uses_per_patron`. Schema version 5 adds `patron_coupons.forgotten_at`.
-- A failed async job refunds its fare once, however many polls see the failure at the same moment, and a late result cannot reopen a job that was refunded.

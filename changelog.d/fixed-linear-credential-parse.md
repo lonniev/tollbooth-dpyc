@@ -1,1 +1,0 @@
-- A courier or proof reply is parsed in linear time. A stranger could send a long reply with no `=` and hold an operator's event loop for seconds per message (40 KB took 8 s).
