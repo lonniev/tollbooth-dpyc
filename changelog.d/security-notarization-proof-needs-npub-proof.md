@@ -1,0 +1,1 @@
+- `get_notarization_proof` answers only a connection that proves the npub, so a stranger can no longer test whether an npub is a patron of an operator.
