@@ -386,7 +386,7 @@ class TestReceiveNip17:
 
     @pytest.mark.asyncio
     async def test_gift_wrap_wrong_sender_skipped(self):
-        """Gift wrap from wrong sender is popped and acknowledged."""
+        """F21: another npub's fresh gift wrap is left for that npub's drain."""
         operator = PrivateKey()
         sender = PrivateKey()
         impersonator = PrivateKey()
@@ -402,9 +402,8 @@ class TestReceiveNip17:
             ex._received_events.append(event)
         _seed_channel(ex, sender.public_key.bech32())
 
-        # The impersonator's gift wrap decrypts but the seal reveals
-        # a different sender — it gets popped (undecryptable from the
-        # expected sender's perspective) and the queue is drained.
+        # The seal names the impersonator, who may have a channel of their
+        # own open: their wrap is theirs to drain, never popped or NACK'd here.
         with patch.object(ex, "_fetch_dms_from_relays"), \
              patch.object(ex, "_pop_event") as mock_pop:
             result = await ex.receive(
@@ -413,9 +412,7 @@ class TestReceiveNip17:
 
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.COURIER_NOT_FOUND
-        # The wrong-sender gift wrap was popped (first arg is the event id)
-        mock_pop.assert_called_once()
-        assert mock_pop.call_args[0][0] == event["id"]
+        mock_pop.assert_not_called()
 
 
 # ── receive Tests — Validation ────────────────────────────────────────
@@ -2225,8 +2222,8 @@ class TestNip17Subscription:
             assert ex._received_events[0]["id"] == "gw_ptag_test"
 
     def test_gift_wrap_events_in_buffer_included_as_candidates(self):
-        """Gift wrap events in the buffer are returned as candidates by
-        _find_dm_candidates regardless of their pubkey (sender is hidden)."""
+        """A gift wrap addressed to a key this process does not hold is left
+        alone: it can be neither read nor called junk."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec)
@@ -2244,12 +2241,8 @@ class TestNip17Subscription:
         with ex._lock:
             ex._received_events.append(gift_wrap_event)
 
-        # _find_dm_candidates should include the gift wrap
-        # even though the sender_hex doesn’t match the event pubkey,
-        # because gift wrap sender identity is hidden until unwrap.
-        results = ex._find_dm_candidates(sender.public_key.hex())
-        assert len(results) == 1
-        assert results[0]["id"] == "gw_candidate_test"
+        assert ex._find_dm_candidates(sender.public_key.hex()) == []
+        assert [e["id"] for e in ex._received_events] == ["gw_candidate_test"]
 
     def test_multiple_filters_in_req(self):
         """REQ message contains two filter objects: NIP-04 and NIP-17 (p-tagged)."""
@@ -2421,24 +2414,16 @@ class TestNip17TimestampHardening:
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec, freshness_window=900)  # 15 min
 
-        three_hours_ago = int(time.time()) - 3 * 60 * 60
-
-        gift_wrap_event = {
-            "id": "gw_fuzzed_ts",
-            "kind": _KIND_GIFT_WRAP,
-            "pubkey": PrivateKey().public_key.hex(),
-            "content": "encrypted-gift-wrap",
-            "created_at": three_hours_ago,
-            "tags": [["p", operator.public_key.hex()]],
-            "sig": "fake_sig",
-        }
+        gift_wrap_event = _make_gift_wrap_event(
+            sender, operator.hex(), operator.public_key.hex(), {"api_key": "k"},
+        )
+        gift_wrap_event["created_at"] = int(time.time()) - 3 * 60 * 60
 
         with ex._lock:
             ex._received_events.append(gift_wrap_event)
 
         results = ex._find_dm_candidates(sender.public_key.hex())
-        assert len(results) == 1
-        assert results[0]["id"] == "gw_fuzzed_ts"
+        assert [r["id"] for r in results] == [gift_wrap_event["id"]]
 
     def test_nip04_old_event_still_found(self):
         """NIP-04 events are found regardless of age — no time filtering."""
@@ -3085,3 +3070,60 @@ class TestHolderBoundChannel:
             pinned, mine = await ex._resolve_pinned_record(sender_npub, "x", _TEST_NONCE, bound_to="holder-a")
         assert other == ErrorCode.COURIER_NONCE_MISMATCH
         assert mine is None and pinned == _TEST_RELAY
+
+
+# ── F21: each drain takes only its own sender's DMs ─────────────────
+
+
+class TestDrainTakesOnlyItsOwn:
+    """One patron's drain neither steals nor NACKs another's replies, and
+    still empties the queue of junk."""
+
+    def _exchange_with(self, *events):
+        operator = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec, freshness_window=3600)
+        built = [make(operator) for make in events]
+        with ex._lock:
+            ex._received_events.extend(built)
+        return ex, built
+
+    @staticmethod
+    def _wrap_from(sender, *, sent=None):
+        return lambda op: _make_gift_wrap_event(
+            sender, op.hex(), op.public_key.hex(), {"api_key": "k"}, created_at=sent,
+        )
+
+    def test_another_patrons_fresh_reply_survives(self):
+        alice, bob = PrivateKey(), PrivateKey()
+        ex, (alices, bobs) = self._exchange_with(self._wrap_from(alice), self._wrap_from(bob))
+        with patch.object(ex, "_request_deletion"):
+            taken = ex._find_dm_candidates(bob.public_key.hex())
+        assert [e["id"] for e in taken] == [bobs["id"]]
+        assert alices["id"] not in ex._consumed_ids
+        assert ex._find_dm_candidates(alice.public_key.hex())[0]["id"] == alices["id"]
+
+    def test_junk_is_popped_so_the_queue_drains(self):
+        alice, bob = PrivateKey(), PrivateKey()
+        now = int(time.time())
+
+        def garbage(op):
+            return {"id": "garbage", "kind": _KIND_GIFT_WRAP, "pubkey": PrivateKey().public_key.hex(),
+                    "content": "not-nip44", "created_at": now, "tags": [["p", op.public_key.hex()]]}
+
+        ex, built = self._exchange_with(
+            garbage,
+            self._wrap_from(alice, sent=now - 2 * 3600),  # older than any open channel
+            self._wrap_from(alice, sent=now + 3600),      # dated past the clock
+        )
+        with patch.object(ex, "_request_deletion") as deleted:
+            assert ex._find_dm_candidates(bob.public_key.hex()) == []
+        assert {e["id"] for e in built} <= ex._consumed_ids
+        assert deleted.call_count == 3
+        assert ex._received_events == []
+
+    def test_a_skewed_clock_is_still_fresh(self):
+        alice, bob = PrivateKey(), PrivateKey()
+        ex, (alices,) = self._exchange_with(self._wrap_from(alice, sent=int(time.time()) + 60))
+        with patch.object(ex, "_request_deletion"):
+            ex._find_dm_candidates(bob.public_key.hex())
+        assert alices["id"] not in ex._consumed_ids
