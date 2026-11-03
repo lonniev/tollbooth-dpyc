@@ -367,7 +367,7 @@ class TestRuntimeAsyncJobs:
         await store.complete(claim, {"answer": 42})
         job = await store.get(claim, NPUB)
         assert job["status"] == "error"
-        assert job["result"] is None
+        assert job["result"] == {}
 
     async def test_a_finished_job_cannot_be_failed_into_a_refund(self, store):
         claim = await _create(store)

@@ -66,10 +66,11 @@ class TestSchemaStatements:
     def test_coupons_then_redemptions_each_indexed(self) -> None:
         from tollbooth.coupons.vault import schema_statements
         sql = schema_statements(lambda n: f"op_test.{n}", "op_test_")
-        assert len(sql) == 5
+        assert len(sql) == 6
         assert "op_test.coupons" in sql[0] and "op_test_idx_coupons_operator" in sql[1]
         assert "ADD COLUMN IF NOT EXISTS tool_ids TEXT[]" in sql[2], "the binding arrives as an ALTER on old tables"
         assert "REFERENCES op_test.coupons(id)" in sql[3], "redemptions follow their coupon"
+        assert "ADD COLUMN IF NOT EXISTS forgotten_at" in sql[5], "forgetting arrives as an ALTER on old tables"
 
 
 # ---------------------------------------------------------------------------
