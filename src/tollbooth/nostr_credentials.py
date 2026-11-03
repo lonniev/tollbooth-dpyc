@@ -143,17 +143,61 @@ def _generate_nonce() -> str:
 _DELIMITED_FIELD = re.compile(r"(?<!\w)(\w+)\s*=\s*@@@((?:[^@]|@(?!@@))*)@@@")
 
 
+class DuplicateFieldError(ValueError):
+    """A reply names the same ``key = @@@value@@@`` field more than once.
+
+    A reply holds each field once. A second copy would decide which value
+    counts by its position, so the reply is refused instead.
+    """
+
+    def __init__(self, keys: list[str]) -> None:
+        self.keys = keys
+        super().__init__(f"field(s) given more than once: {', '.join(keys)}")
+
+
 def _parse_delimited_credentials(text: str) -> dict[str, str] | None:
     """Extract ``key = @@@value@@@`` pairs from *text*.
 
     Returns a dict of field→value mappings, or ``None`` if no @@@ patterns
     were found (indicating the message doesn't contain credentials).
+    Raises :class:`DuplicateFieldError` when a field appears twice.
     """
     matches = _DELIMITED_FIELD.findall(text)
     if not matches:
         return None
-    # Strip newlines that mobile clients may inject; preserve intentional spaces
-    return {key.strip(): re.sub(r"\r?\n", "", value).strip() for key, value in matches}
+    fields: dict[str, str] = {}
+    repeated: list[str] = []
+    for key, value in matches:
+        name = key.strip()
+        if name in fields and name not in repeated:
+            repeated.append(name)
+        # Strip newlines that mobile clients may inject; keep intentional spaces
+        fields[name] = re.sub(r"\r?\n", "", value).strip()
+    if repeated:
+        raise DuplicateFieldError(repeated)
+    return fields
+
+
+# Caller-supplied text that an operator-signed DM quotes (verify_at, reason,
+# origin) is cut to this many characters.
+_QUOTED_TEXT_LIMIT = 1000
+
+
+def _quoted_text(value: str | None) -> str | None:
+    """Make caller-supplied text safe to quote in a courier DM.
+
+    The text becomes one line with no ``@@@``. A newline could fake a section
+    of the DM, and ``@@@`` could add a reply field the patron never chose.
+    Control characters go, and the text is cut to ``_QUOTED_TEXT_LIMIT``.
+    """
+    if value is None:
+        return None
+    text = "".join(ch if ch.isprintable() else " " for ch in value)
+    text = " ".join(text.split())
+    text = re.sub(r"@{2,}", "@", text)
+    if len(text) > _QUOTED_TEXT_LIMIT:
+        text = text[: _QUOTED_TEXT_LIMIT - 1].rstrip() + "…"
+    return text or None
 
 
 @dataclass
@@ -217,6 +261,15 @@ _DM_READ_PROBE_TTL = 600.0
 # token did NOT match the open channel. Deliberately does NOT reveal the
 # expected nonce phrase — telling an unknown sender the token they should
 # have used would defeat the anti-replay guarantee.
+def _repeated_field_nack(keys: list[str]) -> str:
+    """The NACK for a reply that gives a field more than once."""
+    return (
+        "Your message was popped from the courier queue and removed: it gives "
+        f"{', '.join(keys)} more than once. Resend your reply with each field "
+        "once, using the @@@ format from the welcome message."
+    )
+
+
 _NACK_TOKEN = (
     "Your message was popped from the courier queue, but its session "
     "phrase didn't match an open request on this channel, so it has been "
@@ -1055,6 +1108,11 @@ class NostrCredentialExchange:
                 f"Unknown service '{service}'. Available: {available}"
             )
 
+        # Caller text is quoted in the signed DM and its attestation.
+        reason = _quoted_text(reason)
+        origin = _quoted_text(origin)
+        verify_at = _quoted_text(verify_at)
+
         if recipient_npub:
             wait = await self.seconds_until_reopen(recipient_npub, service)
             if wait:
@@ -1543,14 +1601,18 @@ class NostrCredentialExchange:
                     pt = None
                     nack_reason = _NACK_TOKEN
                 if pt is not None:
-                    payload = _parse_delimited_credentials(pt)
-                    if payload is None:
-                        nack_reason = (
-                            "Your message was popped but had no @@@ field "
-                            "markers. Resend using: field_name = @@@value@@@"
-                        )
-                    elif payload.get("nonce", "") != nonce:
-                        nack_reason = _NACK_TOKEN
+                    try:
+                        payload = _parse_delimited_credentials(pt)
+                    except DuplicateFieldError as dup:
+                        nack_reason = _repeated_field_nack(dup.keys)
+                    else:
+                        if payload is None:
+                            nack_reason = (
+                                "Your message was popped but had no @@@ field "
+                                "markers. Resend using: field_name = @@@value@@@"
+                            )
+                        elif payload.get("nonce", "") != nonce:
+                            nack_reason = _NACK_TOKEN
 
             if nack_reason is None:
                 # Valid match — pop it (ACK sent after a successful vault write)

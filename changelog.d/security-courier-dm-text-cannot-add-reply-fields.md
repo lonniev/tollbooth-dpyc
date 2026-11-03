@@ -1,0 +1,1 @@
+- A courier DM quotes the caller's `verify_at`, `reason` and `origin` as one line with no `@@@`, cut at 1,000 characters, so that text cannot add a field to the patron's reply. A reply that gives a field more than once is refused with a NACK naming the field.
