@@ -89,6 +89,9 @@ _KIND_SEAL = 13  # NIP-59 seal (inner layer of gift wrap)
 _KIND_PRIVATE_DM = 14  # NIP-17 private DM (innermost content)
 _KIND_DELETION = 5  # NIP-09 event deletion
 
+# How far ahead of our clock a DM's own timestamp may run and still count.
+_CLOCK_SKEW_SECONDS = 300
+
 # NIP-17 timestamp randomization window (0–48 hours into the past)
 _TIMESTAMP_FUZZ_SECONDS = 2 * 24 * 60 * 60
 
@@ -2310,46 +2313,94 @@ class NostrCredentialExchange:
         return self._subscribe_to_relays(relays)
 
     def _find_dm_candidates(self, sender_hex: str) -> list[dict[str, Any]]:
-        """Find unconsumed DM candidates from a sender, newest first.
+        """Take the unconsumed DMs from one sender, newest first.
 
-        NIP-04 events are filtered by sender pubkey.  NIP-17 gift wraps
-        cannot be filtered by sender until decrypted (the real sender is
-        inside the encrypted seal), so all addressed wraps are included.
+        The queue is shared by every patron, so each drain takes only its
+        own sender's DMs. A NIP-17 gift wrap names its sender only inside
+        the seal, so each wrap is opened that far and routed:
+
+        - from ``sender_hex``: a candidate;
+        - from another npub, sent within the channel lifetime
+          (``freshness_window``): left for that npub's own drain;
+        - anything else (unreadable, or too old or too new to answer any
+          open channel): junk, popped here so the queue cannot fill.
+
+        A wrap addressed to a key this process does not hold is left alone.
         """
-        logger.info(
-            "_find_dm_candidates: sender=%s, total_events=%d, consumed=%d",
-            sender_hex[:16], len(self._received_events),
-            len(self._consumed_ids),
-        )
-
+        now = int(time.time())
         with self._lock:
-            candidates = []
-            for event in self._received_events:
-                event_id = event.get("id", "")
-                if event_id in self._consumed_ids:
-                    continue
+            unconsumed = [
+                e for e in self._received_events
+                if e.get("id", "") not in self._consumed_ids
+            ]
+            keys = {self._pubkey_hex: self._privkey_hex}
+            for agent_key in self._ephemeral_agents.values():
+                keys[agent_key.public_key.hex()] = agent_key.hex()
 
-                kind = event.get("kind", 0)
-
-                if kind == _KIND_ENCRYPTED_DM:
-                    # NIP-04: sender is event.pubkey
-                    if event.get("pubkey", "") == sender_hex:
-                        candidates.append(event)
-
-                elif kind == _KIND_GIFT_WRAP:
-                    # NIP-17: sender is hidden inside the seal —
-                    # include all gift wraps, filter after decryption
+        candidates: list[dict[str, Any]] = []
+        junk: list[str] = []
+        for event in unconsumed:
+            kind = event.get("kind", 0)
+            if kind == _KIND_ENCRYPTED_DM:
+                # NIP-04: the sender is the event's own pubkey.
+                if event.get("pubkey", "") == sender_hex:
                     candidates.append(event)
+            elif kind == _KIND_GIFT_WRAP:
+                route = self._route_gift_wrap(event, sender_hex, keys, now)
+                if route == "mine":
+                    candidates.append(event)
+                elif route == "junk":
+                    junk.append(event.get("id", ""))
 
-            # Newest first
-            candidates.sort(key=lambda e: e.get("created_at", 0), reverse=True)
-            logger.info(
-                "_find_dm_candidates: %d candidates from %d unconsumed events",
-                len(candidates),
-                sum(1 for e in self._received_events
-                    if e.get("id", "") not in self._consumed_ids),
-            )
-            return candidates
+        for event_id in junk:
+            self._pop_event(event_id)
+        candidates.sort(key=lambda e: e.get("created_at", 0), reverse=True)
+        logger.info(
+            "_find_dm_candidates: sender=%s, %d candidate(s), %d junk popped, %d unconsumed",
+            sender_hex[:16], len(candidates), len(junk), len(unconsumed),
+        )
+        return candidates
+
+    def _route_gift_wrap(
+        self,
+        event: dict[str, Any],
+        sender_hex: str,
+        keys: dict[str, str],
+        now: int,
+    ) -> str:
+        """``"mine"``, ``"theirs"`` or ``"junk"`` for one gift wrap.
+
+        Reads the seal's pubkey to name the sender, and for another sender
+        the private DM's own ``created_at`` (the wrap's and seal's are
+        randomized by NIP-59; the DM's is not). The seal's signature is
+        checked later, by the drain that takes the wrap.
+        """
+        if not _HAS_NIP44:
+            return "mine"  # Cannot open it here; the drain reports why.
+        recipient = next(
+            (t[1] for t in event.get("tags", []) if len(t) > 1 and t[0] == "p"), "",
+        )
+        privkey_hex = keys.get(recipient)
+        if privkey_hex is None:
+            return "theirs"
+        try:
+            seal = json.loads(_nip44_decrypt(
+                event.get("content", ""), privkey_hex, event.get("pubkey", ""),
+            ))
+            seal_pubkey = seal.get("pubkey", "")
+            if seal.get("kind") != _KIND_SEAL or not seal_pubkey:
+                return "junk"
+            if seal_pubkey == sender_hex:
+                return "mine"
+            rumor = json.loads(_nip44_decrypt(
+                seal.get("content", ""), privkey_hex, seal_pubkey,
+            ))
+            sent = int(rumor.get("created_at"))
+        except Exception:  # noqa: BLE001 — unreadable is junk, whatever the cause
+            return "junk"
+        if now - self._freshness_window <= sent <= now + _CLOCK_SKEW_SECONDS:
+            return "theirs"
+        return "junk"
 
     def _decrypt_dm(
         self,
