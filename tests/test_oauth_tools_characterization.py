@@ -100,10 +100,12 @@ async def test_begin_oauth_happy_builds_url_and_stores_verifier():
     stored = rt.store_patron_session.await_args.args[1]
     assert stored["pkce_verifier"] == "VERIFIER"
     assert stored["redirect_uri"] == "https://collector.example"  # trailing / stripped
-    # client_id from operator creds; state packs patron npub (lookup key) plus the
-    # operator npub the collector seals the code to.
+    # client_id from operator creds; state packs the patron npub, the operator
+    # npub the collector seals the code to, and the flow's one-time secret (F16).
     assert mk_url.call_args.args[1] == "CID"
-    assert mk_url.call_args.args[3] == f"{PATRON}.{OPERATOR}"
+    secret = stored["state_secret"]
+    assert len(secret) >= 32 and "." not in secret
+    assert mk_url.call_args.args[3] == f"{PATRON}.{OPERATOR}.{secret}"
 
 
 @pytest.mark.asyncio
@@ -148,7 +150,7 @@ async def test_check_status_no_pending_flow():
 @pytest.mark.asyncio
 async def test_check_status_code_pending():
     rt = _runtime()
-    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V", "state_secret": "S"}, ""))
     tools = _register(rt)
     with patch("tollbooth.oracle_client.default_oracle_client",
                return_value=MagicMock(resolve_service=AsyncMock(return_value={"url": "https://collector.example"}))), \
@@ -161,18 +163,20 @@ async def test_check_status_code_pending():
 @pytest.mark.asyncio
 async def test_check_status_completes_and_persists_tokens():
     rt = _runtime()
-    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V", "state_secret": "S"}, ""))
     tools = _register(rt)
     token = {"access_token": "AT", "token_type": "Bearer", "refresh_token": "RT", "expires_at": 1999}
     with patch("tollbooth.oracle_client.default_oracle_client",
                return_value=MagicMock(resolve_service=AsyncMock(return_value={"url": "https://collector.example"}))), \
          patch("tollbooth.oauth2_collector.retrieve_code_from_collector",
-               new=AsyncMock(return_value="AUTHCODE")), \
+               new=AsyncMock(return_value="AUTHCODE")) as mk_retrieve, \
          patch("tollbooth.oauth2_collector.exchange_code_for_token",
                new=AsyncMock(return_value=token)) as mk_exch:
         r = await tools["check_oauth_status"](npub=PATRON)
 
     assert r["success"] is True and r["status"] == "completed"
+    # F16: the code is fetched from where only this flow's secret files it
+    assert mk_retrieve.await_args.args[1] == f"{PATRON}.S"
     # code exchanged with the operator creds + PKCE verifier
     assert mk_exch.await_args.args[0] == "AUTHCODE"
     assert mk_exch.await_args.kwargs["code_verifier"] == "V"
@@ -187,7 +191,7 @@ async def test_check_status_exchange_failure_unclassified():
     """An unexpected exception still surfaces as a structured situation, not
     the old blind "Token exchange failed. Check operator logs." """
     rt = _runtime()
-    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V", "state_secret": "S"}, ""))
     tools = _register(rt)
     with patch("tollbooth.oracle_client.default_oracle_client",
                return_value=MagicMock(resolve_service=AsyncMock(return_value={"url": "https://collector.example"}))), \
@@ -209,7 +213,7 @@ async def test_check_status_exchange_surfaces_provider_refusal():
     from tollbooth.oauth2_collector import OAuthRefreshDenied
 
     rt = _runtime()
-    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V", "state_secret": "S"}, ""))
     tools = _register(rt)
     denied = OAuthRefreshDenied(
         "400 invalid_client: Client authentication failed due to unknown client",
@@ -238,7 +242,7 @@ async def test_check_status_exchange_invalid_grant_routes_to_restart():
     from tollbooth.oauth2_collector import OAuthRefreshDenied
 
     rt = _runtime()
-    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V", "state_secret": "S"}, ""))
     tools = _register(rt)
     denied = OAuthRefreshDenied(
         "400 invalid_grant: code has already been used",
@@ -264,7 +268,7 @@ async def test_check_status_exchange_invalid_grant_routes_to_restart():
 @pytest.mark.asyncio
 async def test_check_status_on_token_received_merges_extra():
     rt = _runtime(on_token=AsyncMock(return_value={"account_hash": "H123"}))
-    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example"}, ""))
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "state_secret": "S"}, ""))
     tools = _register(rt)
     token = {"access_token": "AT", "token_type": "Bearer"}
     with patch("tollbooth.oracle_client.default_oracle_client",
@@ -278,3 +282,15 @@ async def test_check_status_on_token_received_merges_extra():
     assert r["success"] is True
     stored = rt.store_patron_session.await_args.args[1]
     assert stored["account_hash"] == "H123"  # callback extra merged into vault data
+
+
+@pytest.mark.asyncio
+async def test_check_status_without_the_flows_secret_is_no_flow():
+    """F16: a pending flow with no secret cannot say where its code was filed."""
+    rt = _runtime()
+    rt.load_patron_session = AsyncMock(return_value=({"redirect_uri": "https://c.example", "pkce_verifier": "V"}, ""))
+    tools = _register(rt)
+    with patch("tollbooth.oauth2_collector.retrieve_code_from_collector", new=AsyncMock()) as mk_retrieve:
+        r = await tools["check_oauth_status"](npub=PATRON)
+    assert r["success"] is False and "begin_oauth" in r["error"]
+    mk_retrieve.assert_not_awaited()

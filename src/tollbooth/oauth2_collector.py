@@ -486,7 +486,7 @@ def _token_error_fields(resp: httpx.Response) -> tuple[str, str]:
 # The collector encrypts TO the operator's public key with a fresh ephemeral
 # sender keypair per code (same sealed-sender pattern Secure Courier uses for
 # gift-wrap outer layer). Only the operator nsec can open the seal. The OAuth
-# ``state`` (patron npub) is a Neon lookup key only — never material for the
+# ``state`` (patron npub + flow secret) is a Neon lookup key only — never material for the
 # cipher. THREAT-MODEL 7#4 / E-6: vault cipher key must not be derived from a
 # public value.
 #
@@ -500,26 +500,45 @@ _COLLECTOR_CODE_VERSION = 2
 _STATE_SEP = "."
 
 
-def pack_oauth_state(patron_npub: str, operator_npub: str) -> str:
-    """Encode (patron npub, operator npub) into a single OAuth ``state`` string.
+def new_oauth_state_secret() -> str:
+    """A one-time secret for one OAuth flow (URL-safe, never contains '.')."""
+    import secrets
+
+    return secrets.token_urlsafe(24)
+
+
+def pack_oauth_state(patron_npub: str, operator_npub: str, secret: str) -> str:
+    """Encode (patron npub, operator npub, secret) into one OAuth ``state``.
 
     The OAuth ``state`` is the only value that round-trips through the provider
-    back to the collector, so it must carry the operator npub the collector
-    seals TO (a public key — safe to route through the browser) alongside the
-    patron npub the operator retrieves BY. Both are bech32 (no '.' in bech32),
-    so a dot separates them unambiguously.
+    back to the collector, so it carries the operator npub the collector seals
+    TO, the patron npub, and a one-time secret that only the operator's pending
+    flow knows. The code is filed under patron + secret, so a link someone else
+    built with a patron's npub files its code where that patron's flow never
+    looks. bech32 and URL-safe base64 contain no '.', so dots separate the parts.
     """
-    return f"{patron_npub}{_STATE_SEP}{operator_npub}"
+    return _STATE_SEP.join((patron_npub, operator_npub, secret))
 
 
 def unpack_oauth_state(state: str) -> tuple[str, str]:
     """Split an OAuth ``state`` into (patron npub, operator npub).
 
-    Returns ``(patron, "")`` for a legacy patron-only state so the collector can
+    Returns ``(patron, "")`` for a patron-only state so the collector can
     refuse it rather than seal to the wrong (public) key.
     """
-    patron, _, operator = (state or "").partition(_STATE_SEP)
-    return patron, operator
+    parts = (state or "").split(_STATE_SEP)
+    return parts[0], parts[1] if len(parts) > 1 else ""
+
+
+def oauth_code_key(state: str) -> str:
+    """Where the collector files a code: patron npub + the flow's secret.
+
+    Empty when the state carries no secret, so the collector refuses it.
+    """
+    parts = (state or "").split(_STATE_SEP)
+    if len(parts) != 3 or not all(parts):
+        return ""
+    return f"{parts[0]}{_STATE_SEP}{parts[2]}"
 
 
 def _npub_to_hex(npub_or_hex: str) -> str:
@@ -666,7 +685,8 @@ async def retrieve_code_from_collector(
 
     Args:
         collector_url: Base URL of the collector service.
-        state_token: The state token (patron npub) used during authorization —
+        state_token: Where the code was filed: ``oauth_code_key`` of the state
+            (patron npub + the flow's secret) —
             lookup key only, never a cipher key.
         operator_nsec: Operator nsec (``nsec1...``) or 64-char hex private key.
 

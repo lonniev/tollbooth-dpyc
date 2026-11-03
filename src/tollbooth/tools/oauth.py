@@ -97,6 +97,7 @@ async def begin_oauth_tool(rt: Any, npub: str) -> dict[str, Any]:
     from tollbooth.oauth2_collector import (
         build_authorize_url,
         generate_pkce_pair,
+        new_oauth_state_secret,
         pack_oauth_state,
     )
 
@@ -107,21 +108,23 @@ async def begin_oauth_tool(rt: Any, npub: str) -> dict[str, Any]:
         extra_params["code_challenge"] = challenge
         extra_params["code_challenge_method"] = "S256"
 
-    # State carries BOTH npubs: the patron half is the collector's lookup key
-    # (and the retrieve key, unchanged); the operator half is the PUBLIC key the
-    # collector seals the code to, so only this operator's nsec can open it
-    # (check_oauth_status passes rt._get_nsec()). Both are public — safe in a URL.
+    # State carries the patron npub, the operator npub (the PUBLIC key the
+    # collector seals the code to, so only this operator's nsec opens it) and a
+    # one-time secret kept only in this flow's pending record. The collector
+    # files the code under patron + secret, so a link someone else built with
+    # this patron's npub can never deliver its code into this patron's session.
+    state_secret = new_oauth_state_secret()
     authorize_url = build_authorize_url(
         opc.authorize_url,
         client_id,
         redirect_uri,
-        pack_oauth_state(resolved, rt.operator_npub()),
+        pack_oauth_state(resolved, rt.operator_npub(), state_secret),
         scope=opc.scopes or None,
         extra_params=extra_params or None,
     )
 
     # Store PKCE verifier and redirect_uri for check_oauth_status
-    vault_data: dict[str, str] = {"redirect_uri": redirect_uri}
+    vault_data: dict[str, str] = {"redirect_uri": redirect_uri, "state_secret": state_secret}
     if verifier:
         vault_data["pkce_verifier"] = verifier
     await rt.store_patron_session(
@@ -171,7 +174,7 @@ async def check_oauth_status_tool(rt: Any, npub: str) -> dict[str, Any]:
         # Mid-dance: the patron has already clicked Allow. Telling them to start
         # over because the vault was cold would discard a completed grant.
         return rt.oauth_situation_response(OAuthSituation(pending_situation))
-    if not pending or "redirect_uri" not in pending:
+    if not pending or "redirect_uri" not in pending or not pending.get("state_secret"):
         return {
             "success": False,
             "error": "No pending OAuth flow. Call begin_oauth first.",
@@ -219,7 +222,7 @@ async def check_oauth_status_tool(rt: Any, npub: str) -> dict[str, Any]:
 
     # NIP-44 seal opens only with the operator nsec — state is lookup only (#228).
     code = await retrieve_code_from_collector(
-        collector_url, resolved, rt._get_nsec(),
+        collector_url, f"{resolved}.{pending['state_secret']}", rt._get_nsec(),
     )
     if code is None:
         return {
