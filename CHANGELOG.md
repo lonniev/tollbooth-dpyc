@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.114.3] — 2026-11-03
+
+### Security
+
+- PyPI publishing runs only for a `v*` tag whose commit is on `main`, so a token that can push tags cannot ship unreviewed code (F26).
+
+- `session_status(patron_npub)` includes the `upstream_oauth` block only when the connection proves that npub, the same proof `check_oauth_status` needs. Without it the block is left out and the readiness answer is unchanged (F9/F10).
+
 ## [0.114.2] — 2026-11-03
 
 ### Security
