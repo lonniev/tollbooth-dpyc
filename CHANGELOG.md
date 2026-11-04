@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.115.0] — 2026-11-04
+
+### Removed
+
+- `tollbooth.tools.anchors` and the old aliases `anchor_ledger_tool`, `get_anchor_proof_tool` and `list_anchors_tool`: an unused duplicate of `tollbooth.tools.notarization`. Use `notarize_ledger_tool`, `get_notarization_proof_tool` and `list_notarizations_tool`.
+
+### Fixed
+
+- A ledger with no balance change since its last notarization is reported as already covered by that record, instead of failing as `refused` in `service_status`, and the OTS calendars are not asked again.
+
 ## [0.114.3] — 2026-11-03
 
 ### Security

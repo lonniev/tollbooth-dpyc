@@ -1,1 +1,0 @@
-- `tollbooth.tools.anchors` and the old aliases `anchor_ledger_tool`, `get_anchor_proof_tool` and `list_anchors_tool`: an unused duplicate of `tollbooth.tools.notarization`. Use `notarize_ledger_tool`, `get_notarization_proof_tool` and `list_notarizations_tool`.
