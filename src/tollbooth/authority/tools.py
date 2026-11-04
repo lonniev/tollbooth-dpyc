@@ -1328,7 +1328,13 @@ def register_authority_tools(
         durable latest-state row, and fires a best-effort owner-notification
         DM. This is how the Authority learns the store is dark BEFORE a patron
         files a complaint.
+
+        Only an operator this Authority provisioned may report: its npub has a
+        ``neon_database_url`` row in ``bootstrap_config``. Any other signer is
+        refused, with no row written and no DM sent.
         """
+        from tollbooth.authority.tenant_provisioner import get_operator_config_value
+
         if not npub:
             return {"success": False, "error": "npub is required."}
         if not _signed_by(npub):
@@ -1339,11 +1345,23 @@ def register_authority_tools(
             }
         try:
             vault = await runtime.vault()
+            provisioned = await get_operator_config_value(vault, npub, "neon_database_url")
+        except Exception as exc:  # noqa: BLE001
+            # The owner sees the Authority's own store failing as own_store in
+            # network_persistence_health; an unverified reporter gets nothing.
+            logger.info("Could not check the reporter of a Neon 402 alert: %s", exc)
+            return {"success": False, "error": "The Authority could not check its operators just now."}
+        if not provisioned:
+            return {
+                "success": False,
+                "error_code": ErrorCode.OPERATOR_NOT_REGISTERED,
+                "error": "Only an operator this Authority provisioned may report a Neon 402.",
+            }
+        try:
             await neon_alert_store.ensure_schema(vault)
             await neon_alert_store.record(vault, npub, detail)
         except Exception as exc:  # noqa: BLE001
-            # The Authority's OWN store may be down too (shared project). Still
-            # try to reach the human, and report honestly rather than 500.
+            # The operator is ours, so still reach the human, and report honestly rather than 500.
             await _notify_owner_of_neon_402(npub, detail)
             return {"success": False, "error": f"Could not record alert: {exc}"}
 
