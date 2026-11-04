@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.114.2] — 2026-11-03
+
+### Security
+
+- A capped coupon's discount counts only after one of its uses is reserved under its caps, so concurrent calls can no longer spend it past `uses_per_patron` or `total_uses`. A call that cannot reserve a use pays full fare; a call that is then refused for balance gives its use back (F36/F37).
+
 ## [0.114.1] — 2026-11-03
 
 ### Security

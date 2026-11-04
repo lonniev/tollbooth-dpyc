@@ -1,1 +1,0 @@
-- A capped coupon's discount counts only after one of its uses is reserved under its caps, so concurrent calls can no longer spend it past `uses_per_patron` or `total_uses`. A call that cannot reserve a use pays full fare; a call that is then refused for balance gives its use back (F36/F37).
