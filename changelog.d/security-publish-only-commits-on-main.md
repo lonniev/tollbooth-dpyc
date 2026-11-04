@@ -1,1 +1,0 @@
-- PyPI publishing runs only for a `v*` tag whose commit is on `main`, so a token that can push tags cannot ship unreviewed code (F26).
