@@ -1,1 +1,0 @@
-- An Authority accepts a Neon 402 alert only from an operator it provisioned. Any other signer is refused, with no alert row and no owner DM (F35).

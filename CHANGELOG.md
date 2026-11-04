@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.114.1] — 2026-11-03
+
+### Security
+
+- An Authority accepts a Neon 402 alert only from an operator it provisioned. Any other signer is refused, with no alert row and no owner DM (F35).
+
 ## [0.114.0] — 2026-11-03
 
 ### Removed
