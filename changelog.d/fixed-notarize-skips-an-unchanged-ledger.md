@@ -1,0 +1,1 @@
+- A ledger with no balance change since its last notarization is reported as already covered by that record, instead of failing as `refused` in `service_status`, and the OTS calendars are not asked again.

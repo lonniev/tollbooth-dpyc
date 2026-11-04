@@ -3449,7 +3449,9 @@ class OperatorRuntime:
 
                 stage = "notarize"
                 result = await notarize_ledger_tool(vault, self._ots_calendars)
-                if result.get("success"):
+                if result.get("unchanged"):
+                    status["last_unchanged_at"] = status["last_attempt_at"]
+                elif result.get("success"):
                     status["last_notarized_at"] = result.get("created_at")
                     logger.info(
                         "Opportunistic OTS notarization: %s (%d leaves, %d calendars)",
