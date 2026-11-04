@@ -4584,7 +4584,7 @@ def register_standard_tools(
         believe they paid but never got credits must escalate to the
         operator's support, who then invokes this tool on their behalf.
 
-        Use cases: cold-start vault races during check_payment, ncred
+        Use cases: cold-start vault races during check_payment, credential
         delivery hiccups, patrons closing Top-Off sheets before settle,
         any infrastructure incident that left an invoice settled at BTCPay
         but uncredited on the operator's ledger.
@@ -5140,7 +5140,6 @@ def register_standard_tools(
         sender_npub: str = "",
         service: str = "",
         nonce: str = "",
-        credential_card: str = "",
     ) -> dict[str, Any]:
         """Pick up credentials from the Secure Courier.
 
@@ -5156,24 +5155,21 @@ def register_standard_tools(
         none match, the queue is drained and a ``courier_not_found`` result is
         returned. Do NOT poll, loop, or retry.
 
-        If a credential_card (ncred1...) is provided, it is redeemed directly
-        without any relay access (nonce not required for that path). On
-        success, the payment processor client is reinitialized from the new
-        credentials — no server restart needed.
+        On success, the payment processor client is reinitialized from the
+        new credentials — no server restart needed.
 
         Args:
             sender_npub: Required. The npub that sent the credentials.
             service: Required. The credential service name (must match
                 the service used in request_credential_channel).
-            nonce: The session phrase request_credential_channel returned (and
-                the welcome DM shows); it names the reply to collect.
-            credential_card: Optional. An ncred1... card to redeem directly
-                (bypasses the relay drain; nonce not needed).
+            nonce: Required. The session phrase request_credential_channel
+                returned (and the welcome DM shows); it names the reply to
+                collect.
         Free.
         """
         from tollbooth.tools.courier import receive_credentials_tool
         return await receive_credentials_tool(
-            rt, sender_npub, service, nonce, credential_card,
+            rt, sender_npub, service, nonce,
             service_name=service_name, slug=slug,
         )
 
@@ -5219,15 +5215,13 @@ def register_standard_tools(
         async def receive_patron_credentials(
             sender_npub: str = "",
             nonce: str = "",
-            credential_card: str = "",
         ) -> dict[str, Any]:
             """Pick up patron credentials from the Secure Courier.
 
             Deterministic, one-shot retrieval: name the response with
             ``(sender_npub, nonce)`` and the tool drains ONLY the pinned
             rendezvous relay for that channel, stopping at the matching DM.
-            Provide an ncred1... credential_card to redeem directly instead
-            (nonce not required for that path). Do NOT poll or retry.
+            Do NOT poll or retry.
             Free.
 
             Args:
@@ -5235,12 +5229,10 @@ def register_standard_tools(
                     the credential reply.
                 nonce: The session phrase from the welcome DM; it names
                     the reply to collect.
-                credential_card: An ncred1... credential card to redeem instead
-                    of a DM reply.
             """
             from tollbooth.tools.courier import receive_patron_credentials_tool
             return await receive_patron_credentials_tool(
-                rt, sender_npub, nonce, credential_card,
+                rt, sender_npub, nonce,
             )
 
     # Prune registry entries for conditionally-skipped tools so they

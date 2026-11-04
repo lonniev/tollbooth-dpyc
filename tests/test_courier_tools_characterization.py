@@ -5,8 +5,8 @@ open_channel / forget (methods tested in test_nostr_credentials /
 test_secure_courier_service). Their own logic is validation + orchestration +
 the operator-credential validation-callback flow in receive_credentials
 (validator passes → cashier reset; validator fails → forget bad creds +
-rejection DM + structured error). The credential_card branch / no-echo is
-already covered by test_credential_no_echo.py.
+rejection DM + structured error). No-echo is covered by
+test_credential_no_echo.py.
 
 Pins current behavior at the tool-closure level before the Phase 2 extraction
 to tools/courier.py. §2-sensitive — assertions capture existing behavior.
@@ -60,9 +60,6 @@ class FakeCourier:
 
     async def receive(self, sender_npub, service=None, nonce=None, request_tool=None):
         return dict(self.receive_result)
-
-    async def redeem_card(self, ncred, service=None):
-        return {"success": True, "service": service}
 
     async def send(self, recipient_npub, message):
         self.sent.append(message)

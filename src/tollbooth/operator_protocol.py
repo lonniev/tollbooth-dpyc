@@ -185,10 +185,7 @@ OPERATOR_BASE_CATALOG: list[ToolPathInfo] = [
         cost_tier="FREE",
         agent_hint=(
             "Pick up credentials from the Secure Courier. Checks vault "
-            "first (instant), then polls Nostr relays. On first-time "
-            "receipt, sends the credential card (ncred1...) back to the "
-            "patron via Nostr DM for scan-and-paste reuse. Accepts an "
-            "optional credential_card parameter to bypass the relay flow. "
+            "first (instant), then polls Nostr relays. "
             "IMPORTANT: The sender_npub must be the patron's chosen "
             "npub for this service. Do NOT substitute an npub from a "
             "different service or conversation context — each npub is "
@@ -436,13 +433,12 @@ class OperatorProtocol(Protocol):
 
     async def receive_credentials(
         self, sender_npub: str, service: str, nonce: str,
-        credential_card: str,
     ) -> dict[str, Any]:
         """(hot) Pick up credentials from the Secure Courier.
 
         ``nonce`` is the session phrase returned by
         ``request_credential_channel`` — required for the deterministic,
-        pinned-relay drain (or omit it when redeeming a ``credential_card``).
+        pinned-relay drain.
         """
         ...
 

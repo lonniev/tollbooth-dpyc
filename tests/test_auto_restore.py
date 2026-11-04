@@ -126,7 +126,6 @@ def _make_courier_service(
     # so we build one with mocked exchange.
     svc = object.__new__(SecureCourierService)
     svc._operator_nsec = "nsec1fake"
-    svc._send_card_dm = False
     svc._sessions = {}
     svc._on_received = on_received
 

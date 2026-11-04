@@ -1,16 +1,12 @@
 """Regression guard for audit finding S1 — credentials must NEVER be echoed.
 
-The Secure Courier wrapper (``SecureCourierService.redeem_card`` /
-``receive``) strips credential values before returning. The audit found that
-the ``receive_credentials`` and ``receive_patron_credentials`` standard tools
-bypassed that wrapper on the ``credential_card`` branch by reaching through
-``courier._exchange.redeem_credential_card()`` directly, so raw credential
-values leaked into the tool result (→ LLM context, logs, transcripts).
+The Secure Courier wrapper (``SecureCourierService.receive``) strips credential
+values before returning. The audit found a tool branch that reached past that
+wrapper to the exchange, so raw credential values leaked into the tool result
+(→ LLM context, logs, transcripts).
 
-These tests exercise the *registered tool closures* (not the wrapper, which is
-already correct) and assert no credential values survive in any receive/redeem
-result. They are written to FAIL on the pre-fix code and pass once both tool
-sites route through ``courier.redeem_card()``.
+These tests exercise the *registered tool closures* and assert no credential
+values survive in any receive result.
 """
 
 from __future__ import annotations
@@ -62,8 +58,8 @@ PATRON_TEMPLATE = CredentialTemplate(
 def _leaky_courier() -> SecureCourierService:
     """A real SecureCourierService whose exchange returns raw credentials.
 
-    Replacing ``_exchange`` with a mock lets the redeem path run without any
-    relay or vault I/O while still exercising the *real* ``redeem_card``
+    Replacing ``_exchange`` with a mock lets the receive path run without any
+    relay or vault I/O while still exercising the *real* ``receive``
     stripping logic in the wrapper. The mock's return dict carries the canary
     credentials — so a tool that bypasses the wrapper will echo them.
     """
@@ -75,13 +71,13 @@ def _leaky_courier() -> SecureCourierService:
     exchange = MagicMock()
     # Truthy vault so courier()'s late-attach branch is skipped in the runtime.
     exchange._credential_vault = MagicMock()
-    exchange.redeem_credential_card = AsyncMock(
+    exchange.receive = AsyncMock(
         return_value={
             "success": True,
             "service": "test-operator",
             "fields_received": len(SECRET_CREDS),
             "sensitive_fields": 1,
-            "encryption": "credential_card",
+            "encryption": "nip44",
             "credentials": dict(SECRET_CREDS),
             "user_npub": "npub1patrontestxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
             "persisted": True,
@@ -134,14 +130,14 @@ def test_leaky_exchange_actually_carries_credentials() -> None:
     stopped producing a leak.
     """
     courier = _leaky_courier()
-    raw = courier._exchange.redeem_credential_card  # AsyncMock
+    raw = courier._exchange.receive  # AsyncMock
     assert "credentials" in raw.return_value
     assert raw.return_value["credentials"] == SECRET_CREDS
 
 
 @pytest.mark.asyncio
-async def test_receive_credentials_card_branch_strips_credentials() -> None:
-    """receive_credentials with a credential_card must not echo credentials."""
+async def test_receive_credentials_strips_credentials() -> None:
+    """receive_credentials must not echo credentials."""
     rt = _runtime()
     tools = _register(rt)
     assert "receive_credentials" in tools
@@ -149,22 +145,22 @@ async def test_receive_credentials_card_branch_strips_credentials() -> None:
     result = await tools["receive_credentials"](
         sender_npub="npub1patrontestxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         service="test-operator",
-        credential_card="ncred1faketestcard",
+        nonce="a-nonce",
     )
     _assert_no_creds(result)
     assert result.get("success") is True
 
 
 @pytest.mark.asyncio
-async def test_receive_patron_credentials_card_branch_strips_credentials() -> None:
-    """receive_patron_credentials card branch must not echo credentials."""
+async def test_receive_patron_credentials_strips_credentials() -> None:
+    """receive_patron_credentials must not echo credentials."""
     rt = _runtime()
     tools = _register(rt)
     assert "receive_patron_credentials" in tools
 
     result = await tools["receive_patron_credentials"](
         sender_npub="npub1patrontestxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        credential_card="ncred1faketestcard",
+        nonce="a-nonce",
     )
     _assert_no_creds(result)
     assert result.get("success") is True
@@ -188,17 +184,8 @@ SENDER = "npub1patrontestxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 def _courier_whose_vault_write_fails() -> SecureCourierService:
     svc = _leaky_courier()
-    svc._exchange.redeem_credential_card = AsyncMock(return_value=dict(FAILED_WRITE))
     svc._exchange.receive = AsyncMock(return_value=dict(FAILED_WRITE))
     return svc
-
-
-@pytest.mark.asyncio
-async def test_service_strips_credentials_when_a_card_write_fails() -> None:
-    result = await _courier_whose_vault_write_fails().redeem_card("ncred1fake")
-    _assert_no_creds(result)
-    assert result["success"] is False
-    assert result["error_code"] == "credential_vault_unavailable"
 
 
 @pytest.mark.asyncio
@@ -215,9 +202,7 @@ async def test_service_strips_credentials_when_a_receive_write_fails() -> None:
 @pytest.mark.parametrize(
     ("tool", "args"),
     [
-        ("receive_credentials", {"service": "test-operator", "credential_card": "ncred1fake"}),
         ("receive_credentials", {"service": "test-operator", "nonce": "a-nonce"}),
-        ("receive_patron_credentials", {"credential_card": "ncred1fake"}),
         ("receive_patron_credentials", {"nonce": "a-nonce"}),
     ],
 )
@@ -230,21 +215,44 @@ async def test_tools_strip_credentials_when_the_write_fails(tool: str, args: dic
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "args",
-    [{"credential_card": "ncred1fake"}, {"nonce": "a-nonce"}],
-)
-async def test_tools_strip_credentials_a_courier_failed_to(args: dict) -> None:
+async def test_tools_strip_credentials_a_courier_failed_to() -> None:
     """The tools hold the line even if the service ever stops stripping."""
     rt = _runtime()
     courier = MagicMock()
-    courier.redeem_card = AsyncMock(return_value=dict(FAILED_WRITE))
     courier.receive = AsyncMock(return_value=dict(FAILED_WRITE))
     rt.courier = AsyncMock(return_value=courier)
     tools = _register(rt)
     _assert_no_creds(
-        await tools["receive_patron_credentials"](sender_npub=SENDER, **args)
+        await tools["receive_patron_credentials"](sender_npub=SENDER, nonce="a-nonce")
     )
     _assert_no_creds(
-        await tools["receive_credentials"](sender_npub=SENDER, service="test-operator", **args)
+        await tools["receive_credentials"](
+            sender_npub=SENDER, service="test-operator", nonce="a-nonce",
+        )
     )
+
+
+@pytest.mark.parametrize("tool", ["receive_credentials", "receive_patron_credentials"])
+def test_receive_tools_take_no_credential_card(tool: str) -> None:
+    """Credential cards are gone: a reply is collected by its nonce only."""
+    import inspect
+
+    params = inspect.signature(_register(_runtime())[tool]).parameters
+    assert "credential_card" not in params
+    assert "nonce" in params
+
+
+@pytest.mark.asyncio
+async def test_receive_without_a_nonce_is_refused_before_the_courier() -> None:
+    rt = _runtime()
+    courier = MagicMock()
+    courier.receive = AsyncMock()
+    rt.courier = AsyncMock(return_value=courier)
+    tools = _register(rt)
+    for result in (
+        await tools["receive_credentials"](sender_npub=SENDER, service="test-operator"),
+        await tools["receive_patron_credentials"](sender_npub=SENDER),
+    ):
+        assert result["success"] is False
+        assert result["error_code"] == "nonce_missing"
+    courier.receive.assert_not_called()
