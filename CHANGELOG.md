@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.114.0] — 2026-11-03
+
+### Removed
+
+- Credential cards (`ncred1…`, kind 21420) are gone. A credential card could be replayed for 90 days, without proof, to overwrite the stored credentials of the npub it named (security finding F34). `receive_credentials` and `receive_patron_credentials` drop the `credential_card` parameter and need the `nonce`; a successful receive no longer returns or DMs a card. `SecureCourierService` drops `send_card_dm`, `generate_credential_card` and `redeem_card`; the `credential_card` and `media_upload` modules and the `[qr]` extra are removed.
+
 ## [0.113.0] — 2026-11-03
 
 ### Security
