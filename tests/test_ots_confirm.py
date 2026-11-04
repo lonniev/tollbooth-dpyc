@@ -153,6 +153,7 @@ def _notarizing_vault():
     vault.unconfirmed_anchors = AsyncMock(return_value=[])
     vault.list_anchors = AsyncMock(return_value=[{"created_at": "2026-10-06 01:54:07.412774+00"}])
     vault.fetch_all_balances = AsyncMock(return_value=[("npub1a", "{}"), ("npub1b", "{}")])
+    vault.find_anchor_by_root = AsyncMock(return_value=None)
     vault.store_anchor = AsyncMock(return_value="6")
     return vault
 
@@ -222,3 +223,71 @@ async def test_unconfirmed_anchors_are_read_oldest_first():
     sql, params = v._execute.await_args.args
     assert "status = 'submitted'" in sql and "ORDER BY created_at ASC" in sql
     assert params == ["2026-11-03T10:00:00+00:00", 5]
+
+
+# ── an unchanged ledger is already notarized ──────────────────────────
+# The same balances give the same Merkle root, and root_hash is UNIQUE, so
+# re-submitting an untouched ledger used to fail its INSERT and show as
+# "refused" in service_status (Good Earth, 2026-11-04).
+
+@pytest.mark.asyncio
+async def test_an_unchanged_ledger_asks_the_calendars_nothing_and_stores_nothing():
+    from tollbooth.tools.notarization import notarize_ledger_tool
+
+    vault = _notarizing_vault()
+    vault.find_anchor_by_root = AsyncMock(
+        return_value={"id": 6, "status": "confirmed", "created_at": "2026-11-04 11:11:00+00"},
+    )
+    submit = AsyncMock(return_value=[{"calendar": "c", "receipt_b64": ""}])
+    with patch("tollbooth.ots.OTSCalendarClient.submit_digest", submit):
+        result = await notarize_ledger_tool(vault)
+    assert result["success"] is True and result["unchanged"] is True
+    assert result["notarization_id"] == "6" and result["status"] == "confirmed"
+    submit.assert_not_awaited()
+    vault.store_anchor.assert_not_awaited()
+    # The lookup is by the root this ledger gives.
+    assert vault.find_anchor_by_root.await_args.args[0] == result["root_hash"]
+
+
+@pytest.mark.asyncio
+async def test_the_background_notarizer_reports_an_unchanged_ledger_without_error():
+    vault = _notarizing_vault()
+    vault.find_anchor_by_root = AsyncMock(return_value={"id": 6, "status": "confirmed"})
+    rt = _runtime(vault)
+    submit = AsyncMock(return_value=[])
+    with patch("time.monotonic", return_value=120.0), \
+         patch("tollbooth.ots.OTSCalendarClient.submit_digest", submit):
+        rt.fire_and_forget_notarize_if_stale()
+        await _settle(rt)
+    status = rt.notarization_status()
+    assert "last_error" not in status
+    assert status["last_unchanged_at"] == status["last_attempt_at"]
+    submit.assert_not_awaited()
+    vault.store_anchor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lookup_submits_nothing():
+    from tollbooth.tools.notarization import notarize_ledger_tool
+
+    vault = _notarizing_vault()
+    vault.find_anchor_by_root = AsyncMock(side_effect=RuntimeError("down"))
+    submit = AsyncMock(return_value=[])
+    with patch("tollbooth.ots.OTSCalendarClient.submit_digest", submit):
+        result = await notarize_ledger_tool(vault)
+    assert result["success"] is False
+    submit.assert_not_awaited()
+    vault.store_anchor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_find_anchor_by_root_looks_up_that_root():
+    from tollbooth.vaults import NeonVault
+
+    v = NeonVault(database_url="postgresql://u:p@ep-x.neon.tech/db", encryption_nsec_hex="a" * 64)
+    v._execute = AsyncMock(return_value={"rows": [{"id": 6, "status": "confirmed", "created_at": "t"}]})
+    assert (await v.find_anchor_by_root("ab" * 32))["id"] == 6
+    sql, params = v._execute.await_args.args
+    assert "WHERE root_hash = $1" in sql and params == ["ab" * 32]
+    v._execute = AsyncMock(return_value={"rows": []})
+    assert await v.find_anchor_by_root("cd" * 32) is None

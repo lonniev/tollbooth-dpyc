@@ -48,6 +48,29 @@ async def notarize_ledger_tool(
     root_hex = tree.root_hex
     leaf_count = tree.leaf_count
 
+    # The same balances give the same root, and a root is recorded once. A
+    # ledger nobody has touched since an earlier notarization is already
+    # covered by it: say so, and ask the calendars nothing.
+    try:
+        prior = await vault.find_anchor_by_root(root_hex)
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "error": f"Failed to check earlier notarizations: {e}"}
+    if prior:
+        prior_id = str(prior["id"])
+        return {
+            "success": True,
+            "unchanged": True,
+            "notarization_id": prior_id,
+            "root_hash": root_hex,
+            "leaf_count": leaf_count,
+            "status": prior.get("status", "unknown"),
+            "created_at": str(prior.get("created_at", "")),
+            "message": (
+                f"No balance has changed since notarization {prior_id}, "
+                f"which already covers these {leaf_count} balances."
+            ),
+        }
+
     ots = OTSCalendarClient(calendars=ots_calendars)
     try:
         receipts = await ots.submit_digest(tree.root)
@@ -292,9 +315,3 @@ async def list_notarizations_tool(
         "count": len(items),
         "notarizations": items,
     }
-
-
-# Backward compatibility aliases
-anchor_ledger_tool = notarize_ledger_tool
-get_anchor_proof_tool = get_notarization_proof_tool
-list_anchors_tool = list_notarizations_tool

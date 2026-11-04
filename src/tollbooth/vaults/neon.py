@@ -436,6 +436,19 @@ class NeonVault:
             return str(rows[0]["id"])
         raise NeonQueryError("INSERT anchor returned no rows")
 
+    async def find_anchor_by_root(self, root_hash: str) -> dict[str, Any] | None:
+        """The notarization already recorded for this Merkle root, or None.
+
+        ``root_hash`` is UNIQUE: the same balances always give the same root,
+        so a ledger that has not changed is already covered by that record.
+        """
+        result = await self._execute(
+            f"SELECT id, status, created_at FROM {self._t('anchors')} WHERE root_hash = $1",
+            [root_hash],
+        )
+        rows = result.get("rows", [])
+        return rows[0] if rows else None
+
     async def fetch_anchor(self, anchor_id: str) -> dict[str, Any] | None:
         """Fetch a single anchor record by ID."""
         result = await self._execute(

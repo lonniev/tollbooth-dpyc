@@ -17,10 +17,10 @@ from tollbooth.ots import (
     OTSCalendarClient,
     _sha256,
 )
-from tollbooth.tools.anchors import (
-    anchor_ledger_tool,
-    get_anchor_proof_tool,
-    list_anchors_tool,
+from tollbooth.tools.notarization import (
+    get_notarization_proof_tool,
+    list_notarizations_tool,
+    notarize_ledger_tool,
 )
 
 # ---------------------------------------------------------------------------
@@ -341,8 +341,8 @@ class TestOTSCalendarClient:
 # Anchor tool tests
 # ---------------------------------------------------------------------------
 
-class TestAnchorLedgerTool:
-    """Tests for anchor_ledger_tool."""
+class TestNotarizeLedgerTool:
+    """Tests for notarize_ledger_tool."""
 
     @pytest.mark.asyncio
     async def test_success(self):
@@ -351,9 +351,10 @@ class TestAnchorLedgerTool:
 
         vault = AsyncMock()
         vault.fetch_all_balances = AsyncMock(return_value=entries)
+        vault.find_anchor_by_root = AsyncMock(return_value=None)
         vault.store_anchor = AsyncMock(return_value="42")
 
-        with patch("tollbooth.tools.anchors.OTSCalendarClient") as MockOTS:
+        with patch("tollbooth.tools.notarization.OTSCalendarClient") as MockOTS:
             mock_ots = AsyncMock()
             mock_ots.submit_digest = AsyncMock(return_value=[
                 {"calendar": "https://cal1.test", "receipt_b64": "AAEC"},
@@ -362,10 +363,10 @@ class TestAnchorLedgerTool:
             mock_ots._calendars = ["https://cal1.test"]
             MockOTS.return_value = mock_ots
 
-            result = await anchor_ledger_tool(vault, ots_calendars=["https://cal1.test"])
+            result = await notarize_ledger_tool(vault, ots_calendars=["https://cal1.test"])
 
         assert result["success"] is True
-        assert result["anchor_id"] == "42"
+        assert result["notarization_id"] == "42"
         assert result["leaf_count"] == 2
         assert result["calendars_submitted"] == 1
         assert result["status"] == "submitted"
@@ -381,15 +382,15 @@ class TestAnchorLedgerTool:
     async def test_no_balances(self):
         vault = AsyncMock()
         vault.fetch_all_balances = AsyncMock(return_value=[])
-        result = await anchor_ledger_tool(vault)
+        result = await notarize_ledger_tool(vault)
         assert result["success"] is False
-        assert "nothing to anchor" in result["error"].lower()
+        assert "nothing to notarize" in result["error"].lower()
 
     @pytest.mark.asyncio
     async def test_fetch_error(self):
         vault = AsyncMock()
         vault.fetch_all_balances = AsyncMock(side_effect=Exception("DB down"))
-        result = await anchor_ledger_tool(vault)
+        result = await notarize_ledger_tool(vault)
         assert result["success"] is False
         assert "DB down" in result["error"]
 
@@ -399,24 +400,25 @@ class TestAnchorLedgerTool:
         entries = [("npub1x", '{"balance": 1}')]
         vault = AsyncMock()
         vault.fetch_all_balances = AsyncMock(return_value=entries)
+        vault.find_anchor_by_root = AsyncMock(return_value=None)
         vault.store_anchor = AsyncMock(return_value="99")
 
-        with patch("tollbooth.tools.anchors.OTSCalendarClient") as MockOTS:
+        with patch("tollbooth.tools.notarization.OTSCalendarClient") as MockOTS:
             mock_ots = AsyncMock()
             mock_ots.submit_digest = AsyncMock(return_value=[])
             mock_ots.close = AsyncMock()
             mock_ots._calendars = ["https://cal1.test"]
             MockOTS.return_value = mock_ots
 
-            result = await anchor_ledger_tool(vault)
+            result = await notarize_ledger_tool(vault)
 
         assert result["success"] is True
         assert result["status"] == "no_receipts"
         assert result["calendars_submitted"] == 0
 
 
-class TestGetAnchorProofTool:
-    """Tests for get_anchor_proof_tool."""
+class TestGetNotarizationProofTool:
+    """Tests for get_notarization_proof_tool."""
 
     @pytest.mark.asyncio
     async def test_success(self):
@@ -436,7 +438,7 @@ class TestGetAnchorProofTool:
         vault = AsyncMock()
         vault.fetch_anchor = AsyncMock(return_value=anchor)
 
-        result = await get_anchor_proof_tool(vault, "42", "npub1alice")
+        result = await get_notarization_proof_tool(vault, "42", "npub1alice")
         assert result["success"] is True
         assert result["verified"] is True
         assert result["proof"]["root_hash"] == tree.root_hex
@@ -446,7 +448,7 @@ class TestGetAnchorProofTool:
     async def test_anchor_not_found(self):
         vault = AsyncMock()
         vault.fetch_anchor = AsyncMock(return_value=None)
-        result = await get_anchor_proof_tool(vault, "999", "npub1x")
+        result = await get_notarization_proof_tool(vault, "999", "npub1x")
         assert result["success"] is False
         assert "not found" in result["error"].lower()
 
@@ -463,7 +465,7 @@ class TestGetAnchorProofTool:
         vault = AsyncMock()
         vault.fetch_anchor = AsyncMock(return_value=anchor)
 
-        result = await get_anchor_proof_tool(vault, "1", "npub1nonexistent")
+        result = await get_notarization_proof_tool(vault, "1", "npub1nonexistent")
         assert result["success"] is False
         assert "not found" in result["error"].lower()
 
@@ -479,13 +481,13 @@ class TestGetAnchorProofTool:
         vault = AsyncMock()
         vault.fetch_anchor = AsyncMock(return_value=anchor)
 
-        result = await get_anchor_proof_tool(vault, "1", "npub1x")
+        result = await get_notarization_proof_tool(vault, "1", "npub1x")
         assert result["success"] is False
         assert "parse" in result["error"].lower() or "failed" in result["error"].lower()
 
 
-class TestListAnchorsTool:
-    """Tests for list_anchors_tool."""
+class TestListNotarizationsTool:
+    """Tests for list_notarizations_tool."""
 
     @pytest.mark.asyncio
     async def test_success(self):
@@ -505,20 +507,20 @@ class TestListAnchorsTool:
         vault = AsyncMock()
         vault.list_anchors = AsyncMock(return_value=anchors)
 
-        result = await list_anchors_tool(vault, limit=10)
+        result = await list_notarizations_tool(vault, limit=10)
         assert result["success"] is True
         assert result["count"] == 2
-        assert result["anchors"][0]["anchor_id"] == "2"
-        assert result["anchors"][0]["receipt_count"] == 1
-        assert result["anchors"][1]["receipt_count"] == 0
-        assert result["anchors"][1]["confirmed_at"] is not None
+        assert result["notarizations"][0]["notarization_id"] == "2"
+        assert result["notarizations"][0]["receipt_count"] == 1
+        assert result["notarizations"][1]["receipt_count"] == 0
+        assert result["notarizations"][1]["confirmed_at"] is not None
 
     @pytest.mark.asyncio
     async def test_with_status_filter(self):
         vault = AsyncMock()
         vault.list_anchors = AsyncMock(return_value=[])
 
-        result = await list_anchors_tool(vault, status="confirmed")
+        result = await list_notarizations_tool(vault, status="confirmed")
         assert result["success"] is True
         assert result["count"] == 0
         vault.list_anchors.assert_called_once_with(limit=20, status="confirmed")
@@ -527,6 +529,6 @@ class TestListAnchorsTool:
     async def test_vault_error(self):
         vault = AsyncMock()
         vault.list_anchors = AsyncMock(side_effect=Exception("connection lost"))
-        result = await list_anchors_tool(vault)
+        result = await list_notarizations_tool(vault)
         assert result["success"] is False
         assert "connection lost" in result["error"]
