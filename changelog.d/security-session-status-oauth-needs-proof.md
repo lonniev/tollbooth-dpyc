@@ -1,0 +1,1 @@
+- `session_status(patron_npub)` includes the `upstream_oauth` block only when the connection proves that npub, the same proof `check_oauth_status` needs. Without it the block is left out and the readiness answer is unchanged (F9/F10).

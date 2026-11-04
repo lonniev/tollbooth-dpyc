@@ -5007,11 +5007,13 @@ def register_standard_tools(
         - no_identity: Operator nsec is not configured. Deployment issue.
 
         Args:
-            patron_npub: Optional. If supplied, the response includes an
-                ``upstream_oauth`` block with the patron's stored OAuth
-                token expiry (runtime-derived from vault state) so a
-                client can refresh proactively rather than reactively
-                after a stale-token failure.
+            patron_npub: Optional. If supplied and the connection proves
+                it, the response includes an ``upstream_oauth`` block with
+                the patron's stored OAuth token expiry (runtime-derived from
+                vault state) so a client can refresh proactively rather than
+                reactively after a stale-token failure. Without that proof
+                the block is left out and the rest of the answer is the same:
+                which upstream accounts a patron linked is theirs to see.
         """
         # 1. Identity check
         try:
@@ -5130,6 +5132,14 @@ def register_standard_tools(
             try:
                 resolved = resolve_npub(patron_npub)
             except ValueError:
+                return result
+            # The same proof check_oauth_status demands (F9/F10). Silent: the
+            # readiness answer above never depends on it.
+            try:
+                if await rt.prove_caller(resolved) is not None:
+                    return result
+            except Exception as exc:  # noqa: BLE001
+                logger.info("session_status could not check proof: %s", type(exc).__name__)
                 return result
             opc = rt._oauth_provider
             if opc is not None:
