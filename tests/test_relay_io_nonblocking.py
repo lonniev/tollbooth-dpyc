@@ -7,12 +7,18 @@ per relay. Both now hop to a worker thread via ``asyncio.to_thread``.
 
 These tests prove the loop stays responsive: a fast ticker coroutine resolves
 *during* a slow relay drain, not after it. On the pre-fix inline code the ticker
-could not run until the blocking drain finished, so the timing assertion fails.
+could not run until the blocking drain finished.
+
+They check ORDER, not a wall-clock budget: the tick must land before the slow
+relay call returns. A blocked loop cannot pass that on any machine, and a slow
+CI runner or a garbage-collection pause cannot fail it (a fixed 0.18 s budget
+failed on shared runners at 0.20-0.21 s, with the loop free).
 """
 
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import time
 from unittest.mock import MagicMock, patch
@@ -25,9 +31,30 @@ from tollbooth.nostr_credentials import NostrCredentialExchange
 
 _DRAIN_SECONDS = 0.25
 _TICK_AFTER = 0.05
-# Generous margin: a free loop lets the tick land right after _TICK_AFTER; a
-# blocked loop can't service it until the drain ends (~_DRAIN_SECONDS).
-_BLOCKED_THRESHOLD = 0.18
+
+# When each slow relay call returned (time.monotonic), appended by the mocks.
+_drained: list[float] = []
+
+
+@pytest.fixture(autouse=True)
+def _fresh_clock():
+    _drained.clear()
+    gc.collect()  # a pending full collection stalls the loop, not the code under test
+    yield
+
+
+def _slow_io() -> None:
+    time.sleep(_DRAIN_SECONDS)
+    _drained.append(time.monotonic())
+
+
+def _assert_tick_landed_during_the_drain(progressed: list[float]) -> None:
+    assert progressed, "ticker coroutine never ran"
+    assert _drained, "the slow relay call never ran"
+    assert progressed[0] < _drained[0], (
+        f"event loop was blocked: the tick landed "
+        f"{progressed[0] - _drained[0]:.3f}s after the {_DRAIN_SECONDS}s relay call returned"
+    )
 
 
 def _template() -> dict[str, CredentialTemplate]:
@@ -57,7 +84,7 @@ def _slow_connect(*_args, **_kwargs):
     ws = MagicMock()
 
     def _recv():
-        time.sleep(_DRAIN_SECONDS)
+        _slow_io()
         return json.dumps(["EOSE", "sub"])
 
     ws.recv.side_effect = _recv
@@ -75,19 +102,13 @@ async def test_open_channel_does_not_block_event_loop() -> None:
     progressed: list[float] = []
 
     with patch("tollbooth.nostr_credentials.create_connection", side_effect=_slow_connect):
-        start = time.monotonic()
         result, _ = await asyncio.gather(
             ex.open_channel("x", greeting="hi"),
             _ticker(progressed),
         )
 
     assert result["success"] is True
-    assert progressed, "ticker coroutine never ran"
-    # The tick landed while open_channel's relay drain was still in flight.
-    assert progressed[0] - start < _BLOCKED_THRESHOLD, (
-        f"event loop appears blocked: tick at "
-        f"{progressed[0] - start:.3f}s (drain is {_DRAIN_SECONDS}s)"
-    )
+    _assert_tick_landed_during_the_drain(progressed)
 
 
 @pytest.mark.asyncio
@@ -102,7 +123,6 @@ async def test_receive_drain_does_not_block_event_loop() -> None:
     progressed: list[float] = []
 
     with patch("tollbooth.nostr_credentials.create_connection", side_effect=_slow_connect):
-        start = time.monotonic()
         result, _ = await asyncio.gather(
             ex.receive(sender_bech32, service="x", nonce="bold-hawk-42"),
             _ticker(progressed),
@@ -111,11 +131,7 @@ async def test_receive_drain_does_not_block_event_loop() -> None:
     # receive may not find a matching DM (empty relay) — that's fine; we only
     # assert the loop stayed responsive during its drain.
     assert isinstance(result, dict)
-    assert progressed, "ticker coroutine never ran"
-    assert progressed[0] - start < _BLOCKED_THRESHOLD, (
-        f"event loop appears blocked: tick at "
-        f"{progressed[0] - start:.3f}s (drain is {_DRAIN_SECONDS}s)"
-    )
+    _assert_tick_landed_during_the_drain(progressed)
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +147,7 @@ def _slow_connect_serving(event: dict):
 
         def _recv():
             if len(frames) == 2:
-                time.sleep(_DRAIN_SECONDS)
+                _slow_io()
             return frames.pop(0)
 
         ws.recv.side_effect = _recv
@@ -174,15 +190,10 @@ async def test_bootstrap_relay_read_does_not_block_event_loop() -> None:
 
     with patch("websocket.create_connection", side_effect=_slow_connect_serving(event)), \
          patch("tollbooth.oracle_client.default_oracle_client", return_value=oracle):
-        start = time.monotonic()
         result, _ = await asyncio.gather(client.bootstrap(), _ticker(progressed))
 
     assert result.success is True
-    assert progressed, "ticker coroutine never ran"
-    assert progressed[0] - start < _BLOCKED_THRESHOLD, (
-        f"event loop appears blocked: tick at "
-        f"{progressed[0] - start:.3f}s (relay read is {_DRAIN_SECONDS}s)"
-    )
+    _assert_tick_landed_during_the_drain(progressed)
 
 
 @pytest.mark.asyncio
@@ -190,7 +201,7 @@ async def test_relay_liveness_probe_does_not_block_event_loop() -> None:
     from tollbooth.nostr_diagnostics import resolve_relays
 
     def _slow_probe(*_args, **_kwargs):
-        time.sleep(_DRAIN_SECONDS)
+        _slow_io()
         return MagicMock()
 
     relays = ["wss://primary.test", "wss://second.test"]
@@ -198,14 +209,9 @@ async def test_relay_liveness_probe_does_not_block_event_loop() -> None:
 
     with patch("tollbooth.relay_registry.get_relays", return_value=relays), \
          patch("tollbooth.nostr_diagnostics.create_connection", side_effect=_slow_probe):
-        start = time.monotonic()
         live, _ = await asyncio.gather(
             asyncio.to_thread(resolve_relays, timeout=2), _ticker(progressed),
         )
 
     assert live == relays  # registry order, both live
-    assert progressed, "ticker coroutine never ran"
-    assert progressed[0] - start < _BLOCKED_THRESHOLD, (
-        f"event loop appears blocked: tick at "
-        f"{progressed[0] - start:.3f}s (probe is {_DRAIN_SECONDS}s)"
-    )
+    _assert_tick_landed_during_the_drain(progressed)
