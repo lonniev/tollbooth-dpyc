@@ -1,4 +1,4 @@
-"""Coupons vault — CRUD + redemption + atomic burn against Neon.
+"""Coupons vault — CRUD + redemption + capped use reservation against Neon.
 
 Wraps a :class:`NeonVault` the same way :class:`PricingModelStore`
 does.  Two tables live in the operator's schema:
@@ -42,7 +42,7 @@ class CouponNotFound(Exception):
 
 
 class CouponsVault:
-    """CRUD + redemption + atomic burn for the coupons feature."""
+    """CRUD + redemption + capped use reservation for the coupons feature."""
 
     def __init__(self, *, neon_vault: Any) -> None:
         self._neon = neon_vault
@@ -336,23 +336,35 @@ class CouponsVault:
             out[view.coupon_id] = view
         return out
 
-    async def burn_use(self, coupon_id: str, npub: str) -> bool:
-        """Atomically increment per-patron + aggregate counters.
+    async def reserve_use(self, coupon_id: str, npub: str) -> bool:
+        """Take one use of a coupon for this patron, only while both caps allow.
 
-        Single SQL statement using a CTE so PostgreSQL guarantees both
-        UPDATEs commit together.  Returns ``True`` if a row was touched,
-        ``False`` if the redemption row didn't exist (defensive — chain
-        shouldn't mark consume on a non-redeemed coupon)."""
+        One statement. The patron's row is incremented only while
+        ``use_count < uses_per_patron``; the coupon's ``times_redeemed`` only
+        after that, and only while it is below ``total_uses``. Postgres re-checks
+        each condition after waiting on the row lock, so concurrent calls cannot
+        all pass on the same count. Returns ``True`` only when both counters
+        moved: the call may then apply the discount.
+
+        When the patron's increment lands but the aggregate cap was reached in
+        between, the patron's use is spent without a discount. That
+        under-honors the coupon, which is the safe direction (F36/F37).
+        """
         result = await self._neon._execute(
             f"WITH pc AS ("
-            f"  UPDATE {self._t('patron_coupons')} "
-            f"  SET use_count = use_count + 1 "
-            f"  WHERE coupon_id = $1::uuid AND npub = $2 "
-            f"  RETURNING coupon_id"
+            f"  UPDATE {self._t('patron_coupons')} p "
+            f"  SET use_count = p.use_count + 1 "
+            f"  FROM {self._t('coupons')} c "
+            f"  WHERE p.coupon_id = $1::uuid AND p.npub = $2 AND p.forgotten_at IS NULL "
+            f"    AND c.id = p.coupon_id "
+            f"    AND (c.uses_per_patron IS NULL OR p.use_count < c.uses_per_patron) "
+            f"    AND (c.total_uses IS NULL OR c.times_redeemed < c.total_uses) "
+            f"  RETURNING p.coupon_id"
             f"), c AS ("
             f"  UPDATE {self._t('coupons')} "
             f"  SET times_redeemed = times_redeemed + 1, updated_at = now() "
             f"  WHERE id = (SELECT coupon_id FROM pc) "
+            f"    AND (total_uses IS NULL OR times_redeemed < total_uses) "
             f"  RETURNING id"
             f") SELECT (SELECT count(*) FROM pc)::int AS pc_count, "
             f"         (SELECT count(*) FROM c)::int AS c_count",
@@ -361,7 +373,31 @@ class CouponsVault:
         rows = result.get("rows", [])
         if not rows:
             return False
-        return int(rows[0].get("pc_count") or 0) > 0
+        return int(rows[0].get("pc_count") or 0) > 0 and int(rows[0].get("c_count") or 0) > 0
+
+    async def release_use(self, coupon_id: str, npub: str) -> bool:
+        """Give back a use ``reserve_use`` took for a call that charged nothing.
+
+        Never takes a counter below zero. Returns ``True`` when the patron's
+        counter moved.
+        """
+        result = await self._neon._execute(
+            f"WITH pc AS ("
+            f"  UPDATE {self._t('patron_coupons')} "
+            f"  SET use_count = use_count - 1 "
+            f"  WHERE coupon_id = $1::uuid AND npub = $2 AND use_count > 0 "
+            f"  RETURNING coupon_id"
+            f"), c AS ("
+            f"  UPDATE {self._t('coupons')} "
+            f"  SET times_redeemed = times_redeemed - 1, updated_at = now() "
+            f"  WHERE id = (SELECT coupon_id FROM pc) AND times_redeemed > 0 "
+            f"  RETURNING id"
+            f") SELECT (SELECT count(*) FROM pc)::int AS pc_count, "
+            f"         (SELECT count(*) FROM c)::int AS c_count",
+            [coupon_id, npub],
+        )
+        rows = result.get("rows", [])
+        return bool(rows) and int(rows[0].get("pc_count") or 0) > 0
 
     # -- Helpers ----------------------------------------------------------
 

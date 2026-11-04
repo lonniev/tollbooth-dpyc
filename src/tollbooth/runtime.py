@@ -1160,16 +1160,16 @@ class OperatorRuntime:
         # surcharges, even drive it negative into a credit).
         # Without an npub, constraints cannot evaluate.
         effective_cost = cost
-        consumed_coupon_ids: list[str] = []
+        held_coupon_ids: list[str] = []
         if npub and category != "free":
-            effective_cost, consumed_coupon_ids, denial = await self._evaluate_constraints(
+            effective_cost, held_coupon_ids, denial = await self._price_holding_coupons(
                 tool_id, name, npub, cost,
             )
             if denial is not None:
                 return denial
 
         # ── Billing ───────────────────────────────────────────
-        return await self._apply_billing(npub, name, effective_cost, consumed_coupon_ids)
+        return await self._apply_billing(npub, name, effective_cost, held_coupon_ids)
 
     async def _resolve_pricing(
         self,
@@ -1367,12 +1367,84 @@ class OperatorRuntime:
             daily[today] = daily.get(today, 0) + pending
         return total + pending, daily
 
+    async def _price_holding_coupons(
+        self,
+        tool_id: str,
+        name: str,
+        npub: str,
+        cost: int,
+    ) -> tuple[int, list[str], dict[str, Any] | None]:
+        """Price the call, holding one use of every coupon the price relies on.
+
+        A coupon's discount counts only once ``CouponsVault.reserve_use`` has
+        taken one of its uses with a capped increment. A coupon whose use cannot
+        be taken (cap reached, a concurrent call took the last one, the store
+        erred) is left out and the call is priced again without it. A miscount
+        may under-honor a capped coupon, never over-honor it: the operator may
+        sell at a loss under a coupon and budgeted only so many uses (F36/F37).
+
+        Returns ``(effective_cost, held_coupon_ids, denial_or_None)``.
+        """
+        excluded: set[str] = set()
+        held: list[str] = []
+        while True:
+            effective_cost, consumed, denial = await self._evaluate_constraints(
+                tool_id, name, npub, cost, excluded_coupons=frozenset(excluded),
+            )
+            if denial is not None:
+                await self._release_coupons(npub, held)
+                return cost, [], denial
+            if any(cid in excluded for cid in consumed):
+                # The chain discounted with a coupon it could not hold: no discount.
+                await self._release_coupons(npub, held)
+                return cost, [], None
+            lost: list[str] = []
+            for cid in consumed:
+                if cid in held:
+                    continue
+                if await self._reserve_coupon(npub, cid):
+                    held.append(cid)
+                else:
+                    lost.append(cid)
+            if not lost:
+                break
+            excluded.update(lost)
+        await self._release_coupons(npub, [cid for cid in held if cid not in consumed])
+        return effective_cost, [cid for cid in held if cid in consumed], None
+
+    async def _reserve_coupon(self, npub: str, coupon_id: str) -> bool:
+        """Take one use of a coupon for this call; any failure means no use taken."""
+        try:
+            cv = await self.coupons_vault()
+            return bool(await cv.reserve_use(coupon_id, npub))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reserve_use failed (coupon=%s patron=%s): %s", coupon_id, npub[:20], exc)
+            return False
+
+    async def _release_coupons(self, npub: str, coupon_ids: list[str]) -> None:
+        """Give back uses this call held but did not spend. Best-effort: a failed
+        release leaves a use taken, which under-honors the coupon and is safe."""
+        if not coupon_ids:
+            return
+        try:
+            cv = await self.coupons_vault()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("coupons_vault unavailable for release: %s", exc)
+            return
+        for cid in coupon_ids:
+            try:
+                await cv.release_use(cid, npub)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("release_use failed (coupon=%s patron=%s): %s", cid, npub[:20], exc)
+
     async def _evaluate_constraints(
         self,
         tool_id: str,
         name: str,
         npub: str,
         cost: int,
+        *,
+        excluded_coupons: frozenset[str] = frozenset(),
     ) -> tuple[int, list[str], dict[str, Any] | None]:
         """Constraint stage of ``debit_or_deny``.
 
@@ -1382,6 +1454,8 @@ class OperatorRuntime:
         Returns ``(effective_cost, consumed_coupon_ids, denial_or_None)``. A
         chain-evaluation exception falls through with the base cost — it never
         blocks the call. Caller gates this on ``npub and category != "free"``.
+        A coupon in ``excluded_coupons`` is walked as if not redeemed, so it
+        gives no discount.
         """
         from tollbooth.constants import ErrorCode
 
@@ -1389,6 +1463,10 @@ class OperatorRuntime:
         consumed_coupon_ids: list[str] = []
         try:
             chain, coupon_map, gate = await self._effective_chain(tool_id, name, npub)
+            if excluded_coupons and coupon_map is not None:
+                coupon_map = type(coupon_map)(entries=tuple(
+                    entry for entry in coupon_map.entries if entry[0] not in excluded_coupons
+                ))
             if chain:
                 usage = await self._patron_usage(chain, name, npub)
                 if usage is None:
@@ -1429,35 +1507,15 @@ class OperatorRuntime:
         npub: str,
         name: str,
         effective_cost: int,
-        consumed_coupon_ids: list[str],
+        held_coupon_ids: list[str],
     ) -> dict[str, Any] | int:
         """Billing stage of ``debit_or_deny``: no-charge / credit / debit.
 
+        ``held_coupon_ids`` are coupon uses already taken while pricing; they
+        are given back when no fare is charged.
         Returns the (signed) cost to proceed, or an INSUFFICIENT_BALANCE error.
         """
         from tollbooth.constants import ErrorCode
-
-        async def _burn_consumed_coupons() -> None:
-            """Burn one use per consumed coupon id.  Best-effort —
-            errors are logged but don't unwind the debit (the chain
-            already evaluated allowed=True and the patron got the
-            discount; a transient burn failure is recoverable on
-            replay because the same use_count would just re-burn)."""
-            if not consumed_coupon_ids or not npub:
-                return
-            try:
-                cv = await self.coupons_vault()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("coupons_vault unavailable for burn: %s", exc)
-                return
-            for cid in consumed_coupon_ids:
-                try:
-                    await cv.burn_use(cid, npub)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "burn_use failed (coupon=%s patron=%s): %s",
-                        cid, npub[:20], exc,
-                    )
 
         # ── No charge ─────────────────────────────────────────
         if effective_cost == 0:
@@ -1467,7 +1525,6 @@ class OperatorRuntime:
                 # state — never written as a snapshot of its own.
                 cache = await self.ledger_cache()
                 cache.note_usage(npub, name)
-            await _burn_consumed_coupons()
             return 0
 
         # ── Credit (chain drove price negative) ───────────────
@@ -1479,7 +1536,6 @@ class OperatorRuntime:
             cache = await self.ledger_cache()
             credit_sats = abs(effective_cost)
             await cache.credit(npub, credit_sats, f"chain_credit:{name}")
-            await _burn_consumed_coupons()
             return effective_cost  # signed — caller can detect credit case
 
         # ── Billing (atomic, write-through) ────────────────────
@@ -1527,6 +1583,7 @@ class OperatorRuntime:
             # Definitive store unreadable / write kept losing races — never
             # tell a funded patron "insufficient balance". No fare charged.
             logger.warning("Ledger unavailable during debit for %s: %s", npub[:20], exc)
+            await self._release_coupons(npub, held_coupon_ids)
             return {
                 "success": False,
                 "error_code": "vault_unavailable",
@@ -1537,6 +1594,7 @@ class OperatorRuntime:
                 "next_steps": ["Retry in 10–15 seconds."],
             }
         if debited is False:
+            await self._release_coupons(npub, held_coupon_ids)
             bal = _short.get("balance", 0)
             return {
                 "success": False,
@@ -1553,7 +1611,6 @@ class OperatorRuntime:
                     "check_payment(invoice_id=<from purchase_credits>) to confirm settlement",
                 ],
             }
-        await _burn_consumed_coupons()
         return effective_cost
 
     async def rollback_debit(

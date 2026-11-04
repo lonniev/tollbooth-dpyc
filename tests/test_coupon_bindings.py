@@ -54,12 +54,12 @@ def _redemption(c: Coupon) -> CouponRedemption:
 
 
 class FakeCoupons:
-    """The coupons vault as the gate sees it: bound coupons, redemptions, burns."""
+    """The coupons vault as the gate sees it: bound coupons, redemptions, reserved uses."""
 
     def __init__(self, bound):
         self.bound = list(bound)
         self.bound_calls = 0
-        self.burned = []
+        self.reserved = []
 
     async def bound_for_operator(self, operator):
         assert operator == OPERATOR
@@ -69,8 +69,12 @@ class FakeCoupons:
     async def fetch_redemptions_for_chain(self, npub, coupon_ids):
         return {c.id: _redemption(c) for c in self.bound if c.id in coupon_ids}
 
-    async def burn_use(self, coupon_id, npub):
-        self.burned.append(coupon_id)
+    async def reserve_use(self, coupon_id, npub):
+        self.reserved.append(coupon_id)
+        return True
+
+    async def release_use(self, coupon_id, npub):
+        self.reserved.remove(coupon_id)
         return True
 
 
@@ -95,7 +99,7 @@ async def test_a_model_pushed_without_chains_still_honours_the_bound_coupon():
     with _PASS_PROOF:
         charged = await rt.debit_or_deny(tid, PATRON)
     assert charged == 0, "the model has no chain and the coupon still applies"
-    assert coupons.burned == [CID]
+    assert coupons.reserved == [CID]
     ledger = await (await rt.ledger_cache()).get(PATRON)
     assert ledger.balance_api_sats == 1000
 
@@ -114,7 +118,7 @@ async def test_star_binds_every_paid_tool_and_an_empty_binding_binds_none():
     rt = _runtime(registry, resolver=FakeResolver(cost=20, chain=[]), coupons=none)
     with _PASS_PROOF:
         assert await rt.debit_or_deny(a, PATRON) == 20
-    assert none.burned == []
+    assert none.reserved == []
 
 
 @pytest.mark.asyncio
@@ -128,7 +132,7 @@ async def test_a_coupon_authored_in_the_chain_and_bound_on_the_row_applies_once(
     assert [s.id for s in chain] == ["s1"], "the authored step is where the operator put it; no second one"
     with _PASS_PROOF:
         assert await rt.debit_or_deny(tid, PATRON) == 10  # 50 % once, not 75 %
-    assert coupons.burned == [CID]
+    assert coupons.reserved == [CID]
 
 
 @pytest.mark.asyncio
@@ -214,7 +218,7 @@ async def test_check_price_previews_the_bound_coupon_exactly_as_the_debit_will_c
         r = await tools["check_price"](tool_id=tid, npub=PATRON)
     assert r["success"] and r["constraints_enabled"] is True
     assert r["effective_cost_api_sats"] == 0 and r["base_cost_api_sats"] == 20
-    assert coupons.burned == [], "a preview burns nothing"
+    assert coupons.reserved == [], "a preview reserves nothing"
 
     r = await tools["check_price"](tool_id=tid)
     assert r["constraints_enabled"] is True and r["effective_cost_api_sats"] == 20
