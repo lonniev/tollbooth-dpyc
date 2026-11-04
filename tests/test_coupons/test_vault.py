@@ -260,7 +260,7 @@ class TestDelete:
 
 
 # ---------------------------------------------------------------------------
-# redeem / forget / burn_use
+# redeem / forget / reserve_use / release_use
 # ---------------------------------------------------------------------------
 
 
@@ -338,7 +338,7 @@ class TestPatronFlow:
         assert "pc.forgotten_at IS NULL" in _sent_sql(v)[0]
 
     @pytest.mark.asyncio
-    async def test_burn_use_atomic_cte(self) -> None:
+    async def test_reserve_use_atomic_cte(self) -> None:
         v = _vault()
         # Single SQL round-trip with CTE returning counters
         v._client.post = AsyncMock(
@@ -349,13 +349,35 @@ class TestPatronFlow:
                 },
             )
         )
-        out = await _cvault(v).burn_use("c-uuid", "npub1pat")
+        out = await _cvault(v).reserve_use("c-uuid", "npub1pat")
         assert out is True
-        # Confirm it's a single round-trip
+        # Confirm it's a single round-trip carrying both caps
         assert v._client.post.call_count == 1
+        sql = _sent_sql(v)[0]
+        assert "p.use_count < c.uses_per_patron" in sql
+        assert "times_redeemed < total_uses" in sql
 
     @pytest.mark.asyncio
-    async def test_burn_use_missing_row_returns_false(self) -> None:
+    async def test_reserve_use_needs_both_counters_to_move(self) -> None:
+        """The patron's use landed but the aggregate cap was reached: no discount."""
+        v = _vault()
+        v._client.post = AsyncMock(
+            return_value=_response(200, {"command": "SELECT", "rows": [{"pc_count": 1, "c_count": 0}]}),
+        )
+        assert await _cvault(v).reserve_use("c-uuid", "npub1pat") is False
+
+    @pytest.mark.asyncio
+    async def test_release_use_never_goes_below_zero(self) -> None:
+        v = _vault()
+        v._client.post = AsyncMock(
+            return_value=_response(200, {"command": "SELECT", "rows": [{"pc_count": 1, "c_count": 1}]}),
+        )
+        assert await _cvault(v).release_use("c-uuid", "npub1pat") is True
+        sql = _sent_sql(v)[0]
+        assert "use_count > 0" in sql and "times_redeemed > 0" in sql
+
+    @pytest.mark.asyncio
+    async def test_reserve_use_missing_row_returns_false(self) -> None:
         v = _vault()
         v._client.post = AsyncMock(
             return_value=_response(
@@ -365,7 +387,7 @@ class TestPatronFlow:
                 },
             )
         )
-        assert await _cvault(v).burn_use("c-uuid", "npub1pat") is False
+        assert await _cvault(v).reserve_use("c-uuid", "npub1pat") is False
 
 
 # ---------------------------------------------------------------------------

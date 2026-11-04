@@ -38,8 +38,8 @@ class CouponConstraint(ToolConstraint):
       at base price.  This is the common case for patrons who haven't
       claimed the code yet.
     * Redemption present + window/caps OK → apply discount + record
-      ``metadata["consume_coupon_id"]`` so the runtime can burn one
-      use after a successful debit.
+      ``metadata["consume_coupon_id"]``. The runtime keeps the discount
+      only once it has reserved one use under the coupon's caps.
     * Redemption present but window closed / caps reached → neutral.
       An expired redemption isn't a denial; the patron just doesn't
       get the discount on this call.

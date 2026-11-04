@@ -132,7 +132,9 @@ def _runtime(registry, *, balance=1000, resolver=None, gate=None, operator_npub=
     rt._operator_npub = operator_npub
     rt.get_global_demand = AsyncMock(return_value={})
     rt.resolve_tranche_lifetime = AsyncMock(return_value=None)
-    rt.coupons_vault = AsyncMock(return_value=MagicMock(burn_use=AsyncMock()))
+    rt.coupons_vault = AsyncMock(return_value=MagicMock(
+        reserve_use=AsyncMock(return_value=True), release_use=AsyncMock(return_value=True),
+    ))
     if gate is not None:
         rt._constraint_gate = gate
     return rt
@@ -312,17 +314,32 @@ async def test_invalid_npub_denied_for_paid_tool():
 
 
 @pytest.mark.asyncio
-async def test_consumed_coupons_are_burned():
+async def test_a_consumed_coupon_is_reserved_before_the_discount_counts():
     registry, tid = _registry()
     resolver = FakeResolver(cost=10, chain=[_STEP])
     gate = FakeGate(effective=0, consumed=["coupon-1"])  # discounted to free
     rt = _runtime(registry, resolver=resolver, gate=gate)
-    burn = AsyncMock()
-    rt.coupons_vault = AsyncMock(return_value=MagicMock(burn_use=burn))
+    reserve = AsyncMock(return_value=True)
+    rt.coupons_vault = AsyncMock(return_value=MagicMock(reserve_use=reserve, release_use=AsyncMock()))
     with _PASS_PROOF:
         r = await rt.debit_or_deny(tid, PATRON)
     assert r == 0
-    burn.assert_awaited_once_with("coupon-1", PATRON)
+    reserve.assert_awaited_once_with("coupon-1", PATRON)
+
+
+@pytest.mark.asyncio
+async def test_a_coupon_that_cannot_be_reserved_gives_no_discount():
+    """A gate that still claims the coupon after it was left out is not trusted."""
+    registry, tid = _registry()
+    resolver = FakeResolver(cost=10, chain=[_STEP])
+    gate = FakeGate(effective=0, consumed=["coupon-1"])
+    rt = _runtime(registry, resolver=resolver, gate=gate)
+    rt.coupons_vault = AsyncMock(return_value=MagicMock(
+        reserve_use=AsyncMock(side_effect=RuntimeError("neon down")), release_use=AsyncMock(),
+    ))
+    with _PASS_PROOF:
+        r = await rt.debit_or_deny(tid, PATRON)
+    assert r == 10
 
 
 # ── resolve_expiry: the operator's decision, including "none made" ─────────
