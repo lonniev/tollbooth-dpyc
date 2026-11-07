@@ -76,7 +76,7 @@ APPROVAL = CredentialTemplate(
 
 @pytest.mark.parametrize(
     ("template", "fixture"),
-    [(CREDENTIALS, "credentials.json"), (APPROVAL, "approval.json")],
+    [(CREDENTIALS, "credential_form.json"), (APPROVAL, "approval.json")],
 )
 def test_form_matches_golden_fixture(template, fixture):
     form = courier_form_schema(
