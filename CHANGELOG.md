@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.116.0] — 2026-11-07
+
+### Changed
+
+- Secure Courier requests now carry their form as JSON Schema (draft 2020-12) in a private `form` tag on the NIP-17 message, and the operator attestation in an `attestation` tag. The text body stays as the `@@@` fallback for clients that read neither. Sensitive fields are `writeOnly` with `format: password`. The nonce and rendezvous relay are `readOnly` constants. `x-delimiter` names the text delimiter, `x-courier-kind` says whether the request is a form or an approval, `propertyOrder` gives each field its place, and the greeting is the form's `description`.
+- Courier replies may be a JSON object of text values, which keeps newlines and quotes intact. `@@@` replies still work.
+- `FieldSpec` gains `title` and `examples`, and `CredentialTemplate` gains `kind` (`credentials` or `approval`). The npub-proof and Authority onboarding templates are approvals, and `cache_duration` offers 2h, 1d, 1w and 30d.
+- NIP-17 rumors now carry their NIP-01 `id`, so a reply can name the request it answers.
+
 ## [0.115.0] — 2026-11-04
 
 ### Removed
