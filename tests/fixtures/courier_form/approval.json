@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Npub ownership — the signed DM itself proves you own this npub",
+  "description": "Paste your keys below.",
+  "type": "object",
+  "properties": {
+    "confirm": {
+      "type": "string",
+      "title": "confirm",
+      "propertyOrder": 1,
+      "description": "Any text — your signed DM is the proof"
+    },
+    "cache_duration": {
+      "type": "string",
+      "title": "Remember for",
+      "propertyOrder": 2,
+      "description": "How long to cache this proof (e.g. 2h, 1d, 3 days, unlimited)",
+      "default": "2h",
+      "examples": [
+        "2h",
+        "1d",
+        "1w",
+        "30d"
+      ]
+    },
+    "nonce": {
+      "type": "string",
+      "const": "bold-hawk-42",
+      "readOnly": true
+    },
+    "rendezvous_relay": {
+      "type": "string",
+      "const": "wss://relay.example",
+      "readOnly": true
+    }
+  },
+  "required": [
+    "confirm",
+    "nonce",
+    "rendezvous_relay"
+  ],
+  "x-delimiter": "@@@",
+  "x-courier-kind": "approval",
+  "x-service": "npub_ownership"
+}

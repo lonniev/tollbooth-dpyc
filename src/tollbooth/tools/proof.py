@@ -332,7 +332,7 @@ async def receive_npub_proof_tool(
         DuplicateFieldError,
         _courier_resolve_error,
         _npub_to_hex,
-        _parse_delimited_credentials,
+        _parse_reply,
         _repeated_field_nack,
     )
 
@@ -437,7 +437,7 @@ async def receive_npub_proof_tool(
 
         if plaintext:
             try:
-                payload = _parse_delimited_credentials(plaintext)
+                payload = _parse_reply(plaintext)
             except DuplicateFieldError as dup:
                 nack_reason = _repeated_field_nack(dup.keys)
                 last_failure = "a field given twice"

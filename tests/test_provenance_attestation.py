@@ -362,6 +362,14 @@ def test_signed_request_is_not_an_attestation(operator):
 # ---------------------------------------------------------------------------
 
 
+def _tag(tags: list[list[str]], name: str) -> str:
+    """The value of the one rumor tag called *name*."""
+    values = [t[1] for t in tags if t[0] == name]
+    assert len(values) == 1, tags
+    return values[0]
+
+
+
 @pytest.mark.asyncio
 async def test_self_dm_body_attributes_to_registered_npub_and_verifies():
     """The incident case: operator proving its own npub (self-DM).
@@ -390,13 +398,10 @@ async def test_self_dm_body_attributes_to_registered_npub_and_verifies():
     # Registered identity is the Operator line; ephemeral is labeled delivery-only.
     assert f"Operator: {op.public_key.bech32()}" in welcome
     assert "Delivery key:" in welcome
-    assert "--- Operator Attestation ---" in welcome
+    assert "attestation = @@@" not in welcome  # it travels in the rumor tag
 
-    # Extract and verify the embedded attestation.
-    marker = "attestation = @@@"
-    start = welcome.index(marker) + len(marker)
-    end = welcome.index("@@@", start)
-    att = welcome[start:end]
+    # Extract and verify the attestation from the private rumor tags.
+    att = _tag(mock_send_as.call_args.kwargs["rumor_tags"], "attestation")
     res = verify_provenance_attestation(
         att,
         expected_sender_pubkey_hex=ephemeral_hex,
@@ -428,8 +433,7 @@ async def test_patron_dm_attestation_binds_operator_own_key():
     assert f"Operator: {op.public_key.bech32()}" in welcome
     assert "Delivery key:" not in welcome  # no ephemeral on a patron DM
 
-    marker = "attestation = @@@"
-    att = welcome[welcome.index(marker) + len(marker):welcome.index("@@@", welcome.index(marker) + len(marker))]
+    att = _tag(mock_send.call_args.kwargs["rumor_tags"], "attestation")
     res = verify_provenance_attestation(
         att,
         expected_sender_pubkey_hex=op.public_key.hex(),

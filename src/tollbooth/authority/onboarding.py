@@ -21,6 +21,7 @@ AUTHORITY_CLAIM_TEMPLATE = CredentialTemplate(
     version=1,
     fields={"claim": FieldSpec(required=True, sensitive=False)},
     description="Authority curator claim challenge — candidate proves npub ownership",
+    kind="approval",
 )
 
 AUTHORITY_APPROVAL_TEMPLATE = CredentialTemplate(
@@ -28,6 +29,7 @@ AUTHORITY_APPROVAL_TEMPLATE = CredentialTemplate(
     version=1,
     fields={"approval": FieldSpec(required=True, sensitive=False)},
     description="Authority curator approval — parent Authority approves the candidate",
+    kind="approval",
 )
 
 ONBOARDING_TEMPLATES: dict[str, CredentialTemplate] = {
