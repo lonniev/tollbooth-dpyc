@@ -34,6 +34,7 @@ from tollbooth.nostr_credentials import (
 FIXTURES = Path(__file__).parent / "fixtures" / "courier_form"
 NONCE = "bold-hawk-42"
 RELAY = "wss://relay.example"
+GREETING = "Paste your keys below."
 
 CREDENTIALS = CredentialTemplate(
     service="schwab-operator",
@@ -78,7 +79,9 @@ APPROVAL = CredentialTemplate(
     [(CREDENTIALS, "credentials.json"), (APPROVAL, "approval.json")],
 )
 def test_form_matches_golden_fixture(template, fixture):
-    form = courier_form_schema(template, nonce=NONCE, rendezvous_relay=RELAY)
+    form = courier_form_schema(
+        template, nonce=NONCE, rendezvous_relay=RELAY, description=GREETING,
+    )
     assert form == json.loads((FIXTURES / fixture).read_text())
 
 
@@ -103,6 +106,25 @@ def test_form_names_dialect_delimiter_and_kind():
     assert form["x-delimiter"] == "@@@"
     assert form["x-courier-kind"] == "approval"
     assert form["properties"]["cache_duration"]["examples"] == ["2h", "1d", "1w", "30d"]
+
+
+def test_fields_state_their_order():
+    form = courier_form_schema(CREDENTIALS, nonce=NONCE, rendezvous_relay=RELAY)
+    orders = {k: p.get("propertyOrder") for k, p in form["properties"].items()}
+    assert orders == {
+        "app_key": 1, "secret": 2, "account_label": 3,
+        "nonce": None, "rendezvous_relay": None,
+    }
+
+
+def test_greeting_becomes_the_form_description():
+    form = courier_form_schema(
+        CREDENTIALS, nonce=NONCE, rendezvous_relay=RELAY, description=GREETING,
+    )
+    assert form["description"] == GREETING
+    assert "description" not in courier_form_schema(
+        CREDENTIALS, nonce=NONCE, rendezvous_relay=RELAY,
+    )
 
 
 def test_title_falls_back_to_field_name():

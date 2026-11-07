@@ -168,6 +168,7 @@ def courier_form_schema(
     *,
     nonce: str,
     rendezvous_relay: str,
+    description: str = "",
 ) -> dict[str, Any]:
     """The JSON Schema form a courier request carries in its ``form`` tag.
 
@@ -176,12 +177,17 @@ def courier_form_schema(
     ``readOnly``: a form client sends them back unchanged and never shows them
     as inputs. ``x-delimiter`` names the plain-text reply delimiter, and
     ``x-courier-kind`` says whether the request is a form or an approval.
+    JSON objects carry no key order, so each field states its place with
+    ``propertyOrder`` (the json-editor convention). *description* is the
+    operator's greeting, shown above the form.
     """
     if template.kind not in COURIER_KINDS:
         raise ValueError(f"unknown courier kind: {template.kind!r}")
     properties: dict[str, dict[str, Any]] = {}
-    for name, spec in template.fields.items():
-        prop: dict[str, Any] = {"type": "string", "title": spec.title or name}
+    for order, (name, spec) in enumerate(template.fields.items(), start=1):
+        prop: dict[str, Any] = {
+            "type": "string", "title": spec.title or name, "propertyOrder": order,
+        }
         if spec.description:
             prop["description"] = spec.description
         if spec.default:
@@ -197,9 +203,13 @@ def courier_form_schema(
         "type": "string", "const": rendezvous_relay, "readOnly": True,
     }
     required = [n for n, spec in template.fields.items() if spec.required]
-    return {
+    form: dict[str, Any] = {
         "$schema": COURIER_FORM_DIALECT,
         "title": template.description or template.service,
+    }
+    if description:
+        form["description"] = description
+    return form | {
         "type": "object",
         "properties": properties,
         "required": [*required, "nonce", "rendezvous_relay"],

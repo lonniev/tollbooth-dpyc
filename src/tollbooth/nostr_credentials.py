@@ -1274,6 +1274,7 @@ class NostrCredentialExchange:
             """
             form = courier_form_schema(
                 template, nonce=nonce, rendezvous_relay=rendezvous_relay,
+                description=greeting,
             )
             tags = [["form", json.dumps(form, separators=(",", ":"))]]
             if attestation is not None:

@@ -1,16 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Npub ownership — the signed DM itself proves you own this npub",
+  "description": "Paste your keys below.",
   "type": "object",
   "properties": {
     "confirm": {
       "type": "string",
       "title": "confirm",
+      "propertyOrder": 1,
       "description": "Any text — your signed DM is the proof"
     },
     "cache_duration": {
       "type": "string",
       "title": "Remember for",
+      "propertyOrder": 2,
       "description": "How long to cache this proof (e.g. 2h, 1d, 3 days, unlimited)",
       "default": "2h",
       "examples": [
