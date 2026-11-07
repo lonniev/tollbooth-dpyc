@@ -8,6 +8,7 @@ and a service name for matching incoming payloads.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,8 @@ class FieldSpec:
     description: str = ""
     lifecycle: str = "set_once"  # "set_once" | "dynamic"
     default: str = ""  # pre-populated value in the welcome DM
+    title: str = ""  # short label a form shows; the field name when empty
+    examples: tuple[str, ...] = ()  # suggested values a form offers as quick picks
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,10 @@ class CredentialTemplate:
     version: int
     fields: dict[str, FieldSpec]
     description: str = ""
+    # "credentials": the patron types values in. "approval": the reply itself
+    # is the answer (its signature proves the npub), so a client offers one
+    # approve action instead of a form.
+    kind: str = "credentials"
 
 
 # Canonical field specs for the durable long-runner capability. The wheel owns
@@ -147,6 +154,59 @@ def validate_payload(
             )
 
     return payload_fields
+
+
+# The JSON Schema dialect a courier form is written in, and the delimiter a
+# plain-text reply wraps each value in. Both travel inside the form itself.
+COURIER_FORM_DIALECT = "https://json-schema.org/draft/2020-12/schema"
+COURIER_TEXT_DELIMITER = "@@@"
+COURIER_KINDS = ("credentials", "approval")
+
+
+def courier_form_schema(
+    template: CredentialTemplate,
+    *,
+    nonce: str,
+    rendezvous_relay: str,
+) -> dict[str, Any]:
+    """The JSON Schema form a courier request carries in its ``form`` tag.
+
+    A flat object of string fields. ``sensitive`` becomes ``writeOnly`` with
+    ``format: password``. The nonce and rendezvous relay are ``const`` and
+    ``readOnly``: a form client sends them back unchanged and never shows them
+    as inputs. ``x-delimiter`` names the plain-text reply delimiter, and
+    ``x-courier-kind`` says whether the request is a form or an approval.
+    """
+    if template.kind not in COURIER_KINDS:
+        raise ValueError(f"unknown courier kind: {template.kind!r}")
+    properties: dict[str, dict[str, Any]] = {}
+    for name, spec in template.fields.items():
+        prop: dict[str, Any] = {"type": "string", "title": spec.title or name}
+        if spec.description:
+            prop["description"] = spec.description
+        if spec.default:
+            prop["default"] = spec.default
+        if spec.examples:
+            prop["examples"] = list(spec.examples)
+        if spec.sensitive:
+            prop["writeOnly"] = True
+            prop["format"] = "password"
+        properties[name] = prop
+    properties["nonce"] = {"type": "string", "const": nonce, "readOnly": True}
+    properties["rendezvous_relay"] = {
+        "type": "string", "const": rendezvous_relay, "readOnly": True,
+    }
+    required = [n for n, spec in template.fields.items() if spec.required]
+    return {
+        "$schema": COURIER_FORM_DIALECT,
+        "title": template.description or template.service,
+        "type": "object",
+        "properties": properties,
+        "required": [*required, "nonce", "rendezvous_relay"],
+        "x-delimiter": COURIER_TEXT_DELIMITER,
+        "x-courier-kind": template.kind,
+        "x-service": template.service,
+    }
 
 
 def render_credential_payload_lines(template: CredentialTemplate) -> list[str]:

@@ -1505,7 +1505,7 @@ class TestRendezvousRelayPinning:
         # First call (wss://relay.down) raises; second (wss://relay.up) succeeds.
         call_state = {"n": 0}
 
-        def fake_send(_npub, _text, *, target_relay):
+        def fake_send(_npub, _text, *, target_relay, rumor_tags=None):
             call_state["n"] += 1
             if target_relay == "wss://relay.down":
                 raise Exception("ECONNREFUSED")  # noqa: TRY002

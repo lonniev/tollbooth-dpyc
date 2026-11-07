@@ -26,6 +26,7 @@ Reference: https://github.com/nostr-protocol/nips/blob/master/44.md (NIP-44)
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -176,6 +177,55 @@ def _parse_delimited_credentials(text: str) -> dict[str, str] | None:
     if repeated:
         raise DuplicateFieldError(repeated)
     return fields
+
+
+def _json_reply_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``object_pairs_hook`` that refuses a key given twice, as ``@@@`` does."""
+    seen: dict[str, Any] = {}
+    repeated: list[str] = []
+    for key, value in pairs:
+        if key in seen and key not in repeated:
+            repeated.append(key)
+        seen[key] = value
+    if repeated:
+        raise DuplicateFieldError(repeated)
+    return seen
+
+
+def _parse_reply(text: str) -> dict[str, str] | None:
+    """Read a courier reply: a JSON object, or ``key = @@@value@@@`` lines.
+
+    A form client replies with a JSON object of string values, which keeps
+    newlines and quotes intact. A plain-text client replies with ``@@@``
+    lines. Returns ``None`` when the reply holds no fields. A JSON object with
+    a non-string value holds no usable fields and also returns ``None``.
+    Raises :class:`DuplicateFieldError` when a field appears twice.
+    """
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            obj = json.loads(stripped, object_pairs_hook=_json_reply_object)
+        except json.JSONDecodeError:
+            return _parse_delimited_credentials(text)
+        if not isinstance(obj, dict) or not obj:
+            return None
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in obj.items()):
+            return None
+        return {k: v.strip() for k, v in obj.items()}
+    return _parse_delimited_credentials(text)
+
+
+def _rumor_id(rumor: dict[str, Any]) -> str:
+    """NIP-01 event id of an unsigned NIP-17 rumor (NIP-59 rumors carry one).
+
+    A reply quotes it in its ``e`` tag to say which request it answers.
+    """
+    serial = json.dumps(
+        [0, rumor["pubkey"], rumor["created_at"], rumor["kind"],
+         rumor["tags"], rumor["content"]],
+        separators=(",", ":"), ensure_ascii=False,
+    )
+    return hashlib.sha256(serial.encode()).hexdigest()
 
 
 # Caller-supplied text that an operator-signed DM quotes (verify_at, reason,
@@ -592,6 +642,7 @@ class NostrCredentialExchange:
         *,
         target_relay: str | None = None,
         extra_tags: list[list[str]] | None = None,
+        rumor_tags: list[list[str]] | None = None,
     ) -> None:
         """Send a DM via both NIP-17 gift wrap and NIP-04 legacy.
 
@@ -616,6 +667,10 @@ class NostrCredentialExchange:
                 key and is therefore author-queryable for relay-as-cache
                 dedup (see ``has_recent_tagged_dm``). The gift-wrap leg is
                 signed by an ephemeral key and intentionally untagged.
+            rumor_tags: Optional private tags for the NIP-17 leg's kind 14
+                rumor (a courier request's ``form`` and ``attestation``).
+                They are encrypted with the message. The NIP-04 leg cannot
+                carry them.
         """
         if not self._enabled:
             raise CourierNotReady("Secure Courier not enabled.")
@@ -636,7 +691,7 @@ class NostrCredentialExchange:
 
         # ── NIP-17 gift wrap (kind 1059) ─────────────────────────────
         try:
-            message = self._build_gift_wrap(recipient_hex, message_text)
+            message = self._build_gift_wrap(recipient_hex, message_text, rumor_tags)
             if target_relay:
                 ok, detail = self._publish_to_one_relay(message, target_relay)
                 nip17_ok = ok
@@ -711,6 +766,7 @@ class NostrCredentialExchange:
         message_text: str,
         *,
         target_relay: str | None = None,
+        rumor_tags: list[list[str]] | None = None,
     ) -> None:
         """Send a DM using an explicit sender key instead of the operator key.
 
@@ -749,7 +805,7 @@ class NostrCredentialExchange:
         try:
             message = self._build_gift_wrap_with(
                 sender_privkey_hex, sender_pubkey_hex,
-                recipient_hex, message_text,
+                recipient_hex, message_text, rumor_tags,
             )
             if target_relay:
                 ok, detail = self._publish_to_one_relay(message, target_relay)
@@ -821,6 +877,7 @@ class NostrCredentialExchange:
 
     def _build_gift_wrap(
         self, recipient_hex: str, message_text: str,
+        rumor_tags: list[list[str]] | None = None,
     ) -> str:
         """Build a NIP-17 gift-wrapped DM (kind 1059 → 13 → 14).
 
@@ -829,6 +886,7 @@ class NostrCredentialExchange:
         """
         return self._build_gift_wrap_with(
             self._privkey_hex, self._pubkey_hex, recipient_hex, message_text,
+            rumor_tags,
         )
 
     def _build_gift_wrap_with(
@@ -837,20 +895,25 @@ class NostrCredentialExchange:
         sender_pubkey_hex: str,
         recipient_hex: str,
         message_text: str,
+        rumor_tags: list[list[str]] | None = None,
     ) -> str:
         """Build a NIP-17 gift-wrapped DM with explicit sender keys.
+
+        *rumor_tags* are added to the kind 14 rumor after its ``p`` tag. They
+        are encrypted with the content, so only the recipient sees them.
 
         Returns the Nostr protocol message (``["EVENT", {...}]``) ready
         for relay publishing.
         """
         # Layer 3: Kind 14 rumor — unsigned private DM
-        rumor = {
+        rumor: dict[str, Any] = {
             "kind": _KIND_PRIVATE_DM,
             "content": message_text,
-            "tags": [["p", recipient_hex]],
+            "tags": [["p", recipient_hex], *(rumor_tags or [])],
             "pubkey": sender_pubkey_hex,
             "created_at": int(time.time()),
         }
+        rumor["id"] = _rumor_id(rumor)
 
         # Layer 2: Kind 13 seal — signed by sender, content NIP-44 encrypted
         seal_content = _nip44_encrypt(
@@ -1136,7 +1199,10 @@ class NostrCredentialExchange:
         from datetime import datetime
 
         from tollbooth import __version__ as _tb_version
-        from tollbooth.credential_templates import render_credential_payload_lines
+        from tollbooth.credential_templates import (
+            courier_form_schema,
+            render_credential_payload_lines,
+        )
 
         timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
         payload_lines = render_credential_payload_lines(template)
@@ -1172,7 +1238,7 @@ class NostrCredentialExchange:
                 f"Delivery key: {agent_key.public_key.bech32()}\n"
                 f"  (Relays drop self-addressed DMs, so this request is "
                 f"delivered from a one-time key. Its authority comes from the "
-                f"Operator Attestation below — never from this key.)\n"
+                f"operator attestation that travels with it — never from this key.)\n"
             )
 
         # Operator-signed provenance attestation, bound to the exact delivery
@@ -1180,11 +1246,11 @@ class NostrCredentialExchange:
         # unavailable the DM omits the block and renders amber client-side,
         # never green (envelope-absent is never trusted). See
         # identity_proof.create_provenance_attestation.
-        attestation_block = ""
+        attestation: str | None = None
         if recipient_npub is not None and self._privkey_hex:
             try:
                 from tollbooth.identity_proof import create_provenance_attestation
-                _attestation = create_provenance_attestation(
+                attestation = create_provenance_attestation(
                     self._privkey_hex,
                     sender_pubkey_hex=sender_pubkey_hex,
                     subject_npub=recipient_npub,
@@ -1194,18 +1260,25 @@ class NostrCredentialExchange:
                     origin=origin,
                     verify_at=verify_at,
                 )
-                attestation_block = (
-                    "--- Operator Attestation ---\n"
-                    "Signed by the Operator's registered npub; binds the "
-                    "delivery key and this exact request. Verify it resolves "
-                    "to a known Operator in the DPYC registry before trusting "
-                    "this message.\n"
-                    f"attestation = @@@{_attestation}@@@\n\n"
-                )
             except Exception:
                 logger.debug(
                     "best-effort provenance attestation build failed", exc_info=True,
                 )
+
+        def build_form_tags(rendezvous_relay: str) -> list[list[str]]:
+            """The request's private rumor tags: its form, and its attestation.
+
+            A form client draws the request from ``form`` and checks
+            ``attestation`` before trusting it. The text body is the fallback
+            for clients that read neither.
+            """
+            form = courier_form_schema(
+                template, nonce=nonce, rendezvous_relay=rendezvous_relay,
+            )
+            tags = [["form", json.dumps(form, separators=(",", ":"))]]
+            if attestation is not None:
+                tags.append(["attestation", attestation])
+            return tags
 
         def build_welcome(rendezvous_relay: str) -> str:
             """Build the welcome DM with the rendezvous relay embedded.
@@ -1231,7 +1304,6 @@ class NostrCredentialExchange:
                     if verify_at else ""
                 )
                 + "\n"
-                f"{attestation_block}"
                 f"--- Message Provenance ---\n"
                 f"Service: {template.description or template.service}\n"
                 + (f"Requested from: {origin}\n" if origin else "")
@@ -1287,16 +1359,19 @@ class NostrCredentialExchange:
                     continue
 
                 welcome_text = build_welcome(candidate_relay)
+                form_tags = build_form_tags(candidate_relay)
                 try:
                     if agent_key is not None:
                         self._send_dm_as(
                             agent_key, recipient_npub, welcome_text,
                             target_relay=candidate_relay,
+                            rumor_tags=form_tags,
                         )
                     else:
                         self.send_dm(
                             recipient_npub, welcome_text,
                             target_relay=candidate_relay,
+                            rumor_tags=form_tags,
                         )
                     committed_relay = candidate_relay
                     break
@@ -1602,14 +1677,15 @@ class NostrCredentialExchange:
                     nack_reason = _NACK_TOKEN
                 if pt is not None:
                     try:
-                        payload = _parse_delimited_credentials(pt)
+                        payload = _parse_reply(pt)
                     except DuplicateFieldError as dup:
                         nack_reason = _repeated_field_nack(dup.keys)
                     else:
                         if payload is None:
                             nack_reason = (
-                                "Your message was popped but had no @@@ field "
-                                "markers. Resend using: field_name = @@@value@@@"
+                                "Your message was popped but held no fields. "
+                                "Resend as a JSON object of text values, or as "
+                                "lines of field_name = @@@value@@@"
                             )
                         elif payload.get("nonce", "") != nonce:
                             nack_reason = _NACK_TOKEN
@@ -1656,7 +1732,7 @@ class NostrCredentialExchange:
         # ── Match: consume one-time channel state (keyed by raw service) ──
         await self.close_channel(sender_npub, service)
 
-        payload = _parse_delimited_credentials(plaintext)
+        payload = _parse_reply(plaintext)
         if payload is None:
             self._send_error_dm(sender_npub, error_template)
             raise CourierValidationError(

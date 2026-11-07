@@ -805,10 +805,13 @@ class OperatorRuntime:
                 ),
                 "cache_duration": FieldSpec(
                     required=False, sensitive=False, default="2h",
+                    title="Remember for",
                     description="How long to cache this proof (e.g. 2h, 1d, 3 days, unlimited)",
+                    examples=("2h", "1d", "1w", "30d"),
                 ),
             },
             description="Npub ownership — the signed DM itself proves you own this npub",
+            kind="approval",
         )
 
         self._courier = SecureCourierService(
