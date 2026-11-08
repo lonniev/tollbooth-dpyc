@@ -18,14 +18,15 @@ from tollbooth.nostr_credentials import (
     _KIND_METADATA,
     _KIND_PRIVATE_DM,
     _KIND_SEAL,
+    _PEER_WRAP_BACKDATE_SECONDS,
     _REOPEN_AFTER_SECONDS,
-    _TIMESTAMP_FUZZ_SECONDS,
     CourierChannelBusy,
     CourierError,
     CourierNotReady,
     CourierValidationError,
     NostrCredentialExchange,
     NostrProfile,
+    _nip44_decrypt,
     _parse_delimited_credentials,
 )
 
@@ -2440,13 +2441,13 @@ class TestNip17TimestampHardening:
 
         # NIP-04 filter uses normal freshness window
         nip04_since = nip04_filter["since"]
-        # Gift wrap filter has a wider window (48h wider for NIP-17 fuzz)
+        # Gift wrap filter reaches 48h further back: peers backdate their wraps
         giftwrap_since = giftwrap_filter["since"]
         assert giftwrap_since < nip04_since
-        assert nip04_since - giftwrap_since == _TIMESTAMP_FUZZ_SECONDS
+        assert nip04_since - giftwrap_since == _PEER_WRAP_BACKDATE_SECONDS
 
-    def test_nip17_fuzzed_timestamp_found_by_candidate_filter(self):
-        """Gift wrap with created_at fuzzed 3h into the past is still returned."""
+    def test_backdated_peer_gift_wrap_found_by_candidate_filter(self):
+        """A peer's gift wrap backdated 3h is still returned."""
         operator = PrivateKey()
         sender = PrivateKey()
         ex = _make_exchange(nsec=operator.nsec, freshness_window=900)  # 15 min
@@ -2461,6 +2462,20 @@ class TestNip17TimestampHardening:
 
         results = ex._find_dm_candidates(sender.public_key.hex())
         assert [r["id"] for r in results] == [gift_wrap_event["id"]]
+
+    def test_our_gift_wrap_and_seal_carry_the_real_time(self):
+        """Ours are never backdated: an ephemeral relay drops old-dated events."""
+        operator = PrivateKey()
+        recipient = PrivateKey()
+        ex = _make_exchange(nsec=operator.nsec)
+        before = int(time.time())
+        wrap = json.loads(ex._build_gift_wrap(recipient.public_key.hex(), "hi"))[1]
+        after = int(time.time())
+        assert before <= wrap["created_at"] <= after
+        seal = json.loads(_nip44_decrypt(
+            wrap["content"], recipient.hex(), wrap["pubkey"],
+        ))
+        assert before <= seal["created_at"] <= after
 
     def test_nip04_old_event_still_found(self):
         """NIP-04 events are found regardless of age — no time filtering."""
