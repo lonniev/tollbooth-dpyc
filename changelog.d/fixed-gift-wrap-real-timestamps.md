@@ -1,1 +1,0 @@
-- Gift wraps and seals carry the real send time. A backdated wrap was dropped as old by ephemeral relays such as relay.snort.social before the recipient fetched it, so the courier form never arrived. Reads still reach 48 hours back for other clients' backdated wraps.

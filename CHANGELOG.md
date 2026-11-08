@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.116.1] — 2026-11-07
+
+### Fixed
+
+- Gift wraps and seals carry the real send time. A backdated wrap was dropped as old by ephemeral relays such as relay.snort.social before the recipient fetched it, so the courier form never arrived. Reads still reach 48 hours back for other clients' backdated wraps.
+
 ## [0.116.0] — 2026-11-07
 
 ### Changed
