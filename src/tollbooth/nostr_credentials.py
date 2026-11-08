@@ -97,19 +97,12 @@ _CLOCK_SKEW_SECONDS = 300
 # A channel for one (npub, service) may be replaced at most this often.
 _REOPEN_AFTER_SECONDS = 120
 
-# NIP-17 timestamp randomization window (0–48 hours into the past)
-_TIMESTAMP_FUZZ_SECONDS = 2 * 24 * 60 * 60
-
-
-def _randomize_timestamp() -> int:
-    """Return a timestamp fuzzed 0–48 hours into the past per NIP-17.
-
-    NIP-17 recommends randomizing ``created_at`` to thwart time-analysis.
-    We only fuzz *backwards* because Nostr relays reject events whose
-    ``created_at`` is in the future (anti-spam policy on Primal, Damus,
-    nos.lol, and most others).
-    """
-    return int(time.time()) - random.randint(0, _TIMESTAMP_FUZZ_SECONDS)
+# Other Nostr clients follow NIP-59 and backdate their gift wraps up to 48
+# hours, so a read for gift wraps reaches back this far. Ours carry the real
+# time: an ephemeral relay drops a backdated event as old before the
+# recipient fetches it, and the NIP-04 copy sent beside it shows the real
+# time anyway, so backdating would hide nothing.
+_PEER_WRAP_BACKDATE_SECONDS = 2 * 24 * 60 * 60
 
 
 # Anti-replay nonce slug — memorable adjective-noun-number phrases
@@ -924,7 +917,7 @@ class NostrCredentialExchange:
             content=seal_content,
             tags=[],  # No tags on seal (metadata protection)
             pubkey=sender_pubkey_hex,
-            created_at=_randomize_timestamp(),
+            created_at=int(time.time()),
         )
         seal.sign(sender_privkey_hex)
 
@@ -942,7 +935,7 @@ class NostrCredentialExchange:
                 ["expiration", expiry],  # NIP-40 auto-delete
             ],
             pubkey=ephemeral_sk.public_key.hex(),
-            created_at=_randomize_timestamp(),
+            created_at=int(time.time()),
         )
         wrap.sign(ephemeral_sk.hex())
 
@@ -2299,7 +2292,7 @@ class NostrCredentialExchange:
         filter_giftwrap_tagged: dict[str, Any] = {
             "kinds": [_KIND_GIFT_WRAP],
             "#p": listen_pubkeys,
-            "since": since - _TIMESTAMP_FUZZ_SECONDS,  # 48h wider for NIP-17 fuzz
+            "since": since - _PEER_WRAP_BACKDATE_SECONDS,  # peers backdate wraps
             "limit": 50,
         }
 
@@ -2456,7 +2449,7 @@ class NostrCredentialExchange:
 
         Reads the seal's pubkey to name the sender, and for another sender
         the private DM's own ``created_at`` (the wrap's and seal's are
-        randomized by NIP-59; the DM's is not). The seal's signature is
+        backdated by peers under NIP-59; the DM's is not). The seal's signature is
         checked later, by the drain that takes the wrap.
         """
         if not _HAS_NIP44:
