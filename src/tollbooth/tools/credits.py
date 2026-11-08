@@ -37,6 +37,19 @@ def _invoice_owner(invoice: dict[str, Any]) -> str | None:
 logger = logging.getLogger(__name__)
 
 
+async def _fetch_bolt11(btcpay: BTCPayClient, invoice_id: str) -> str | None:
+    """The invoice's BOLT11 string for a direct wallet payment, or None.
+
+    Best effort: the checkout link still pays the invoice when the Lightning
+    node is slow to answer.
+    """
+    try:
+        return await btcpay.get_lightning_invoice(invoice_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to fetch BOLT11 for invoice %s", invoice_id)
+        return None
+
+
 async def _create_purchase_invoice(
     btcpay: BTCPayClient,
     cache: LedgerCache,
@@ -126,12 +139,7 @@ async def _create_purchase_invoice(
         )
 
     # Fetch BOLT11 Lightning invoice string for direct wallet payment
-    bolt11: str | None = None
-    if invoice_id:
-        try:
-            bolt11 = await btcpay.get_lightning_invoice(invoice_id)
-        except Exception:  # noqa: BLE001
-            logger.debug("Failed to fetch BOLT11 for invoice %s", invoice_id)
+    bolt11 = await _fetch_bolt11(btcpay, invoice_id) if invoice_id else None
 
     result: dict[str, Any] = {
         "success": True,
@@ -331,6 +339,15 @@ async def check_payment_tool(
 
     if status == "New":
         result["message"] = "Invoice created, awaiting payment."
+        # The owner may pick an unpaid top-up back up on another device, so
+        # hand back the payment page and Lightning invoice it would have seen
+        # from purchase_credits. Nobody else learns where to pay.
+        if _invoice_owner(invoice) == user_id:
+            result["checkout_link"] = invoice.get("checkoutLink", "")
+            result["expiration"] = invoice.get("expirationTime", "")
+            bolt11 = await _fetch_bolt11(btcpay, invoice_id)
+            if bolt11:
+                result["lightning_invoice"] = bolt11
 
     elif status == "Processing":
         result["message"] = "Payment seen, waiting for confirmation."

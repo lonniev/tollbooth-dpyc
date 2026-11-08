@@ -4592,7 +4592,9 @@ def register_standard_tools(
     async def check_payment(invoice_id: str, npub: str) -> dict[str, Any]:
         """Check the payment status of a Lightning invoice.
 
-        Call after paying the invoice from purchase_credits.
+        Call after paying the invoice from purchase_credits. While the
+        invoice is unpaid, the result carries its checkout_link and
+        lightning_invoice again, so the patron can pay it from another device.
         Free — no credits required. Proof of npub ownership is required
         to prevent credit-grant front-running by an observer of the
         invoice ID.
