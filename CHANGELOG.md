@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.117.0] — 2026-11-08
+
+### Added
+
+- `check_payment` returns the payment page and Lightning invoice of its owner's still-unpaid invoice, so a top-up started on one device can be paid from another.
+
 ## [0.116.1] — 2026-11-07
 
 ### Fixed

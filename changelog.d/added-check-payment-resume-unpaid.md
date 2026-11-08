@@ -1,1 +1,0 @@
-- `check_payment` returns the payment page and Lightning invoice of its owner's still-unpaid invoice, so a top-up started on one device can be paid from another.
