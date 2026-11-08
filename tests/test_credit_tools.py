@@ -343,6 +343,42 @@ class TestCheckPayment:
         assert "awaiting" in result["message"]
 
     @pytest.mark.asyncio
+    async def test_new_status_resumes_for_owner(self) -> None:
+        btcpay = _mock_btcpay({
+            "id": "inv-1", "status": "New", "metadata": {"user_id": "user1"},
+            "checkoutLink": "https://pay.example.com/i/inv-1", "expirationTime": 1762600000,
+        })
+        btcpay.get_lightning_invoice = AsyncMock(return_value="lnbc10u1resume")
+        result = await check_payment_tool(btcpay, _mock_cache(), "user1", "inv-1")
+        assert result["checkout_link"] == "https://pay.example.com/i/inv-1"
+        assert result["expiration"] == 1762600000
+        assert result["lightning_invoice"] == "lnbc10u1resume"
+
+    @pytest.mark.asyncio
+    async def test_new_status_hides_payment_page_from_others(self) -> None:
+        btcpay = _mock_btcpay({
+            "id": "inv-1", "status": "New", "metadata": {"user_id": "someone-else"},
+            "checkoutLink": "https://pay.example.com/i/inv-1",
+        })
+        btcpay.get_lightning_invoice = AsyncMock(return_value="lnbc10u1resume")
+        result = await check_payment_tool(btcpay, _mock_cache(), "user1", "inv-1")
+        assert result["status"] == "New"
+        assert "checkout_link" not in result
+        assert "lightning_invoice" not in result
+        btcpay.get_lightning_invoice.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_new_status_without_bolt11_still_resumes(self) -> None:
+        btcpay = _mock_btcpay({
+            "id": "inv-1", "status": "New", "metadata": {"user_id": "user1"},
+            "checkoutLink": "https://pay.example.com/i/inv-1",
+        })
+        btcpay.get_lightning_invoice = AsyncMock(side_effect=RuntimeError("node busy"))
+        result = await check_payment_tool(btcpay, _mock_cache(), "user1", "inv-1")
+        assert result["checkout_link"] == "https://pay.example.com/i/inv-1"
+        assert "lightning_invoice" not in result
+
+    @pytest.mark.asyncio
     async def test_processing_status(self) -> None:
         btcpay = _mock_btcpay({"id": "inv-1", "status": "Processing"})
         cache = _mock_cache()
