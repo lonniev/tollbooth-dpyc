@@ -289,6 +289,10 @@ async def request_npub_proof_tool(
             f"The patron MUST reply on that relay (it's embedded in the DM). "
             f"Call receive_npub_proof after the patron confirms they replied."
         )
+    if "form_delivered" in result:
+        # False means the relay refused the gift wrap twice: the patron's
+        # client shows a plain-text request with no form to fill in.
+        response["form_delivered"] = bool(result["form_delivered"])
     return response
 
 

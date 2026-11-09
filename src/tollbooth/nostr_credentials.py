@@ -636,7 +636,7 @@ class NostrCredentialExchange:
         target_relay: str | None = None,
         extra_tags: list[list[str]] | None = None,
         rumor_tags: list[list[str]] | None = None,
-    ) -> None:
+    ) -> bool:
         """Send a DM via both NIP-17 gift wrap and NIP-04 legacy.
 
         Sends the same message twice — once as a NIP-17 kind 1059 gift
@@ -644,8 +644,9 @@ class NostrCredentialExchange:
         sees whichever their client supports.  The receive side already
         handles both protocols.
 
-        Raises ``CourierError`` only if *both* protocols fail to get at
-        least one relay acceptance.
+        Returns whether the gift wrap landed (see ``_send_dual``). Raises
+        ``CourierError`` only if *both* protocols fail to get at least one
+        relay acceptance.
 
         Args:
             recipient_npub: Patron's npub (bech32).
@@ -678,79 +679,11 @@ class NostrCredentialExchange:
                 f"Invalid recipient npub: {exc}"
             ) from exc
 
-        nip17_ok = False
-        nip04_ok = False
-        errors: list[str] = []
-
-        # ── NIP-17 gift wrap (kind 1059) ─────────────────────────────
-        try:
-            message = self._build_gift_wrap(recipient_hex, message_text, rumor_tags)
-            if target_relay:
-                ok, detail = self._publish_to_one_relay(message, target_relay)
-                nip17_ok = ok
-                if nip17_ok:
-                    logger.info(
-                        "Sent NIP-17 gift-wrapped DM to %s via pinned relay %s",
-                        recipient_npub[:20], target_relay,
-                    )
-                else:
-                    errors.append(f"NIP-17 @ {target_relay}: {detail}")
-            else:
-                results = self._publish_to_relays(message) or []
-                accepted = sum(1 for _, ok, _ in results if ok)
-                nip17_ok = accepted > 0
-                if nip17_ok:
-                    logger.info(
-                        "Sent NIP-17 gift-wrapped DM to %s (%d/%d relays)",
-                        recipient_npub[:20], accepted, len(results),
-                    )
-                else:
-                    details = "; ".join(
-                        f"{url}: {err}" for url, ok, err in results if not ok
-                    )
-                    errors.append(f"NIP-17: {details}")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"NIP-17: {exc}")
-            logger.debug("NIP-17 send failed: %s", exc)
-
-        # ── NIP-04 legacy DM (kind 4) ───────────────────────────────
-        try:
-            message = self._build_nip04_dm(
-                recipient_hex, message_text, extra_tags=extra_tags,
-            )
-            if target_relay:
-                ok, detail = self._publish_to_one_relay(message, target_relay)
-                nip04_ok = ok
-                if nip04_ok:
-                    logger.info(
-                        "Sent NIP-04 DM to %s via pinned relay %s",
-                        recipient_npub[:20], target_relay,
-                    )
-                else:
-                    errors.append(f"NIP-04 @ {target_relay}: {detail}")
-            else:
-                results = self._publish_to_relays(message) or []
-                accepted = sum(1 for _, ok, _ in results if ok)
-                nip04_ok = accepted > 0
-                if nip04_ok:
-                    logger.info(
-                        "Sent NIP-04 DM to %s (%d/%d relays)",
-                        recipient_npub[:20], accepted, len(results),
-                    )
-                else:
-                    details = "; ".join(
-                        f"{url}: {err}" for url, ok, err in results if not ok
-                    )
-                    errors.append(f"NIP-04: {details}")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"NIP-04: {exc}")
-            logger.debug("NIP-04 send failed: %s", exc)
-
-        if not nip17_ok and not nip04_ok:
-            raise CourierError(
-                "All relay sends failed for both protocols: "
-                + "; ".join(errors)
-            )
+        return self._send_dual(
+            self._privkey_hex, self._pubkey_hex, recipient_npub, recipient_hex,
+            message_text, target_relay=target_relay,
+            rumor_tags=rumor_tags, extra_tags=extra_tags,
+        )
 
     def _send_dm_as(
         self,
@@ -760,7 +693,7 @@ class NostrCredentialExchange:
         *,
         target_relay: str | None = None,
         rumor_tags: list[list[str]] | None = None,
-    ) -> None:
+    ) -> bool:
         """Send a DM using an explicit sender key instead of the operator key.
 
         Same dual-protocol logic as ``send_dm()`` but signs and encrypts
@@ -773,6 +706,8 @@ class NostrCredentialExchange:
             message_text: Plaintext message to encrypt and send.
             target_relay: If set, publish only to this single relay
                 (used by the rendezvous-pinned open_channel path).
+
+        Returns whether the gift wrap landed.
         """
         if not self._enabled:
             raise CourierNotReady("Secure Courier not enabled.")
@@ -787,86 +722,95 @@ class NostrCredentialExchange:
                 f"Invalid recipient npub: {exc}"
             ) from exc
 
-        sender_privkey_hex = sender_key.hex()
-        sender_pubkey_hex = sender_key.public_key.hex()
+        return self._send_dual(
+            sender_key.hex(), sender_key.public_key.hex(), recipient_npub,
+            recipient_hex, message_text, target_relay=target_relay,
+            rumor_tags=rumor_tags,
+        )
 
+    # A relay that drops one gift wrap usually takes the next: a rebuilt wrap
+    # has a fresh ephemeral key, id and timestamp.
+    _GIFT_WRAP_ATTEMPTS = 2
+
+    def _publish_event(
+        self, message: str, target_relay: str | None,
+    ) -> tuple[bool, str]:
+        """Publish to the pinned relay, or fan out; (accepted, why not)."""
+        if target_relay:
+            return self._publish_to_one_relay(message, target_relay)
+        results = self._publish_to_relays(message) or []
+        if any(ok for _, ok, _ in results):
+            return True, ""
+        return False, "; ".join(f"{url}: {err}" for url, ok, err in results if not ok)
+
+    def _send_dual(
+        self,
+        sender_privkey_hex: str,
+        sender_pubkey_hex: str,
+        recipient_npub: str,
+        recipient_hex: str,
+        message_text: str,
+        *,
+        target_relay: str | None = None,
+        rumor_tags: list[list[str]] | None = None,
+        extra_tags: list[list[str]] | None = None,
+    ) -> bool:
+        """Send the NIP-17 gift wrap, then the NIP-04 copy.
+
+        The gift wrap is the message that matters: only it carries the
+        rumor's ``form``, which a form client draws as fields the human fills
+        in. The NIP-04 copy is text a human must copy and rewrite by hand. So a
+        refused gift wrap is retried with a freshly built wrap, and a final
+        failure is a warning, never a quiet debug line.
+
+        Returns whether the gift wrap landed. Raises ``CourierError`` only when
+        neither copy did.
+        """
+        where = target_relay or "configured relays"
         nip17_ok = False
-        nip04_ok = False
         errors: list[str] = []
-
-        # ── NIP-17 gift wrap (kind 1059) ─────────────────────────────
-        try:
-            message = self._build_gift_wrap_with(
-                sender_privkey_hex, sender_pubkey_hex,
-                recipient_hex, message_text, rumor_tags,
+        for attempt in range(1, self._GIFT_WRAP_ATTEMPTS + 1):
+            try:
+                message = self._build_gift_wrap_with(
+                    sender_privkey_hex, sender_pubkey_hex,
+                    recipient_hex, message_text, rumor_tags,
+                )
+                nip17_ok, detail = self._publish_event(message, target_relay)
+            except Exception as exc:  # noqa: BLE001
+                nip17_ok, detail = False, str(exc)
+            if nip17_ok:
+                logger.info(
+                    "Sent NIP-17 gift-wrapped DM to %s via %s (attempt %d)",
+                    recipient_npub[:20], where, attempt,
+                )
+                break
+            errors.append(f"NIP-17 attempt {attempt} @ {where}: {detail}")
+        if not nip17_ok:
+            logger.warning(
+                "NIP-17 gift wrap to %s was refused by %s %d times — only the "
+                "NIP-04 text copy can arrive, so a form client shows no form: %s",
+                recipient_npub[:20], where, self._GIFT_WRAP_ATTEMPTS,
+                "; ".join(errors),
             )
-            if target_relay:
-                ok, detail = self._publish_to_one_relay(message, target_relay)
-                nip17_ok = ok
-                if nip17_ok:
-                    logger.info(
-                        "Sent NIP-17 agent DM to %s via pinned relay %s",
-                        recipient_npub[:20], target_relay,
-                    )
-                else:
-                    errors.append(f"NIP-17 @ {target_relay}: {detail}")
-            else:
-                results = self._publish_to_relays(message) or []
-                accepted = sum(1 for _, ok, _ in results if ok)
-                nip17_ok = accepted > 0
-                if nip17_ok:
-                    logger.info(
-                        "Sent NIP-17 agent DM to %s (%d/%d relays)",
-                        recipient_npub[:20], accepted, len(results),
-                    )
-                else:
-                    details = "; ".join(
-                        f"{url}: {err}" for url, ok, err in results if not ok
-                    )
-                    errors.append(f"NIP-17: {details}")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"NIP-17: {exc}")
-            logger.debug("NIP-17 agent send failed: %s", exc)
 
-        # ── NIP-04 legacy DM (kind 4) ───────────────────────────────
         try:
             message = self._build_nip04_dm_with(
-                sender_privkey_hex, sender_pubkey_hex,
-                recipient_hex, message_text,
+                sender_privkey_hex, sender_pubkey_hex, recipient_hex,
+                message_text, extra_tags=extra_tags,
             )
-            if target_relay:
-                ok, detail = self._publish_to_one_relay(message, target_relay)
-                nip04_ok = ok
-                if nip04_ok:
-                    logger.info(
-                        "Sent NIP-04 agent DM to %s via pinned relay %s",
-                        recipient_npub[:20], target_relay,
-                    )
-                else:
-                    errors.append(f"NIP-04 @ {target_relay}: {detail}")
-            else:
-                results = self._publish_to_relays(message) or []
-                accepted = sum(1 for _, ok, _ in results if ok)
-                nip04_ok = accepted > 0
-                if nip04_ok:
-                    logger.info(
-                        "Sent NIP-04 agent DM to %s (%d/%d relays)",
-                        recipient_npub[:20], accepted, len(results),
-                    )
-                else:
-                    details = "; ".join(
-                        f"{url}: {err}" for url, ok, err in results if not ok
-                    )
-                    errors.append(f"NIP-04: {details}")
+            nip04_ok, detail = self._publish_event(message, target_relay)
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"NIP-04: {exc}")
-            logger.debug("NIP-04 agent send failed: %s", exc)
+            nip04_ok, detail = False, str(exc)
+        if nip04_ok:
+            logger.info("Sent NIP-04 DM to %s via %s", recipient_npub[:20], where)
+        else:
+            errors.append(f"NIP-04 @ {where}: {detail}")
 
         if not nip17_ok and not nip04_ok:
             raise CourierError(
-                "All relay sends failed for both protocols: "
-                + "; ".join(errors)
+                "All relay sends failed for both protocols: " + "; ".join(errors)
             )
+        return nip17_ok
 
     def _build_gift_wrap(
         self, recipient_hex: str, message_text: str,
@@ -1331,6 +1275,7 @@ class NostrCredentialExchange:
             # in the DM body before signing so the responder knows
             # where to reply.
             committed_relay: str | None = None
+            form_delivered = False
             attempt_errors: list[str] = []
             for candidate_relay in self._relays:
                 # A rendezvous is a two-way seam: the DM has to land there AND
@@ -1356,13 +1301,13 @@ class NostrCredentialExchange:
                 form_tags = build_form_tags(candidate_relay)
                 try:
                     if agent_key is not None:
-                        self._send_dm_as(
+                        form_delivered = self._send_dm_as(
                             agent_key, recipient_npub, welcome_text,
                             target_relay=candidate_relay,
                             rumor_tags=form_tags,
                         )
                     else:
-                        self.send_dm(
+                        form_delivered = self.send_dm(
                             recipient_npub, welcome_text,
                             target_relay=candidate_relay,
                             rumor_tags=form_tags,
@@ -1420,6 +1365,9 @@ class NostrCredentialExchange:
                 )
 
             result["welcome_dm_sent"] = True
+            # False: only the NIP-04 text copy landed, so the human sees no
+            # form and must copy the payload into a reply by hand.
+            result["form_delivered"] = form_delivered
             result["rendezvous_relay"] = committed_relay
             result["message"] = (
                 f"A welcome DM has been sent to {recipient_npub} via {committed_relay}. "
