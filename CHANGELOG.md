@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.117.1] — 2026-11-09
+
+### Fixed
+
+- Secure Courier retries a refused NIP-17 gift wrap once with a freshly built wrap, and warns when it still fails: only the gift wrap carries the form, so a text-only request makes the human copy the payload by hand. `open_channel` and `request_npub_proof` report `form_delivered`.
+
 ## [0.117.0] — 2026-11-08
 
 ### Added
