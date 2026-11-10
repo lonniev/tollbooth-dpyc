@@ -1,0 +1,1 @@
+- Secure Courier retries a refused NIP-17 gift wrap once with a freshly built wrap, and warns when it still fails: only the gift wrap carries the form, so a text-only request makes the human copy the payload by hand. `open_channel` and `request_npub_proof` report `form_delivered`.

@@ -1387,6 +1387,67 @@ class TestSendDm:
                 ex.send_dm(patron.public_key.bech32(), "Rejected")
 
 
+class TestGiftWrapRetry:
+    """The gift wrap carries the form; a refused one is retried, then warned."""
+
+    @staticmethod
+    def _kind(message: str) -> int:
+        return json.loads(message)[1]["kind"]
+
+    def test_retries_a_refused_gift_wrap_with_a_fresh_one(self):
+        ex = _make_exchange()
+        patron = PrivateKey()
+        sent: list[tuple[int, str]] = []
+
+        def publish(message: str, relay: str) -> tuple[bool, str]:
+            kind = self._kind(message)
+            first_wrap = kind == 1059 and not any(k == 1059 for k, _ in sent)
+            sent.append((kind, json.loads(message)[1]["id"]))
+            return (False, "rate-limited") if first_wrap else (True, "")
+
+        with patch.object(ex, "_publish_to_one_relay", side_effect=publish):
+            delivered = ex.send_dm(
+                patron.public_key.bech32(), "hi", target_relay="wss://relay.test",
+            )
+
+        assert delivered is True
+        wraps = [i for k, i in sent if k == 1059]
+        assert len(wraps) == 2 and wraps[0] != wraps[1]  # rebuilt, not resent
+        assert [k for k, _ in sent].count(4) == 1
+
+    def test_twice_refused_gift_wrap_warns_and_reports_text_only(self, caplog):
+        ex = _make_exchange()
+        patron = PrivateKey()
+        kinds: list[int] = []
+
+        def publish(message: str, relay: str) -> tuple[bool, str]:
+            kinds.append(self._kind(message))
+            return (kinds[-1] == 4), "" if kinds[-1] == 4 else "blocked"
+
+        with caplog.at_level("WARNING", logger="tollbooth.nostr_credentials"), \
+             patch.object(ex, "_publish_to_one_relay", side_effect=publish):
+            delivered = ex._send_dm_as(
+                PrivateKey(), patron.public_key.bech32(), "hi",
+                target_relay="wss://relay.test",
+            )
+
+        assert delivered is False
+        assert kinds == [1059, 1059, 4]
+        assert "only the NIP-04 text copy can arrive" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_open_channel_reports_form_delivery(self):
+        ex = _make_exchange()
+        patron = PrivateKey()
+        with patch.object(ex, "_start_subscription"), \
+             patch.object(ex, "_relay_serves_dm_reads", return_value=(True, "")), \
+             patch.object(ex, "send_dm", return_value=False):
+            result = await ex.open_channel(
+                "x", greeting="hi", recipient_npub=patron.public_key.bech32(),
+            )
+        assert result["form_delivered"] is False
+
+
 class TestOpenChannelWithWelcomeDm:
     @pytest.mark.asyncio
     async def test_sends_welcome_dm_when_npub_provided(self):
