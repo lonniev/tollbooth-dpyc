@@ -1078,6 +1078,7 @@ class NostrCredentialExchange:
         origin: str | None = None,
         verify_at: str | None = None,
         bound_to: str = "",
+        channel: str = "",
     ) -> dict[str, Any]:
         """Open a credential delivery channel for a service.
 
@@ -1093,6 +1094,12 @@ class NostrCredentialExchange:
             greeting: Operator-provided banner shown at the top of the
                 welcome DM.
             recipient_npub: Optional patron npub to send welcome DM to.
+            channel: Optional name that keeps this channel apart from other
+                open channels for the same ``(recipient_npub, service)``. The
+                channel's state lives under ``"{service}#{channel}"``; pass
+                that same string to ``seconds_until_reopen``,
+                ``_resolve_pinned_record`` and ``close_channel``. Empty means
+                one channel per ``(recipient_npub, service)``.
 
         Returns:
             Dict with npub, relays, template instructions, and freshness window.
@@ -1108,13 +1115,18 @@ class NostrCredentialExchange:
                 f"Unknown service '{service}'. Available: {available}"
             )
 
+        # Where this channel's state lives. The template, the attestation and
+        # the DM speak of ``service``; the pending record, pin, binding and
+        # ephemeral agent live under ``state``.
+        state = f"{service}#{channel}" if channel else service
+
         # Caller text is quoted in the signed DM and its attestation.
         reason = _quoted_text(reason)
         origin = _quoted_text(origin)
         verify_at = _quoted_text(verify_at)
 
         if recipient_npub:
-            wait = await self.seconds_until_reopen(recipient_npub, service)
+            wait = await self.seconds_until_reopen(recipient_npub, state)
             if wait:
                 raise CourierChannelBusy(wait)
 
@@ -1153,7 +1165,7 @@ class NostrCredentialExchange:
             assert recipient_npub is not None  # implied by is_self_dm
             agent_key = PrivateKey()
             with self._lock:
-                self._ephemeral_agents[(recipient_npub, service)] = agent_key
+                self._ephemeral_agents[(recipient_npub, state)] = agent_key
             logger.info(
                 "Self-DM detected — using ephemeral agent %s for %s/%s",
                 agent_key.public_key.bech32()[:20],
@@ -1346,9 +1358,9 @@ class NostrCredentialExchange:
             # Pin committed. Persist nonce + rendezvous so receive can
             # match the reply and the caller can display the URL.
             expiry = time.time() + self._freshness_window
-            self._pending_nonces[(recipient_npub, service)] = (nonce, expiry)
-            self._pinned_relays[(recipient_npub, service)] = committed_relay
-            self._bound_to[(recipient_npub, service)] = bound_to
+            self._pending_nonces[(recipient_npub, state)] = (nonce, expiry)
+            self._pinned_relays[(recipient_npub, state)] = committed_relay
+            self._bound_to[(recipient_npub, state)] = bound_to
 
             # Persist pending state to survive cold starts
             if self._credential_vault is not None:
@@ -1361,7 +1373,7 @@ class NostrCredentialExchange:
                 if agent_key is not None:
                     pending_blob["agent_nsec_hex"] = agent_key.hex()
                 await self._vault_store(
-                    f"__pending__{service}", recipient_npub, pending_blob,
+                    f"__pending__{state}", recipient_npub, pending_blob,
                 )
 
             result["welcome_dm_sent"] = True
