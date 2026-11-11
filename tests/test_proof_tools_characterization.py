@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,6 +23,7 @@ from pynostr.key import PrivateKey
 
 from tollbooth.constants import ErrorCode
 from tollbooth.runtime import OperatorRuntime, register_standard_tools
+from tollbooth.tools.proof import _proof_channel, _proof_state
 
 os.environ.setdefault(
     "TOLLBOOTH_NOSTR_OPERATOR_NSEC",
@@ -50,6 +52,7 @@ class FakeExchange:
         self._resolve_error = resolve_error
         self._fetch_delay = fetch_delay
         self._privkey_hex = "ab" * 32
+        self._lock = threading.Lock()
         self._ephemeral_agents: dict = {}
         self._pending_nonces: dict = {}
         self._pinned_relays: dict = {}
@@ -353,7 +356,7 @@ async def test_match_clears_channel_state(patron):
     tools = _register(rt)
 
     await tools["receive_npub_proof"](patron_npub=patron, nonce=nonce)
-    key = (patron, "npub_ownership")
+    key = (patron, _proof_state(HOLDER))
     # one-time-use cleanup removed the nonce/pin state
     assert key not in ex._pending_nonces
     assert key not in ex._pinned_relays
@@ -376,7 +379,7 @@ async def test_a_challenge_sent_before_a_revocation_cannot_prove(patron):
     assert r["success"] is False
     assert r["error_code"] == ErrorCode.PROOF_CHALLENGE_REVOKED
     assert ex.fetched == 0 and ex.popped == []
-    assert ex.closed == [(patron, "npub_ownership")]
+    assert ex.closed == [(patron, _proof_state(HOLDER))]
     assert await rt.wallet.envelope(HOLDER, patron) is None
 
 
@@ -431,6 +434,8 @@ async def test_request_sends_challenge_and_returns_token(patron):
     assert rt._courier.open_channel.await_args.args[0] == "npub_ownership"
     # bound to the holder that asked, so only it may collect the reply
     assert rt._courier.open_channel.await_args.kwargs["bound_to"] == HOLDER
+    # on that holder's own channel, apart from any other holder's request
+    assert rt._courier.open_channel.await_args.kwargs["channel"] == _proof_channel(HOLDER)
 
 
 @pytest.mark.asyncio
@@ -588,3 +593,105 @@ async def test_receive_collects_only_on_the_requesting_holder(patron):
     tools = _register(rt)
     await tools["receive_npub_proof"](patron_npub=patron, nonce="bold-hawk-42")
     assert ex.resolved_for == HOLDER
+
+
+# ── Two holders proving one npub at once ──────────────────────────────
+# A background scheduler and the human logging in both ask the same npub for
+# proof. Each holder has its own channel, and neither may take, reject or
+# purge the other's reply.
+
+OTHER = "h2"
+
+
+def _open(ex, patron, holder, nonce, agent=None):
+    state = _proof_state(holder)
+    ex._pending_nonces[(patron, state)] = (nonce, time.time() + 600)
+    if agent is not None:
+        ex._ephemeral_agents[(patron, state)] = agent
+
+
+@pytest.mark.asyncio
+async def test_a_reply_to_another_holders_request_is_left_for_it(patron):
+    ours, theirs = "bold-hawk-42", "calm-fox-7"
+    ex = FakeExchange(candidates=[
+        {"id": "theirs", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=theirs)},
+        {"id": "ours", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=ours)},
+    ])
+    _open(ex, patron, OTHER, theirs)
+    rt, _ = _runtime_with_exchange(ex)
+    tools = _register(rt)
+
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce=ours)
+
+    assert r["success"] is True
+    assert ("theirs", True) not in ex.popped and ("theirs", False) not in ex.popped
+    assert ex.popped == [("ours", False)]
+    # the other holder's channel is still open for its own collect
+    assert (patron, _proof_state(OTHER)) in ex._pending_nonces
+
+
+@pytest.mark.asyncio
+async def test_a_reply_addressed_to_another_channels_key_is_left_for_it(patron):
+    ours = "bold-hawk-42"
+    their_agent = PrivateKey()
+    ex = FakeExchange(candidates=[
+        # Undecryptable with our key: it is addressed to the other channel's.
+        {"id": "theirs", "_relay": PIN, **SIGNED, "_undecryptable": True,
+         "tags": [["p", their_agent.public_key.hex()]]},
+        {"id": "ours", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=ours)},
+    ])
+    _open(ex, patron, OTHER, "calm-fox-7", agent=their_agent)
+    rt, _ = _runtime_with_exchange(ex)
+    tools = _register(rt)
+
+    r = await tools["receive_npub_proof"](patron_npub=patron, nonce=ours)
+
+    assert r["success"] is True
+    assert [p for p in ex.popped if p[0] == "theirs"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_stale_reply_with_no_open_channel_is_still_rejected(patron):
+    ours = "bold-hawk-42"
+    ex = FakeExchange(candidates=[
+        {"id": "stale", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce="old-owl-1")},
+        {"id": "ours", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce=ours)},
+    ])
+    rt, _ = _runtime_with_exchange(ex)
+    tools = _register(rt)
+
+    await tools["receive_npub_proof"](patron_npub=patron, nonce=ours)
+
+    assert ("stale", True) in ex.popped
+
+
+@pytest.mark.asyncio
+async def test_a_new_request_does_not_purge_another_holders_reply(patron):
+    ex = FakeExchange(candidates=[
+        {"id": "theirs", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce="calm-fox-7")},
+        {"id": "stale", "_relay": PIN, **SIGNED, "_plaintext": _delimited(nonce="old-owl-1")},
+    ])
+    _open(ex, patron, OTHER, "calm-fox-7")
+    asked: list = []
+
+    async def reopen(npub, state):
+        asked.append((npub, state))
+        return 0
+
+    ex.seconds_until_reopen = reopen
+    rt = OperatorRuntime(tool_registry={}, service_name="Test Operator",
+                         holder_auth_url="https://op.example")
+    rt._courier = SimpleNamespace(
+        _exchange=ex,
+        open_channel=AsyncMock(return_value={
+            "success": True, "nonce": "bold-hawk-42", "rendezvous_relay": PIN,
+        }),
+    )
+    tools = _register(rt)
+
+    r = await tools["request_npub_proof"](patron_npub=patron)
+
+    assert r["success"] is True
+    assert ex.popped == [("stale", False)]
+    # the busy guard is this holder's own, never the other holder's
+    assert asked == [(patron, _proof_state(HOLDER))]

@@ -13,6 +13,7 @@ constant below; nothing else changed. The drain loop is pinned by
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time as _time
 from datetime import UTC
@@ -29,6 +30,99 @@ logger = logging.getLogger(__name__)
 # Channel state is keyed by this raw service (matching open_channel and
 # _resolve_pinned_record), never a resolved credential template.
 PROOF_SERVICE = "npub_ownership"
+
+
+def _proof_channel(holder: str) -> str:
+    """The channel name for the proof requests one holder connection asks.
+
+    Each holder gets its own channel, so two connections proving the same
+    npub at once (a background scheduler and the human logging in) never
+    replace, purge or reject each other's request. The holder id is hashed:
+    the name lands in vault keys and must not echo a connection credential.
+    """
+    return hashlib.sha256(holder.encode()).hexdigest()[:16]
+
+
+def _proof_state(holder: str) -> str:
+    """Where one holder's proof channel keeps its state in the courier."""
+    return f"{PROOF_SERVICE}#{_proof_channel(holder)}"
+
+
+async def close_proof_channels(exchange: Any, npub: str) -> None:
+    """Close every proof channel this process holds open for ``npub``.
+
+    A channel held only in another process's vault record is not seen here;
+    the revocation watermark refuses any grant its reply could mint.
+    """
+    with exchange._lock:
+        states = {
+            state for (who, state) in exchange._pending_nonces
+            if who == npub and state.startswith(f"{PROOF_SERVICE}#")
+        }
+    for state in states:
+        await exchange.close_channel(npub, state)
+
+
+def _addressed_to(event: dict[str, Any]) -> str:
+    """The hex key a DM is addressed to: its first ``p`` tag."""
+    return next(
+        (t[1] for t in event.get("tags", []) if len(t) > 1 and t[0] == "p"), "",
+    )
+
+
+def _other_proof_channels(
+    exchange: Any, npub: str, own_state: str,
+) -> tuple[set[str], set[str]]:
+    """The delivery keys and nonces of ``npub``'s other open proof channels.
+
+    Only channels this process holds in memory are seen. A reply to a channel
+    held by another process is addressed to that channel's delivery key when
+    the npub is the operator's own, and ``_find_dm_candidates`` leaves a wrap
+    for a key this process does not hold alone.
+    """
+    now = _time.time()
+    agents: set[str] = set()
+    nonces: set[str] = set()
+    with exchange._lock:
+        for (who, state), (nonce, expiry) in exchange._pending_nonces.items():
+            if (
+                who != npub or state == own_state
+                or not state.startswith(f"{PROOF_SERVICE}#") or expiry <= now
+            ):
+                continue
+            nonces.add(nonce)
+            agent = exchange._ephemeral_agents.get((who, state))
+            if agent is not None:
+                agents.add(agent.public_key.hex())
+    return agents, nonces
+
+
+def _belongs_elsewhere(
+    exchange: Any,
+    candidate: dict[str, Any],
+    patron_hex: str,
+    others: tuple[set[str], set[str]],
+) -> bool:
+    """Whether a DM answers another open proof channel, and so must be left.
+
+    True when it is addressed to another channel's delivery key, or when it
+    decrypts with the operator key to a reply carrying another channel's nonce.
+    """
+    from tollbooth.nostr_credentials import _parse_reply
+
+    agents, nonces = others
+    if _addressed_to(candidate) in agents:
+        return True
+    if not nonces:
+        return False
+    try:
+        plaintext = exchange._decrypt_dm(
+            candidate, patron_hex, decrypt_privkey_hex=exchange._privkey_hex,
+        )
+        payload = _parse_reply(plaintext) if plaintext else None
+    except Exception:  # noqa: BLE001 — unreadable or malformed is not another's
+        return False
+    return payload is not None and payload.get("nonce", "") in nonces
 
 
 # Real-client-IP headers, most-trustworthy first. Different fronts use different
@@ -192,23 +286,29 @@ async def request_npub_proof_tool(
 
     # Refuse a replacement before the purge: the purge pops this patron's DMs,
     # which would take a reply to the channel that is still open.
+    state = _proof_state(holder)
     try:
-        wait = await courier._exchange.seconds_until_reopen(patron_npub, PROOF_SERVICE)
+        wait = await courier._exchange.seconds_until_reopen(patron_npub, state)
     except Exception:
         logger.debug("reopen check failed", exc_info=True)
         wait = 0
     if wait:
         return CourierChannelBusy(wait).to_response()
 
-    # Purge stale DMs for this patron before sending a fresh challenge. The
-    # fetch and NIP-09 deletes are blocking websocket I/O, so run them off the
-    # event loop (same reasoning as the courier drains in 0.44.3 / M1.2).
+    # Purge stale DMs for this patron before sending a fresh challenge, except
+    # replies to another holder's open proof request: those are still wanted.
+    # The fetch and NIP-09 deletes are blocking websocket I/O, so run them off
+    # the event loop (same reasoning as the courier drains in 0.44.3 / M1.2).
     def _purge_stale() -> int:
         from tollbooth.nostr_credentials import _npub_to_hex
         exchange = courier._exchange
         patron_hex = _npub_to_hex(patron_npub)
         exchange._fetch_dms_from_relays()
-        stale = exchange._find_dm_candidates(patron_hex)
+        others = _other_proof_channels(exchange, patron_npub, state)
+        stale = [
+            c for c in exchange._find_dm_candidates(patron_hex)
+            if not _belongs_elsewhere(exchange, c, patron_hex, others)
+        ]
         for candidate in stale:
             exchange._pop_event(candidate.get("id", ""))
         return len(stale)
@@ -248,6 +348,7 @@ async def request_npub_proof_tool(
             origin=origin,
             verify_at=verify_at,
             bound_to=holder,
+            channel=_proof_channel(holder),
         )
         if not result.get("success"):
             return result
@@ -341,15 +442,17 @@ async def receive_npub_proof_tool(
     )
 
     patron_hex = _npub_to_hex(resolved)
-    # Channel state is keyed by the RAW proof service (matching open_channel
-    # and _resolve_pinned_record), never the resolved credential template.
-    nonce_key = (resolved, PROOF_SERVICE)
+    # Channel state is keyed by this holder's proof channel (matching
+    # open_channel and _resolve_pinned_record), never the resolved credential
+    # template, and never another holder's channel for the same npub.
+    state = _proof_state(holder)
+    nonce_key = (resolved, state)
 
     # Resolve + verify the pinned rendezvous relay for this exact
     # (patron, nonce-service, nonce). Handles cold-start vault rehydration
     # and returns a structured error — popping nothing — when unresolved.
     pinned, error_code = await exchange._resolve_pinned_record(
-        resolved, PROOF_SERVICE, nonce, bound_to=holder,
+        resolved, state, nonce, bound_to=holder,
     )
     if error_code is not None:
         return {
@@ -379,7 +482,7 @@ async def receive_npub_proof_tool(
             ),
         }
     if revoked_before is not None and opened_at <= revoked_before:
-        await exchange.close_channel(resolved, PROOF_SERVICE)
+        await exchange.close_channel(resolved, state)
         return {
             "success": False,
             "error_code": _EC.PROOF_CHALLENGE_REVOKED,
@@ -394,9 +497,13 @@ async def receive_npub_proof_tool(
     # Single drain of ONLY the pinned relay — human-gated, no retry loop.
     # Off the event loop — blocking websocket I/O (0.44.3 / M1.2 reasoning).
     await asyncio.to_thread(exchange._fetch_dms_from_relays, [pinned])
+    # A reply to another holder's open proof request is not this drain's to
+    # take or to reject: leave it for that holder's own collect.
+    others = _other_proof_channels(exchange, resolved, state)
     candidates = [
         c for c in exchange._find_dm_candidates(patron_hex)
         if c.get("_relay") in (pinned, None)
+        and not _belongs_elsewhere(exchange, c, patron_hex, others)
     ]
 
     if not candidates:
@@ -472,7 +579,7 @@ async def receive_npub_proof_tool(
 
     # One-time use: the channel leaves memory AND the vault, or another
     # process would rehydrate it and collect the same reply again.
-    await exchange.close_channel(resolved, PROOF_SERVICE)
+    await exchange.close_channel(resolved, state)
 
     # One summary DM to patron
     if matched_payload is not None:

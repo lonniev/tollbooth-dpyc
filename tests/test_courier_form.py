@@ -221,3 +221,38 @@ def test_gift_wrapped_rumor_carries_its_tags_and_a_nip01_id():
     )
     reference.compute_id()
     assert rumor["id"] == reference.id == _rumor_id(rumor)
+
+
+@pytest.mark.asyncio
+async def test_two_channels_for_one_npub_and_service_stay_apart():
+    """A named channel keeps its own nonce, pin, binding and busy guard, so a
+    second request for the same npub and service replaces nothing."""
+    op, patron = PrivateKey(), PrivateKey()
+    npub = patron.public_key.bech32()
+    ex = NostrCredentialExchange(
+        nsec=op.nsec, relays=[RELAY], templates={"schwab-operator": CREDENTIALS},
+    )
+    with patch.object(ex, "_start_subscription"), patch.object(ex, "send_dm"):
+        first = await ex.open_channel(
+            "schwab-operator", greeting="Hi", recipient_npub=npub,
+            bound_to="h1", channel="a",
+        )
+        # Another channel opens at once: no busy guard between them.
+        second = await ex.open_channel(
+            "schwab-operator", greeting="Hi", recipient_npub=npub,
+            bound_to="h2", channel="b",
+        )
+
+    assert ex._pending_nonces[(npub, "schwab-operator#a")][0] == first["nonce"]
+    assert ex._pending_nonces[(npub, "schwab-operator#b")][0] == second["nonce"]
+    assert (npub, "schwab-operator") not in ex._pending_nonces
+    assert await ex.seconds_until_reopen(npub, "schwab-operator#a") > 0
+    assert await ex._resolve_pinned_record(
+        npub, "schwab-operator#a", first["nonce"], bound_to="h1",
+    ) == (RELAY, None)
+    assert await ex._resolve_pinned_record(
+        npub, "schwab-operator#b", second["nonce"], bound_to="h2",
+    ) == (RELAY, None)
+
+    await ex.close_channel(npub, "schwab-operator#a")
+    assert (npub, "schwab-operator#b") in ex._pending_nonces

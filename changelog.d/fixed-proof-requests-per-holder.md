@@ -1,0 +1,1 @@
+- Two connections can now ask the same npub for proof at once. Each holder connection gets its own proof request, so a background scheduler and a person logging in no longer replace each other's request, purge each other's waiting reply, or reject it as a wrong token. `NostrCredentialExchange.open_channel` takes an optional `channel` name for this.

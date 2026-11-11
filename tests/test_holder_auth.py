@@ -18,6 +18,7 @@ import hashlib
 import json
 import secrets
 import socket
+import threading
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -347,7 +348,16 @@ async def test_forgetting_an_npub_drops_it_from_every_wallet():
         require_caller_proof=AsyncMock(return_value=None),
         courier=AsyncMock(return_value=SimpleNamespace(
             forget=AsyncMock(return_value={"success": True}),
-            _exchange=SimpleNamespace(close_channel=AsyncMock()),
+            _exchange=SimpleNamespace(
+                close_channel=AsyncMock(),
+                _lock=threading.Lock(),
+                _pending_nonces={
+                    ("npub1a", "npub_ownership#h1"): ("n1", time.time() + 60),
+                    ("npub1a", "npub_ownership#h2"): ("n2", time.time() + 60),
+                    ("npub1a", "patron"): ("n3", time.time() + 60),
+                    ("npub1b", "npub_ownership#h2"): ("n4", time.time() + 60),
+                },
+            ),
         )),
         proof_grant_revocations=AsyncMock(return_value=SimpleNamespace(revoke_all=AsyncMock())),
         holder_auth_enabled=True,
@@ -359,8 +369,10 @@ async def test_forgetting_an_npub_drops_it_from_every_wallet():
 
     assert result["proof_grants_revoked"] is True
     assert set(store.wallet) == {("h2", "npub1b")}
-    # F23: an open proof challenge is closed too, so its reply cannot mint
-    (await rt.courier())._exchange.close_channel.assert_awaited_once_with("npub1a", "npub_ownership")
+    # F23: every open proof challenge for the npub is closed too, so no reply
+    # can mint; other npubs' and other services' channels stay open.
+    closed = {c.args for c in (await rt.courier())._exchange.close_channel.await_args_list}
+    assert closed == {("npub1a", "npub_ownership#h1"), ("npub1a", "npub_ownership#h2")}
 
 
 # ---------------------------------------------------------------------------
