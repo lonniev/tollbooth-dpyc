@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.118.0] — 2026-11-11
+
+### Fixed
+
+- Two connections can now ask the same npub for proof at once. Each holder connection gets its own proof request, so a background scheduler and a person logging in no longer replace each other's request, purge each other's waiting reply, or reject it as a wrong token. `NostrCredentialExchange.open_channel` takes an optional `channel` name for this.
+
 ## [0.117.1] — 2026-11-09
 
 ### Fixed
