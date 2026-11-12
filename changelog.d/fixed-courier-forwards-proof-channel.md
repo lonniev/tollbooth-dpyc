@@ -1,1 +1,0 @@
-- `request_npub_proof` works again: 0.118.0 refused every proof request with "open_channel() got an unexpected keyword argument 'channel'", because the `SecureCourierService` wrapper did not forward the new per-holder channel.
