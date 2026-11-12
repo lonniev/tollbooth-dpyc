@@ -174,6 +174,7 @@ class TestOpenChannel:
 
         mock_open.assert_called_once_with(
             "x", greeting="Test greeting", recipient_npub=None, reason=None, origin=None, verify_at=None, bound_to="",
+            channel="",
         )
         assert result == expected
 
@@ -199,6 +200,39 @@ class TestOpenChannel:
 
         mock_open.assert_called_once_with(
             "x", greeting="Test greeting", recipient_npub=npub, reason=None, origin=None, verify_at=None, bound_to="",
+            channel="",
+        )
+
+
+    @pytest.mark.asyncio
+    async def test_passes_channel(self, operator_nsec, relays, templates):
+        """A proof request's per-holder channel reaches the exchange."""
+        service = SecureCourierService(
+            operator_nsec=operator_nsec, relays=relays, templates=templates,
+        )
+        with patch.object(
+            service.exchange, "open_channel",
+            new_callable=AsyncMock, return_value={"success": True},
+        ) as mock_open:
+            await service.open_channel(
+                "npub_ownership", greeting="hi", bound_to="holder-1", channel="abc123",
+            )
+        assert mock_open.call_args.kwargs["channel"] == "abc123"
+        assert mock_open.call_args.kwargs["bound_to"] == "holder-1"
+
+    def test_wrapper_accepts_every_exchange_keyword(self):
+        """The wrapper forwards a fixed list; a keyword the exchange gains
+        must be added here too, or callers of the wrapper break (0.118.0)."""
+        import inspect
+
+        def keywords(fn):
+            return {
+                n for n, p in inspect.signature(fn).parameters.items()
+                if p.kind is inspect.Parameter.KEYWORD_ONLY
+            }
+
+        assert keywords(NostrCredentialExchange.open_channel) <= keywords(
+            SecureCourierService.open_channel
         )
 
 
