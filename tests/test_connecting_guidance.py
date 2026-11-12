@@ -48,4 +48,4 @@ def test_a_service_without_holders_says_nothing_it_does_not_do(monkeypatch):
 def test_the_proof_lifetime_is_the_codes(monkeypatch, stale):
     text = _instructions(monkeypatch)
     assert stale not in text
-    assert "2 hours by default, at most 30 days" in text
+    assert "2 hours by default, at most 90 days" in text

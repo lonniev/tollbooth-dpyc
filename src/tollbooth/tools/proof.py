@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import logging
 import time as _time
+from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
 
@@ -30,6 +31,15 @@ logger = logging.getLogger(__name__)
 # Channel state is keyed by this raw service (matching open_channel and
 # _resolve_pinned_record), never a resolved credential template.
 PROOF_SERVICE = "npub_ownership"
+# The approval a patron gives to let a peer npub read their account and pay for
+# them (tools/peer.py). It rides the same signed-reply machinery as the proof.
+PEER_SERVICE = "peer_grant"
+# Every approval service whose open channels share one patron's DM queue.
+_APPROVAL_SERVICES = (PROOF_SERVICE, PEER_SERVICE)
+
+
+def _is_approval_state(state: str) -> bool:
+    return any(state.startswith(f"{service}#") for service in _APPROVAL_SERVICES)
 
 
 def _proof_channel(holder: str) -> str:
@@ -49,7 +59,7 @@ def _proof_state(holder: str) -> str:
 
 
 async def close_proof_channels(exchange: Any, npub: str) -> None:
-    """Close every proof channel this process holds open for ``npub``.
+    """Close every proof and peer-grant channel this process holds open for ``npub``.
 
     A channel held only in another process's vault record is not seen here;
     the revocation watermark refuses any grant its reply could mint.
@@ -57,7 +67,7 @@ async def close_proof_channels(exchange: Any, npub: str) -> None:
     with exchange._lock:
         states = {
             state for (who, state) in exchange._pending_nonces
-            if who == npub and state.startswith(f"{PROOF_SERVICE}#")
+            if who == npub and _is_approval_state(state)
         }
     for state in states:
         await exchange.close_channel(npub, state)
@@ -73,7 +83,8 @@ def _addressed_to(event: dict[str, Any]) -> str:
 def _other_proof_channels(
     exchange: Any, npub: str, own_state: str,
 ) -> tuple[set[str], set[str]]:
-    """The delivery keys and nonces of ``npub``'s other open proof channels.
+    """The delivery keys and nonces of ``npub``'s other open approval channels
+    (proofs and peer grants alike).
 
     Only channels this process holds in memory are seen. A reply to a channel
     held by another process is addressed to that channel's delivery key when
@@ -87,7 +98,7 @@ def _other_proof_channels(
         for (who, state), (nonce, expiry) in exchange._pending_nonces.items():
             if (
                 who != npub or state == own_state
-                or not state.startswith(f"{PROOF_SERVICE}#") or expiry <= now
+                or not _is_approval_state(state) or expiry <= now
             ):
                 continue
             nonces.add(nonce)
@@ -284,9 +295,43 @@ async def request_npub_proof_tool(
             "error": "Secure Courier not configured.",
         }
 
+    _greeting = rt._npub_proof_greeting or (
+        f"Hi — {service_name or 'this service'} needs to verify "
+        "you own this npub. Reply with any text to confirm. "
+        "Your signed Nostr DM is the proof."
+    )
+    return await send_approval_request(
+        courier, patron_npub,
+        service=PROOF_SERVICE, channel=_proof_channel(holder), holder=holder,
+        greeting=_greeting, reason=reason, verify_at=verify_at,
+        label="Proof request", receive_tool="receive_npub_proof",
+    )
+
+
+async def send_approval_request(
+    courier: Any,
+    patron_npub: str,
+    *,
+    service: str,
+    channel: str,
+    holder: str,
+    greeting: str,
+    reason: str | None,
+    verify_at: str | None,
+    label: str,
+    receive_tool: str,
+    peer_npub: str = "",
+) -> dict[str, Any]:
+    """DM *patron_npub* an approval form on the ``service#channel`` channel.
+
+    Refuses to replace a channel opened too recently, purges the patron's
+    stale DMs except replies to their other open approval channels, opens the
+    channel bound to *holder* (only it may collect the reply), and returns the
+    nonce and rendezvous relay. *label* and *receive_tool* word the result.
+    """
+    state = f"{service}#{channel}"
     # Refuse a replacement before the purge: the purge pops this patron's DMs,
     # which would take a reply to the channel that is still open.
-    state = _proof_state(holder)
     try:
         wait = await courier._exchange.seconds_until_reopen(patron_npub, state)
     except Exception:
@@ -321,11 +366,7 @@ async def request_npub_proof_tool(
         logger.debug("best-effort stale-DM purge failed", exc_info=True)
 
     try:
-        _greeting = rt._npub_proof_greeting or (
-            f"Hi — {service_name or 'this service'} needs to verify "
-            "you own this npub. Reply with any text to confirm. "
-            "Your signed Nostr DM is the proof."
-        )
+        _greeting = greeting
         # NOTE: `reason` is carried ONCE, in the signed attestation tag (below,
         # via open_channel → create_provenance_attestation). It is deliberately
         # NOT also spliced into the greeting or a provenance line — the payload
@@ -341,14 +382,15 @@ async def request_npub_proof_tool(
         # signed into the attestation so the human can judge an unsolicited ask.
         origin = harvest_request_origin()
         result = await courier.open_channel(
-            PROOF_SERVICE,
+            service,
             greeting=_greeting,
             recipient_npub=patron_npub,
             reason=reason,
             origin=origin,
             verify_at=verify_at,
             bound_to=holder,
-            channel=_proof_channel(holder),
+            channel=channel,
+            peer_npub=peer_npub,
         )
         if not result.get("success"):
             return result
@@ -362,14 +404,14 @@ async def request_npub_proof_tool(
             "success": False,
             "error_code": _EC_UNREACHABLE,
             "error": (
-                f"No relay would accept the proof challenge, so there is no "
+                f"No relay would accept the {label.lower()}, so there is no "
                 f"rendezvous for the patron to reply on. This is a relay "
                 f"outage, not something the patron can fix. Try again shortly. "
                 f"({e})"
             ),
         }
     except Exception as e:  # noqa: BLE001
-        return {"success": False, "error": f"Failed to send proof request: {e}"}
+        return {"success": False, "error": f"Failed to send {label.lower()}: {e}"}
 
     # The challenge phrase and rendezvous relay from the channel result.
     nonce = result.get("nonce", "")
@@ -379,16 +421,16 @@ async def request_npub_proof_tool(
         "success": True,
         "nonce": nonce,
         "message": (
-            "Proof request sent via Secure Courier. "
-            "Call receive_npub_proof to complete."
+            f"{label} sent via Secure Courier. "
+            f"Call {receive_tool} to complete."
         ),
     }
     if rendezvous_relay:
         response["rendezvous_relay"] = rendezvous_relay
         response["message"] = (
-            f"Proof request sent via Secure Courier on {rendezvous_relay}. "
+            f"{label} sent via Secure Courier on {rendezvous_relay}. "
             f"The patron MUST reply on that relay (it's embedded in the DM). "
-            f"Call receive_npub_proof after the patron confirms they replied."
+            f"Call {receive_tool} after the patron confirms they replied."
         )
     if "form_delivered" in result:
         # False means the relay refused the gift wrap twice: the patron's
@@ -430,7 +472,148 @@ async def receive_npub_proof_tool(
             "error": "Secure Courier not configured.",
         }
 
+    state = _proof_state(holder)
+    reply = await collect_signed_approval(
+        rt, courier._exchange, resolved, state, nonce,
+        holder=holder, request_tool="request_npub_proof",
+    )
+    if not isinstance(reply, ApprovalReply):
+        return reply
     exchange = courier._exchange
+    expected_phrase = nonce
+    matched_payload = reply.payload
+    popped = reply.popped
+    patron_sig = reply.patron_sig
+    patron_event_id = reply.patron_event_id
+
+    # Store to vault (for cold-start recovery of proven status)
+    if exchange._credential_vault is not None:
+        try:
+            await exchange._vault_store(
+                PROOF_SERVICE, resolved, matched_payload,
+            )
+        except Exception:
+            logger.debug(
+                "best-effort proof persistence to vault failed", exc_info=True,
+            )
+
+    # Operator callback (e.g., taxsort stores passphrase hash)
+    if rt._on_npub_proven is not None:
+        try:
+            await rt._on_npub_proven(resolved, matched_payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("on_npub_proven callback failed: %s", exc)
+
+    # The grant records which exchange the patron answered.
+    import hashlib as _hashlib
+    nonce_hash = _hashlib.sha256(expected_phrase.encode()).hexdigest()
+
+    # The patron's consent window, from their own reply (default 2 h).
+    from tollbooth.proven_npub import grant_ttl_seconds
+    grant_ttl = grant_ttl_seconds(matched_payload.get("cache_duration", ""))
+
+    # Mint the Operator-signed kind-30080 proof grant for the holder's wallet.
+    from tollbooth.identity_credential import sign_proof_grant
+    try:
+        grant_json = sign_proof_grant(
+            patron_npub=resolved,
+            operator_nsec=rt._get_nsec(),
+            challenge_hash=nonce_hash,
+            patron_sig=patron_sig,
+            patron_event_id=patron_event_id,
+            ttl_seconds=grant_ttl,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("proof-grant issuance failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"Failed to issue proof grant: {exc}",
+            "popped_dms": popped,
+        }
+
+    import json as _json
+    envelope = _json.dumps(
+        {"grant": _json.loads(grant_json)},
+        separators=(",", ":"),
+    )
+
+    issued_at = int(_time.time())
+    expires_at_ts = issued_at + grant_ttl
+
+    ttl_display = grant_ttl
+    hours = ttl_display / 3600
+    if hours >= 1:
+        duration_human = f"{hours:.0f} hour{'s' if hours != 1 else ''}"
+    else:
+        duration_human = f"{ttl_display // 60} minute{'s' if ttl_display >= 120 else ''}"
+
+    from datetime import datetime
+    expires_dt = datetime.fromtimestamp(expires_at_ts, tz=UTC)
+    expires_str = expires_dt.strftime("%Y-%m-%d %H:%M UTC")
+
+    npub_short = resolved[:16] + "..." if len(resolved) > 20 else resolved
+    op_name = rt._service_name
+
+    confirmation_msg = (
+        f"Your ownership of {npub_short} is confirmed "
+        f"for {op_name}. "
+        f"Proof remains valid until {expires_str} "
+        f"({duration_human} from now). "
+        f"Cleaned {popped} DM(s) from relay."
+    )
+
+    # Send enriched confirmation DM to patron
+    try:
+        exchange.send_dm(resolved, confirmation_msg)
+    except Exception:
+        logger.debug("proof confirmation DM send failed", exc_info=True)
+
+    proven = {
+        "success": True,
+        "proven_npub": resolved,
+        "popped_dms": popped,
+        "expires_in_seconds": ttl_display,
+        "expires_at": expires_str,
+        "message": confirmation_msg,
+    }
+
+    # The grant stays in the holder's wallet, so it never enters the
+    # caller's transcript; paid calls then name only the npub.
+    await (await rt.holder_store()).hold(holder, resolved, envelope, expires_at_ts)
+    return {**proven, "held_by_connection": True}
+
+
+@dataclass(frozen=True)
+class ApprovalReply:
+    """A patron's signed reply that answered one approval channel's nonce."""
+
+    payload: dict[str, Any]
+    patron_sig: str
+    patron_event_id: str
+    popped: int
+
+
+async def collect_signed_approval(
+    rt: Any,
+    exchange: Any,
+    resolved: str,
+    state: str,
+    nonce: str,
+    *,
+    holder: str,
+    request_tool: str,
+) -> ApprovalReply | dict[str, Any]:
+    """Collect the patron's signed reply to one approval channel.
+
+    Resolves the pinned rendezvous relay for ``(resolved, state, nonce)``
+    bound to ``holder``, refuses a challenge raised before the patron last
+    revoked, drains only the pinned relay, leaves replies that answer the
+    patron's other open approval channels, NACKs mismatches up to the cap, and
+    closes the channel. Returns the reply on a match that carries the patron's
+    verified signature, else a structured error naming *request_tool* for a
+    fresh challenge.
+    """
+    from tollbooth.constants import ErrorCode as _EC
     from tollbooth.nostr_credentials import (
         _MAX_NACKS_PER_DRAIN,
         _NACK_TOKEN,
@@ -442,14 +625,10 @@ async def receive_npub_proof_tool(
     )
 
     patron_hex = _npub_to_hex(resolved)
-    # Channel state is keyed by this holder's proof channel (matching
-    # open_channel and _resolve_pinned_record), never the resolved credential
-    # template, and never another holder's channel for the same npub.
-    state = _proof_state(holder)
     nonce_key = (resolved, state)
 
     # Resolve + verify the pinned rendezvous relay for this exact
-    # (patron, nonce-service, nonce). Handles cold-start vault rehydration
+    # (patron, channel, nonce). Handles cold-start vault rehydration
     # and returns a structured error — popping nothing — when unresolved.
     pinned, error_code = await exchange._resolve_pinned_record(
         resolved, state, nonce, bound_to=holder,
@@ -459,9 +638,8 @@ async def receive_npub_proof_tool(
             "success": False,
             "error_code": error_code,
             "popped_dms": 0,
-            "error": _courier_resolve_error(error_code, "request_npub_proof"),
+            "error": _courier_resolve_error(error_code, request_tool),
         }
-    expected_phrase = nonce
 
     # A challenge raised before the patron last revoked can never mint a
     # grant, however late its reply is collected. Both times are this
@@ -471,7 +649,7 @@ async def receive_npub_proof_tool(
     try:
         revoked_before = await (await rt.proof_grant_revocations()).revoked_before(resolved)
     except Exception as exc:  # noqa: BLE001 — unknown is not "not revoked"
-        logger.warning("revocation check before a proof collect unavailable: %s", exc)
+        logger.warning("revocation check before a collect unavailable: %s", exc)
         return {
             "success": False,
             "error_code": _EC.PROOF_REVOCATIONS_UNAVAILABLE,
@@ -489,7 +667,7 @@ async def receive_npub_proof_tool(
             "popped_dms": 0,
             "error": (
                 "The patron revoked their proofs after this challenge was sent, "
-                "so it can no longer prove them. Call request_npub_proof for a "
+                f"so it can no longer be approved. Call {request_tool} for a "
                 "fresh challenge."
             ),
         }
@@ -497,8 +675,8 @@ async def receive_npub_proof_tool(
     # Single drain of ONLY the pinned relay — human-gated, no retry loop.
     # Off the event loop — blocking websocket I/O (0.44.3 / M1.2 reasoning).
     await asyncio.to_thread(exchange._fetch_dms_from_relays, [pinned])
-    # A reply to another holder's open proof request is not this drain's to
-    # take or to reject: leave it for that holder's own collect.
+    # A reply to another open approval channel of this patron is not this
+    # drain's to take or to reject: leave it for that channel's own collect.
     others = _other_proof_channels(exchange, resolved, state)
     candidates = [
         c for c in exchange._find_dm_candidates(patron_hex)
@@ -521,8 +699,8 @@ async def receive_npub_proof_tool(
     # mechanism — a reply carrying the current one-time nonce is by definition
     # the right reply, regardless of wall-clock timing (no timestamp gate, which
     # raced clock skew + human-paced replies and silently dropped valid proofs).
-    # Mismatched DMs are NACK'd up to the cap. For self-DM proofs the reply is
-    # encrypted to the ephemeral agent npub, so decrypt with the agent key
+    # Mismatched DMs are NACK'd up to the cap. For self-DM approvals the reply
+    # is encrypted to the ephemeral agent npub, so decrypt with the agent key
     # (restored by the resolver) and fall back to the operator nsec.
     matched_payload = None
     matched_candidate: dict[str, Any] | None = None
@@ -556,7 +734,7 @@ async def receive_npub_proof_tool(
                 if payload is None:
                     nack_reason = _NACK_TOKEN
                     last_failure = "no @@@ fields"
-                elif payload.get("nonce", "") != expected_phrase:
+                elif payload.get("nonce", "") != nonce:
                     nack_reason = _NACK_TOKEN
                     last_failure = "wrong token"
         elif nack_reason is None:
@@ -581,128 +759,14 @@ async def receive_npub_proof_tool(
     # process would rehydrate it and collect the same reply again.
     await exchange.close_channel(resolved, state)
 
-    # One summary DM to patron
-    if matched_payload is not None:
-        # Store to vault (for cold-start recovery of proven status)
-        if exchange._credential_vault is not None:
-            try:
-                await exchange._vault_store(
-                    PROOF_SERVICE, resolved, matched_payload,
-                )
-            except Exception:
-                logger.debug(
-                    "best-effort proof persistence to vault failed", exc_info=True,
-                )
-
-        # Operator callback (e.g., taxsort stores passphrase hash)
-        if rt._on_npub_proven is not None:
-            try:
-                await rt._on_npub_proven(resolved, matched_payload)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("on_npub_proven callback failed: %s", exc)
-
-        # The grant records which exchange the patron answered.
-        import hashlib as _hashlib
-        nonce_hash = _hashlib.sha256(expected_phrase.encode()).hexdigest()
-
-        # The patron's consent window, from their own reply (default 2 h).
-        from tollbooth.proven_npub import grant_ttl_seconds
-        grant_ttl = grant_ttl_seconds((matched_payload or {}).get("cache_duration", ""))
-
-        # The signature the courier verified on the reply's signed layer (the
-        # NIP-17 seal, or the NIP-04 event). No verified signature, no grant:
-        # the grant attests exactly this proof of possession.
-        patron_sig = str((matched_candidate or {}).get("_sender_sig") or "")
-        patron_event_id = str((matched_candidate or {}).get("_sender_event_id") or "")
-        if not patron_sig or not patron_event_id:
-            return {
-                "success": False,
-                "error_code": _EC.PROOF_INVALID,
-                "popped_dms": popped,
-                "error": (
-                    "The reply matched the challenge but carried no verifiable "
-                    "patron signature, so no proof grant was issued. Ask the "
-                    "patron to reply again from a Nostr client that signs DMs."
-                ),
-            }
-
-        # Mint the Operator-signed kind-30080 proof grant for the holder's wallet.
-        from tollbooth.identity_credential import sign_proof_grant
-        try:
-            grant_json = sign_proof_grant(
-                patron_npub=resolved,
-                operator_nsec=rt._get_nsec(),
-                challenge_hash=nonce_hash,
-                patron_sig=patron_sig,
-                patron_event_id=patron_event_id,
-                ttl_seconds=grant_ttl,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("proof-grant issuance failed: %s", exc)
-            return {
-                "success": False,
-                "error": f"Failed to issue proof grant: {exc}",
-                "popped_dms": popped,
-            }
-
-        import json as _json
-        envelope = _json.dumps(
-            {"grant": _json.loads(grant_json)},
-            separators=(",", ":"),
-        )
-
-        issued_at = int(_time.time())
-        expires_at_ts = issued_at + grant_ttl
-
-        ttl_display = grant_ttl
-        hours = ttl_display / 3600
-        if hours >= 1:
-            duration_human = f"{hours:.0f} hour{'s' if hours != 1 else ''}"
-        else:
-            duration_human = f"{ttl_display // 60} minute{'s' if ttl_display >= 120 else ''}"
-
-        from datetime import datetime
-        expires_dt = datetime.fromtimestamp(expires_at_ts, tz=UTC)
-        expires_str = expires_dt.strftime("%Y-%m-%d %H:%M UTC")
-
-        npub_short = resolved[:16] + "..." if len(resolved) > 20 else resolved
-        op_name = rt._service_name
-
-        confirmation_msg = (
-            f"Your ownership of {npub_short} is confirmed "
-            f"for {op_name}. "
-            f"Proof remains valid until {expires_str} "
-            f"({duration_human} from now). "
-            f"Cleaned {popped} DM(s) from relay."
-        )
-
-        # Send enriched confirmation DM to patron
-        try:
-            exchange.send_dm(resolved, confirmation_msg)
-        except Exception:
-            logger.debug("proof confirmation DM send failed", exc_info=True)
-
-        proven = {
-            "success": True,
-            "proven_npub": resolved,
-            "popped_dms": popped,
-            "expires_in_seconds": ttl_display,
-            "expires_at": expires_str,
-            "message": confirmation_msg,
-        }
-
-        # The grant stays in the holder's wallet, so it never enters the
-        # caller's transcript; paid calls then name only the npub.
-        await (await rt.holder_store()).hold(holder, resolved, envelope, expires_at_ts)
-        return {**proven, "held_by_connection": True}
-    else:
+    if matched_payload is None:
         # NACKs already went to each mismatched sender during the drain;
         # the returned error never reveals the expected phrase.
         summary = (
             f"Drained the pinned relay ({pinned}); cleaned {popped} DM(s) "
-            f"but none carried the expected proof phrase. The queue is now "
+            f"but none carried the expected reply. The queue is now "
             f"empty of the sought reply — confirm the patron replied on "
-            f"{pinned}, or call request_npub_proof for a fresh exchange."
+            f"{pinned}, or call {request_tool} for a fresh exchange."
         )
         if last_failure:
             summary += f" (last issue: {last_failure})"
@@ -712,6 +776,27 @@ async def receive_npub_proof_tool(
             "popped_dms": popped,
             "error": summary,
         }
+
+    # The signature the courier verified on the reply's signed layer (the
+    # NIP-17 seal, or the NIP-04 event). No verified signature, no grant:
+    # a grant attests exactly this proof of possession.
+    patron_sig = str((matched_candidate or {}).get("_sender_sig") or "")
+    patron_event_id = str((matched_candidate or {}).get("_sender_event_id") or "")
+    if not patron_sig or not patron_event_id:
+        return {
+            "success": False,
+            "error_code": _EC.PROOF_INVALID,
+            "popped_dms": popped,
+            "error": (
+                "The reply matched the challenge but carried no verifiable "
+                "patron signature, so no grant was issued. Ask the "
+                "patron to reply again from a Nostr client that signs DMs."
+            ),
+        }
+    return ApprovalReply(
+        payload=matched_payload, patron_sig=patron_sig,
+        patron_event_id=patron_event_id, popped=popped,
+    )
 
 
 async def check_proof_status_tool(rt: Any, patron_npub: str) -> dict[str, Any]:

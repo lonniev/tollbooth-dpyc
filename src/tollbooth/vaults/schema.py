@@ -33,9 +33,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 # sha256 of every concern's statements rendered for the test schema "op_test".
-SCHEMA_DIGEST = "238c338345abd64f4b80fb4236020648945e7e8b82c665fb770a6dbd47f34966"
+SCHEMA_DIGEST = "14ef254b806660b87d88f874c5c1700e4ef5544707292af39027fc95aacddf90"
 
 Statements = Callable[[Callable[[str], str], str], list[str]]
 
@@ -73,6 +73,7 @@ def concerns() -> tuple[tuple[str, Statements], ...]:
     from tollbooth.vaults.neon import (
         notarization_schema_statements as notarization,
     )
+    from tollbooth.vaults.peer_grant_store import schema_statements as peer_grants
 
     return (
         ("ledger", ledger),
@@ -82,6 +83,7 @@ def concerns() -> tuple[tuple[str, Statements], ...]:
         ("async_jobs", async_jobs),
         ("credentials", credentials),
         ("holders", holders),
+        ("peer_grants", peer_grants),
         ("properties", properties),
     )
 

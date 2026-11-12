@@ -190,6 +190,12 @@ REQUEST_NPUB_PROOF_UUID              = "dbd9e8fb-d5f6-5015-8345-1c36229e420c"
 RECEIVE_NPUB_PROOF_UUID              = "922ad409-7d07-5cb3-9f66-a6c4eecc24a1"
 CHECK_PROOF_STATUS_UUID              = "4a41f606-b1cf-5ca2-8e56-74daebc092fb"
 
+# Peer grants: a patron lets another npub see their account and pay for them
+REQUEST_PEER_GRANT_UUID              = "f17327d7-ebd9-5aa9-9d48-ff6e09b2f23d"
+RECEIVE_PEER_GRANT_UUID              = "5ba38ae5-7ab2-564c-9bb3-c0ff1a07b602"
+LIST_PEER_GRANTS_UUID                = "1f527646-da88-51dc-89e5-06264d6c1eec"
+REVOKE_PEER_GRANT_UUID               = "acea8098-4919-53cf-8896-fc100d7fd7d2"
+
 # Oracle delegation
 ORACLE_ABOUT_UUID                    = "0acf5be2-48de-56b1-a3c4-ff3e981f3e80"
 ORACLE_GET_TAX_RATE_UUID             = "290f77f4-6a6c-5aa1-b2a9-382cb50dc687"
@@ -355,6 +361,20 @@ _STANDARD_LIST: list[ToolIdentity] = [
     ToolIdentity(tool_id=CHECK_PROOF_STATUS_UUID, capability="check_proof_status", category="free",
                  title="Check proof status", behavior=READS,
                  intent="Read-only check of whether the connection proves an npub, and until when."),
+
+    # -- Peer grants --
+    ToolIdentity(tool_id=REQUEST_PEER_GRANT_UUID, capability="request_peer_grant", category="free",
+                 title="Request peer grant", behavior=CREATES_REMOTE,
+                 intent="Ask a patron by DM to let a peer npub see their account and pay for them."),
+    ToolIdentity(tool_id=RECEIVE_PEER_GRANT_UUID, capability="receive_peer_grant", category="free",
+                 title="Receive peer grant", behavior=CONSUMES_REMOTE,
+                 intent="Collect the patron's signed approval and record the peer grant."),
+    ToolIdentity(tool_id=LIST_PEER_GRANTS_UUID, capability="list_peer_grants", category="free",
+                 title="List peer grants", behavior=READS,
+                 intent="List the peers a patron lets see and fund their account, with expiry."),
+    ToolIdentity(tool_id=REVOKE_PEER_GRANT_UUID, capability="revoke_peer_grant", category="free",
+                 title="Revoke peer grant", behavior=DELETES,
+                 intent="Withdraw one peer's grant to see and fund a patron's account."),
 
     # -- Oracle delegation --
     # Wire-exposed under the operator's `_oracle_` namespace (e.g.

@@ -130,13 +130,13 @@ async def test_unreadable_vault_raises_so_the_gate_fails_closed():
 # ---------------------------------------------------------------------------
 
 
-def test_cap_is_thirty_days():
-    assert MAX_PROVEN_TTL == 30 * 24 * 3600
+def test_cap_is_ninety_days():
+    assert MAX_PROVEN_TTL == 90 * 24 * 3600
 
 
 @pytest.mark.parametrize("text,seconds", [
     ("2h", 7200), ("two days", 172800), ("  30  min ", 1800),
-    ("1w", 604800), ("30 days", MAX_PROVEN_TTL),
+    ("1w", 604800), ("30 days", 2592000), ("90 days", MAX_PROVEN_TTL),
 ])
 def test_parse_duration(text, seconds):
     assert parse_duration(text) == seconds
@@ -147,7 +147,7 @@ def test_parse_duration_unlimited_is_none():
 
 
 def test_parse_duration_clamps_above_cap():
-    assert parse_duration("45 days") == MAX_PROVEN_TTL
+    assert parse_duration("120 days") == MAX_PROVEN_TTL
 
 
 def test_parse_duration_rejects_garbage():

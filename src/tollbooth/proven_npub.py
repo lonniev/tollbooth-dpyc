@@ -35,7 +35,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 DEFAULT_PROVEN_TTL = 7200  # 2 hours — default grant lifetime when the patron names none
-MAX_PROVEN_TTL = 2592000  # 30 days — hard cap on any grant, patron cannot exceed
+MAX_PROVEN_TTL = 7776000  # 90 days — hard cap on any grant, patron cannot exceed
 
 DEFAULT_REFRESH_SECONDS = 60.0
 """How long a per-npub watermark read stays good before the vault is re-read."""
