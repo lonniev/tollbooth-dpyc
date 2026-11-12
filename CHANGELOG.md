@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.119.0] — 2026-11-12
+
+### Added
+
+- Peer grants: a patron can let other npubs (a Parent, a Supervisor) see their account and pay for them at an Operator. The peer calls `request_peer_grant`, the patron approves the DM, and the peer calls `receive_peer_grant`. A granted peer passes `check_balance`, `account_statement`, `purchase_credits` and `check_payment` for the patron, and nothing else; paid tools still need the patron's own proof. `list_peer_grants` and `revoke_peer_grant` let the patron see and withdraw them, `held_identities` shows `peer_of`, and `forget_credentials` revokes every peer. A patron may approve several peers. The approval form names the peer as `x-peer-npub`, so a form client can mark a peer it does not know.
+
+### Changed
+
+- Proof grants and peer grants may last up to 90 days (was 30).
+
 ## [0.118.1] — 2026-11-12
 
 ### Fixed
