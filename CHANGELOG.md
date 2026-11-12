@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.118.1] — 2026-11-12
+
+### Fixed
+
+- `request_npub_proof` works again: 0.118.0 refused every proof request with "open_channel() got an unexpected keyword argument 'channel'", because the `SecureCourierService` wrapper did not forward the new per-holder channel.
+
 ## [0.118.0] — 2026-11-11
 
 ### Fixed
