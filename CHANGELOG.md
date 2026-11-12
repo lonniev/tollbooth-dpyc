@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.119.1] — 2026-11-12
+
+### Changed
+
+- `list_peer_grants` also returns `patrons`: the accounts that let the caller's npub see and fund them. A tab that signs each request has no holder wallet, so `held_identities` cannot name them.
+
 ## [0.119.0] — 2026-11-12
 
 ### Added

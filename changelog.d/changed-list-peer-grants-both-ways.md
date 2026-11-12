@@ -1,1 +1,0 @@
-- `list_peer_grants` also returns `patrons`: the accounts that let the caller's npub see and fund them. A tab that signs each request has no holder wallet, so `held_identities` cannot name them.
