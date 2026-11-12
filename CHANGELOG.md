@@ -5,6 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.120.0] — 2026-11-12
+
+### Changed
+
+- A peer grant (sponsorship) may now be started by either party. `request_peer_grant` takes the caller's proof of either npub: a peer offers to sponsor the patron, or the patron asks the peer to sponsor them. The other party approves by DM and `receive_peer_grant` records it. When the patron asks, the form carries `x-patron-npub`.
+- Peer grants carry `origin` (`peer` or `patron`), `approver`, `approver_sig` and `approver_event_id` in place of `patron_sig` and `patron_event_id`. Grants minted by 0.119 no longer verify; ask again.
+
 ## [0.119.1] — 2026-11-12
 
 ### Changed
