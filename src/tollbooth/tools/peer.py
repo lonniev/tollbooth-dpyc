@@ -171,16 +171,22 @@ async def receive_peer_grant_tool(
 
 
 async def list_peer_grants_tool(rt: Any, npub: str) -> dict[str, Any]:
-    """The patron's peers here, with when each grant ends. Only the patron sees it."""
+    """Both sides of *npub*'s peer grants here, with when each ends.
+
+    ``peers`` are the npubs it lets see and fund its account; ``patrons`` are
+    the accounts that let it see and fund theirs. Only *npub* itself sees either.
+    """
     if err := await rt.require_caller_proof(npub):
         return err
     patron = rt.resolve_npub(npub)
     try:
-        peers = await (await rt.peer_grant_store()).peers_of(patron)
+        store = await rt.peer_grant_store()
+        peers = await store.peers_of(patron)
+        patrons = await store.patrons_of(patron)
     except Exception as exc:  # noqa: BLE001 — never surface the SQL
         logger.warning("peer grant store unavailable: %s", type(exc).__name__)
         return _store_unavailable()
-    return {"success": True, "patron_npub": patron, "peers": peers}
+    return {"success": True, "patron_npub": patron, "peers": peers, "patrons": patrons}
 
 
 async def revoke_peer_grant_tool(rt: Any, npub: str, peer_npub: str) -> dict[str, Any]:
