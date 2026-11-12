@@ -254,6 +254,13 @@ async def forget_credentials_tool(
                 result["properties_cleared"] = await (await rt.property_store()).clear(target_npub)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("properties not cleared on forget: %s", exc)
+        # The watermark refuses the patron's peer grants too; dropping them is
+        # housekeeping, so a failure here changes no answer.
+        if result.get("proof_grants_revoked"):
+            try:
+                await (await rt.peer_grant_store()).remove_all(target_npub)
+            except Exception:
+                logger.warning("peer grants not dropped on forget", exc_info=True)
         # The watermark already refuses every held grant; dropping them from
         # the wallets is housekeeping, so a failure here changes no answer.
         if result.get("proof_grants_revoked") and rt.holder_auth_enabled:

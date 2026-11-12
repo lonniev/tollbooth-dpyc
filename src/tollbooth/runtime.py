@@ -284,6 +284,7 @@ class OperatorRuntime:
         # request proves an npub.
         self._holder_auth_url = holder_auth_url.rstrip("/")
         self._holder_store: Any | None = None  # lazy HolderStore
+        self._peer_grant_store: Any | None = None  # lazy PeerGrantStore
         # One refresh at a time per (service, patron). A rotating single-use
         # refresh token cannot survive being spent twice at once — see
         # _oauth_refresh_lock.
@@ -807,10 +808,30 @@ class OperatorRuntime:
                     required=False, sensitive=False, default="2h",
                     title="Remember for",
                     description="How long to cache this proof (e.g. 2h, 1d, 3 days, unlimited)",
-                    examples=("2h", "1d", "1w", "30d"),
+                    examples=("2h", "1d", "1w", "30d", "90d"),
                 ),
             },
             description="Npub ownership — the signed DM itself proves you own this npub",
+            kind="approval",
+        )
+        # Built-in template for a peer grant: the patron lets another npub see
+        # their account here and pay for them (tools/peer.py).
+        templates["peer_grant"] = CredentialTemplate(
+            service="peer_grant",
+            version=1,
+            fields={
+                "confirm": FieldSpec(
+                    required=True, sensitive=False,
+                    description="Any text — your signed reply is the approval",
+                ),
+                "allow_for": FieldSpec(
+                    required=False, sensitive=False, default="30d",
+                    title="Allow for",
+                    description="How long this peer may see and fund your account (at most 90 days)",
+                    examples=("7d", "30d", "90d"),
+                ),
+            },
+            description="Peer grant — let another npub see your account and pay for you",
             kind="approval",
         )
 
@@ -983,6 +1004,92 @@ class OperatorRuntime:
             from tollbooth.vaults.holder_store import HolderStore
             self._holder_store = HolderStore(await self.vault())
         return self._holder_store
+
+    async def peer_grant_store(self) -> Any:
+        """Lazy accessor for the peer grant store: who may watch and fund whom."""
+        if self._peer_grant_store is None:
+            from tollbooth.vaults.peer_grant_store import PeerGrantStore
+            self._peer_grant_store = PeerGrantStore(await self.vault())
+        return self._peer_grant_store
+
+    async def require_caller_or_peer(self, npub: str) -> dict[str, Any] | None:
+        """The gate for the four tools a patron's peer may call for them.
+
+        ``check_balance``, ``account_statement``, ``purchase_credits`` and
+        ``check_payment`` pass when the caller proves ``npub`` itself, or when
+        the caller proves a peer npub that ``npub`` approved here (an
+        Operator-signed, unexpired, unrevoked peer grant). Nothing else uses
+        this gate: paid tools stay behind ``debit_or_deny`` and every other
+        patron tool behind ``require_caller_proof``.
+        """
+        from tollbooth.constants import ErrorCode
+        err = await self.require_caller_proof(npub)
+        if err is None or err.get("error_code") != ErrorCode.PROOF_REQUIRED:
+            return err
+        try:
+            patron = resolve_npub(npub)
+        except ValueError:
+            return err
+        try:
+            peers = await self._caller_npubs()
+            if peers:
+                store = await self.peer_grant_store()
+                revocations = await self.proof_grant_revocations()
+                for peer in peers:
+                    if _same_npub(peer, patron):
+                        continue
+                    if await self._peer_grant_valid(store, revocations, patron, peer):
+                        return None
+        except Exception as exc:  # noqa: BLE001 — unknown is not "granted"
+            logger.warning("peer grant check unavailable: %s", type(exc).__name__)
+            return _holder_store_unavailable()
+        err["peer_grant"] = (
+            "A peer npub may see and fund this account once the patron approves "
+            "it: the peer calls request_peer_grant, the patron replies to the DM, "
+            "then the peer calls receive_peer_grant."
+        )
+        return err
+
+    async def _caller_npubs(self) -> list[str]:
+        """Every npub the request in flight proves: its NIP-98 signer, and each
+        npub its holder wallet holds a still-valid proof grant for."""
+        from tollbooth.holder_auth import current_holder, signed_npub
+
+        proven: list[str] = []
+        signer = signed_npub()
+        if signer is not None:
+            proven.append(signer)
+        holder = current_holder() if self.holder_auth_enabled else None
+        if holder is not None:
+            for held in await (await self.holder_store()).holdings(holder):
+                if await self.prove_caller(held["npub"]) is None:
+                    proven.append(held["npub"])
+        return proven
+
+    async def _peer_grant_valid(
+        self, store: Any, revocations: Any, patron: str, peer: str,
+    ) -> bool:
+        """Whether the store holds a valid grant from patron to peer here."""
+        import json as _json
+
+        from tollbooth.identity_credential import (
+            IdentityCredentialError,
+            verify_peer_grant,
+        )
+
+        envelope = await store.get(patron, peer)
+        if not envelope:
+            return False
+        try:
+            grant = _json.dumps(_json.loads(envelope)["grant"])
+            claims = verify_peer_grant(
+                grant, expected_patron_npub=patron, expected_peer_npub=peer,
+                expected_operator_hex=self.operator_pubkey_hex(),
+            )
+        except (IdentityCredentialError, KeyError, TypeError, ValueError):
+            return False
+        # A patron who revoked their proofs revoked their peers' grants too.
+        return not await revocations.is_revoked(patron, claims["created_at"])
 
     async def prove_caller(self, npub: str) -> dict[str, Any] | None:
         """The one proof gate: may the request in flight act as ``npub``?
@@ -4473,12 +4580,13 @@ def register_standard_tools(
         use authority_check_balance instead.
 
         Free — no credits required. Proof of npub ownership is required
-        to prevent anyone-with-the-registry from enumerating balances.
+        to prevent anyone-with-the-registry from enumerating balances; a peer
+        the patron approved (``request_peer_grant``) may check it too.
 
         Args:
             npub: The Nostr public key (npub1...) whose balance to check.
         """
-        if err := await rt.require_caller_proof(npub):
+        if err := await rt.require_caller_or_peer(npub):
             return err
         try:
             npub = resolve_npub(npub)
@@ -4494,7 +4602,8 @@ def register_standard_tools(
 
         Creates a Lightning invoice. Pay it with any Lightning wallet,
         then call check_payment to confirm. Proof of npub ownership is
-        required so credits land in the correct ledger.
+        required so credits land in the correct ledger; a peer the patron
+        approved (``request_peer_grant``) may buy credits for them.
 
         Free — no credits required to call.
 
@@ -4502,7 +4611,7 @@ def register_standard_tools(
             npub: The Nostr public key (npub1...) the credits will fund.
             amount_sats: Satoshis to purchase (default 1000).
         """
-        if err := await rt.require_caller_proof(npub):
+        if err := await rt.require_caller_or_peer(npub):
             return err
         try:
             npub = resolve_npub(npub)
@@ -4603,7 +4712,7 @@ def register_standard_tools(
             invoice_id: The invoice ID returned by purchase_credits.
             npub: The Nostr public key (npub1...) that purchased the invoice.
         """
-        if err := await rt.require_caller_proof(npub):
+        if err := await rt.require_caller_or_peer(npub):
             return err
         try:
             npub = resolve_npub(npub)
@@ -4686,13 +4795,14 @@ def register_standard_tools(
         tax balance.
 
         Free — no credits consumed. Proof of npub ownership is required
-        to prevent statement-scraping of arbitrary patrons.
+        to prevent statement-scraping of arbitrary patrons; a peer the patron
+        approved (``request_peer_grant``) may read it too.
 
         Args:
             npub: The patron's Nostr public key (npub1...).
             days: Number of days of daily usage history to include (default 30).
         """
-        if err := await rt.require_caller_proof(npub):
+        if err := await rt.require_caller_or_peer(npub):
             return err
         try:
             npub = resolve_npub(npub)
@@ -4886,6 +4996,9 @@ def register_standard_tools(
         A connection that authenticates with a holder bearer keeps every npub
         proven through it; a paid call then needs only `npub`. Nothing secret
         is returned.
+
+        ``peer_of`` lists the patrons who let one of those npubs see their
+        account and pay for them (``request_peer_grant``).
         """
         from tollbooth.holder_auth import current_holder
 
@@ -4905,7 +5018,19 @@ def register_standard_tools(
         except Exception as exc:  # noqa: BLE001 — never surface the SQL
             logger.warning("holder wallet unavailable: %s", type(exc).__name__)
             return _holder_store_unavailable()
-        return {"success": True, "holder": True, "identities": identities}
+        result: dict[str, Any] = {"success": True, "holder": True, "identities": identities}
+        # The patrons who let one of these npubs see and fund their account.
+        # Extra news, so a store that cannot answer leaves it out.
+        try:
+            store = await rt.peer_grant_store()
+            result["peer_of"] = [
+                {**grant, "peer_npub": held["npub"]}
+                for held in identities
+                for grant in await store.patrons_of(held["npub"])
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("peer grants unavailable: %s", type(exc).__name__)
+        return result
 
     @tool
     async def request_echo() -> dict[str, Any]:
@@ -5739,6 +5864,79 @@ def register_standard_tools(
         """
         from tollbooth.tools.proof import check_proof_status_tool
         return await check_proof_status_tool(rt, patron_npub)
+
+    # -- Peer grant tools --------------------------------------------------
+    #
+    # A patron lets another npub (a Parent, a Supervisor) see their account
+    # here and pay for them. Bodies live in tollbooth.tools.peer.
+
+    @tool
+    async def request_peer_grant(patron_npub: str = "", peer_npub: str = "") -> dict[str, Any]:
+        """Ask a patron to let a peer npub see their account here and pay for them.
+
+        The caller must prove ``peer_npub`` (its own npub). The patron gets an
+        approval DM naming the peer. Once approved, the peer may call
+        ``check_balance``, ``account_statement``, ``purchase_credits`` and
+        ``check_payment`` for the patron — never spend their balance.
+
+        **Human-in-the-loop:** after calling this, STOP and wait for the user
+        to confirm the patron replied, then call ``receive_peer_grant`` once.
+
+        Free.
+
+        Args:
+            patron_npub: Required. The patron whose account the peer would see.
+            peer_npub: Required. The peer's own npub, which this connection proves.
+        """
+        from tollbooth.tools.peer import request_peer_grant_tool
+        return await request_peer_grant_tool(
+            rt, patron_npub, peer_npub, service_name=service_name,
+        )
+
+    @tool
+    async def receive_peer_grant(
+        patron_npub: str = "", peer_npub: str = "", nonce: str = "",
+    ) -> dict[str, Any]:
+        """Collect the patron's approval and record the peer grant.
+
+        **Call this only after the user confirms the patron replied.** It
+        drains only the pinned relay, once. The caller must prove ``peer_npub``.
+        The grant lasts as long as the patron chose in their reply (30 days by
+        default, at most 90). Free.
+
+        Args:
+            patron_npub: Required. The patron who was asked.
+            peer_npub: Required. The peer's own npub, which this connection proves.
+            nonce: Required. The phrase ``request_peer_grant`` returned.
+        """
+        from tollbooth.tools.peer import receive_peer_grant_tool
+        return await receive_peer_grant_tool(rt, patron_npub, peer_npub, nonce)
+
+    @tool
+    async def list_peer_grants(npub: str = "") -> dict[str, Any]:
+        """List the peers a patron lets see and fund their account here. Free.
+
+        Only the patron may list them: the caller must prove ``npub``.
+
+        Args:
+            npub: Required. The patron's npub.
+        """
+        from tollbooth.tools.peer import list_peer_grants_tool
+        return await list_peer_grants_tool(rt, npub)
+
+    @tool
+    async def revoke_peer_grant(npub: str = "", peer_npub: str = "") -> dict[str, Any]:
+        """Withdraw one peer's grant to see and fund a patron's account here. Free.
+
+        The patron may revoke any of their peers, and a peer may drop its own
+        grant. ``forget_credentials`` revokes every peer at once.
+
+        Args:
+            npub: Required. The patron's npub.
+            peer_npub: Required. The peer to revoke.
+        """
+        from tollbooth.tools.peer import revoke_peer_grant_tool
+        return await revoke_peer_grant_tool(rt, npub, peer_npub)
 
     # -- Oracle delegation (oracle_ namespace) ----------------------------
 
@@ -6624,7 +6822,7 @@ def register_standard_tools(
         "- **proof is required** → Call `request_npub_proof` then "
         "`receive_npub_proof` to prove npub ownership. The proof lasts as "
         "long as the patron chose in their reply (2 hours by default, at most "
-        "30 days); `check_proof_status` says until when. Renew with a fresh "
+        "90 days); `check_proof_status` says until when. Renew with a fresh "
         "request/receive cycle.\n"
         "- **Insufficient credit balance** → Call `purchase_credits` to top up.\n"
         "- **Operator credentials not delivered yet** → This is a lifecycle state, "

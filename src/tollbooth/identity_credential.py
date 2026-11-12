@@ -38,6 +38,11 @@ IDENTITY_CREDENTIAL_LABEL = "dpyc.identity"
 # unlocks one on its own.
 PROOF_GRANT_TAG = "dpyc-proof-grant"
 PROOF_GRANT_LABEL = "dpyc.proof_grant"
+# A peer grant: the patron lets another npub read their account and pay for
+# them at one Operator — never spend as them.
+PEER_GRANT_TAG = "dpyc-peer-grant"
+PEER_GRANT_LABEL = "dpyc.peer_grant"
+PEER_GRANT_SCOPE = "read+fund"
 
 # Default credential TTL: 30 days
 DEFAULT_CREDENTIAL_TTL_SECONDS = 30 * 24 * 3600
@@ -306,6 +311,62 @@ def sign_proof_grant(
     Raises:
         IdentityCredentialError: On signing failure.
     """
+    return _sign_grant(
+        patron_npub, operator_nsec,
+        tag=PROOF_GRANT_TAG, label=PROOF_GRANT_LABEL,
+        challenge_hash=challenge_hash, patron_sig=patron_sig,
+        patron_event_id=patron_event_id, ttl_seconds=ttl_seconds,
+    )
+
+
+def sign_peer_grant(
+    patron_npub: str,
+    peer_npub: str,
+    operator_nsec: str,
+    *,
+    challenge_hash: str,
+    patron_sig: str,
+    patron_event_id: str,
+    ttl_seconds: int = DEFAULT_CREDENTIAL_TTL_SECONDS,
+) -> str:
+    """Sign a kind-30080 Operator peer grant: the patron lets *peer_npub* read
+    their account and pay for them at this Operator.
+
+    Same shape and proof as :func:`sign_proof_grant` — the Operator verified a
+    patron-signed reply over the challenge — plus ``peer`` (the peer's hex
+    pubkey) and ``scope`` (always :data:`PEER_GRANT_SCOPE`). Its ``t`` tag is
+    :data:`PEER_GRANT_TAG`, so it can never pass as a proof grant.
+    """
+    try:
+        peer_hex = _npub_to_hex(peer_npub)
+    except Exception as e:
+        raise IdentityCredentialError(f"Invalid peer npub: {e}") from e
+    if peer_hex == _npub_to_hex(patron_npub):
+        raise IdentityCredentialError("A patron cannot be their own peer.")
+    return _sign_grant(
+        patron_npub, operator_nsec,
+        tag=PEER_GRANT_TAG, label=PEER_GRANT_LABEL,
+        challenge_hash=challenge_hash, patron_sig=patron_sig,
+        patron_event_id=patron_event_id, ttl_seconds=ttl_seconds,
+        extra_tags=[["peer", peer_hex], ["scope", PEER_GRANT_SCOPE]],
+        extra_content={"peer_npub": peer_npub, "scope": PEER_GRANT_SCOPE},
+    )
+
+
+def _sign_grant(
+    patron_npub: str,
+    operator_nsec: str,
+    *,
+    tag: str,
+    label: str,
+    challenge_hash: str,
+    patron_sig: str,
+    patron_event_id: str,
+    ttl_seconds: int,
+    extra_tags: list[list[str]] | None = None,
+    extra_content: dict[str, str] | None = None,
+) -> str:
+    """Sign one kind-30080 grant of type *tag* for *patron_npub*."""
     try:
         from pynostr.event import Event  # type: ignore[import-untyped]
         from pynostr.key import PrivateKey  # type: ignore[import-untyped]
@@ -339,7 +400,7 @@ def sign_proof_grant(
 
     now = int(time.time())
     # Allow non-positive ttl so callers/tests can mint already-expired grants;
-    # verify_proof_grant rejects those via the expiration check.
+    # verification rejects those via the expiration check.
     expiration = now + int(ttl_seconds)
     jti = str(uuid.uuid4())
 
@@ -349,6 +410,7 @@ def sign_proof_grant(
             "operator_npub": operator_npub,
             "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
             "challenge": challenge_hash,
+            **(extra_content or {}),
         },
         separators=(",", ":"),
     )
@@ -356,12 +418,13 @@ def sign_proof_grant(
     tags = [
         ["d", jti],
         ["p", patron_hex],
-        ["t", PROOF_GRANT_TAG],
-        ["L", PROOF_GRANT_LABEL],
+        ["t", tag],
+        ["L", label],
         ["challenge", challenge_hash],
         ["patron_sig", patron_sig],
         ["expiration", str(expiration)],
         ["patron_event_id", patron_event_id],
+        *(extra_tags or []),
     ]
 
     event = Event(
@@ -411,6 +474,57 @@ def verify_proof_grant(
             ``bad_signature``, ``wrong_kind``, ``not_proof_grant``,
             ``operator_mismatch``, ``malformed``).
     """
+    claims, _tags = _verify_grant(
+        event_json, tag=PROOF_GRANT_TAG, wrong_tag_reason="not_proof_grant",
+        expected_patron_npub=expected_patron_npub, challenge_hash=challenge_hash,
+        expected_operator_hex=expected_operator_hex,
+    )
+    return claims
+
+
+def verify_peer_grant(
+    event_json: str,
+    *,
+    expected_patron_npub: str,
+    expected_peer_npub: str,
+    expected_operator_hex: str | None = None,
+) -> dict[str, Any]:
+    """Verify a kind-30080 Operator peer grant from *expected_patron_npub* to
+    *expected_peer_npub*.
+
+    Every check of :func:`verify_proof_grant`, plus: the ``t`` tag is
+    :data:`PEER_GRANT_TAG` (``not_peer_grant`` otherwise), the ``peer`` tag is
+    the expected peer (``wrong_peer``), and ``scope`` is
+    :data:`PEER_GRANT_SCOPE` (``wrong_scope``).
+
+    Returns the proof-grant claims plus ``peer_npub`` and ``scope``.
+    """
+    claims, tags = _verify_grant(
+        event_json, tag=PEER_GRANT_TAG, wrong_tag_reason="not_peer_grant",
+        expected_patron_npub=expected_patron_npub, challenge_hash=None,
+        expected_operator_hex=expected_operator_hex,
+    )
+    try:
+        expected_peer_hex = _npub_to_hex(expected_peer_npub)
+    except Exception as e:
+        raise IdentityCredentialError("wrong_peer") from e
+    if _get_tag_value(tags, "peer") != expected_peer_hex:
+        raise IdentityCredentialError("wrong_peer")
+    if _get_tag_value(tags, "scope") != PEER_GRANT_SCOPE:
+        raise IdentityCredentialError("wrong_scope")
+    return {**claims, "peer_npub": expected_peer_npub, "scope": PEER_GRANT_SCOPE}
+
+
+def _verify_grant(
+    event_json: str,
+    *,
+    tag: str,
+    wrong_tag_reason: str,
+    expected_patron_npub: str,
+    challenge_hash: str | None,
+    expected_operator_hex: str | None,
+) -> tuple[dict[str, Any], list[list[str]]]:
+    """The checks every kind-30080 grant passes; returns (claims, tags)."""
     try:
         from pynostr.event import Event  # type: ignore[import-untyped]
     except ImportError as e:
@@ -440,10 +554,9 @@ def verify_proof_grant(
     if event.kind != IDENTITY_CREDENTIAL_KIND:
         raise IdentityCredentialError("wrong_kind")
 
-    tag_t = _get_tag_value(event.tags, "t")
-    if tag_t != PROOF_GRANT_TAG:
-        # A plain identity credential (or anything else) is not a proof grant.
-        raise IdentityCredentialError("not_proof_grant")
+    if _get_tag_value(event.tags, "t") != tag:
+        # A grant of another type (or a plain identity credential) is refused.
+        raise IdentityCredentialError(wrong_tag_reason)
 
     expiration_str = _get_tag_value(event.tags, "expiration")
     if not expiration_str:
@@ -508,7 +621,7 @@ def verify_proof_grant(
         "challenge": challenge,
         "patron_sig": patron_sig,
         "patron_event_id": patron_event_id,
-    }
+    }, event.tags
 
 
 async def verify_credential_chain(

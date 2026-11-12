@@ -1,0 +1,1 @@
+- Proof grants and peer grants may last up to 90 days (was 30).
