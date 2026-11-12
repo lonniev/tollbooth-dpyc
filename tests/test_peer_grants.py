@@ -338,6 +338,10 @@ async def test_request_goes_through_the_real_courier_and_its_template(setup, mon
     assert opened.await_args.args[0] == "peer_grant"
     assert kw["recipient_npub"] == patron and kw["bound_to"] == peer
     assert kw["channel"] == _peer_channel(peer) and peer in kw["greeting"]
+    assert kw["peer_npub"] == peer, "the form names the peer for the patron's client"
+    named = courier_form_schema(template, nonce=NONCE, rendezvous_relay="wss://r", peer_npub=peer)
+    assert named["x-peer-npub"] == peer
+    assert "x-peer-npub" not in form, "only a peer grant names a peer"
 
 
 @pytest.mark.asyncio

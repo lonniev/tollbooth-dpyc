@@ -169,6 +169,7 @@ def courier_form_schema(
     nonce: str,
     rendezvous_relay: str,
     description: str = "",
+    peer_npub: str = "",
 ) -> dict[str, Any]:
     """The JSON Schema form a courier request carries in its ``form`` tag.
 
@@ -179,7 +180,9 @@ def courier_form_schema(
     ``x-courier-kind`` says whether the request is a form or an approval.
     JSON objects carry no key order, so each field states its place with
     ``propertyOrder`` (the json-editor convention). *description* is the
-    operator's greeting, shown above the form.
+    operator's greeting, shown above the form. *peer_npub*, for a peer-grant
+    approval, names the npub the patron would let see their account
+    (``x-peer-npub``), so a form client can say whether it knows that npub.
     """
     if template.kind not in COURIER_KINDS:
         raise ValueError(f"unknown courier kind: {template.kind!r}")
@@ -209,6 +212,8 @@ def courier_form_schema(
     }
     if description:
         form["description"] = description
+    if peer_npub:
+        form["x-peer-npub"] = peer_npub
     return form | {
         "type": "object",
         "properties": properties,

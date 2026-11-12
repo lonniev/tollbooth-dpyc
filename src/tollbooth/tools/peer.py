@@ -91,6 +91,7 @@ async def request_peer_grant_tool(
         service=PEER_SERVICE, channel=_peer_channel(peer), holder=peer,
         greeting=greeting, reason=f"Peer grant for {peer}", verify_at=None,
         label="Peer grant request", receive_tool="receive_peer_grant",
+        peer_npub=peer,
     )
 
 
