@@ -68,6 +68,26 @@ APPROVAL = CredentialTemplate(
     kind="approval",
 )
 
+# The peer-grant approval, as OperatorRuntime.courier() registers it.
+PEER = CredentialTemplate(
+    service="peer_grant",
+    version=1,
+    fields={
+        "confirm": FieldSpec(
+            required=True, sensitive=False,
+            description="Any text — your signed reply is the approval",
+        ),
+        "allow_for": FieldSpec(
+            required=False, sensitive=False, default="30d", title="Allow for",
+            description="How long this peer may see and fund your account (at most 90 days)",
+            examples=("7d", "30d", "90d"),
+        ),
+    },
+    description="Peer grant — let another npub see your account and pay for you",
+    kind="approval",
+)
+PEER_NPUB = "npub1d999638gqpn8c594teklxtxva0uvxdng80q3ycyqvldjdl457c7qcrq64z"
+
 
 # ---------------------------------------------------------------------------
 # The form
@@ -83,6 +103,31 @@ def test_form_matches_golden_fixture(template, fixture):
         template, nonce=NONCE, rendezvous_relay=RELAY, description=GREETING,
     )
     assert form == json.loads((FIXTURES / fixture).read_text())
+
+
+def test_peer_grant_form_matches_golden_fixture():
+    form = courier_form_schema(
+        PEER, nonce=NONCE, rendezvous_relay=RELAY, description=GREETING,
+        peer_npub=PEER_NPUB,
+    )
+    assert form == json.loads((FIXTURES / "peer_grant.json").read_text())
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_registers_the_peer_template_the_fixture_pins(monkeypatch):
+    """The fixture's template is the one operators actually send."""
+    from unittest.mock import AsyncMock, patch
+
+    from pynostr.key import PrivateKey
+
+    from tollbooth.runtime import OperatorRuntime
+    rt = OperatorRuntime(tool_registry={})
+    monkeypatch.setenv("TOLLBOOTH_NOSTR_OPERATOR_NSEC", PrivateKey().bech32())
+    with patch("tollbooth.relay_registry.ensure_relays_seeded", AsyncMock()), \
+            patch("tollbooth.nostr_diagnostics.resolve_relays", return_value=[RELAY]), \
+            patch.object(rt, "vault", AsyncMock(side_effect=RuntimeError("no vault"))):
+        courier = await rt.courier()
+    assert courier._exchange._templates["peer_grant"] == PEER
 
 
 def test_sensitive_field_is_write_only_password():
