@@ -5914,12 +5914,14 @@ def register_standard_tools(
 
     @tool
     async def list_peer_grants(npub: str = "") -> dict[str, Any]:
-        """List the peers a patron lets see and fund their account here. Free.
+        """List an npub's peer grants here, both ways. Free.
 
-        Only the patron may list them: the caller must prove ``npub``.
+        ``peers``: the npubs it lets see its account and pay for it.
+        ``patrons``: the accounts that let it see theirs and pay for them.
+        Only that npub may list them: the caller must prove ``npub``.
 
         Args:
-            npub: Required. The patron's npub.
+            npub: Required. The npub whose grants to list.
         """
         from tollbooth.tools.peer import list_peer_grants_tool
         return await list_peer_grants_tool(rt, npub)

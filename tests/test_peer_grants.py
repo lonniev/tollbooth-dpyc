@@ -260,6 +260,7 @@ async def test_the_patron_lists_and_held_identities_shows_peer_of(setup):
     tools = _register(rt)
     listed = await tools["list_peer_grants"](npub=patron)
     assert [p["peer_npub"] for p in listed["peers"]] == [peer]
+    assert listed["patrons"] == []
     held = await tools["held_identities"]()
     assert held["peer_of"] == [{"patron_npub": patron, "expires_at": 2**40, "peer_npub": peer}]
 
@@ -360,3 +361,19 @@ async def test_forget_drops_the_patrons_peers(setup):
     rt.property_store = AsyncMock(return_value=SimpleNamespace(clear=AsyncMock(return_value=0)))  # type: ignore[method-assign]
     await forget_credentials_tool(rt, "x", patron)
     assert await rt.peers.peers_of(patron) == []
+
+
+@pytest.mark.asyncio
+async def test_a_peer_lists_the_accounts_it_funds(setup):
+    """A tab that signs each request has no holder wallet, so held_identities
+    cannot name its patrons; list_peer_grants does, for the proven peer only."""
+    rt, _, patron, peer = setup
+    await _grant(rt, patron, peer)
+    tools = _register(rt)
+    with patch("tollbooth.holder_auth.signed_npub", return_value=peer), \
+            patch("tollbooth.holder_auth.current_holder", return_value=None):
+        listed = await tools["list_peer_grants"](npub=peer)
+        assert listed["patrons"] == [{"patron_npub": patron, "expires_at": 2**40}]
+        assert listed["peers"] == []
+        refused = await tools["list_peer_grants"](npub=patron)
+    assert refused["error_code"] == ErrorCode.PROOF_REQUIRED
