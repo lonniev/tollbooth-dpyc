@@ -170,6 +170,7 @@ def courier_form_schema(
     rendezvous_relay: str,
     description: str = "",
     peer_npub: str = "",
+    asking_patron: str = "",
 ) -> dict[str, Any]:
     """The JSON Schema form a courier request carries in its ``form`` tag.
 
@@ -183,7 +184,11 @@ def courier_form_schema(
     operator's greeting, shown above the form. *peer_npub*, for a peer-grant
     approval, names the npub the patron would let see their account
     (``x-peer-npub``), so a form client can say whether it knows that npub.
+    *asking_patron*, for the other way round, names the patron who asks the
+    recipient to sponsor them (``x-patron-npub``). A form sets one or neither.
     """
+    if peer_npub and asking_patron:
+        raise ValueError("a form names a peer or an asking patron, never both")
     if template.kind not in COURIER_KINDS:
         raise ValueError(f"unknown courier kind: {template.kind!r}")
     properties: dict[str, dict[str, Any]] = {}
@@ -214,6 +219,8 @@ def courier_form_schema(
         form["description"] = description
     if peer_npub:
         form["x-peer-npub"] = peer_npub
+    if asking_patron:
+        form["x-patron-npub"] = asking_patron
     return form | {
         "type": "object",
         "properties": properties,

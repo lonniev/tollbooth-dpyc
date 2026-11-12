@@ -12,7 +12,7 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from pynostr.key import PrivateKey
+from pynostr.key import PrivateKey, PublicKey
 
 from tests.test_holder_auth import _envelope
 from tests.test_proof_tools_characterization import (
@@ -33,7 +33,7 @@ from tollbooth.identity_credential import (
     verify_peer_grant,
     verify_proof_grant,
 )
-from tollbooth.tools.peer import _peer_channel
+from tollbooth.tools.peer import _pair_channel
 from tollbooth.vaults.peer_grant_store import PeerGrantStore
 
 NONCE = "calm-lake-17"
@@ -86,8 +86,8 @@ def _npub() -> str:
 
 def _peer_envelope(op_nsec: str, patron: str, peer: str, ttl: int = 3600) -> str:
     grant = sign_peer_grant(
-        patron, peer, op_nsec, challenge_hash=CHALLENGE,
-        patron_sig="ab" * 64, patron_event_id="seal-1", ttl_seconds=ttl,
+        patron, peer, op_nsec, origin="peer", challenge_hash=CHALLENGE,
+        approver_sig="ab" * 64, approver_event_id="seal-1", ttl_seconds=ttl,
     )
     return json.dumps({"grant": json.loads(grant)}, separators=(",", ":"))
 
@@ -103,7 +103,8 @@ class TestPeerGrantSignature:
     def _grant(self, **kw):
         return sign_peer_grant(
             kw.pop("patron", self.patron), kw.pop("peer", self.peer), self.op.bech32(),
-            challenge_hash=CHALLENGE, patron_sig="ab" * 64, patron_event_id="seal-1", **kw,
+            origin=kw.pop("origin", "peer"), challenge_hash=CHALLENGE,
+            approver_sig="ab" * 64, approver_event_id="seal-1", **kw,
         )
 
     def test_verifies_for_its_patron_and_peer(self):
@@ -147,6 +148,39 @@ class TestPeerGrantSignature:
     def test_a_patron_cannot_be_their_own_peer(self):
         with pytest.raises(IdentityCredentialError):
             self._grant(peer=self.patron)
+
+
+class TestEitherPartyStarts:
+    def setup_method(self):
+        self.op = PrivateKey()
+        self.patron, self.peer = _npub(), _npub()
+
+    @pytest.mark.parametrize(("origin", "approver"), [("peer", "patron"), ("patron", "peer")])
+    def test_the_other_party_is_the_approver(self, origin, approver):
+        grant = sign_peer_grant(
+            self.patron, self.peer, self.op.bech32(), origin=origin, challenge_hash=CHALLENGE,
+            approver_sig="ab" * 64, approver_event_id="seal-1",
+        )
+        claims = verify_peer_grant(grant, expected_patron_npub=self.patron, expected_peer_npub=self.peer)
+        assert claims["origin"] == origin
+        assert claims["approver"] == PublicKey.from_npub(getattr(self, approver)).hex()
+
+    def test_an_unknown_origin_is_refused(self):
+        with pytest.raises(IdentityCredentialError, match="origin"):
+            sign_peer_grant(self.patron, self.peer, self.op.bech32(), origin="anyone",
+                            challenge_hash=CHALLENGE, approver_sig="ab" * 64, approver_event_id="e")
+
+    def test_a_grant_without_its_approver_is_malformed(self):
+        """The 0.119 shape (patron_sig, no origin or approver) no longer verifies."""
+        from tollbooth.identity_credential import PEER_GRANT_LABEL, PEER_GRANT_TAG, _sign_grant
+        old = _sign_grant(
+            self.patron, self.op.bech32(), tag=PEER_GRANT_TAG, label=PEER_GRANT_LABEL,
+            challenge_hash=CHALLENGE, ttl_seconds=3600,
+            approval_tags=[["patron_sig", "ab" * 64], ["patron_event_id", "seal-1"]],
+            extra_tags=[["peer", PublicKey.from_npub(self.peer).hex()], ["scope", PEER_GRANT_SCOPE]],
+        )
+        with pytest.raises(IdentityCredentialError, match="malformed"):
+            verify_peer_grant(old, expected_patron_npub=self.patron, expected_peer_npub=self.peer)
 
 
 # -- the gate ------------------------------------------------------------------
@@ -297,7 +331,7 @@ async def test_receive_records_the_grant_for_the_peer(setup):
     assert r["success"] and r["peer_npub"] == peer
     assert not {"grant", "envelope"} & set(r), "the grant never enters the transcript"
     assert ex.resolved_for == peer, "only a caller proving the peer may collect"
-    assert ex.closed == [(patron, f"peer_grant#{_peer_channel(peer)}")]
+    assert ex.closed == [(patron, f"peer_grant#{_pair_channel(peer)}")]
     envelope = await rt.peers.get(patron, peer)
     claims = verify_peer_grant(json.dumps(json.loads(envelope)["grant"]),
                                expected_patron_npub=patron, expected_peer_npub=peer)
@@ -338,7 +372,7 @@ async def test_request_goes_through_the_real_courier_and_its_template(setup, mon
     kw = opened.await_args.kwargs
     assert opened.await_args.args[0] == "peer_grant"
     assert kw["recipient_npub"] == patron and kw["bound_to"] == peer
-    assert kw["channel"] == _peer_channel(peer) and peer in kw["greeting"]
+    assert kw["channel"] == _pair_channel(peer) and peer in kw["greeting"]
     assert kw["peer_npub"] == peer, "the form names the peer for the patron's client"
     named = courier_form_schema(template, nonce=NONCE, rendezvous_relay="wss://r", peer_npub=peer)
     assert named["x-peer-npub"] == peer
@@ -377,3 +411,62 @@ async def test_a_peer_lists_the_accounts_it_funds(setup):
         assert listed["peers"] == []
         refused = await tools["list_peer_grants"](npub=patron)
     assert refused["error_code"] == ErrorCode.PROOF_REQUIRED
+
+
+# -- the patron starts it --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_patron_asks_a_peer_to_sponsor_them(setup, monkeypatch):
+    """Through the real SecureCourierService: the DM goes to the peer and names the patron."""
+    rt, _, patron, peer = setup
+    await _hold(rt, patron)
+    rt._courier = None
+    monkeypatch.setenv("TOLLBOOTH_NOSTR_OPERATOR_NSEC", rt._nsec)
+    with patch("tollbooth.relay_registry.ensure_relays_seeded", AsyncMock()), \
+            patch("tollbooth.nostr_diagnostics.resolve_relays", return_value=["wss://relay.test"]), \
+            patch.object(rt, "vault", AsyncMock(side_effect=RuntimeError("no vault"))):
+        courier = await rt.courier()
+    tools = _register(rt)
+    with patch.object(courier._exchange, "open_channel",
+                      AsyncMock(return_value={"success": True, "nonce": NONCE})) as opened, \
+            patch.object(courier._exchange, "_fetch_dms_from_relays"):
+        r = await tools["request_peer_grant"](patron_npub=patron, peer_npub=peer)
+    assert r["success"]
+    kw = opened.await_args.kwargs
+    assert kw["recipient_npub"] == peer and kw["bound_to"] == patron
+    assert kw["channel"] == _pair_channel(patron)
+    assert kw["asking_patron"] == patron and kw["peer_npub"] == ""
+    assert "asks you to sponsor them" in kw["greeting"]
+
+
+@pytest.mark.asyncio
+async def test_the_patron_collects_the_peers_approval(setup):
+    rt, _, patron, peer = setup
+    await _hold(rt, patron)
+    ex = FakeExchange(candidates=[{
+        "id": "e1", "_relay": PIN, **SIGNED,
+        "_plaintext": _delimited(confirm="ok", nonce=NONCE),
+    }])
+    rt._courier.__dict__["_exchange"] = ex
+    tools = _register(rt)
+
+    r = await tools["receive_peer_grant"](patron_npub=patron, peer_npub=peer, nonce=NONCE)
+
+    assert r["success"] and r["origin"] == "patron"
+    assert ex.resolved_for == patron, "only the patron who asked may collect"
+    assert ex.closed == [(peer, f"peer_grant#{_pair_channel(patron)}")]
+    envelope = await rt.peers.get(patron, peer)
+    claims = verify_peer_grant(json.dumps(json.loads(envelope)["grant"]),
+                               expected_patron_npub=patron, expected_peer_npub=peer)
+    assert claims["origin"] == "patron"
+    assert any("You now sponsor" in dm for dm in ex.sent_dms), "the sponsor is told"
+
+
+@pytest.mark.asyncio
+async def test_a_caller_proving_neither_party_is_refused(setup):
+    rt, _, patron, peer = setup
+    await _hold(rt, _npub())
+    tools = _register(rt)
+    r = await tools["request_peer_grant"](patron_npub=patron, peer_npub=peer)
+    assert r["error_code"] == ErrorCode.PROOF_REQUIRED

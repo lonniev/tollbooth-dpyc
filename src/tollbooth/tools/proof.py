@@ -321,6 +321,7 @@ async def send_approval_request(
     label: str,
     receive_tool: str,
     peer_npub: str = "",
+    asking_patron: str = "",
 ) -> dict[str, Any]:
     """DM *patron_npub* an approval form on the ``service#channel`` channel.
 
@@ -391,6 +392,7 @@ async def send_approval_request(
             bound_to=holder,
             channel=channel,
             peer_npub=peer_npub,
+            asking_patron=asking_patron,
         )
         if not result.get("success"):
             return result

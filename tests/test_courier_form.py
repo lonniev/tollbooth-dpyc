@@ -87,6 +87,7 @@ PEER = CredentialTemplate(
     kind="approval",
 )
 PEER_NPUB = "npub1d999638gqpn8c594teklxtxva0uvxdng80q3ycyqvldjdl457c7qcrq64z"
+ASKING_PATRON = "npub1d999638gqpn8c594teklxtxva0uvxdng80q3ycyqvldjdl457c7qcrq64z"
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +112,24 @@ def test_peer_grant_form_matches_golden_fixture():
         peer_npub=PEER_NPUB,
     )
     assert form == json.loads((FIXTURES / "peer_grant.json").read_text())
+
+
+def test_sponsor_request_form_matches_golden_fixture():
+    """The patron asks the recipient to sponsor them: the form names that patron."""
+    form = courier_form_schema(
+        PEER, nonce=NONCE, rendezvous_relay=RELAY, description=GREETING,
+        asking_patron=ASKING_PATRON,
+    )
+    assert form == json.loads((FIXTURES / "sponsor_request.json").read_text())
+    assert "x-peer-npub" not in form
+
+
+def test_a_form_names_a_peer_or_an_asking_patron_never_both():
+    with pytest.raises(ValueError, match="never both"):
+        courier_form_schema(
+            PEER, nonce=NONCE, rendezvous_relay=RELAY,
+            peer_npub=PEER_NPUB, asking_patron=ASKING_PATRON,
+        )
 
 
 @pytest.mark.asyncio

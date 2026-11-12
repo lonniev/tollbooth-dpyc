@@ -43,6 +43,10 @@ PROOF_GRANT_LABEL = "dpyc.proof_grant"
 PEER_GRANT_TAG = "dpyc-peer-grant"
 PEER_GRANT_LABEL = "dpyc.peer_grant"
 PEER_GRANT_SCOPE = "read+fund"
+# Who started a peer grant; the other party approved it by signed reply.
+PEER_GRANT_ORIGINS = ("peer", "patron")
+_PROOF_APPROVAL = ("patron_sig", "patron_event_id")
+_PEER_APPROVAL = ("origin", "approver", "approver_sig", "approver_event_id")
 
 # Default credential TTL: 30 days
 DEFAULT_CREDENTIAL_TTL_SECONDS = 30 * 24 * 3600
@@ -314,8 +318,8 @@ def sign_proof_grant(
     return _sign_grant(
         patron_npub, operator_nsec,
         tag=PROOF_GRANT_TAG, label=PROOF_GRANT_LABEL,
-        challenge_hash=challenge_hash, patron_sig=patron_sig,
-        patron_event_id=patron_event_id, ttl_seconds=ttl_seconds,
+        challenge_hash=challenge_hash, ttl_seconds=ttl_seconds,
+        approval_tags=[["patron_sig", patron_sig], ["patron_event_id", patron_event_id]],
     )
 
 
@@ -324,32 +328,45 @@ def sign_peer_grant(
     peer_npub: str,
     operator_nsec: str,
     *,
+    origin: str,
     challenge_hash: str,
-    patron_sig: str,
-    patron_event_id: str,
+    approver_sig: str,
+    approver_event_id: str,
     ttl_seconds: int = DEFAULT_CREDENTIAL_TTL_SECONDS,
 ) -> str:
     """Sign a kind-30080 Operator peer grant: the patron lets *peer_npub* read
     their account and pay for them at this Operator.
 
-    Same shape and proof as :func:`sign_proof_grant` — the Operator verified a
-    patron-signed reply over the challenge — plus ``peer`` (the peer's hex
-    pubkey) and ``scope`` (always :data:`PEER_GRANT_SCOPE`). Its ``t`` tag is
+    Either party may start it (*origin*, ``"peer"`` or ``"patron"``); the
+    other approves it by a signed reply over the challenge, which the Operator
+    verified. The starter's consent is the npub proof the Operator checked on
+    its call. Tags: ``peer`` (hex), ``scope`` (always
+    :data:`PEER_GRANT_SCOPE`), ``origin``, ``approver`` (the other party's
+    hex), ``approver_sig`` and ``approver_event_id``. Its ``t`` tag is
     :data:`PEER_GRANT_TAG`, so it can never pass as a proof grant.
     """
+    if origin not in PEER_GRANT_ORIGINS:
+        raise IdentityCredentialError(f"origin must be one of {PEER_GRANT_ORIGINS}.")
     try:
         peer_hex = _npub_to_hex(peer_npub)
+        patron_hex = _npub_to_hex(patron_npub)
     except Exception as e:
-        raise IdentityCredentialError(f"Invalid peer npub: {e}") from e
-    if peer_hex == _npub_to_hex(patron_npub):
+        raise IdentityCredentialError(f"Invalid npub: {e}") from e
+    if peer_hex == patron_hex:
         raise IdentityCredentialError("A patron cannot be their own peer.")
+    approver_hex = patron_hex if origin == "peer" else peer_hex
     return _sign_grant(
         patron_npub, operator_nsec,
         tag=PEER_GRANT_TAG, label=PEER_GRANT_LABEL,
-        challenge_hash=challenge_hash, patron_sig=patron_sig,
-        patron_event_id=patron_event_id, ttl_seconds=ttl_seconds,
+        challenge_hash=challenge_hash, ttl_seconds=ttl_seconds,
+        approval_tags=[
+            ["origin", origin],
+            ["approver", approver_hex],
+            ["approver_sig", approver_sig],
+            ["approver_event_id", approver_event_id],
+        ],
         extra_tags=[["peer", peer_hex], ["scope", PEER_GRANT_SCOPE]],
-        extra_content={"peer_npub": peer_npub, "scope": PEER_GRANT_SCOPE},
+        extra_content={"peer_npub": peer_npub, "scope": PEER_GRANT_SCOPE, "origin": origin},
     )
 
 
@@ -360,13 +377,16 @@ def _sign_grant(
     tag: str,
     label: str,
     challenge_hash: str,
-    patron_sig: str,
-    patron_event_id: str,
     ttl_seconds: int,
+    approval_tags: list[list[str]],
     extra_tags: list[list[str]] | None = None,
     extra_content: dict[str, str] | None = None,
 ) -> str:
-    """Sign one kind-30080 grant of type *tag* for *patron_npub*."""
+    """Sign one kind-30080 grant of type *tag* for *patron_npub*.
+
+    *approval_tags* name the verified approval (who signed it, and its
+    signature and event id); every value is required.
+    """
     try:
         from pynostr.event import Event  # type: ignore[import-untyped]
         from pynostr.key import PrivateKey  # type: ignore[import-untyped]
@@ -378,10 +398,9 @@ def _sign_grant(
 
     if not challenge_hash or not isinstance(challenge_hash, str):
         raise IdentityCredentialError("challenge_hash is required.")
-    if not patron_sig or not isinstance(patron_sig, str):
-        raise IdentityCredentialError("patron_sig is required.")
-    if not patron_event_id or not isinstance(patron_event_id, str):
-        raise IdentityCredentialError("patron_event_id is required.")
+    for name, value in approval_tags:
+        if not value or not isinstance(value, str):
+            raise IdentityCredentialError(f"{name} is required.")
 
     try:
         if operator_nsec.startswith("nsec1"):
@@ -421,9 +440,8 @@ def _sign_grant(
         ["t", tag],
         ["L", label],
         ["challenge", challenge_hash],
-        ["patron_sig", patron_sig],
         ["expiration", str(expiration)],
-        ["patron_event_id", patron_event_id],
+        *approval_tags,
         *(extra_tags or []),
     ]
 
@@ -477,7 +495,7 @@ def verify_proof_grant(
     claims, _tags = _verify_grant(
         event_json, tag=PROOF_GRANT_TAG, wrong_tag_reason="not_proof_grant",
         expected_patron_npub=expected_patron_npub, challenge_hash=challenge_hash,
-        expected_operator_hex=expected_operator_hex,
+        expected_operator_hex=expected_operator_hex, approval=_PROOF_APPROVAL,
     )
     return claims
 
@@ -494,15 +512,16 @@ def verify_peer_grant(
 
     Every check of :func:`verify_proof_grant`, plus: the ``t`` tag is
     :data:`PEER_GRANT_TAG` (``not_peer_grant`` otherwise), the ``peer`` tag is
-    the expected peer (``wrong_peer``), and ``scope`` is
-    :data:`PEER_GRANT_SCOPE` (``wrong_scope``).
+    the expected peer (``wrong_peer``), ``scope`` is
+    :data:`PEER_GRANT_SCOPE` (``wrong_scope``), and the ``approver`` is the
+    party that did not start it (``wrong_approver``).
 
     Returns the proof-grant claims plus ``peer_npub`` and ``scope``.
     """
     claims, tags = _verify_grant(
         event_json, tag=PEER_GRANT_TAG, wrong_tag_reason="not_peer_grant",
         expected_patron_npub=expected_patron_npub, challenge_hash=None,
-        expected_operator_hex=expected_operator_hex,
+        expected_operator_hex=expected_operator_hex, approval=_PEER_APPROVAL,
     )
     try:
         expected_peer_hex = _npub_to_hex(expected_peer_npub)
@@ -512,6 +531,13 @@ def verify_peer_grant(
         raise IdentityCredentialError("wrong_peer")
     if _get_tag_value(tags, "scope") != PEER_GRANT_SCOPE:
         raise IdentityCredentialError("wrong_scope")
+    # The approver is the party that did not start it.
+    origin = claims["origin"]
+    if origin not in PEER_GRANT_ORIGINS:
+        raise IdentityCredentialError("malformed")
+    approver = _npub_to_hex(expected_patron_npub) if origin == "peer" else expected_peer_hex
+    if claims["approver"] != approver:
+        raise IdentityCredentialError("wrong_approver")
     return {**claims, "peer_npub": expected_peer_npub, "scope": PEER_GRANT_SCOPE}
 
 
@@ -523,6 +549,7 @@ def _verify_grant(
     expected_patron_npub: str,
     challenge_hash: str | None,
     expected_operator_hex: str | None,
+    approval: tuple[str, ...],
 ) -> tuple[dict[str, Any], list[list[str]]]:
     """The checks every kind-30080 grant passes; returns (claims, tags)."""
     try:
@@ -578,9 +605,8 @@ def _verify_grant(
     if challenge_hash is not None and challenge != challenge_hash:
         raise IdentityCredentialError("challenge_mismatch")
 
-    patron_sig = _get_tag_value(event.tags, "patron_sig") or ""
-    patron_event_id = _get_tag_value(event.tags, "patron_event_id") or ""
-    if not patron_sig or not patron_event_id:
+    approved = {name: _get_tag_value(event.tags, name) or "" for name in approval}
+    if not all(approved.values()):
         raise IdentityCredentialError("malformed")
 
     try:
@@ -619,8 +645,7 @@ def _verify_grant(
         "jti": jti,
         "expiration": expiration,
         "challenge": challenge,
-        "patron_sig": patron_sig,
-        "patron_event_id": patron_event_id,
+        **approved,
     }, event.tags
 
 

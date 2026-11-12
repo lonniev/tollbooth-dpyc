@@ -174,7 +174,7 @@ class TestOpenChannel:
 
         mock_open.assert_called_once_with(
             "x", greeting="Test greeting", recipient_npub=None, reason=None, origin=None, verify_at=None, bound_to="",
-            channel="", peer_npub="",
+            channel="", peer_npub="", asking_patron="",
         )
         assert result == expected
 
@@ -200,7 +200,7 @@ class TestOpenChannel:
 
         mock_open.assert_called_once_with(
             "x", greeting="Test greeting", recipient_npub=npub, reason=None, origin=None, verify_at=None, bound_to="",
-            channel="", peer_npub="",
+            channel="", peer_npub="", asking_patron="",
         )
 
 
