@@ -1080,6 +1080,7 @@ class NostrCredentialExchange:
         bound_to: str = "",
         channel: str = "",
         peer_npub: str = "",
+        asking_patron: str = "",
     ) -> dict[str, Any]:
         """Open a credential delivery channel for a service.
 
@@ -1225,6 +1226,7 @@ class NostrCredentialExchange:
             form = courier_form_schema(
                 template, nonce=nonce, rendezvous_relay=rendezvous_relay,
                 description=greeting, peer_npub=peer_npub,
+                asking_patron=asking_patron,
             )
             tags = [["form", json.dumps(form, separators=(",", ":"))]]
             if attestation is not None:

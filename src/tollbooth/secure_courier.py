@@ -169,6 +169,7 @@ class SecureCourierService:
         bound_to: str = "",
         channel: str = "",
         peer_npub: str = "",
+        asking_patron: str = "",
     ) -> dict[str, Any]:
         """Open a Secure Courier channel.  Sends welcome DM if *recipient_npub* provided.
 
@@ -185,6 +186,8 @@ class SecureCourierService:
                 requests for *service* at once (a proof request per holder).
             peer_npub: For a peer-grant approval, the npub the patron would
                 let see their account; carried in the form as ``x-peer-npub``.
+            asking_patron: For the other way round, the patron who asks the
+                recipient to sponsor them; carried as ``x-patron-npub``.
 
         Returns:
             Dict with npub, relays, template instructions, and freshness window.
@@ -192,7 +195,7 @@ class SecureCourierService:
         return await self._exchange.open_channel(
             service, greeting=greeting, recipient_npub=recipient_npub,
             reason=reason, origin=origin, verify_at=verify_at, bound_to=bound_to,
-            channel=channel, peer_npub=peer_npub,
+            channel=channel, peer_npub=peer_npub, asking_patron=asking_patron,
         )
 
     async def receive(

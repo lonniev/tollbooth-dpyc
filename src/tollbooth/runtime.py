@@ -5872,21 +5872,22 @@ def register_standard_tools(
 
     @tool
     async def request_peer_grant(patron_npub: str = "", peer_npub: str = "") -> dict[str, Any]:
-        """Ask a patron to let a peer npub see their account here and pay for them.
+        """Start a peer grant (sponsorship): a peer sees a patron's account and pays for them.
 
-        The caller must prove ``peer_npub`` (its own npub). The patron gets an
-        approval DM naming the peer. Once approved, the peer may call
+        Either party starts it. The caller proves one of the two npubs and the
+        other gets an approval DM: a peer offers to sponsor the patron, or the
+        patron asks the peer to sponsor them. Once approved, the peer may call
         ``check_balance``, ``account_statement``, ``purchase_credits`` and
         ``check_payment`` for the patron — never spend their balance.
 
         **Human-in-the-loop:** after calling this, STOP and wait for the user
-        to confirm the patron replied, then call ``receive_peer_grant`` once.
+        to confirm the other party replied, then call ``receive_peer_grant`` once.
 
         Free.
 
         Args:
             patron_npub: Required. The patron whose account the peer would see.
-            peer_npub: Required. The peer's own npub, which this connection proves.
+            peer_npub: Required. The peer (sponsor). This connection proves one of the two.
         """
         from tollbooth.tools.peer import request_peer_grant_tool
         return await request_peer_grant_tool(
@@ -5897,16 +5898,16 @@ def register_standard_tools(
     async def receive_peer_grant(
         patron_npub: str = "", peer_npub: str = "", nonce: str = "",
     ) -> dict[str, Any]:
-        """Collect the patron's approval and record the peer grant.
+        """Collect the other party's approval and record the peer grant.
 
-        **Call this only after the user confirms the patron replied.** It
-        drains only the pinned relay, once. The caller must prove ``peer_npub``.
-        The grant lasts as long as the patron chose in their reply (30 days by
-        default, at most 90). Free.
+        **Call this only after the user confirms the other party replied.** It
+        drains only the pinned relay, once. The caller proves the same npub it
+        proved for ``request_peer_grant``. The grant lasts as long as the
+        approver chose in their reply (30 days by default, at most 90). Free.
 
         Args:
-            patron_npub: Required. The patron who was asked.
-            peer_npub: Required. The peer's own npub, which this connection proves.
+            patron_npub: Required. The patron whose account the peer would see.
+            peer_npub: Required. The peer (sponsor).
             nonce: Required. The phrase ``request_peer_grant`` returned.
         """
         from tollbooth.tools.peer import receive_peer_grant_tool

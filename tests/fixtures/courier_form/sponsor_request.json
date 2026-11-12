@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Peer grant \u2014 let another npub see your account and pay for you",
+  "description": "Paste your keys below.",
+  "x-patron-npub": "npub1d999638gqpn8c594teklxtxva0uvxdng80q3ycyqvldjdl457c7qcrq64z",
+  "type": "object",
+  "properties": {
+    "confirm": {
+      "type": "string",
+      "title": "confirm",
+      "propertyOrder": 1,
+      "description": "Any text \u2014 your signed reply is the approval"
+    },
+    "allow_for": {
+      "type": "string",
+      "title": "Allow for",
+      "propertyOrder": 2,
+      "description": "How long this peer may see and fund your account (at most 90 days)",
+      "default": "30d",
+      "examples": [
+        "7d",
+        "30d",
+        "90d"
+      ]
+    },
+    "nonce": {
+      "type": "string",
+      "const": "bold-hawk-42",
+      "readOnly": true
+    },
+    "rendezvous_relay": {
+      "type": "string",
+      "const": "wss://relay.example",
+      "readOnly": true
+    }
+  },
+  "required": [
+    "confirm",
+    "nonce",
+    "rendezvous_relay"
+  ],
+  "x-delimiter": "@@@",
+  "x-courier-kind": "approval",
+  "x-service": "peer_grant"
+}
