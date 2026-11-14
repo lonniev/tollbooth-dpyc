@@ -97,6 +97,34 @@ async def test_receive_happy_records_pending_and_notifies():
     assert upsert.await_args.kwargs == {"service_url": "https://svc", "display_name": "Svc", "note": "hi"}
 
 
+async def test_receive_answers_before_the_owner_dm_is_sent():
+    """The heads-up DM goes to each relay in turn and may take a minute. The
+    operator's request must not wait on it: Pricing Studio spun the whole time."""
+    import asyncio
+
+    relays_answer = asyncio.Event()
+    sent: list[str] = []
+
+    async def slow_dm(_runtime, text):
+        await relays_answer.wait()
+        sent.append(text)
+
+    with _authority_tools(_rt()) as tools, patch.object(at, "_signed_by", MagicMock(return_value=True)), \
+             patch.object(at, "_dm_owner", slow_dm), \
+             patch.object(at.operator_requests, "ensure_schema", AsyncMock()), \
+             patch.object(at.operator_requests, "upsert_pending", AsyncMock()):
+        r = await asyncio.wait_for(
+            tools["receive_adoption_request"](operator_npub="npub1op", service_url="https://svc"),
+            timeout=1,
+        )
+        assert r["success"] is True and r["status"] == "pending"
+        assert sent == []  # answered while the DM was still on its way
+
+        relays_answer.set()
+        await at._owner_dms_sent()
+    assert len(sent) == 1 and "requests adoption" in sent[0]
+
+
 # ── list_operator_requests ────────────────────────────────────────────────
 
 

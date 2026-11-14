@@ -57,6 +57,7 @@ async def test_a_provisioned_operator_records_and_tells_the_owner():
     r = await run()
     assert r["success"] is True
     assert "INSERT" in vault.writes
+    await at._owner_dms_sent()
     dm.assert_awaited_once()
 
 
