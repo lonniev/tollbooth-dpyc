@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.122.0] — 2026-11-15
+
+### Added
+
+- `tollbooth.ical`: an RFC 5545 writer for subscribable calendars (all-day and timed events, to-dos, folding by octets, stable UIDs), lifted from Good Earth so every operator serves feeds the same way. The caller passes its own `prodid` and UID `domain`.
+
 ## [0.121.0] — 2026-11-15
 
 ### Added
