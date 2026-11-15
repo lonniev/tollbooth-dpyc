@@ -1,1 +1,0 @@
-- An Authority answers an operator's adoption request, registry-update request or Neon-402 alert at once, and sends its owner the heads-up DM in the background. The DM goes to each relay in turn with a 10-second connect and acknowledgement window per relay, so one slow relay held an adoption request open for tens of seconds while Pricing Studio showed a spinner.
