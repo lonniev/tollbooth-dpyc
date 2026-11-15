@@ -1,0 +1,1 @@
+- `tollbooth.ical`: an RFC 5545 writer for subscribable calendars (all-day and timed events, to-dos, folding by octets, stable UIDs), lifted from Good Earth so every operator serves feeds the same way. The caller passes its own `prodid` and UID `domain`.
