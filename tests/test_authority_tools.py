@@ -307,6 +307,7 @@ async def test_update_operator_records_a_pending_request_and_tells_the_owner():
     insert = next(sql for sql, _ in vault.calls if sql.startswith("INSERT"))
     assert "operator_update_requests" in insert
     oracle.assert_not_awaited()  # nothing changes until the owner approves
+    await at._owner_dms_sent()
     dm.assert_awaited_once()
 
 

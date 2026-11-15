@@ -434,6 +434,33 @@ async def _dm_owner(runtime: OperatorRuntime, text: str) -> None:
         logger.info("Owner DM skipped: %s", exc)
 
 
+#: Owner DMs still being sent, held so a send is not garbage-collected mid-flight.
+_OWNER_DMS: set[asyncio.Task[None]] = set()
+
+
+def _dm_owner_soon(runtime: OperatorRuntime, text: str) -> None:
+    """Send an owner DM in the background, so the caller answers without waiting.
+
+    A DM is published to each relay in turn, and each may take its full connect and
+    acknowledgement timeouts. Awaited inline, one slow relay held an operator's
+    adoption request open for tens of seconds while Pricing Studio showed a spinner.
+    The durable queue is the record; the DM is a heads-up and may arrive a little later.
+    """
+    try:
+        task = asyncio.get_running_loop().create_task(_dm_owner(runtime, text))
+    except RuntimeError:
+        logger.info("Owner DM skipped: no running event loop")
+        return
+    _OWNER_DMS.add(task)
+    task.add_done_callback(_OWNER_DMS.discard)
+
+
+async def _owner_dms_sent() -> None:
+    """Wait until every owner DM in flight has been sent or given up."""
+    if _OWNER_DMS:
+        await asyncio.gather(*list(_OWNER_DMS), return_exceptions=True)
+
+
 def _resolve_npub_or_operator(npub: str) -> str:
     """Resolve npub, falling back to operator's own npub if empty."""
     try:
@@ -969,7 +996,7 @@ def register_authority_tools(
             )
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not record request: {exc}"}
-        await _notify_owner(f"Operator {npub[:16]}... asks to update its registry entry.")
+        _notify_owner(f"Operator {npub[:16]}... asks to update its registry entry.")
         return {
             "success": True,
             "status": operator_requests.PENDING,
@@ -1221,10 +1248,10 @@ def register_authority_tools(
     # Deferred operator adoption (the courtship)
     # ------------------------------------------------------------------
 
-    async def _notify_owner(text: str) -> None:
-        """Best-effort "check your queue" DM to the Authority owner. The
-        durable queue (``list_operator_requests``) is the source of truth."""
-        await _dm_owner(runtime, text + " Review it with list_operator_requests in the Pricing Studio.")
+    def _notify_owner(text: str) -> None:
+        """Best-effort "check your queue" DM to the Authority owner, sent in the
+        background. The durable queue (``list_operator_requests``) is the source of truth."""
+        _dm_owner_soon(runtime, text + " Review it with list_operator_requests in the Pricing Studio.")
 
     @tool
     async def receive_adoption_request(
@@ -1264,7 +1291,7 @@ def register_authority_tools(
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": f"Could not record request: {exc}"}
 
-        await _notify_owner(f"Operator {operator_npub[:16]}... ({service_url}) requests adoption.")
+        _notify_owner(f"Operator {operator_npub[:16]}... ({service_url}) requests adoption.")
         return {
             "success": True,
             "status": operator_requests.PENDING,
@@ -1298,10 +1325,10 @@ def register_authority_tools(
     # Neon persistence health — the accounting store are the Authority's charge
     # ------------------------------------------------------------------
 
-    async def _notify_owner_of_neon_402(operator_npub: str, detail: str) -> None:
+    def _notify_owner_of_neon_402(operator_npub: str, detail: str) -> None:
         """Best-effort heads-up DM to the Authority owner that an operator's
-        store is 402-locked. Never raises; the durable row is the record."""
-        await _dm_owner(runtime, (
+        store is 402-locked, sent in the background. The durable row is the record."""
+        _dm_owner_soon(runtime, (
             f"⚠ Operator {operator_npub[:16]}... reports its Neon store is "
             "402-locked (compute/storage quota exhausted) — paid tools are "
             "down for its patrons. Review with network_persistence_health / "
@@ -1362,10 +1389,10 @@ def register_authority_tools(
             await neon_alert_store.record(vault, npub, detail)
         except Exception as exc:  # noqa: BLE001
             # The operator is ours, so still reach the human, and report honestly rather than 500.
-            await _notify_owner_of_neon_402(npub, detail)
+            _notify_owner_of_neon_402(npub, detail)
             return {"success": False, "error": f"Could not record alert: {exc}"}
 
-        await _notify_owner_of_neon_402(npub, detail)
+        _notify_owner_of_neon_402(npub, detail)
         return {
             "success": True,
             "operator_npub": npub,
