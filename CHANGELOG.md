@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.120.1] — 2026-11-14
+
+### Fixed
+
+- An Authority answers an operator's adoption request, registry-update request or Neon-402 alert at once, and sends its owner the heads-up DM in the background. The DM goes to each relay in turn with a 10-second connect and acknowledgement window per relay, so one slow relay held an adoption request open for tens of seconds while Pricing Studio showed a spinner.
+
 ## [0.120.0] — 2026-11-12
 
 ### Changed
