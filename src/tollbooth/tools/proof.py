@@ -16,7 +16,7 @@ import asyncio
 import hashlib
 import logging
 import time as _time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC
 from typing import Any
 
@@ -34,8 +34,10 @@ PROOF_SERVICE = "npub_ownership"
 # The approval a patron gives to let a peer npub read their account and pay for
 # them (tools/peer.py). It rides the same signed-reply machinery as the proof.
 PEER_SERVICE = "peer_grant"
+# A statement an npub signs by replying (tools/signature.py), on the same machinery.
+SIGNATURE_SERVICE = "signature"
 # Every approval service whose open channels share one patron's DM queue.
-_APPROVAL_SERVICES = (PROOF_SERVICE, PEER_SERVICE)
+_APPROVAL_SERVICES = (PROOF_SERVICE, PEER_SERVICE, SIGNATURE_SERVICE)
 
 
 def _is_approval_state(state: str) -> bool:
@@ -593,6 +595,8 @@ class ApprovalReply:
     patron_sig: str
     patron_event_id: str
     popped: int
+    #: The whole signed layer (the NIP-17 seal or the NIP-04 DM), verified.
+    patron_event: dict[str, Any] = field(default_factory=dict)
 
 
 async def collect_signed_approval(
@@ -798,6 +802,7 @@ async def collect_signed_approval(
     return ApprovalReply(
         payload=matched_payload, patron_sig=patron_sig,
         patron_event_id=patron_event_id, popped=popped,
+        patron_event=dict((matched_candidate or {}).get("_sender_event") or {}),
     )
 
 

@@ -107,6 +107,33 @@ def sign_request(nsec: str, *, method: str, url: str, body: bytes) -> str:
     return "Nostr " + base64.b64encode(event.encode()).decode()
 
 
+def sign_signature_witness(
+    operator_nsec: str,
+    *,
+    signer_npub: str,
+    statement_hash: str,
+    reply_event_id: str,
+    challenge_hash: str,
+) -> str:
+    """The Operator's witness that ``signer_npub``'s reply ``reply_event_id`` signed ``statement_hash``.
+
+    A kind-27235 event like the provenance attestation: its ``u`` tag is a
+    sentinel and it has no ``method`` or ``payload``, so it never passes as a
+    signed request. ``challenge`` is sha256 of the one-time nonce the reply
+    answered.
+    """
+    from tollbooth.nostr_credentials import _npub_to_hex
+    from tollbooth.tools.signature import SIGNATURE_WITNESS_TOOL
+
+    return _signed_proof_event(operator_nsec, [
+        ["u", SIGNATURE_WITNESS_TOOL],
+        ["p", _npub_to_hex(signer_npub)],
+        ["e", reply_event_id],
+        ["sha256", statement_hash],
+        ["challenge", challenge_hash],
+    ])
+
+
 PROVENANCE_ATTESTATION_TOOL = "npub_proof_request"
 """``u``-tag sentinel marking a kind-27235 event as a proof-request provenance
 attestation, so it can never be mistaken for a signed request: it carries no
