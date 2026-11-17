@@ -834,6 +834,19 @@ class OperatorRuntime:
             description="Peer grant — let another npub see your account and pay for you",
             kind="approval",
         )
+        # Built-in template for signing a statement by reply (tools/signature.py).
+        templates["signature"] = CredentialTemplate(
+            service="signature",
+            version=1,
+            fields={
+                "agree": FieldSpec(
+                    required=True, sensitive=False,
+                    description="Any text — your signed reply is your signature on the statement above",
+                ),
+            },
+            description="Signature — sign the statement in this message by replying",
+            kind="approval",
+        )
 
         self._courier = SecureCourierService(
             operator_nsec=nsec,
@@ -842,6 +855,19 @@ class OperatorRuntime:
             templates=templates,
         )
         return self._courier
+
+    async def request_signature(self, signer_npub: str, statement: str) -> dict[str, Any]:
+        """DM ``signer_npub`` a statement to sign by replying; see ``tollbooth.tools.signature``.
+
+        For an operator's own tools: returns ``nonce`` and ``statement_hash``.
+        """
+        from tollbooth.tools.signature import request_signature_tool
+        return await request_signature_tool(self, signer_npub, statement, service_name=self._service_name)
+
+    async def receive_signature(self, signer_npub: str, nonce: str, statement_hash: str) -> dict[str, Any]:
+        """Collect a reply asked for by ``request_signature``, as a signature record."""
+        from tollbooth.tools.signature import receive_signature_tool
+        return await receive_signature_tool(self, signer_npub, nonce, statement_hash)
 
     def runtime_name(self, capability: str) -> str:
         """Resolve the full runtime tool name from a capability seed.

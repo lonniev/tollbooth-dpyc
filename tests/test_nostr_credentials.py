@@ -3090,6 +3090,8 @@ class TestSignedLayerSurfaced:
         seal = json.loads(nip44_decrypt(wrap["content"], ex._privkey_hex, wrap["pubkey"]))
         assert wrap["_sender_sig"] == seal["sig"]
         assert wrap["_sender_event_id"] == seal["id"]
+        # The whole seal is kept, so a reply can stand as a signature later.
+        assert wrap["_sender_event"] == {k: seal[k] for k in ("id", "pubkey", "created_at", "kind", "tags", "content", "sig")}
         assert seal["pubkey"] == patron.public_key.hex()
 
     def test_gift_wrap_with_a_forged_seal_signature_is_refused(self):
@@ -3131,6 +3133,7 @@ class TestSignedLayerSurfaced:
         assert plaintext == "hello"
         assert event["_sender_sig"] == event["sig"]
         assert event["_sender_event_id"] == event["id"]
+        assert event["_sender_event"]["sig"] == event["sig"] and "_relay" not in event["_sender_event"]
 
     def test_nip04_with_a_bad_signature_is_refused(self):
         ex = _make_exchange()

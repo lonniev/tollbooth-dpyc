@@ -2507,6 +2507,7 @@ class NostrCredentialExchange:
         # A kind-4 DM is signed by the sender directly; verify and surface it.
         event["_sender_event_id"] = _verify_signed_layer(event, "DM")
         event["_sender_sig"] = event["sig"]
+        event["_sender_event"] = {k: event[k] for k in _SIGNED_EVENT_FIELDS}
         event["encryption"] = "nip04"
         logger.info(
             "Received NIP-04 DM (legacy). Consider upgrading to a "
@@ -2584,6 +2585,7 @@ class NostrCredentialExchange:
         # patron's proof of possession that a proof grant later attests.
         event["_sender_event_id"] = _verify_signed_layer(seal, "seal")
         event["_sender_sig"] = seal["sig"]
+        event["_sender_event"] = {k: seal[k] for k in _SIGNED_EVENT_FIELDS}
 
         # Layer 3: Decrypt seal content with our privkey + sender pubkey
         try:

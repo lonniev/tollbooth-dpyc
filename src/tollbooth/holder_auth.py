@@ -77,6 +77,7 @@ REGISTRATIONS_PER_HOUR = 20
 # signature binds, so the body is read whole before the request is admitted.
 MAX_SIGNED_BODY_BYTES = 32 * 1024 * 1024
 _BODY_SHA256 = "dpyc.body_sha256"
+_BODY = "dpyc.body"
 # A signed request's NIP-98 credential, restated as a bearer: FastMCP admits
 # only the Bearer scheme to an authenticated route.
 _SIGNED_BEARER = "nostr."
@@ -102,6 +103,27 @@ def signed_npub() -> str | None:
     if token is None or token.client_id != SIGNED:
         return None
     return str((token.claims or {}).get("npub") or "") or None
+
+
+def signed_request() -> dict[str, Any] | None:
+    """The request in flight as its signer signed it, or None when it is not a signed request.
+
+    ``{"npub", "event", "body"}``: the verified NIP-98 event and the exact body
+    whose sha256 its ``payload`` tag carries. Kept whole, the pair is a
+    signature anyone can check later over everything the body says.
+    """
+    token = _request_token()
+    if token is None or token.client_id != SIGNED:
+        return None
+    import base64
+    import json
+
+    claims = token.claims or {}
+    try:
+        event = json.loads(base64.b64decode(token.token).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return {"npub": str(claims.get("npub") or ""), "event": event, "body": str(claims.get("body") or "")}
 
 
 class HolderAuthProvider(OAuthProvider):
@@ -490,7 +512,11 @@ def _signed_request_token(
     )
     if npub is None:
         return None
-    return AccessToken(token=value, client_id=SIGNED, scopes=[], claims={"npub": npub})
+    # The signed body rides along so a tool may keep the signature as a record
+    # of what was signed (``signed_request``); its hash is what the event binds.
+    body = conn.scope.get(_BODY) or b""
+    return AccessToken(token=value, client_id=SIGNED, scopes=[],
+                       claims={"npub": npub, "body": body.decode("utf-8", errors="replace")})
 
 
 class _HashSignedBody:
@@ -523,6 +549,7 @@ class _HashSignedBody:
             if message["type"] != "http.request" or not message.get("more_body"):
                 break
         scope[_BODY_SHA256] = digest.hexdigest()
+        scope[_BODY] = b"".join(m.get("body", b"") for m in held)
         scope["headers"] = [
             (name, b"Bearer " + _SIGNED_BEARER.encode() + value[6:].strip())
             if name == b"authorization" else (name, value)
