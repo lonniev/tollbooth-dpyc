@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.123.0] — 2026-11-17
+
+### Added
+
+- Signatures over a statement, built on two protocols already in service and adding no event kind (`tollbooth.tools.signature`). The statement is normalized and hashed, as Vinney Cavallo's Attestr draft does.
+  - **Signed request:** an agent signs a statement by calling a tool with its own key, and `signed_request_record(hash)` keeps the NIP-98 event plus the exact body it signed. `holder_auth.signed_request()` exposes the request in flight.
+  - **Signed reply:** `OperatorRuntime.request_signature` / `receive_signature` DM the statement on the Secure Courier, using the new `signature` approval template. They keep the signer's verified reply and an Operator-signed witness (`identity_proof.sign_signature_witness`).
+  - `verify_signature_record` checks either kind of record from its own contents.
+- The courier now keeps the whole verified signed layer of a reply (`_sender_event`), and `ApprovalReply.patron_event` carries it. Existing proof and peer-grant flows are unchanged.
+
 ## [0.122.0] — 2026-11-15
 
 ### Added
