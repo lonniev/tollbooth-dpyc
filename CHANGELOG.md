@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.124.0] — 2026-11-18
+
+### Added
+
+- `tollbooth.cashu`: the wallet side of Cashu ecash, for escrow an Operator can build but never spend. Blind and unblind (NUT-00), DLEQ checks on every promise (NUT-12), P2PK locks and their SIG_ALL swap and melt messages (NUT-11), mint quotes bound to a key (NUT-20), raw BIP-340 sign and verify, and `MintClient` for an https mint on a public address. Checked against the specification's published test vectors. `coincurve` is now an explicit dependency.
+
 ## [0.123.0] — 2026-11-17
 
 ### Added
