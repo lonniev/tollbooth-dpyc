@@ -45,6 +45,7 @@ import functools
 import inspect
 import logging
 import os
+import re
 import signal
 import threading
 import time
@@ -62,6 +63,9 @@ from tollbooth.identity_proof import require_held_grant
 from tollbooth.oauth_situation import OAuthSituation
 from tollbooth.tool_identity import capability_uuid
 from tollbooth.vault_backend import LedgerUnavailableError, LedgerWriteError
+
+#: "401" as a status on its own; inside an id or an amount ("a4016584", "2401 sats") it is not one.
+_HTTP_401 = re.compile(r"(?<![0-9a-z])401(?![0-9a-z])")
 
 logger = logging.getLogger(__name__)
 
@@ -4178,7 +4182,7 @@ class OperatorRuntime:
                         # refresh flow without parsing prose.
                         msg = str(exc).lower()
                         is_upstream_auth = (
-                            "401" in msg
+                            _HTTP_401.search(msg) is not None
                             or "unauthorized" in msg
                             or "invalid_grant" in msg
                             or "token expired" in msg
