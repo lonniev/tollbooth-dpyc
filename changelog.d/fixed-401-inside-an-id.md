@@ -1,0 +1,1 @@
+- A tool refusal whose text merely contains "401" — a random task id such as `a4016584…`, or "2401 sats" — no longer comes back as "upstream authorization needs to be re-granted" with OAuth steps; only a standalone 401 does.

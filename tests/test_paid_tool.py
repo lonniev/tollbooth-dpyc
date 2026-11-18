@@ -474,6 +474,22 @@ class TestErrorCodeMapping:
         assert any("begin_oauth" in s for s in result["next_steps"])
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("said", ["No task 'a4016584a06755c2' is yours to see.", "Pay 2401 sats first.", "Code 4010 is unknown."])
+    async def test_a_401_inside_an_id_or_an_amount_is_no_auth_failure(self, said):
+        """A refusal naming a random id or an amount that happens to hold '401' keeps its own words."""
+        from tollbooth.constants import ErrorCode
+        rt = _make_runtime()
+        await _inject_fake_cache(rt, balance=1000)
+
+        @rt.paid_tool(capability_uuid("my_tool"))
+        async def my_tool(npub: str = "") -> dict:
+            raise ValueError(said)
+
+        result = await my_tool(npub=VALID_NPUB)
+        assert result["error_code"] == ErrorCode.TOOL_INPUT_INVALID
+        assert said in result["error"]
+
+    @pytest.mark.asyncio
     async def test_invalid_grant_routes_to_oauth_refresh_code(self):
         from tollbooth.constants import ErrorCode
         rt = _make_runtime()
