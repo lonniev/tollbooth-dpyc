@@ -34,6 +34,8 @@ dependencies = [
     # is the whole of the argument. The lock happened to resolve 50.0.0, which is
     # why nothing broke and why nobody noticed for eight days.
     "cryptography>=49.0.0",
+    # secp256k1 point arithmetic and BIP-340 for tollbooth.cashu (already present via pynostr).
+    "coincurve==21.0.0",
 ]
 
 [project.optional-dependencies]

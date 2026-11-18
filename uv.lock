@@ -3063,6 +3063,7 @@ name = "tollbooth-dpyc"
 version = "0.123.0"
 source = { editable = "." }
 dependencies = [
+    { name = "coincurve" },
     { name = "cryptography" },
     { name = "httpx" },
     { name = "pynostr" },
@@ -3096,6 +3097,7 @@ x402 = [
 
 [package.metadata]
 requires-dist = [
+    { name = "coincurve", specifier = "==21.0.0" },
     { name = "cryptography", specifier = ">=49.0.0" },
     { name = "eth-account", marker = "extra == 'x402'", specifier = ">=0.13.0" },
     { name = "fastmcp", marker = "extra == 'dev'", specifier = ">=3.2.0" },
