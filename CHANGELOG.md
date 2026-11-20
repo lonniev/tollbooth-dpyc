@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.126.0] — 2026-11-20
+
+### Added
+
+- `bolt11.decode` reads the paid node, `Invoice.payee` (33-byte hex): from the invoice's `n` field, or else recovered from its signature. A Cashu mint's invoice names the Lightning node behind it.
+
 ## [0.125.0] — 2026-11-20
 
 ### Added
