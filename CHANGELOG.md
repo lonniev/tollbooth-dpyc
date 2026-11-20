@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.125.0] — 2026-11-20
+
+### Added
+
+- An operator's vault heals itself when its Authority rotates the database password. Approving an adoption, even a repeat one, rotates it, and a process that booted earlier used to fail every database call until it was redeployed. Now, when Postgres refuses the login (SQLSTATE class 28), the vault re-reads the newest bootstrap config from the relays and switches to it if it names the same database host. It does this once, single-flight and at most once a minute, then retries the query.
+
 ## [0.124.1] — 2026-11-18
 
 ### Fixed

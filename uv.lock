@@ -3060,7 +3060,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/bb/89/6df40b0c5fd9a1c30
 
 [[package]]
 name = "tollbooth-dpyc"
-version = "0.124.1"
+version = "0.125.0"
 source = { editable = "." }
 dependencies = [
     { name = "coincurve" },
