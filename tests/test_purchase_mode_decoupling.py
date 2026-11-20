@@ -123,5 +123,7 @@ async def test_vault_authority_source_ignores_purchase_mode(monkeypatch):
          patch("tollbooth.vaults.NeonVault") as NV:
         NV.return_value.ensure_schema = AsyncMock()
         await rt.vault()
+    from tollbooth.runtime import _newest_neon_url
     NV.assert_called_once_with(database_url="postgres://bootstrapped",
-                               encryption_nsec_hex="ff")
+                               encryption_nsec_hex="ff",
+                               refresh_database_url=_newest_neon_url)
