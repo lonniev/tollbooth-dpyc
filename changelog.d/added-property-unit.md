@@ -1,1 +1,0 @@
-- `PropertySpec.unit`: what a number counts (`"%"`, `"days"`, `"commissions"`), carried in every property listing so a page shows it beside the value.
