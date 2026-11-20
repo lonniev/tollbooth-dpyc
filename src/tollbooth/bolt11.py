@@ -2,8 +2,9 @@
 
 A payer needs three facts from an invoice it did not write: how much it asks
 for, which payment hash settles it, and when it stops being payable. This
-module reads those and nothing else. It does not check the invoice's
-signature and it does not pay — the wallet that pays does both.
+module reads those, and the node that is paid (``payee``: the ``n`` field, or
+the key that signed the invoice). It does not pay; the wallet that pays checks
+the invoice again.
 
     asked = decode(invoice)
     asked.amount_msat      # None when the invoice names no amount
@@ -38,6 +39,8 @@ _TIMESTAMP_GROUPS = 7      # 35 bits
 _SIGNATURE_GROUPS = 104    # 520 bits
 _TAG_PAYMENT_HASH = 1      # `p`
 _TAG_EXPIRY = 6            # `x`
+_TAG_PAYEE = 19            # `n`
+_PAYEE_GROUPS = 53         # 265 bits carrying a 33-byte key
 _DEFAULT_EXPIRY_SECONDS = 3600
 _PAYMENT_HASH_GROUPS = 52  # 260 bits carrying a 256-bit hash
 # An invoice is a QR code's worth of text. Anything far longer is not one.
@@ -57,6 +60,8 @@ class Invoice:
     payment_hash: str
     created_at: int
     expiry_seconds: int
+    #: The paid node's public key (33 bytes, hex): the ``n`` field, or the key that signed it.
+    payee: str = ""
 
     @property
     def expires_at(self) -> int:
@@ -68,6 +73,35 @@ def _to_int(groups: list[int]) -> int:
     for g in groups:
         value = (value << 5) | g
     return value
+
+
+def _to_bytes(groups: list[int]) -> bytes:
+    """5-bit groups as bytes, the last byte padded with zero bits (BOLT11's signed form)."""
+    acc, bits, out = 0, 0, bytearray()
+    for g in groups:
+        acc = (acc << 5) | g
+        bits += 5
+        while bits >= 8:
+            bits -= 8
+            out.append((acc >> bits) & 0xFF)
+    if bits:
+        out.append((acc << (8 - bits)) & 0xFF)
+    return bytes(out)
+
+
+def _signer(hrp: str, data: list[int]) -> str:
+    """The key that signed the invoice, recovered from its signature; "" when it cannot be."""
+    import hashlib
+
+    from coincurve import PublicKey
+
+    signed = hrp.encode("utf-8") + _to_bytes(data[:-_SIGNATURE_GROUPS])
+    sig = _to_bytes(data[-_SIGNATURE_GROUPS:])  # 64 bytes of r||s, then the recovery id
+    try:
+        key = PublicKey.from_signature_and_message(sig[:65], signed, hasher=lambda m: hashlib.sha256(m).digest())
+    except (ValueError, Exception):  # noqa: BLE001 — any failure is "not recoverable"
+        return ""
+    return str(key.format(compressed=True).hex())
 
 
 def _amount_msat(digits: str | None, multiplier: str | None) -> int | None:
@@ -114,6 +148,7 @@ def decode(invoice: str) -> Invoice:
     fields = data[_TIMESTAMP_GROUPS:-_SIGNATURE_GROUPS]
 
     payment_hash: str | None = None
+    payee = ""
     expiry = _DEFAULT_EXPIRY_SECONDS
     pos = 0
     while pos < len(fields):
@@ -138,6 +173,8 @@ def decode(invoice: str) -> Invoice:
             payment_hash = f"{_to_int(body) >> 4:064x}"
         elif tag == _TAG_EXPIRY:
             expiry = _to_int(body)
+        elif tag == _TAG_PAYEE and length == _PAYEE_GROUPS:
+            payee = f"{_to_int(body) >> 1:066x}"
 
     if payment_hash is None:
         raise Bolt11Error("invoice names no payment hash")
@@ -148,4 +185,5 @@ def decode(invoice: str) -> Invoice:
         payment_hash=payment_hash,
         created_at=created_at,
         expiry_seconds=expiry,
+        payee=payee or _signer(hrp, data),
     )

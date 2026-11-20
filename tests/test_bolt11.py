@@ -126,3 +126,21 @@ class TestRefusals:
     def test_an_enormous_string_is_refused_without_parsing(self) -> None:
         with pytest.raises(Bolt11Error, match="too long"):
             decode("lnbc1" + "q" * 10_000)
+
+
+
+# --- the paid node ------------------------------------------------------------
+
+#: The spec's examples are signed by this node ("…to me @03e7156ae33b…").
+SPEC_PAYEE = "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad"
+
+
+@pytest.mark.parametrize("invoice", [DONATION, COFFEE, TESTNET])
+def test_the_payee_is_recovered_from_the_signature(invoice):
+    assert decode(invoice).payee == SPEC_PAYEE
+
+
+def test_a_signature_that_recovers_nothing_names_no_payee():
+    from tollbooth.bolt11 import _signer
+
+    assert _signer("lnbc", [0] * 200) == ""
