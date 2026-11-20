@@ -309,3 +309,23 @@ async def test_a_text_value_reads_back_as_it_was_set():
     got = await store.values(OPERATOR)
     assert {n: v for n, (v, _) in got.items()} == {
         "reference_edit_model": "nvidia/nemotron-3.5-super-vl:free", "units": "C", "order": ["gdd"]}
+
+
+# --- units ----------------------------------------------------------------------
+
+
+def test_a_unit_travels_with_its_property_in_the_listing():
+    spec = PropertySpec(kind="number", default=75, label="Proven", minimum=0, maximum=100, unit="%")
+    row = listing({"proven": spec}, {})[0]
+    assert row["unit"] == "%" and row["value"] == 75
+
+
+def test_no_unit_adds_nothing():
+    spec = PropertySpec(kind="number", default=3, label="Finished", minimum=1, maximum=100)
+    assert "unit" not in listing({"n": spec}, {})[0]
+
+
+@pytest.mark.parametrize("unit", ["x" * 25, "a\nb"])
+def test_a_unit_is_a_short_word_or_symbol(unit):
+    with pytest.raises(ValueError):
+        PropertySpec(kind="number", default=1, label="L", minimum=0, maximum=9, unit=unit)

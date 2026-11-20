@@ -84,6 +84,8 @@ class PropertySpec:
     maximum: float | None = None
     suggestions: tuple[str, ...] = ()
     follows: str = "account"
+    #: What a number counts, shown beside its value: ``"%"``, ``"days"``, ``"sats"``, ``"commissions"``.
+    unit: str = ""
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -92,6 +94,8 @@ class PropertySpec:
             raise ValueError(f"follows must be one of {FOLLOWS}")
         if self.kind == "choice" and not self.choices:
             raise ValueError("a choice property needs its choices")
+        if len(self.unit) > 24 or any(ord(c) < 32 for c in self.unit):
+            raise ValueError("a unit is a short word or symbol")
         if self.default is not None:
             validate(self, self.default)  # a default that would be refused is a bug
 
@@ -108,6 +112,8 @@ class PropertySpec:
             out["maximum"] = self.maximum
         if self.suggestions:
             out["suggestions"] = list(self.suggestions)
+        if self.unit:
+            out["unit"] = self.unit
         return out
 
 
