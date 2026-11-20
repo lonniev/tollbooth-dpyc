@@ -1,1 +1,0 @@
-- `bolt11.decode` reads the paid node, `Invoice.payee` (33-byte hex): from the invoice's `n` field, or else recovered from its signature. A Cashu mint's invoice names the Lightning node behind it.
