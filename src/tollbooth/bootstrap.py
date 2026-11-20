@@ -150,6 +150,18 @@ async def ensure_bootstrapped(
         return result
 
 
+def forget_bootstrap() -> None:
+    """Drop the memoised result, so the next ``ensure_bootstrapped`` reads the relays again.
+
+    For one case only: the database refused the password the cached config
+    carries. An Authority rotates an operator's database password whenever it
+    approves an adoption (again), and publishes the new config as a fresh
+    replaceable event, so the newest event on the relays is the cure.
+    """
+    global _cached_result
+    _cached_result = None
+
+
 # Strong refs, so a spread outlives the request that started it.
 _spreads: set[asyncio.Task[None]] = set()
 

@@ -177,6 +177,21 @@ def classify_operator_secrets(
     return configured, missing, optional_missing
 
 
+async def _newest_neon_url() -> str | None:
+    """The Neon URL in the newest bootstrap config on the relays.
+
+    An Authority rotates an operator's database password when it approves an
+    adoption, even a repeat one, and publishes the new config. A process that
+    booted before then holds the old password; its vault asks here once the
+    database refuses it, instead of waiting for a redeploy.
+    """
+    from tollbooth.bootstrap import ensure_bootstrapped, forget_bootstrap
+
+    forget_bootstrap()
+    result = await ensure_bootstrapped()
+    return result.neon_database_url if result.success else None
+
+
 class OperatorRuntime:
     """Core DPYC protocol engine shared by all operators.
 
@@ -606,6 +621,7 @@ class OperatorRuntime:
         self._vault = NeonVault(
             database_url=result.neon_database_url,
             encryption_nsec_hex=result.encryption_nsec_hex,
+            refresh_database_url=_newest_neon_url,
         )
         await self._vault.ensure_schema()
         logger.info("Vault bootstrapped from Authority (encrypted)")

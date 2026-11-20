@@ -16,9 +16,12 @@ Call ``ensure_schema()`` once at startup to create tables if they don't exist.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -27,6 +30,9 @@ import httpx
 from tollbooth.vault_backend import LedgerVersionConflict
 
 logger = logging.getLogger(__name__)
+
+#: Least time between two reads of a fresh connection string after a refused login.
+LOGIN_REFRESH_SECONDS = 60.0
 
 
 class NeonQueryError(Exception):
@@ -76,7 +82,14 @@ class NeonVault:
         database_url: str,
         http_endpoint: str | None = None,
         encryption_nsec_hex: str | None = None,
+        refresh_database_url: Callable[[], Awaitable[str | None]] | None = None,
     ) -> None:
+        # Asked for the current connection string when Postgres refuses this one's
+        # login (an Authority rotated the password); None keeps today's behaviour.
+        self._refresh_database_url = refresh_database_url
+        self._refresh_lock = asyncio.Lock()
+        self._refreshed_at = 0.0
+        self._database_url = database_url
         parsed = urlparse(database_url)
 
         # Keep the pooler endpoint — Neon HTTP SQL API requires it.
@@ -183,6 +196,58 @@ class NeonVault:
         query: str,
         params: list[Any] | None = None,
     ) -> dict[str, Any]:
+        """Execute a single SQL statement; once more on fresh credentials if the login was refused."""
+        try:
+            return await self._execute_once(query, params)
+        except NeonQueryError as exc:
+            if not await self._heal_login(exc):
+                raise
+        return await self._execute_once(query, params)
+
+    async def _execute_batch(self, queries: list[str]) -> list[dict[str, Any]]:
+        """Run several statements in one transaction; once more on fresh credentials if the login was refused."""
+        try:
+            return await self._execute_batch_once(queries)
+        except NeonQueryError as exc:
+            if not await self._heal_login(exc):
+                raise
+        return await self._execute_batch_once(queries)
+
+    async def _heal_login(self, exc: NeonQueryError) -> bool:
+        """After a refused login, take the current connection string; True when it changed.
+
+        Single-flight, and at most once a minute: a refused login that a fresh
+        read cannot cure stays a refused login, and is not retried in a loop.
+        """
+        from tollbooth.persistence_errors import is_refused_login
+
+        if self._refresh_database_url is None or not is_refused_login(exc):
+            return False
+        before = self._database_url
+        async with self._refresh_lock:
+            if self._database_url != before:
+                return True  # another caller already healed it
+            now = time.monotonic()
+            if now - self._refreshed_at < LOGIN_REFRESH_SECONDS:
+                return False
+            self._refreshed_at = now
+            fresh = await self._refresh_database_url()
+            if not fresh or fresh == self._database_url:
+                logger.warning("Neon refused the login and no newer connection string was found.")
+                return False
+            if (urlparse(fresh).hostname or "") != self._endpoint_host:
+                logger.warning("A newer connection string names another database host; not switching.")
+                return False
+            self._database_url = fresh
+            self._client.headers["Neon-Connection-String"] = fresh
+            logger.info("Neon refused the login; switched to the Authority's newer connection string.")
+            return True
+
+    async def _execute_once(
+        self,
+        query: str,
+        params: list[Any] | None = None,
+    ) -> dict[str, Any]:
         """Execute a single SQL statement via Neon HTTP API.
 
         Returns the result dict with ``rows``, ``rowCount``, ``command``, etc.
@@ -226,7 +291,7 @@ class NeonVault:
 
         return data
 
-    async def _execute_batch(self, queries: list[str]) -> list[dict[str, Any]]:
+    async def _execute_batch_once(self, queries: list[str]) -> list[dict[str, Any]]:
         """Run several statements in ONE request and ONE transaction.
 
         Neon's HTTP endpoint takes ``{"queries": [{"query", "params"}, …]}``

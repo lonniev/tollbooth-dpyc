@@ -31,6 +31,16 @@ def is_permanent_sql_error(exc: Exception) -> bool:
     return bool(code) and code[:2] in _PERMANENT_SQLSTATE_CLASSES
 
 
+def is_refused_login(exc: Exception) -> bool:
+    """True when the database refused this connection's credentials (SQLSTATE class 28).
+
+    Permanent for the credentials in hand, but not for the operator: an Authority
+    that rotated the password has already published the new one.
+    """
+    code = getattr(exc, "code", "") or ""
+    return code[:2] == "28" or "password authentication failed" in str(exc).lower()
+
+
 def is_quota_error(exc: Exception) -> bool:
     """True when *exc* is the persistence provider (Neon) refusing with HTTP
     402 — the database has exhausted its compute/storage quota. Non-transient
