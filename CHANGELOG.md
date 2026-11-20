@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.127.0] — 2026-11-20
+
+### Added
+
+- `PropertySpec.unit`: what a number counts (`"%"`, `"days"`, `"commissions"`), carried in every property listing so a page shows it beside the value.
+
 ## [0.126.0] — 2026-11-20
 
 ### Added
