@@ -1,1 +1,0 @@
-- `tollbooth.llm_call`: `ask()` sends one generation (reasoning effort, an optional prompt-cached system block, optional web search) and raises a refund-safe `LlmAnswerError` on any provider refusal; `tagged()` reads the answer's JSON block; `number`, `whole`, `text`, `url` and `one_of` check each field. Lifted from goodearth-mcp so Task Booth can draft jobs without a third copy.

@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.128.0] — 2026-11-21
+
+### Added
+
+- `tollbooth.llm_call`: `ask()` sends one generation (reasoning effort, an optional prompt-cached system block, optional web search) and raises a refund-safe `LlmAnswerError` on any provider refusal; `tagged()` reads the answer's JSON block; `number`, `whole`, `text`, `url` and `one_of` check each field. Lifted from goodearth-mcp so Task Booth can draft jobs without a third copy.
+
 ## [0.127.0] — 2026-11-20
 
 ### Added
