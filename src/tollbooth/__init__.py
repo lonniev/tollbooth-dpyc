@@ -13,7 +13,7 @@ from tollbooth.bootstrap import BootstrapClient, BootstrapResult, ensure_bootstr
 from tollbooth.btcpay_client import BTCPayAuthError, BTCPayClient, BTCPayError
 from tollbooth.certificate import UNDERSTOOD_PROTOCOLS, CertificateError, verify_certificate_auto
 from tollbooth.config import TollboothConfig
-from tollbooth.constants import ECOSYSTEM_LINKS, LOW_BALANCE_FLOOR_API_SATS, MAX_INVOICE_SATS
+from tollbooth.constants import LOW_BALANCE_FLOOR_API_SATS, MAX_INVOICE_SATS
 from tollbooth.credential_vault_backend import CredentialVaultBackend, SessionBindingBackend
 from tollbooth.identity_credential import (
     IDENTITY_CREDENTIAL_KIND,
@@ -250,7 +250,6 @@ __all__ = [
     "AUTHORITY_BASE_CATALOG",
     # Credential Card
     "DEFAULT_REGISTRY_URL",
-    "ECOSYSTEM_LINKS",
     "IDENTITY_CREDENTIAL_KIND",
     "IDENTITY_CREDENTIAL_LABEL",
     "IDENTITY_CREDENTIAL_TAG",

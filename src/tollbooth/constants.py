@@ -186,17 +186,3 @@ class ErrorCode:
 # MCP-to-MCP calls, so it never reads the dpyc-community registry on GitHub
 # itself. Changing this is the only bootstrap coordinate baked into the SDK.
 DPYC_ORACLE_MCP_URL = "https://dpyc-oracle.fastmcp.app/mcp"
-
-# Canonical links to DPYC ecosystem repos and live services.
-# Operators should include these in service_status responses so
-# AI agents can discover sibling services without web search.
-ECOSYSTEM_LINKS: dict[str, str] = {
-    "dpyc_community": "https://github.com/lonniev/dpyc-community",
-    "tollbooth_dpyc": "https://github.com/lonniev/tollbooth-dpyc",
-    "tollbooth_authority": "https://github.com/lonniev/tollbooth-authority",
-    "thebrain_mcp": "https://github.com/lonniev/thebrain-mcp",
-    "excalibur_mcp": "https://github.com/lonniev/excalibur-mcp",
-    "dpyc_oracle": "https://github.com/lonniev/dpyc-oracle",
-    "tollbooth_sample": "https://github.com/lonniev/tollbooth-sample",
-    "dpyc_oracle_mcp": DPYC_ORACLE_MCP_URL,
-}
