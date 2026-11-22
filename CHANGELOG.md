@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.130.0] — 2026-11-22
+
+### Removed
+
+- `ECOSYSTEM_LINKS` is gone from `tollbooth.constants` and the package root. It was a frozen 8-entry roster that nothing in the fleet read; the Oracle's `list_services` reads the live dpyc-community registry instead.
+
 ## [0.129.0] — 2026-11-22
 
 ### Added
