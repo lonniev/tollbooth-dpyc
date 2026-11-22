@@ -292,6 +292,8 @@ class OperatorRuntime:
         # to in-flight fire-and-forget tasks so they aren't GC'd mid-send.
         self._last_quota_alert_at: float = 0.0
         self._quota_alert_tasks: set[Any] = set()
+        # The pleas this process has sent whose cause it has not yet seen clear.
+        self._open_pleas: set[str] = set()
         self._proof_grant_revocations: Any | None = None  # lazy ProofGrantRevocations
         self._operator_pubkey_hex: str | None = None
         self._npub_proof_field = npub_proof_field
@@ -732,6 +734,85 @@ class OperatorRuntime:
             return
         self._quota_alert_tasks.add(task)
         task.add_done_callback(self._quota_alert_tasks.discard)
+
+    # ------------------------------------------------------------------
+    # Pleas: the operator asks its own human for money
+    # ------------------------------------------------------------------
+
+    async def plead(self, cause: str, message: str) -> None:
+        """Ask this operator's human, by a DM to its own npub, to fund an outside
+        account that has run dry: an LLM router's credits, an X developer app's.
+
+        Pricing Studio shows a DM an operator sends itself. The plea stays on the
+        relays for ``PLEA_LASTS_S`` so it waits for a human who is not looking,
+        and repeats at most every ``PLEA_REPEAT_S`` per ``cause`` while the
+        outage lasts: the relays remember the last one (a public
+        ``dpyc-plea-<cause>`` marker on the NIP-04 leg), so every instance of a
+        serverless operator agrees without a database.
+
+        Fire-and-forget: relay I/O runs on a daemon thread, nothing is raised,
+        and the caller (a patron's call, a scheduler tick) is never delayed.
+        ``cause`` becomes a public tag, so it must be a short lowercase slug; the
+        message is encrypted.
+        """
+        if not isinstance(cause, str) or not _PLEA_CAUSE.fullmatch(cause):
+            logger.warning("plead: refused cause %r (want a short lowercase slug)", cause)
+            return
+        text = str(message)[:_PLEA_MESSAGE_MAX]
+        sent = await self._self_dm_sender()
+        if sent is None:
+            return
+        exchange, self_npub = sent
+        tag = f"{_PLEA_TAG_PREFIX}{cause}"
+        self._open_pleas.add(cause)
+
+        def _run() -> None:
+            try:
+                if exchange.has_recent_tagged_dm(self_npub, tag, within_seconds=PLEA_REPEAT_S):
+                    return  # this plea is still fresh on the relays
+                exchange.send_dm(
+                    self_npub, text, extra_tags=[["t", tag]], expires_in=PLEA_LASTS_S,
+                )
+            except Exception:  # a plea never breaks its caller
+                logger.debug("plea %s not sent (best-effort)", cause, exc_info=True)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    async def plea_resolved(self, cause: str, message: str) -> None:
+        """Tell the human a pleaded ``cause`` has cleared, once.
+
+        Free to call on every success: it does nothing unless this process
+        pleaded for ``cause``, so it costs no relay query. An instance that
+        never saw the outage says nothing; the pleas stopping is then the sign.
+        """
+        if cause not in self._open_pleas:
+            return
+        self._open_pleas.discard(cause)
+        sent = await self._self_dm_sender()
+        if sent is None:
+            return
+        exchange, self_npub = sent
+        text = str(message)[:_PLEA_MESSAGE_MAX]
+
+        def _run() -> None:
+            try:
+                exchange.send_dm(self_npub, text, expires_in=PLEA_LASTS_S)
+            except Exception:  # a "resolved" note is a courtesy
+                logger.debug("plea-resolved %s not sent (best-effort)", cause, exc_info=True)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    async def _self_dm_sender(self) -> tuple[Any, str] | None:
+        """The relay exchange and this operator's own npub, or None when either is missing."""
+        try:
+            self_npub = self.operator_npub()
+            courier = await self.courier()
+        except Exception:  # noqa: BLE001
+            return None
+        exchange = getattr(courier, "_exchange", None)
+        if not self_npub or exchange is None:
+            return None
+        return exchange, self_npub
 
     # ------------------------------------------------------------------
     # Secure Courier
@@ -4428,6 +4509,15 @@ def _build_initial_pricing_model(
 # ======================================================================
 # Standard tool registration
 # ======================================================================
+
+
+#: A plea repeats at most this often per cause while its outage lasts.
+PLEA_REPEAT_S = 12 * 3600
+#: A plea stays on the relays this long (NIP-40), so it waits for its human.
+PLEA_LASTS_S = 7 * 86400
+_PLEA_TAG_PREFIX = "dpyc-plea-"
+_PLEA_CAUSE = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+_PLEA_MESSAGE_MAX = 2000
 
 
 # Public marker tag stamped on low-cert-balance self-notice DMs so the

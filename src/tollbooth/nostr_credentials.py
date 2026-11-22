@@ -300,6 +300,12 @@ _PUBLISH_ACK_TIMEOUT = 10
 # newly-broken relay can keep being pinned as a rendezvous.
 _DM_READ_PROBE_TTL = 600.0
 
+#: How long a DM stays on the relays (NIP-40) unless the sender says otherwise.
+#: Ten minutes: a courier exchange is read at once or never.
+DM_EXPIRES_IN = 600
+#: The longest a sender may keep a DM on the relays.
+DM_EXPIRES_IN_MAX = 30 * 86400
+
 # NACK copy sent to the sender of a popped courier DM whose anti-replay
 # token did NOT match the open channel. Deliberately does NOT reveal the
 # expected nonce phrase — telling an unknown sender the token they should
@@ -636,6 +642,7 @@ class NostrCredentialExchange:
         target_relay: str | None = None,
         extra_tags: list[list[str]] | None = None,
         rumor_tags: list[list[str]] | None = None,
+        expires_in: int = DM_EXPIRES_IN,
     ) -> bool:
         """Send a DM via both NIP-17 gift wrap and NIP-04 legacy.
 
@@ -665,7 +672,17 @@ class NostrCredentialExchange:
                 rumor (a courier request's ``form`` and ``attestation``).
                 They are encrypted with the message. The NIP-04 leg cannot
                 carry them.
+            expires_in: Seconds both legs stay on the relays (NIP-40), 60 to
+                ``DM_EXPIRES_IN_MAX``. Ten minutes by default; a message a
+                human may not read at once (an operator's plea) asks for longer.
         """
+        if (
+            isinstance(expires_in, bool) or not isinstance(expires_in, int)
+            or not 60 <= expires_in <= DM_EXPIRES_IN_MAX
+        ):
+            raise CourierValidationError(
+                f"expires_in must be whole seconds from 60 to {DM_EXPIRES_IN_MAX}."
+            )
         if not self._enabled:
             raise CourierNotReady("Secure Courier not enabled.")
 
@@ -682,7 +699,7 @@ class NostrCredentialExchange:
         return self._send_dual(
             self._privkey_hex, self._pubkey_hex, recipient_npub, recipient_hex,
             message_text, target_relay=target_relay,
-            rumor_tags=rumor_tags, extra_tags=extra_tags,
+            rumor_tags=rumor_tags, extra_tags=extra_tags, expires_in=expires_in,
         )
 
     def _send_dm_as(
@@ -754,6 +771,7 @@ class NostrCredentialExchange:
         target_relay: str | None = None,
         rumor_tags: list[list[str]] | None = None,
         extra_tags: list[list[str]] | None = None,
+        expires_in: int = DM_EXPIRES_IN,
     ) -> bool:
         """Send the NIP-17 gift wrap, then the NIP-04 copy.
 
@@ -774,6 +792,7 @@ class NostrCredentialExchange:
                 message = self._build_gift_wrap_with(
                     sender_privkey_hex, sender_pubkey_hex,
                     recipient_hex, message_text, rumor_tags,
+                    expires_in=expires_in,
                 )
                 nip17_ok, detail = self._publish_event(message, target_relay)
             except Exception as exc:  # noqa: BLE001
@@ -796,7 +815,7 @@ class NostrCredentialExchange:
         try:
             message = self._build_nip04_dm_with(
                 sender_privkey_hex, sender_pubkey_hex, recipient_hex,
-                message_text, extra_tags=extra_tags,
+                message_text, extra_tags=extra_tags, expires_in=expires_in,
             )
             nip04_ok, detail = self._publish_event(message, target_relay)
         except Exception as exc:  # noqa: BLE001
@@ -833,6 +852,8 @@ class NostrCredentialExchange:
         recipient_hex: str,
         message_text: str,
         rumor_tags: list[list[str]] | None = None,
+        *,
+        expires_in: int = DM_EXPIRES_IN,
     ) -> str:
         """Build a NIP-17 gift-wrapped DM with explicit sender keys.
 
@@ -870,7 +891,7 @@ class NostrCredentialExchange:
         wrap_content = _nip44_encrypt(
             json.dumps(seal.to_dict()), ephemeral_sk.hex(), recipient_hex,
         )
-        expiry = str(int(time.time()) + 600)  # NIP-40: expire after 10 minutes
+        expiry = str(int(time.time()) + expires_in)  # NIP-40 auto-delete
         wrap = Event(
             kind=_KIND_GIFT_WRAP,
             content=wrap_content,
@@ -910,6 +931,7 @@ class NostrCredentialExchange:
         message_text: str,
         *,
         extra_tags: list[list[str]] | None = None,
+        expires_in: int = DM_EXPIRES_IN,
     ) -> str:
         """Build a NIP-04 kind 4 encrypted DM with explicit sender keys.
 
@@ -925,7 +947,7 @@ class NostrCredentialExchange:
             message_text, sender_privkey_hex, recipient_hex,
         )
         now = int(time.time())
-        expiry = str(now + 600)  # NIP-40: expire after 10 minutes
+        expiry = str(now + expires_in)  # NIP-40 auto-delete
         tags = [["p", recipient_hex], ["expiration", expiry]]
         if extra_tags:
             tags.extend(extra_tags)
