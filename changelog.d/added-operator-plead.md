@@ -1,2 +1,0 @@
-- `OperatorRuntime.plead(cause, message)` asks the operator's own human, by a DM to its own npub (Pricing Studio shows it), to fund an outside account that ran dry, such as an LLM router's credits or an X developer app's. It stays on the relays for 7 days and repeats at most every 12 hours per cause, deduped on the relays across instances. `plea_resolved(cause, message)` says once that it cleared.
-- `send_dm` takes `expires_in` (60 s to 30 days); every DM still defaults to 10 minutes.
