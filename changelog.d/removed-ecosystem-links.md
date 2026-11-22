@@ -1,1 +1,0 @@
-- `ECOSYSTEM_LINKS` is gone from `tollbooth.constants` and the package root. It was a frozen 8-entry roster that nothing in the fleet read; the Oracle's `list_services` reads the live dpyc-community registry instead.
