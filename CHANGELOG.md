@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.131.1] — 2026-11-26
+
+### Changed
+
+- A NIP-05 address whose domain publishes no names (an HTML page, a 404, or JSON without `names`) now says "<domain> doesn't publish NIP-05 names" and which part of the address to check; an unknown name says the domain has no such name.
+
+### Fixed
+
+- A NIP-05 lookup no longer follows redirects, fetches only from public DNS hostnames (no IP address, port, local name or private-network answer), and trusts a resolved npub for five minutes rather than until restart.
+
 ## [0.131.0] — 2026-11-25
 
 ### Added

@@ -1,1 +1,0 @@
-- A NIP-05 lookup no longer follows redirects, fetches only from public DNS hostnames (no IP address, port, local name or private-network answer), and trusts a resolved npub for five minutes rather than until restart.
