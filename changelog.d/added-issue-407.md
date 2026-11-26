@@ -1,0 +1,1 @@
+- Patron identification accepts NIP-05 addresses (`name@domain`) anywhere an npub is taken: `resolve_npub` looks up `https://domain/.well-known/nostr.json` and continues with the resolved npub, so `request_npub_proof` and the other identity tools no longer reject human-readable identifiers.

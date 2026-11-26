@@ -94,13 +94,29 @@ _REFRESH_LOST_AT = "refresh_lost_at"
 def resolve_npub(npub: str) -> str:
     """Validate and return the npub. No fallback, no session cache.
 
-    Validates prefix, length, and bech32 decode. Raises ValueError
-    if npub is missing or malformed.
+    Accepts a bech32 ``npub1...`` *or* a NIP-05 address (``name@domain``).
+    NIP-05 is resolved via ``https://domain/.well-known/nostr.json`` to an
+    npub before the usual prefix/length/bech32 checks. Raises ValueError
+    if the value is missing, malformed, or cannot be resolved.
     """
-    if not npub or not npub.startswith("npub1") or len(npub) < 60:
+    if not npub:
         raise ValueError(
             "npub is required. Pass your Nostr public key (npub1...) "
-            "to identify yourself."
+            "or a NIP-05 address (name@domain) to identify yourself."
+        )
+    # NIP-05: name@domain → look up hex pubkey → bech32 npub.
+    from tollbooth.nip05 import Nip05ResolutionError, looks_like_nip05, resolve_nip05
+
+    if looks_like_nip05(npub):
+        try:
+            npub = resolve_nip05(npub)
+        except Nip05ResolutionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    if not npub.startswith("npub1") or len(npub) < 60:
+        raise ValueError(
+            "npub is required. Pass your Nostr public key (npub1...) "
+            "or a NIP-05 address (name@domain) to identify yourself."
         )
     try:
         from pynostr.key import PublicKey
@@ -3054,9 +3070,12 @@ class OperatorRuntime:
         structured error dict (``{success, error_code, error}``) if not.
 
         Distinguishes the "missing" case (param empty/None) from the
-        "invalid" case (bad format / bech32 decode failure) so the
-        calling agent knows whether the patron forgot to pass it or
-        passed a malformed value.
+        "invalid" case (bad format / bech32 decode failure / NIP-05
+        resolution failure) so the calling agent knows whether the
+        patron forgot to pass it or passed a malformed value.
+
+        Accepts bech32 ``npub1...`` and NIP-05 ``name@domain`` alike —
+        the latter is resolved before validation (see :func:`resolve_npub`).
 
         Standardizes the validation pattern that every wheel-side and
         consumer-side tool needs to repeat (DRY):
@@ -3075,7 +3094,8 @@ class OperatorRuntime:
                 "error_code": ErrorCode.NPUB_MISSING,
                 "error": (
                     f"{param} is required. Pass your Nostr public key "
-                    "(npub1...) to identify yourself."
+                    "(npub1...) or a NIP-05 address (name@domain) "
+                    "to identify yourself."
                 ),
             }
         try:
