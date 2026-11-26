@@ -87,7 +87,7 @@ class TestResolveNip05:
             client.__exit__ = MagicMock(return_value=False)
             mock_cls.return_value = client
 
-            with pytest.raises(Nip05ResolutionError, match="not found"):
+            with pytest.raises(Nip05ResolutionError, match="has no NIP-05 name .alice."):
                 resolve_nip05("alice@example.com")
 
     def test_http_error(self) -> None:
@@ -99,6 +99,33 @@ class TestResolveNip05:
             mock_cls.return_value = client
 
             with pytest.raises(Nip05ResolutionError, match="HTTP 404"):
+                resolve_nip05("alice@example.com")
+
+    def test_html_page_says_the_domain_publishes_no_names(self) -> None:
+        resp = _mock_response(200)
+        resp.json.side_effect = ValueError("Expecting value")
+        with patch("tollbooth.nip05.httpx.Client") as mock_cls:
+            client = MagicMock()
+            client.get.return_value = resp
+            client.__enter__ = MagicMock(return_value=client)
+            client.__exit__ = MagicMock(return_value=False)
+            mock_cls.return_value = client
+
+            with pytest.raises(
+                Nip05ResolutionError,
+                match=r"example\.com doesn't publish NIP-05 names\. Check the part of alice@example\.com after the @",
+            ):
+                resolve_nip05("alice@example.com")
+
+    def test_json_without_names_map_says_the_same(self) -> None:
+        with patch("tollbooth.nip05.httpx.Client") as mock_cls:
+            client = MagicMock()
+            client.get.return_value = _mock_response(200, {"hello": "world"})
+            client.__enter__ = MagicMock(return_value=client)
+            client.__exit__ = MagicMock(return_value=False)
+            mock_cls.return_value = client
+
+            with pytest.raises(Nip05ResolutionError, match="doesn't publish NIP-05 names"):
                 resolve_nip05("alice@example.com")
 
     def test_invalid_address(self) -> None:

@@ -174,6 +174,14 @@ def clear_nip05_cache() -> None:
         _cache.clear()
 
 
+def _not_a_nip05_domain(name: str, domain: str) -> str:
+    """The domain answered, but with something other than a NIP-05 names map."""
+    return (
+        f"{domain} doesn't publish NIP-05 names. "
+        f"Check the part of {name}@{domain} after the @."
+    )
+
+
 def _lookup(name: str, domain: str, timeout: float) -> str:
     """Fetch and validate one NIP-05 mapping (name already lowercased)."""
     _check_resolves_public(domain)
@@ -192,32 +200,25 @@ def _lookup(name: str, domain: str, timeout: float) -> str:
         )
     if resp.status_code != 200:
         raise Nip05ResolutionError(
-            f"NIP-05 endpoint returned HTTP {resp.status_code}: {url}"
+            f"{domain} doesn't publish NIP-05 names (HTTP {resp.status_code}). "
+            f"Check the part of {name}@{domain} after the @."
         )
 
     try:
         data = resp.json()
     except Exception as exc:
-        raise Nip05ResolutionError(
-            f"NIP-05 endpoint returned non-JSON for {name}@{domain}"
-        ) from exc
+        raise Nip05ResolutionError(_not_a_nip05_domain(name, domain)) from exc
 
-    if not isinstance(data, dict):
-        raise Nip05ResolutionError(
-            f"NIP-05 endpoint returned unexpected payload for {name}@{domain}"
-        )
-
-    names = data.get("names")
+    names = data.get("names") if isinstance(data, dict) else None
     if not isinstance(names, dict):
-        raise Nip05ResolutionError(
-            f"NIP-05 response missing 'names' map for {name}@{domain}"
-        )
+        raise Nip05ResolutionError(_not_a_nip05_domain(name, domain))
 
     # NIP-05: name comparison is case-insensitive; servers often store lowercase.
     hex_pk = names.get(name)
     if not isinstance(hex_pk, str) or not _HEX64_RE.match(hex_pk):
         raise Nip05ResolutionError(
-            f"NIP-05 name {name!r} not found (or not a hex pubkey) at {domain}"
+            f"{domain} has no NIP-05 name {name!r}. Check the part of "
+            f"{name}@{domain} before the @."
         )
 
     try:
