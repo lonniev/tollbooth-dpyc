@@ -271,6 +271,10 @@ async def request_npub_proof_tool(
 ) -> dict[str, Any]:
     """Send an npub-ownership challenge DM via the Secure Courier.
 
+    ``patron_npub`` may be a bech32 ``npub1...`` *or* a NIP-05 address
+    (``name@domain``); the latter is resolved to an npub before the
+    challenge is sent.
+
     ``reason`` is an optional human-readable purpose the Operator states for
     the request ("I'm working on your request XYZ and need the Operator to do
     ABC"). It is signed into the provenance attestation (tamper-evident) and
@@ -281,6 +285,9 @@ async def request_npub_proof_tool(
     err = rt.npub_validation_error(patron_npub, param="patron_npub")
     if err is not None:
         return err
+    # Resolve after validation so NIP-05 addresses become the npub the DM
+    # and channel state are keyed by — never the raw name@domain string.
+    resolved = rt.resolve_npub(patron_npub)
     # The proof lands in the wallet of the connection that asked, so only a
     # holder may ask, and only it may collect the reply.
     from tollbooth.holder_auth import current_holder
@@ -303,7 +310,7 @@ async def request_npub_proof_tool(
         "Your signed Nostr DM is the proof."
     )
     return await send_approval_request(
-        courier, patron_npub,
+        courier, resolved,
         service=PROOF_SERVICE, channel=_proof_channel(holder), holder=holder,
         greeting=_greeting, reason=reason, verify_at=verify_at,
         label="Proof request", receive_tool="receive_npub_proof",
