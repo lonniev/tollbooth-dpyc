@@ -1,1 +1,0 @@
-- A NIP-05 address whose domain publishes no names (an HTML page, a 404, or JSON without `names`) now says "<domain> doesn't publish NIP-05 names" and which part of the address to check; an unknown name says the domain has no such name.
