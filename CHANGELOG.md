@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Changes not yet released live in `changelog.d/`, one file per change — see the README there for why, and `scripts/changelog.py` for what folds them in at release time.
 
+## [0.131.0] — 2026-11-25
+
+### Added
+
+- Patron identification accepts NIP-05 addresses (`name@domain`) anywhere an npub is taken: `resolve_npub` looks up `https://domain/.well-known/nostr.json` and continues with the resolved npub, so `request_npub_proof` and the other identity tools no longer reject human-readable identifiers.
+
 ## [0.130.0] — 2026-11-22
 
 ### Removed
