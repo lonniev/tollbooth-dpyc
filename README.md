@@ -613,28 +613,9 @@ Dependency flows one way: `your-mcp-server --> tollbooth-dpyc`. Authority is a n
 
 ### Ecosystem Repos
 
-| Repo | Role |
-|------|------|
-| [tollbooth-sample](https://github.com/lonniev/tollbooth-sample) | **Canonical reference operator** — start here |
-| [tollbooth-authority](https://github.com/lonniev/tollbooth-authority) | Tax collection, Schnorr signing, purchase order certification |
-| [dpyc-community](https://github.com/lonniev/dpyc-community) | Membership registry, governance, service discovery |
-| [dpyc-oracle](https://github.com/lonniev/dpyc-oracle) | Community concierge — onboarding, tax rates, membership |
-| [thebrain-mcp](https://github.com/lonniev/thebrain-mcp) | Production operator — PersonalBrain knowledge graph |
-| [excalibur-mcp](https://github.com/lonniev/excalibur-mcp) | Production operator — social media posting |
-| [schwab-mcp](https://github.com/lonniev/schwab-mcp) | Production operator — brokerage data with OAuth2 |
-| [cypher-mcp](https://github.com/lonniev/cypher-mcp) | Production operator — monetized graph answers via named Cypher templates over Neo4j/AuraDB |
-| [taxsort-mcp](https://github.com/lonniev/taxsort-mcp) | Production operator — tax sorting + classification with Cloudflare Pages UI |
-| [optionality-mcp](https://github.com/lonniev/optionality-mcp) | Production operator — options analytics |
-| [goodearth-mcp](https://github.com/lonniev/goodearth-mcp) | Production operator — region-scoped farm climate analytics |
-| [beesknees-mcp](https://github.com/lonniev/beesknees-mcp) | Production operator — a multiplayer race to the queen |
-| [roastify-mcp](https://github.com/lonniev/roastify-mcp) | Production operator — Roastify coffee catalog and packaging artwork |
-| [ChartRemotely-mcp](https://github.com/lonniev/ChartRemotely-mcp) | Production operator — relays chart commands to a patron's desktop agent |
-| [tollbooth-shortlinks](https://github.com/lonniev/tollbooth-shortlinks) | Community utility — URL shortener |
-| [tollbooth-oauth2-collector](https://github.com/lonniev/tollbooth-oauth2-collector) | Community utility — OAuth2 callback mailbox |
-| [tollbooth-web](https://github.com/lonniev/tollbooth-web) | Shared browser SDK for operator front ends |
-| [tollbooth-pricing-studio](https://github.com/lonniev/tollbooth-pricing-studio) | iOS pricing editor — Nostr DMs, native crypto |
-
----
+Start a new operator from [tollbooth-sample](https://github.com/lonniev/tollbooth-sample), the canonical reference operator.
+Browse the Tollbooth DPYC™ family in the [MCP catalog](https://cafe.tollbooth-dpyc.com/collections/mcps).
+The [DPYC Oracle](https://dpyc-oracle.fastmcp.app/mcp) lists the live network with its free `list_services` tool.
 
 ## Install
 
